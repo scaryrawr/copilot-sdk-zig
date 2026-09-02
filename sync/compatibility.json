@@ -1,0 +1,30 @@
+{
+  "wireMethods": [
+    {
+      "name": "connect",
+      "declaredBy": "api.schema.json"
+    },
+    {
+      "name": "session.create",
+      "declaredBy": "src/client.zig"
+    },
+    {
+      "name": "session.destroy",
+      "declaredBy": "src/client.zig"
+    },
+    {
+      "name": "session.event",
+      "declaredBy": "src/client.zig"
+    },
+    {
+      "name": "session.send",
+      "declaredBy": "api.schema.json"
+    }
+  ],
+  "sessionEventDiscriminators": [
+    "assistant.message",
+    "assistant.message_delta",
+    "session.error",
+    "session.idle"
+  ]
+}

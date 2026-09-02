@@ -1,3 +1,5 @@
+.sync-work/
 .zig-cache/
+node_modules/
 zig-out/
 *.o

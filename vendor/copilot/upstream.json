@@ -1,0 +1,11 @@
+{
+  "upstreamRepository": "github/copilot-sdk",
+  "upstreamRef": "main",
+  "upstreamCommit": "ed1c2eaa134ed60faa99acb1870f0477c6943031",
+  "sdkProtocolVersion": 3,
+  "cliPackageVersion": "1.0.81-10",
+  "schemaDigests": {
+    "api.schema.json": "sha256:2fe3c6446797d212545eb67e6448ad13ed474e3438ce57a7fc1c84891176b4af",
+    "session-events.schema.json": "sha256:ae6c23246aa713d8a58ddf2dcfcb8912dfc28b3e923fe0ac5ef344f9f2a3ba5f"
+  }
+}

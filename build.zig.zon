@@ -1,0 +1,14 @@
+.{
+    .name = .copilot_sdk,
+    .version = "0.1.0",
+    .fingerprint = 0x1a9464f2d1a5313e,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "LICENSE",
+        "NOTICE",
+        "build.zig",
+        "build.zig.zon",
+        "README.md",
+        "src",
+    },
+}

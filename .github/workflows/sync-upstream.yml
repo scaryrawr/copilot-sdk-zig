@@ -1,0 +1,76 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "23 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          branch=sync/upstream
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          remote_branch=false
+          set +e
+          git ls-remote --exit-code --heads origin "$branch" >/dev/null
+          status=$?
+          set -e
+          case "$status" in
+            0)
+              git fetch origin "$branch"
+              remote_branch=true
+              ;;
+            2)
+              ;;
+            *)
+              exit "$status"
+              ;;
+          esac
+          if [ "$remote_branch" = true ]; then
+            git checkout -B "$branch" "origin/$branch"
+            git merge --no-edit origin/main
+          else
+            git checkout -b "$branch" origin/main
+          fi
+          npm ci
+          npm run sync -- --if-published
+          ahead=0
+          if [ "$remote_branch" = true ]; then
+            ahead=$(git rev-list --count "origin/$branch..HEAD")
+          fi
+          if git diff --quiet && [ "$ahead" -eq 0 ]; then
+            exit 0
+          fi
+          git add vendor/copilot src/protocol_version.zig
+          if ! git diff --cached --quiet; then
+            git commit -m "Sync Copilot schemas"
+          fi
+          git push --set-upstream origin "$branch"
+          pr=$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')
+          body="Updates the vendored schemas, upstream metadata, and generated Zig protocol version from github/copilot-sdk main."
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" --title "Sync Copilot schemas" --body "$body"
+          else
+            gh pr create --base main --head "$branch" --title "Sync Copilot schemas" --body "$body"
+          fi

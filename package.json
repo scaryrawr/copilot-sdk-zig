@@ -1,0 +1,8 @@
+{
+  "name": "copilot-sdk-zig-sync",
+  "private": true,
+  "scripts": {
+    "sync": "node scripts/sync.mjs",
+    "test": "node scripts/sync.mjs --check"
+  }
+}

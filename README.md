@@ -1,0 +1,143 @@
+# Copilot SDK for Zig
+
+This repository contains an unofficial Zig SDK for GitHub Copilot CLI. The
+community maintains it. GitHub does not support or endorse this SDK.
+
+The SDK starts Copilot CLI as a child process and exchanges JSON-RPC messages
+over standard input and standard output. Its API is blocking and
+single-threaded.
+
+## Requirements
+
+- Zig 0.16.0
+- GitHub Copilot CLI in `PATH`, or its path in `ClientOptions.cli_path`
+
+## Install from GitHub
+
+Add the package to `build.zig.zon`:
+
+```sh
+zig fetch --save=copilot_sdk git+https://github.com/scaryrawr/copilot-sdk-zig
+```
+
+Pin a release tag or commit in production projects. Add the module to your
+compile step in `build.zig`:
+
+```zig
+const copilot_dependency = b.dependency("copilot_sdk", .{
+    .target = target,
+    .optimize = optimize,
+});
+executable.root_module.addImport(
+    "copilot_sdk",
+    copilot_dependency.module("copilot_sdk"),
+);
+```
+
+## Send a prompt
+
+Pass a `std.Io` implementation to `Client.init`. The client starts
+`copilot --headless --stdio --no-auto-update` and completes the `connect`
+handshake before it returns.
+
+```zig
+const std = @import("std");
+const copilot = @import("copilot_sdk");
+
+pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
+    var client = try copilot.Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    const session = try client.createSession(.{ .streaming = true });
+    defer session.destroy() catch {};
+
+    const message_id = try session.send(.{ .prompt = "Explain this repository." });
+    defer allocator.free(message_id);
+
+    while (true) {
+        var event = try session.nextEvent();
+        defer event.deinit(allocator);
+
+        switch (event) {
+            .assistant_message => |message| {
+                _ = message;
+            },
+            .assistant_message_delta => |delta| {
+                _ = delta;
+            },
+            .session_idle => break,
+            .session_error => return error.CopilotSessionError,
+            .unknown => {},
+        }
+    }
+}
+```
+
+`Session` borrows its `Client`. Keep the client alive while a session handle is
+in use. `SessionEvent` values and the message ID from `send` own memory from the
+client allocator.
+
+## Supported scope
+
+The SDK supports only the stdio transport. It implements these wire methods:
+
+- `connect`
+- `session.create`
+- `session.send`
+- `session.destroy`
+- `session.event`
+
+It recognizes these session events:
+
+- `assistant.message`
+- `assistant.message_delta`
+- `session.idle`
+- `session.error`
+
+Other session events use the `unknown` variant. The SDK does not support an
+external CLI server URL, custom tools, or the broader APIs in the upstream
+schema.
+
+The client stores at most 1,024 queued session events. An RPC call or event read
+returns `error.EventQueueFull` when callers leave other sessions undrained.
+
+## Develop
+
+Run the checks from the repository root:
+
+```sh
+zig fmt --check build.zig src
+zig build test
+zig build
+npm ci
+npm test
+```
+
+Run `npm run sync` to update the upstream metadata, the two schema snapshots,
+and `src/protocol_version.zig`.
+
+## Upstream sync policy
+
+`vendor/copilot/upstream.json` records the `github/copilot-sdk` main commit, the
+SDK protocol version, the exact `@github/copilot` version from the upstream
+lockfile, and SHA-256 digests for both schema snapshots.
+
+The sync script installs that published `@github/copilot` version without
+running package scripts. It copies only `api.schema.json` and
+`session-events.schema.json`. The script then generates the Zig protocol
+version constant and checks the required methods and event discriminators in
+`sync/compatibility.json`.
+
+The published API schema declares `connect` and `session.send`. Copilot SDKs
+own the `session.create`, `session.destroy`, and `session.event` lifecycle
+messages, so the compatibility check verifies those names in `src/client.zig`.
+
+The scheduled workflow checks upstream once a week. When inputs change, it
+updates one `sync/upstream` branch and opens or refreshes one pull request. The
+workflow waits for the exact CLI package version to reach the registry and
+never force-pushes.
+
+## License
+
+The SDK is available under the MIT License. See `NOTICE` for the required
+notice for source adapted from `github/copilot-sdk`.
