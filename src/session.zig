@@ -5,15 +5,48 @@ pub const SessionConfig = struct {
     model: ?[]const u8 = null,
     working_directory: ?[]const u8 = null,
     streaming: bool = false,
+    tools: []const Tool = &.{},
+    system_message: ?SystemMessageConfig = null,
+    request_permission: bool = false,
 };
 
 pub const MessageOptions = struct {
     prompt: []const u8,
 };
 
+pub const Tool = struct {
+    name: []const u8,
+    description: []const u8,
+    parameters_json: []const u8 = "{}",
+    skip_permission: bool = false,
+    handler: ?ToolHandler = null,
+    context: ?*anyopaque = null,
+};
+
+pub const ToolHandler = *const fn (
+    allocator: std.mem.Allocator,
+    arguments_json: []const u8,
+    context: ?*anyopaque,
+) anyerror![]u8;
+
+pub const SystemMessageMode = enum {
+    append,
+    replace,
+};
+
+pub const SystemMessageConfig = struct {
+    mode: SystemMessageMode = .append,
+    content: []const u8,
+};
+
 pub const AssistantMessage = struct {
     content: []u8,
     message_id: ?[]u8,
+
+    pub fn deinit(self: AssistantMessage, allocator: std.mem.Allocator) void {
+        allocator.free(self.content);
+        if (self.message_id) |message_id| allocator.free(message_id);
+    }
 };
 
 pub const AssistantMessageDelta = struct {
@@ -23,6 +56,88 @@ pub const AssistantMessageDelta = struct {
 
 pub const SessionError = struct {
     message: []u8,
+};
+
+pub const PermissionRequested = struct {
+    request_id: []u8,
+    permission_request_json: []u8,
+
+    pub fn kind(self: PermissionRequested) !PermissionRequestKind {
+        const parsed = try std.json.parseFromSlice(
+            struct { kind: []const u8 },
+            std.heap.page_allocator,
+            self.permission_request_json,
+            .{ .ignore_unknown_fields = true },
+        );
+        defer parsed.deinit();
+        return PermissionRequestKind.fromString(parsed.value.kind);
+    }
+
+    pub fn parseRequest(
+        self: PermissionRequested,
+        comptime T: type,
+        allocator: std.mem.Allocator,
+    ) !std.json.Parsed(T) {
+        return std.json.parseFromSlice(T, allocator, self.permission_request_json, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        });
+    }
+};
+
+pub const ExternalToolRequested = struct {
+    request_id: []u8,
+    tool_call_id: []u8,
+    tool_name: []u8,
+    arguments_json: []u8,
+
+    pub fn parseArguments(
+        self: ExternalToolRequested,
+        comptime T: type,
+        allocator: std.mem.Allocator,
+    ) !std.json.Parsed(T) {
+        return std.json.parseFromSlice(T, allocator, self.arguments_json, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        });
+    }
+};
+
+pub const PermissionRequestKind = enum {
+    shell,
+    write,
+    read,
+    mcp,
+    url,
+    memory,
+    custom_tool,
+    hook,
+    extension_management,
+    factory,
+    extension_permission_access,
+    extension_env_access,
+    unknown,
+
+    pub fn fromString(value: []const u8) PermissionRequestKind {
+        const mappings = .{
+            .{ "shell", PermissionRequestKind.shell },
+            .{ "write", PermissionRequestKind.write },
+            .{ "read", PermissionRequestKind.read },
+            .{ "mcp", PermissionRequestKind.mcp },
+            .{ "url", PermissionRequestKind.url },
+            .{ "memory", PermissionRequestKind.memory },
+            .{ "custom-tool", PermissionRequestKind.custom_tool },
+            .{ "hook", PermissionRequestKind.hook },
+            .{ "extension-management", PermissionRequestKind.extension_management },
+            .{ "factory", PermissionRequestKind.factory },
+            .{ "extension-permission-access", PermissionRequestKind.extension_permission_access },
+            .{ "extension-env-access", PermissionRequestKind.extension_env_access },
+        };
+        inline for (mappings) |mapping| {
+            if (std.mem.eql(u8, value, mapping[0])) return mapping[1];
+        }
+        return .unknown;
+    }
 };
 
 pub const UnknownEvent = struct {
@@ -35,20 +150,29 @@ pub const SessionEvent = union(enum) {
     assistant_message_delta: AssistantMessageDelta,
     session_idle,
     session_error: SessionError,
+    permission_requested: PermissionRequested,
+    external_tool_requested: ExternalToolRequested,
     unknown: UnknownEvent,
 
     pub fn deinit(self: *SessionEvent, allocator: std.mem.Allocator) void {
         switch (self.*) {
-            .assistant_message => |value| {
-                allocator.free(value.content);
-                if (value.message_id) |message_id| allocator.free(message_id);
-            },
+            .assistant_message => |value| value.deinit(allocator),
             .assistant_message_delta => |value| {
                 allocator.free(value.delta_content);
                 allocator.free(value.message_id);
             },
             .session_idle => {},
             .session_error => |value| allocator.free(value.message),
+            .permission_requested => |value| {
+                allocator.free(value.request_id);
+                allocator.free(value.permission_request_json);
+            },
+            .external_tool_requested => |value| {
+                allocator.free(value.request_id);
+                allocator.free(value.tool_call_id);
+                allocator.free(value.tool_name);
+                allocator.free(value.arguments_json);
+            },
             .unknown => |value| {
                 allocator.free(value.event_type);
                 allocator.free(value.data_json);
@@ -109,6 +233,34 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
             .message = try allocator.dupe(u8, try requiredString(data, "message")),
         } };
     }
+    if (std.mem.eql(u8, event_type, "permission.requested")) {
+        return .{ .permission_requested = .{
+            .request_id = try allocator.dupe(u8, try requiredString(data, "requestId")),
+            .permission_request_json = try std.json.Stringify.valueAlloc(
+                allocator,
+                data.get("permissionRequest") orelse return error.InvalidSessionEvent,
+                .{},
+            ),
+        } };
+    }
+    if (std.mem.eql(u8, event_type, "external_tool.requested")) {
+        const request_id = try allocator.dupe(u8, try requiredString(data, "requestId"));
+        errdefer allocator.free(request_id);
+        const tool_call_id = try allocator.dupe(u8, try requiredString(data, "toolCallId"));
+        errdefer allocator.free(tool_call_id);
+        const tool_name = try allocator.dupe(u8, try requiredString(data, "toolName"));
+        errdefer allocator.free(tool_name);
+        return .{ .external_tool_requested = .{
+            .request_id = request_id,
+            .tool_call_id = tool_call_id,
+            .tool_name = tool_name,
+            .arguments_json = try std.json.Stringify.valueAlloc(
+                allocator,
+                data.get("arguments") orelse .null,
+                .{},
+            ),
+        } };
+    }
 
     const owned_event_type = try allocator.dupe(u8, event_type);
     errdefer allocator.free(owned_event_type);
@@ -147,4 +299,47 @@ test "known and unknown events retain owned data" {
 
     try std.testing.expectEqualStrings("future.event", unknown.unknown.event_type);
     try std.testing.expectEqualStrings("{\"answer\":42}", unknown.unknown.data_json);
+}
+
+test "permission and external tool events retain opaque payloads" {
+    const allocator = std.testing.allocator;
+    const permission_json = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"permission.requested","data":{"requestId":"p1","permissionRequest":{"kind":"shell","fullCommandText":"pwd"}}}
+    ,
+        .{},
+    );
+    defer permission_json.deinit();
+    var permission = try parseEvent(allocator, permission_json.value);
+    defer permission.deinit(allocator);
+
+    try std.testing.expectEqualStrings("p1", permission.permission_requested.request_id);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"shell\",\"fullCommandText\":\"pwd\"}",
+        permission.permission_requested.permission_request_json,
+    );
+
+    const tool_json = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"external_tool.requested","data":{"requestId":"r1","toolCallId":"t1","toolName":"lookup","arguments":{"id":"alpha"}}}
+    ,
+        .{},
+    );
+    defer tool_json.deinit();
+    var tool = try parseEvent(allocator, tool_json.value);
+    defer tool.deinit(allocator);
+
+    try std.testing.expectEqualStrings("lookup", tool.external_tool_requested.tool_name);
+    try std.testing.expectEqualStrings(
+        "{\"id\":\"alpha\"}",
+        tool.external_tool_requested.arguments_json,
+    );
+
+    const Arguments = struct { id: []const u8 };
+    const arguments = try tool.external_tool_requested.parseArguments(Arguments, allocator);
+    defer arguments.deinit();
+    try std.testing.expectEqualStrings("alpha", arguments.value.id);
+    try std.testing.expectEqual(PermissionRequestKind.shell, try permission.permission_requested.kind());
 }

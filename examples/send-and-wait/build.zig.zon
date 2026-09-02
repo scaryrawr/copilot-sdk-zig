@@ -1,0 +1,16 @@
+.{
+    .name = .copilot_send_and_wait_example,
+    .version = "0.1.0",
+    .fingerprint = 0xcee02719af8da8b0,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .copilot_sdk = .{
+            .path = "../..",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
