@@ -299,7 +299,7 @@
     },
     "registerExtensionLaunchProvider": {
       "rpcMethod": "registerExtensionLaunchProvider",
-      "description": "Registers the calling SDK client as the per-entrypoint extension launch provider. Call before creating any sessions. When omitted, the runtime temporarily falls back to its built-in Node launcher for backward compatibility.",
+      "description": "Registers the calling SDK client as the per-entrypoint extension launch provider. Call before creating any sessions. When omitted, the runtime uses its built-in extension launcher.",
       "params": null,
       "result": {
         "type": "null"
@@ -1316,6 +1316,31 @@
       },
       "stability": "experimental"
     },
+    "sandbox": {
+      "getEnforcementStatus": {
+        "rpcMethod": "session.sandbox.getEnforcementStatus",
+        "description": "Returns whether managed policy requires sandbox enforcement and whether an enforcement failure has permanently blocked the session.",
+        "params": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "description": "Target session identifier"
+            }
+          },
+          "required": [
+            "sessionId"
+          ],
+          "additionalProperties": false,
+          "description": "Identifies the target session."
+        },
+        "result": {
+          "$ref": "#/definitions/SandboxEnforcementStatus",
+          "description": "Managed sandbox enforcement state for a session."
+        },
+        "stability": "experimental"
+      }
+    },
     "sendSystemNotification": {
       "rpcMethod": "session.sendSystemNotification",
       "description": "Queues or sends an internal system notification to the session according to its passive policy.",
@@ -2092,6 +2117,14 @@
             "limits": {
               "$ref": "#/definitions/FactoryRunLimits",
               "description": "Optional per-invocation resource ceiling overrides."
+            },
+            "notifyOnComplete": {
+              "type": "boolean",
+              "description": "Whether to notify the originating session when the factory completes."
+            },
+            "logPhaseNames": {
+              "type": "boolean",
+              "description": "Whether to emit factory phase names to the session transcript."
             }
           },
           "required": [
@@ -2108,6 +2141,91 @@
           "description": "Resolved persisted factory identity and resumed run envelope."
         },
         "stability": "experimental"
+      },
+      "runFromTool": {
+        "rpcMethod": "session.factory.runFromTool",
+        "description": "Internal tool-originated factory invocation.",
+        "params": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "description": "Target session identifier"
+            },
+            "name": {
+              "type": "string",
+              "description": "Registered factory name."
+            },
+            "args": {
+              "description": "Factory input value.",
+              "x-opaque-json": true
+            },
+            "options": {
+              "$ref": "#/definitions/FactoryToolRunOptions",
+              "description": "Tool-originated factory invocation options."
+            },
+            "toolCallId": {
+              "type": "string",
+              "description": "Opaque identifier of the originating tool call."
+            }
+          },
+          "required": [
+            "sessionId",
+            "name",
+            "args"
+          ],
+          "additionalProperties": false,
+          "description": "Internal parameters for invoking a registered factory from a tool.",
+          "title": "FactoryToolRunRequest",
+          "visibility": "internal",
+          "stability": "experimental"
+        },
+        "result": {
+          "$ref": "#/definitions/FactoryRunResult",
+          "description": "Complete current or terminal factory run envelope."
+        },
+        "stability": "experimental",
+        "visibility": "internal"
+      },
+      "resumeFromTool": {
+        "rpcMethod": "session.factory.resumeFromTool",
+        "description": "Internal tool-originated factory resume.",
+        "params": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "description": "Target session identifier"
+            },
+            "runId": {
+              "type": "string",
+              "description": "Factory run identifier."
+            },
+            "limits": {
+              "$ref": "#/definitions/FactoryRunLimits",
+              "description": "Optional per-invocation resource ceiling overrides."
+            },
+            "toolCallId": {
+              "type": "string",
+              "description": "Opaque identifier of the originating tool call."
+            }
+          },
+          "required": [
+            "sessionId",
+            "runId"
+          ],
+          "additionalProperties": false,
+          "description": "Internal parameters for resuming a factory run from a tool.",
+          "title": "FactoryToolResumeRequest",
+          "visibility": "internal",
+          "stability": "experimental"
+        },
+        "result": {
+          "$ref": "#/definitions/FactoryResumeResult",
+          "description": "Resolved persisted factory identity and resumed run envelope."
+        },
+        "stability": "experimental",
+        "visibility": "internal"
       },
       "getRun": {
         "rpcMethod": "session.factory.getRun",
@@ -2586,6 +2704,10 @@
             "serverManagedModel": {
               "type": "string",
               "description": "Model required by server-managed policy, when configured."
+            },
+            "policyHelperModel": {
+              "type": "string",
+              "description": "Startup default model from the enterprise policy helper, when configured. Weakest of the managed sources: it applies only when neither device nor server policy names a model, and an explicit user selection still wins."
             },
             "repoModel": {
               "type": "string",
@@ -6055,10 +6177,6 @@
               "type": "string",
               "description": "Target session identifier"
             },
-            "noViewLineNumbers": {
-              "type": "boolean",
-              "description": "Whether line numbers should be omitted from the view tool descriptor."
-            },
             "reduceUserIntervention": {
               "type": "boolean",
               "description": "Whether descriptors should favor fewer user-intervention prompts."
@@ -6074,10 +6192,6 @@
             "shellConfig": {
               "$ref": "#/definitions/ToolsShellDescriptorConfig",
               "description": "Shell-specific names and description lines for shell tools."
-            },
-            "shellAsyncOnlyEnabled": {
-              "type": "boolean",
-              "description": "Whether shell commands may only run asynchronously."
             },
             "shellSupportsPowerShell7Syntax": {
               "type": "boolean",
@@ -6492,6 +6606,13 @@
             "command": {
               "type": "string",
               "description": "Slash-prefixed command string to enqueue, e.g. '/compact' or '/model gpt-4'. Queued FIFO with any in-flight items; if the session is idle, processing kicks off immediately."
+            },
+            "displayText": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Optional user-facing text for the queue row. The command string is shown when omitted."
             }
           },
           "required": [
@@ -6618,12 +6739,12 @@
               "description": "Question to answer from the current conversation context."
             },
             "onChunk": {
-              "description": "In-process streaming callback `(text) => void` invoked with each token as the model emits it. Marked internal: excluded from the public SDK surface. In a process-separated SDK this is replaced by a streaming RPC that yields chunks and a final answer.",
+              "description": "In-process streaming callback `(text) => void` invoked with each token as the model emits it. Internal and excluded from the public SDK surface.",
               "visibility": "internal",
               "x-opaque-in-process": true
             },
             "abortSignal": {
-              "description": "In-process `AbortSignal` forwarded to the model client to cancel an in-flight request. Marked internal: excluded from the public SDK surface. Replaced by an explicit cancellation token + cancel RPC in the SDK migration.",
+              "description": "In-process `AbortSignal` forwarded to the model client to cancel an in-flight request. Internal and excluded from the public SDK surface.",
               "visibility": "internal",
               "x-opaque-in-process": true
             }
@@ -12453,6 +12574,21 @@
       "description": "Validation errors from the most recent authentication attempt.",
       "title": "AuthValidationErrors"
     },
+    "AutoTier": {
+      "type": "string",
+      "enum": [
+        "efficiency",
+        "balance",
+        "intelligence"
+      ],
+      "description": "Routing preference used when the session model is `auto`.",
+      "title": "AutoTier",
+      "x-enumDescriptions": {
+        "efficiency": "Optimize for efficiency.",
+        "balance": "Balance efficiency and intelligence.",
+        "intelligence": "Optimize for intelligence."
+      }
+    },
     "BuiltInModelCatalog": {
       "type": "object",
       "properties": {
@@ -13061,6 +13197,10 @@
     "CapiSessionOptions": {
       "type": "object",
       "properties": {
+        "autoTier": {
+          "$ref": "#/definitions/AutoTier",
+          "description": "Routing preference used when the session model is `auto`. The runtime persists the preference across cold resume. When omitted, the default routing behavior is used. Resuming an already-resident session cannot change its preference."
+        },
         "enableWebSocketResponses": {
           "type": "boolean",
           "description": "Whether to use WebSocket transport for the CAPI Responses API. Enabled by default when the model advertises `ws:/responses` support; set to `false` to force the HTTP Responses transport in environments where WebSockets are blocked (e.g. behind a proxy). Setting this to `false` is equivalent to the `COPILOT_CLI_DISABLE_WEBSOCKET_RESPONSES` environment variable."
@@ -13819,6 +13959,13 @@
           "maximum": 599,
           "description": "HTTP status code, when the failure was a rejected response."
         },
+        "retryAfterSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300,
+          "format": "duration",
+          "description": "Bounded cooldown in seconds before another catalog request should be attempted, when the authority supplied a numeric Retry-After value or the runtime applied its documented fallback."
+        },
         "message": {
           "type": "string",
           "maxLength": 1000,
@@ -13842,6 +13989,9 @@
         "timeout",
         "tls",
         "connection-refused",
+        "proxy-authentication-required",
+        "rate-limited",
+        "service-unavailable",
         "http-status",
         "response-too-large",
         "redirect-rejected"
@@ -13854,7 +14004,10 @@
         "timeout": "The request exceeded its time budget.",
         "tls": "The TLS handshake or certificate validation failed.",
         "connection-refused": "The connection was refused or reset.",
-        "http-status": "The authority returned a status the runtime treats as a failure.",
+        "proxy-authentication-required": "The configured proxy returned 407 and requires authentication.",
+        "rate-limited": "The authority rate-limited requests and supplied or implied a bounded cooldown.",
+        "service-unavailable": "The authority returned a transient 5xx response.",
+        "http-status": "The authority returned another status the runtime treats as a failure.",
         "response-too-large": "The response exceeded the permitted size.",
         "redirect-rejected": "A redirect was refused by the runtime's redirect policy."
       }
@@ -13940,7 +14093,7 @@
           "minLength": 1,
           "maxLength": 256,
           "pattern": "\\S",
-          "description": "Free-text search query. Never written to logs or telemetry."
+          "description": "Free-text search query. Persisted as tool input for session continuity, but omitted from telemetry."
         },
         "limit": {
           "type": "integer",
@@ -15996,6 +16149,13 @@
         "command": {
           "type": "string",
           "description": "Slash-prefixed command string to enqueue, e.g. '/compact' or '/model gpt-4'. Queued FIFO with any in-flight items; if the session is idle, processing kicks off immediately."
+        },
+        "displayText": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Optional user-facing text for the queue row. The command string is shown when omitted."
         }
       },
       "required": [
@@ -16854,6 +17014,10 @@
         "outputTruncated": {
           "type": "boolean",
           "description": "Whether outputPreview is known to be incomplete or truncated"
+        },
+        "outputFilePath": {
+          "type": "string",
+          "description": "Path reported in the shell session's filesystem namespace when shell output exceeded the configured large-output threshold."
         }
       },
       "required": [
@@ -17711,6 +17875,14 @@
         "limits": {
           "$ref": "#/definitions/FactoryRunLimits",
           "description": "Optional per-invocation resource ceiling overrides."
+        },
+        "notifyOnComplete": {
+          "type": "boolean",
+          "description": "Whether to notify the originating session when the factory completes."
+        },
+        "logPhaseNames": {
+          "type": "boolean",
+          "description": "Whether to emit factory phase names to the session transcript."
         }
       },
       "required": [
@@ -18042,6 +18214,26 @@
           ],
           "additionalProperties": false,
           "description": "The run stopped because its usage accounting could not be completed."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "runId": {
+              "type": "string",
+              "description": "Factory run identifier."
+            },
+            "type": {
+              "type": "string",
+              "const": "factory_provider_disconnected",
+              "description": "Factory failure variant discriminator."
+            }
+          },
+          "required": [
+            "type",
+            "runId"
+          ],
+          "additionalProperties": false,
+          "description": "The extension that owns the factory disconnected while the run was executing, so the host halted it. The run's journaled subagent results are preserved so a resume can reuse them."
         }
       ],
       "description": "Machine-readable factory run failure.",
@@ -18126,6 +18318,12 @@
           "type": "string",
           "description": "Factory run identifier."
         },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "description": "One-based execution attempt represented by this envelope. Absent before the first attempt starts or when returned by an older runtime."
+        },
         "status": {
           "$ref": "#/definitions/FactoryRunStatus",
           "description": "Current or terminal factory run status."
@@ -18140,7 +18338,7 @@
         },
         "failure": {
           "$ref": "#/definitions/FactoryRunFailure",
-          "description": "Machine-readable failure details for an errored run."
+          "description": "Machine-readable failure details for a halted or errored run."
         },
         "reason": {
           "type": "string",
@@ -18347,6 +18545,79 @@
       "title": "FactoryRunTerminal",
       "stability": "experimental"
     },
+    "FactoryToolResumeRequest": {
+      "type": "object",
+      "properties": {
+        "runId": {
+          "type": "string",
+          "description": "Factory run identifier."
+        },
+        "limits": {
+          "$ref": "#/definitions/FactoryRunLimits",
+          "description": "Optional per-invocation resource ceiling overrides."
+        },
+        "toolCallId": {
+          "type": "string",
+          "description": "Opaque identifier of the originating tool call."
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "additionalProperties": false,
+      "description": "Internal parameters for resuming a factory run from a tool.",
+      "title": "FactoryToolResumeRequest",
+      "visibility": "internal",
+      "stability": "experimental"
+    },
+    "FactoryToolRunOptions": {
+      "type": "object",
+      "properties": {
+        "limits": {
+          "$ref": "#/definitions/FactoryRunLimits",
+          "description": "Per-invocation resource ceiling overrides."
+        },
+        "resumeFromRunId": {
+          "type": "string",
+          "description": "Run identifier whose journal and progress should seed this resumed run."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Options for an internal tool-originated factory invocation.",
+      "title": "FactoryToolRunOptions",
+      "visibility": "internal",
+      "stability": "experimental"
+    },
+    "FactoryToolRunRequest": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Registered factory name."
+        },
+        "args": {
+          "description": "Factory input value.",
+          "x-opaque-json": true
+        },
+        "options": {
+          "$ref": "#/definitions/FactoryToolRunOptions",
+          "description": "Tool-originated factory invocation options."
+        },
+        "toolCallId": {
+          "type": "string",
+          "description": "Opaque identifier of the originating tool call."
+        }
+      },
+      "required": [
+        "name",
+        "args"
+      ],
+      "additionalProperties": false,
+      "description": "Internal parameters for invoking a registered factory from a tool.",
+      "title": "FactoryToolRunRequest",
+      "visibility": "internal",
+      "stability": "experimental"
+    },
     "FilterMapping": {
       "anyOf": [
         {
@@ -18542,6 +18813,15 @@
         "dev_device_id": {
           "type": "string",
           "description": "Stable machine identifier for the device."
+        },
+        "cpu_model": {
+          "type": "string",
+          "description": "Distinct CPU model names for the host, comma-separated."
+        },
+        "cpu_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of logical CPU cores on the host."
         }
       },
       "required": [
@@ -24700,6 +24980,10 @@
           "type": "string",
           "description": "Model required by server-managed policy, when configured."
         },
+        "policyHelperModel": {
+          "type": "string",
+          "description": "Startup default model from the enterprise policy helper, when configured. Weakest of the managed sources: it applies only when neither device nor server policy names a model, and an explicit user selection still wins."
+        },
         "repoModel": {
           "type": "string",
           "description": "Model selected by repository settings, when configured."
@@ -24772,6 +25056,10 @@
         "message": {
           "type": "string",
           "description": "Human-readable promotion message. Does not include the expiry timestamp; consumers may format endsAt and append it when present."
+        },
+        "showBanner": {
+          "type": "boolean",
+          "description": "Whether the service asked hosts to give this promotion a prominent surface, such as a dedicated banner, in addition to listing it with the model. `true` requests that surface and `false` asks for the model list only. Absent means the service expressed no preference — for example a response that predates the field — so hosts should apply their own default rather than read it as `false`."
         }
       },
       "additionalProperties": false,
@@ -26782,6 +27070,10 @@
         "surface": {
           "$ref": "#/definitions/PermissionDecisionSurface",
           "description": "Client surface that submitted the response."
+        },
+        "responseCapability": {
+          "$ref": "#/definitions/PermissionResponseCapability",
+          "description": "Whether the responding client could ask a user interactively, was running headlessly, or had no response path. Omit when the client cannot determine this authoritatively."
         }
       },
       "required": [
@@ -26991,6 +27283,7 @@
         "tui",
         "prompt_mode",
         "copilot_app",
+        "acp",
         "sdk"
       ],
       "description": "Client surface that submitted a permission response.",
@@ -26999,6 +27292,7 @@
         "tui": "The interactive Copilot CLI terminal UI.",
         "prompt_mode": "The non-interactive Copilot CLI prompt mode.",
         "copilot_app": "The Copilot App client.",
+        "acp": "An Agent Client Protocol host.",
         "sdk": "A generic Copilot SDK client."
       }
     },
@@ -27360,6 +27654,21 @@
       "additionalProperties": false,
       "description": "Indicates whether the permission decision was applied; false when the request was already resolved.",
       "title": "PermissionRequestResult"
+    },
+    "PermissionResponseCapability": {
+      "type": "string",
+      "enum": [
+        "interactive",
+        "headless",
+        "none"
+      ],
+      "description": "Response capability available to the client when it settled a permission request.",
+      "title": "PermissionResponseCapability",
+      "x-enumDescriptions": {
+        "interactive": "The client could ask a user for this decision.",
+        "headless": "The client could return an automated response but could not ask a user.",
+        "none": "The client had no response path available."
+      }
     },
     "PermissionRule": {
       "type": "object",
@@ -30639,7 +30948,7 @@
           "description": "Session to register extension tools on."
         },
         "loader": {
-          "description": "In-process ExtensionLoader handle (CLI-only optimization). Marked internal: this field is excluded from the public SDK surface. When the CLI migrates to a process-separated SDK, extension discovery/launch moves entirely into the runtime — the CLI passes pure config (search paths, disabled ids) via SessionOptions instead.",
+          "description": "In-process ExtensionLoader handle used only by the CLI and excluded from the public SDK surface.",
           "visibility": "internal",
           "x-opaque-in-process": true
         },
@@ -30661,7 +30970,7 @@
       "type": "object",
       "properties": {
         "unsubscribe": {
-          "description": "In-process unsubscribe function (CLI-only optimization). Marked internal: replaced by an explicit `extensions.unregister` RPC in the SDK migration.",
+          "description": "In-process unsubscribe function used only by the CLI.",
           "visibility": "internal",
           "x-opaque-in-process": true
         }
@@ -31189,6 +31498,14 @@
           "$ref": "#/definitions/FactoryRunLimits",
           "description": "Per-invocation resource ceiling overrides."
         },
+        "notifyOnComplete": {
+          "type": "boolean",
+          "description": "Whether to notify the originating session when the factory completes."
+        },
+        "logPhaseNames": {
+          "type": "boolean",
+          "description": "Whether to emit factory phase names to the session transcript."
+        },
         "resumeFromRunId": {
           "type": "string",
           "description": "Run identifier whose journal and progress should seed this resumed run."
@@ -31220,7 +31537,7 @@
         },
         "allowDevToolAccess": {
           "type": "boolean",
-          "description": "Whether to auto-grant read access to the tool directories discovered on PATH and in toolchain environment variables (GOROOT, CARGO_HOME, JAVA_HOME, VIRTUAL_ENV, and similar), and to common developer-tool caches, registries, and toolchains in their default home locations (cargo, go, npm, Maven, and more), plus read-write access to (and up-front creation of) the scratch caches builds write on every run (go-build, ccache, sccache, Gradle caches, Cargo lock/tracker files), so builds work without extra configuration; a relocated CARGO_HOME additionally gets its Cargo lock files granted read-write. Set to false to disable every grant listed above: user-installed toolchains (rustup, nvm, pyenv, conda, pipx) then need explicit userPolicy.filesystem entries — readonlyPaths to read them, plus readwriteFiles for a relocated CARGO_HOME's .package-cache and .global-cache, which Cargo locks on every build. Only these developer-tool grants are affected: the working directory (see addCurrentWorkingDirectory), temporary storage, session log paths, and system locations follow their own rules and stay granted, so commands still run. Default: true (enabled by default; set to false to opt out)."
+          "description": "Whether to auto-grant read access to tool directories discovered on PATH and in toolchain environment variables (GOROOT, JAVA_HOME, VIRTUAL_ENV, and similar), and to common developer-tool caches, config, and toolchains. Writable grants cover scratch caches, the Unix GitHub CLI cache, and Cargo's registry, git store, and lock/tracker files. A relocated CARGO_HOME gets the same narrow split: registry and git are read-write; bin is read-only; the home root, config.toml, and credentials.toml stay ungranted. Set to false to disable every grant listed above; user-installed toolchains and caches then need explicit userPolicy.filesystem readonlyPaths and readwritePaths entries. The working directory (see addCurrentWorkingDirectory), temporary storage, session log paths, and system locations follow their own rules and stay granted. Default: true (enabled by default; set to false to opt out)."
         }
       },
       "required": [
@@ -31406,6 +31723,30 @@
       "additionalProperties": false,
       "description": "macOS seatbelt-specific options.",
       "title": "SandboxConfigUserPolicySeatbelt"
+    },
+    "SandboxEnforcementStatus": {
+      "type": "object",
+      "properties": {
+        "required": {
+          "type": "boolean",
+          "description": "Whether the effective managed policy requires an available sandbox backend."
+        },
+        "blocked": {
+          "type": "boolean",
+          "description": "Whether an enforcement failure has permanently blocked the session."
+        },
+        "reason": {
+          "type": "string",
+          "description": "The first sandbox enforcement failure that blocked the session."
+        }
+      },
+      "required": [
+        "required",
+        "blocked"
+      ],
+      "additionalProperties": false,
+      "description": "Managed sandbox enforcement state for a session.",
+      "title": "SandboxEnforcementStatus"
     },
     "ScheduleAddAtRequest": {
       "type": "object",
@@ -35435,7 +35776,7 @@
           "description": "Session options for cloud session creation."
         },
         "onTaskCreated": {
-          "description": "In-process callback invoked when the cloud task is created (before connection). Marked internal because a function reference cannot cross the JSON-RPC boundary. Disappears in the SDK migration: the field is purely cosmetic (it flips a single CLI phase label from 'creating' to 'connecting') and the wire-clean version just drops the intermediate phase.",
+          "description": "In-process callback invoked when the cloud task is created, before connection. Internal because function references cannot cross the JSON-RPC boundary.",
           "visibility": "internal",
           "x-opaque-in-process": true
         }
@@ -35740,7 +36081,7 @@
       "type": "object",
       "properties": {
         "enabled": {
-          "description": "In-process `() => boolean` gating callback (CLI-only optimization). Marked internal: replaced by runtime-side enable/disable RPCs in the SDK migration.",
+          "description": "In-process `() => boolean` gating callback used only by the CLI.",
           "visibility": "internal",
           "x-opaque-in-process": true
         }
@@ -37084,6 +37425,10 @@
         "message": {
           "type": "string",
           "description": "Optional user-facing message describing the completed command"
+        },
+        "mode": {
+          "$ref": "#/definitions/SessionMode",
+          "description": "Optional target session mode applied without submitting an agent prompt"
         },
         "runtimeSettingsChanged": {
           "type": "boolean",
@@ -38585,10 +38930,6 @@
     "ToolsGetBuiltinDescriptorsRequest": {
       "type": "object",
       "properties": {
-        "noViewLineNumbers": {
-          "type": "boolean",
-          "description": "Whether line numbers should be omitted from the view tool descriptor."
-        },
         "reduceUserIntervention": {
           "type": "boolean",
           "description": "Whether descriptors should favor fewer user-intervention prompts."
@@ -38604,10 +38945,6 @@
         "shellConfig": {
           "$ref": "#/definitions/ToolsShellDescriptorConfig",
           "description": "Shell-specific names and description lines for shell tools."
-        },
-        "shellAsyncOnlyEnabled": {
-          "type": "boolean",
-          "description": "Whether shell commands may only run asynchronously."
         },
         "shellSupportsPowerShell7Syntax": {
           "type": "boolean",
@@ -39397,12 +39734,12 @@
           "description": "Question to answer from the current conversation context."
         },
         "onChunk": {
-          "description": "In-process streaming callback `(text) => void` invoked with each token as the model emits it. Marked internal: excluded from the public SDK surface. In a process-separated SDK this is replaced by a streaming RPC that yields chunks and a final answer.",
+          "description": "In-process streaming callback `(text) => void` invoked with each token as the model emits it. Internal and excluded from the public SDK surface.",
           "visibility": "internal",
           "x-opaque-in-process": true
         },
         "abortSignal": {
-          "description": "In-process `AbortSignal` forwarded to the model client to cancel an in-flight request. Marked internal: excluded from the public SDK surface. Replaced by an explicit cancellation token + cancel RPC in the SDK migration.",
+          "description": "In-process `AbortSignal` forwarded to the model client to cancel an in-flight request. Internal and excluded from the public SDK surface.",
           "visibility": "internal",
           "x-opaque-in-process": true
         }
