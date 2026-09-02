@@ -20,7 +20,17 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: zig fmt --check build.zig src
+      - run: zig fmt --check build.zig src examples
       - run: zig build test
       - run: zig build
+      - name: Build examples
+        run: |
+          for example in basic custom-tools external-tools permissions prompt-customization send-and-wait join-session; do
+            zig build --build-file "examples/$example/build.zig"
+          done
+      - name: Check example help
+        run: |
+          for example in basic custom-tools external-tools permissions prompt-customization send-and-wait; do
+            zig build --build-file "examples/$example/build.zig" run -- --help
+          done
       - run: npm test

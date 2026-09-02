@@ -22,10 +22,21 @@ const QueuedEvent = struct {
     }
 };
 
+const RegisteredTool = struct {
+    session_id: []const u8,
+    name: []u8,
+    handler: session_types.ToolHandler,
+    context: ?*anyopaque,
+
+    fn deinit(self: RegisteredTool, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+    }
+};
+
 pub const Client = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    child: std.process.Child,
+    child: ?std.process.Child,
     reader: *std.Io.File.Reader,
     writer: *std.Io.File.Writer,
     reader_buffer: []u8,
@@ -33,6 +44,7 @@ pub const Client = struct {
     next_request_id: u64 = 1,
     session_ids: std.ArrayList([]u8) = .empty,
     events: std.ArrayList(QueuedEvent) = .empty,
+    tools: std.ArrayList(RegisteredTool) = .empty,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -42,6 +54,33 @@ pub const Client = struct {
         var client = try spawn(allocator, io, options);
         errdefer client.deinit();
         try client.connect(options.connection_token);
+        return client;
+    }
+
+    pub fn initParent(allocator: std.mem.Allocator, io: std.Io) !Client {
+        const reader_buffer = try allocator.alloc(u8, 8192);
+        errdefer allocator.free(reader_buffer);
+        const writer_buffer = try allocator.alloc(u8, 8192);
+        errdefer allocator.free(writer_buffer);
+        const reader = try allocator.create(std.Io.File.Reader);
+        errdefer allocator.destroy(reader);
+        const writer = try allocator.create(std.Io.File.Writer);
+        errdefer allocator.destroy(writer);
+
+        reader.* = std.Io.File.stdin().readerStreaming(io, reader_buffer);
+        writer.* = std.Io.File.stdout().writerStreaming(io, writer_buffer);
+
+        var client = Client{
+            .allocator = allocator,
+            .io = io,
+            .child = null,
+            .reader = reader,
+            .writer = writer,
+            .reader_buffer = reader_buffer,
+            .writer_buffer = writer_buffer,
+        };
+        errdefer client.deinit();
+        try client.connect(null);
         return client;
     }
 
@@ -95,9 +134,11 @@ pub const Client = struct {
     pub fn deinit(self: *Client) void {
         for (self.events.items) |*event| event.deinit(self.allocator);
         self.events.deinit(self.allocator);
+        for (self.tools.items) |tool| tool.deinit(self.allocator);
+        self.tools.deinit(self.allocator);
         for (self.session_ids.items) |id| self.allocator.free(id);
         self.session_ids.deinit(self.allocator);
-        self.child.kill(self.io);
+        if (self.child) |*child| child.kill(self.io);
         self.allocator.destroy(self.reader);
         self.allocator.destroy(self.writer);
         self.allocator.free(self.reader_buffer);
@@ -119,17 +160,69 @@ pub const Client = struct {
         self: *Client,
         config: session_types.SessionConfig,
     ) !Session {
+        var parsed_parameters: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty;
+        defer {
+            for (parsed_parameters.items) |parsed| parsed.deinit();
+            parsed_parameters.deinit(self.allocator);
+        }
+        var tools: std.ArrayList(WireTool) = .empty;
+        defer tools.deinit(self.allocator);
+        try appendWireTools(self.allocator, config.tools, &parsed_parameters, &tools);
+
         const parsed = try self.call(struct { sessionId: []const u8 }, "session.create", .{
             .sessionId = config.session_id,
             .model = config.model,
             .workingDirectory = config.working_directory,
             .streaming = config.streaming,
+            .tools = tools.items,
+            .systemMessage = config.system_message,
+            .requestPermission = config.request_permission,
         });
         defer parsed.deinit();
 
         const id = try self.allocator.dupe(u8, parsed.value.sessionId);
-        errdefer self.allocator.free(id);
-        try self.session_ids.append(self.allocator, id);
+        self.session_ids.append(self.allocator, id) catch |err| {
+            self.allocator.free(id);
+            return err;
+        };
+        errdefer self.removeSession(id);
+        try self.registerToolHandlers(id, config.tools);
+        return .{ .client = self, .id = id };
+    }
+
+    pub fn joinSession(
+        self: *Client,
+        session_id: []const u8,
+        config: session_types.SessionConfig,
+    ) !Session {
+        var parsed_parameters: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty;
+        defer {
+            for (parsed_parameters.items) |parsed| parsed.deinit();
+            parsed_parameters.deinit(self.allocator);
+        }
+        var tools: std.ArrayList(WireTool) = .empty;
+        defer tools.deinit(self.allocator);
+        try appendWireTools(self.allocator, config.tools, &parsed_parameters, &tools);
+
+        const parsed = try self.call(std.json.Value, "session.resume", .{
+            .sessionId = session_id,
+            .model = config.model,
+            .workingDirectory = config.working_directory,
+            .streaming = config.streaming,
+            .tools = tools.items,
+            .systemMessage = config.system_message,
+            .requestPermission = config.request_permission,
+            .disableResume = true,
+        });
+        parsed.deinit();
+
+        const id = try self.allocator.dupe(u8, session_id);
+        self.session_ids.append(self.allocator, id) catch |err| {
+            self.allocator.free(id);
+            return err;
+        };
+        errdefer self.removeSession(id);
+        try self.registerToolHandlers(id, config.tools);
         return .{ .client = self, .id = id };
     }
 
@@ -183,7 +276,13 @@ pub const Client = struct {
             const result = object.get("result") orelse return error.MissingResult;
             const result_json = try std.json.Stringify.valueAlloc(self.allocator, result, .{});
             defer self.allocator.free(result_json);
-            return std.json.parseFromSlice(Result, self.allocator, result_json, .{});
+            // The CLI may add response metadata as the protocol evolves. Parse the
+            // fields this SDK needs without rejecting compatible extra fields. The
+            // parsed result must own strings because result_json is freed below.
+            return std.json.parseFromSlice(Result, self.allocator, result_json, .{
+                .allocate = .alloc_always,
+                .ignore_unknown_fields = true,
+            });
         }
     }
 
@@ -233,6 +332,16 @@ pub const Client = struct {
             }
         }
 
+        var tool_index: usize = 0;
+        while (tool_index < self.tools.items.len) {
+            if (std.mem.eql(u8, self.tools.items[tool_index].session_id, session_id)) {
+                const tool = self.tools.orderedRemove(tool_index);
+                tool.deinit(self.allocator);
+            } else {
+                tool_index += 1;
+            }
+        }
+
         for (self.session_ids.items, 0..) |id, session_index| {
             if (std.mem.eql(u8, id, session_id)) {
                 self.allocator.free(id);
@@ -240,6 +349,39 @@ pub const Client = struct {
                 return;
             }
         }
+    }
+
+    fn registerToolHandlers(
+        self: *Client,
+        session_id: []const u8,
+        definitions: []const session_types.Tool,
+    ) !void {
+        for (definitions) |definition| {
+            const handler = definition.handler orelse continue;
+            const name = try self.allocator.dupe(u8, definition.name);
+            errdefer self.allocator.free(name);
+            try self.tools.append(self.allocator, .{
+                .session_id = session_id,
+                .name = name,
+                .handler = handler,
+                .context = definition.context,
+            });
+        }
+    }
+
+    fn findToolHandler(
+        self: *Client,
+        session_id: []const u8,
+        name: []const u8,
+    ) ?RegisteredTool {
+        for (self.tools.items) |tool| {
+            if (std.mem.eql(u8, tool.session_id, session_id) and
+                std.mem.eql(u8, tool.name, name))
+            {
+                return tool;
+            }
+        }
+        return null;
     }
 
     fn nextEvent(self: *Client, session_id: []const u8) !session_types.SessionEvent {
@@ -288,8 +430,52 @@ pub const Session = struct {
         return self.client.allocator.dupe(u8, parsed.value.messageId);
     }
 
+    pub fn sendAndWait(
+        self: Session,
+        options: session_types.MessageOptions,
+    ) !?session_types.AssistantMessage {
+        const message_id = try self.send(options);
+        defer self.client.allocator.free(message_id);
+
+        var response: ?session_types.AssistantMessage = null;
+        errdefer if (response) |message| message.deinit(self.client.allocator);
+
+        while (true) {
+            var event = try self.nextEvent();
+            defer event.deinit(self.client.allocator);
+
+            switch (event) {
+                .assistant_message => |message| {
+                    if (response) |previous| previous.deinit(self.client.allocator);
+                    response = message;
+                    event = .session_idle;
+                },
+                .session_idle => return response,
+                .session_error => return error.CopilotSessionError,
+                else => {},
+            }
+        }
+    }
+
     pub fn nextEvent(self: Session) !session_types.SessionEvent {
-        return self.client.nextEvent(self.id);
+        var event = try self.client.nextEvent(self.id);
+        errdefer event.deinit(self.client.allocator);
+        if (event == .external_tool_requested) {
+            const request = event.external_tool_requested;
+            if (self.client.findToolHandler(self.id, request.tool_name)) |tool| {
+                const result = tool.handler(
+                    self.client.allocator,
+                    request.arguments_json,
+                    tool.context,
+                ) catch |err| {
+                    try self.respondToToolError(request.request_id, @errorName(err));
+                    return event;
+                };
+                defer self.client.allocator.free(result);
+                try self.respondToTool(request.request_id, result);
+            }
+        }
+        return event;
     }
 
     pub fn destroy(self: Session) !void {
@@ -299,14 +485,103 @@ pub const Session = struct {
         parsed.deinit();
         self.client.removeSession(self.id);
     }
+
+    pub fn approvePermission(self: Session, request_id: []const u8) !void {
+        const parsed = try self.client.call(std.json.Value, "session.permissions.handlePendingPermissionRequest", .{
+            .sessionId = self.id,
+            .requestId = request_id,
+            .result = .{ .kind = "approve-once" },
+        });
+        parsed.deinit();
+    }
+
+    pub fn rejectPermission(
+        self: Session,
+        request_id: []const u8,
+        feedback: ?[]const u8,
+    ) !void {
+        const parsed = try self.client.call(std.json.Value, "session.permissions.handlePendingPermissionRequest", .{
+            .sessionId = self.id,
+            .requestId = request_id,
+            .result = .{ .kind = "reject", .feedback = feedback },
+        });
+        parsed.deinit();
+    }
+
+    pub fn respondToTool(
+        self: Session,
+        request_id: []const u8,
+        result: []const u8,
+    ) !void {
+        const parsed = try self.client.call(struct { success: bool }, "session.tools.handlePendingToolCall", .{
+            .sessionId = self.id,
+            .requestId = request_id,
+            .result = result,
+        });
+        defer parsed.deinit();
+        if (!parsed.value.success) return error.ToolResultNotAccepted;
+    }
+
+    pub fn respondToToolError(
+        self: Session,
+        request_id: []const u8,
+        message: []const u8,
+    ) !void {
+        const parsed = try self.client.call(struct { success: bool }, "session.tools.handlePendingToolCall", .{
+            .sessionId = self.id,
+            .requestId = request_id,
+            .@"error" = message,
+        });
+        defer parsed.deinit();
+        if (!parsed.value.success) return error.ToolResultNotAccepted;
+    }
 };
+
+const WireTool = struct {
+    name: []const u8,
+    description: []const u8,
+    parameters: std.json.Value,
+    skipPermission: bool,
+};
+
+fn appendWireTools(
+    allocator: std.mem.Allocator,
+    definitions: []const session_types.Tool,
+    parsed_parameters: *std.ArrayList(std.json.Parsed(std.json.Value)),
+    tools: *std.ArrayList(WireTool),
+) !void {
+    for (definitions) |definition| {
+        const parsed = try std.json.parseFromSlice(
+            std.json.Value,
+            allocator,
+            definition.parameters_json,
+            .{},
+        );
+        errdefer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidToolParameters;
+        try tools.append(allocator, .{
+            .name = definition.name,
+            .description = definition.description,
+            .parameters = parsed.value,
+            .skipPermission = definition.skip_permission,
+        });
+        try parsed_parameters.append(allocator, parsed);
+    }
+}
 
 test "public client API type checks" {
     _ = &Client.init;
+    _ = &Client.initParent;
     _ = &Client.createSession;
+    _ = &Client.joinSession;
     _ = &Session.send;
+    _ = &Session.sendAndWait;
     _ = &Session.nextEvent;
     _ = &Session.destroy;
+    _ = &Session.approvePermission;
+    _ = &Session.rejectPermission;
+    _ = &Session.respondToTool;
+    _ = &Session.respondToToolError;
 }
 
 fn validateConnectResult(ok: bool, protocol_version: u64) !void {
@@ -326,12 +601,31 @@ test "connect validates the protocol version" {
     );
 }
 
+test "typed RPC results allow additional fields" {
+    const allocator = std.testing.allocator;
+    const result_json = try allocator.dupe(u8,
+        \\{"sessionId":"s1","workspacePath":"/tmp/workspace"}
+    );
+    const parsed = try std.json.parseFromSlice(
+        struct { sessionId: []const u8 },
+        allocator,
+        result_json,
+        .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        },
+    );
+    defer parsed.deinit();
+    allocator.free(result_json);
+    try std.testing.expectEqualStrings("s1", parsed.value.sessionId);
+}
+
 test "session.event notifications queue by session" {
     const allocator = std.testing.allocator;
     var client = Client{
         .allocator = allocator,
         .io = undefined,
-        .child = undefined,
+        .child = null,
         .reader = undefined,
         .writer = undefined,
         .reader_buffer = &.{},
@@ -340,6 +634,8 @@ test "session.event notifications queue by session" {
     defer {
         for (client.events.items) |*event| event.deinit(allocator);
         client.events.deinit(allocator);
+        for (client.tools.items) |tool| tool.deinit(allocator);
+        client.tools.deinit(allocator);
     }
 
     const parsed = try std.json.parseFromSlice(
@@ -365,7 +661,7 @@ test "destroy removes session-owned allocations" {
     var client = Client{
         .allocator = allocator,
         .io = undefined,
-        .child = undefined,
+        .child = null,
         .reader = undefined,
         .writer = undefined,
         .reader_buffer = &.{},
@@ -374,6 +670,8 @@ test "destroy removes session-owned allocations" {
     defer {
         for (client.events.items) |*event| event.deinit(allocator);
         client.events.deinit(allocator);
+        for (client.tools.items) |tool| tool.deinit(allocator);
+        client.tools.deinit(allocator);
         for (client.session_ids.items) |id| allocator.free(id);
         client.session_ids.deinit(allocator);
     }
@@ -396,7 +694,7 @@ test "session event queue has a fixed bound" {
     var client = Client{
         .allocator = allocator,
         .io = undefined,
-        .child = undefined,
+        .child = null,
         .reader = undefined,
         .writer = undefined,
         .reader_buffer = &.{},
@@ -405,6 +703,8 @@ test "session event queue has a fixed bound" {
     defer {
         for (client.events.items) |*event| event.deinit(allocator);
         client.events.deinit(allocator);
+        for (client.tools.items) |tool| tool.deinit(allocator);
+        client.tools.deinit(allocator);
     }
 
     try client.events.ensureTotalCapacity(allocator, max_queued_events);

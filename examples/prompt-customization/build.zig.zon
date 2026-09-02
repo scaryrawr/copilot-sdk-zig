@@ -1,0 +1,16 @@
+.{
+    .name = .copilot_prompt_example,
+    .version = "0.1.0",
+    .fingerprint = 0xcc63fbcc02184d11,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .copilot_sdk = .{
+            .path = "../..",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

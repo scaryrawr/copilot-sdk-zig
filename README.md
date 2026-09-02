@@ -34,6 +34,35 @@ executable.root_module.addImport(
 );
 ```
 
+The package also exposes a `copilot_schema` module for deriving custom-tool
+JSON Schemas from Zig structs at comptime:
+
+```zig
+const schema = @import("copilot_schema");
+
+const WeatherArguments = struct {
+    city: []const u8,
+    unit: ?enum { celsius, fahrenheit },
+};
+
+const weather_tool = schema.defineTool(WeatherArguments, .{
+    .name = "get_weather",
+    .description = "Get weather for a city.",
+    .handler = struct {
+        fn handle(
+            allocator: std.mem.Allocator,
+            arguments: WeatherArguments,
+        ) ![]u8 {
+            return std.fmt.allocPrint(
+                allocator,
+                "Weather for {s}",
+                .{arguments.city},
+            );
+        }
+    }.handle,
+});
+```
+
 ## Send a prompt
 
 Pass a `std.Io` implementation to `Client.init`. The client starts
@@ -77,15 +106,36 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
 in use. `SessionEvent` values and the message ID from `send` own memory from the
 client allocator.
 
+## Examples
+
+Runnable projects are listed in [`examples`](examples). They cover streaming,
+custom tools, permission decisions, prompt customization, and joining a
+foreground CLI session from an extension.
+
+```sh
+cd examples/basic
+zig build
+zig build run -- --help
+zig build run
+```
+
+The last command requires the Copilot CLI in `PATH`. Use
+`zig build run -- --cli-path /path/to/copilot` when it is installed elsewhere.
+CI builds every example and runs credential-free help paths, while the SDK unit
+tests verify protocol behavior without requiring Copilot credentials.
+
 ## Supported scope
 
 The SDK supports only the stdio transport. It implements these wire methods:
 
 - `connect`
 - `session.create`
+- `session.resume`
 - `session.send`
 - `session.destroy`
 - `session.event`
+- `session.permissions.handlePendingPermissionRequest`
+- `session.tools.handlePendingToolCall`
 
 It recognizes these session events:
 
@@ -93,10 +143,11 @@ It recognizes these session events:
 - `assistant.message_delta`
 - `session.idle`
 - `session.error`
+- `permission.requested`
+- `external_tool.requested`
 
 Other session events use the `unknown` variant. The SDK does not support an
-external CLI server URL, custom tools, or the broader APIs in the upstream
-schema.
+external CLI server URL or the broader APIs in the upstream schema.
 
 The client stores at most 1,024 queued session events. An RPC call or event read
 returns `error.EventQueueFull` when callers leave other sessions undrained.
@@ -106,9 +157,12 @@ returns `error.EventQueueFull` when callers leave other sessions undrained.
 Run the checks from the repository root:
 
 ```sh
-zig fmt --check build.zig src
+zig fmt --check build.zig src examples
 zig build test
 zig build
+for example in basic custom-tools external-tools permissions prompt-customization send-and-wait join-session; do
+  zig build --build-file "examples/$example/build.zig"
+done
 npm ci
 npm test
 ```

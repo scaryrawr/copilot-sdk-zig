@@ -1,0 +1,17 @@
+.{
+    .name = .copilot_sdk_join_session_example,
+    .version = "0.1.0",
+    .fingerprint = 0xe10509400ddc0e42,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .copilot_sdk = .{
+            .path = "../..",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "extension.mjs",
+        "src",
+    },
+}
