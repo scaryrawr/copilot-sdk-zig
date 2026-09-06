@@ -26,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
         .tools = &.{status_tool},
         .request_permission = true,
     });
-    defer session.destroy() catch {};
+    defer session.disconnect() catch {};
 
     const message_id = try session.send(.{
         .prompt = "Use external_deployment_status for staging and report the result.",

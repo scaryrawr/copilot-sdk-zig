@@ -16,7 +16,7 @@ pub fn main(init: std.process.Init) !void {
             .content = "Answer as a concise Zig mentor and include one practical tip.",
         },
     });
-    defer session.destroy() catch {};
+    defer session.disconnect() catch {};
 
     const message_id = try session.send(.{
         .prompt = "What is an error union?",

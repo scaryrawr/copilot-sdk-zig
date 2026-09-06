@@ -10,6 +10,14 @@ pub const ClientOptions = struct {
     working_directory: ?[]const u8 = null,
     cli_args: []const []const u8 = &.{},
     connection_token: ?[]const u8 = null,
+    client_info: ?ClientInfo = null,
+};
+
+pub const ClientInfo = struct {
+    application_name: ?[]const u8 = null,
+    application_version: ?[]const u8 = null,
+    integration_name: ?[]const u8 = null,
+    integration_version: ?[]const u8 = null,
 };
 
 const QueuedEvent = struct {
@@ -53,7 +61,7 @@ pub const Client = struct {
     ) !Client {
         var client = try spawn(allocator, io, options);
         errdefer client.deinit();
-        try client.connect(options.connection_token);
+        try client.connect(options.connection_token, options.client_info);
         return client;
     }
 
@@ -80,7 +88,7 @@ pub const Client = struct {
             .writer_buffer = writer_buffer,
         };
         errdefer client.deinit();
-        try client.connect(null);
+        try client.connect(null, null);
         return client;
     }
 
@@ -146,12 +154,19 @@ pub const Client = struct {
         self.* = undefined;
     }
 
-    fn connect(self: *Client, token: ?[]const u8) !void {
+    fn connect(
+        self: *Client,
+        token: ?[]const u8,
+        client_info: ?ClientInfo,
+    ) !void {
         const parsed = try self.call(struct {
             ok: bool,
             protocolVersion: u64,
             version: []const u8,
-        }, "connect", .{ .token = token });
+        }, "connect", .{
+            .token = token,
+            .clientInfo = toWireClientInfo(client_info),
+        });
         defer parsed.deinit();
         try validateConnectResult(parsed.value.ok, parsed.value.protocolVersion);
     }
@@ -448,9 +463,11 @@ pub const Session = struct {
                 .assistant_message => |message| {
                     if (response) |previous| previous.deinit(self.client.allocator);
                     response = message;
-                    event = .session_idle;
+                    event = .{ .session_idle = .{} };
                 },
-                .session_idle => return response,
+                .session_idle => |idle| {
+                    if (completesSendAndWait(idle)) return response;
+                },
                 .session_error => return error.CopilotSessionError,
                 else => {},
             }
@@ -478,21 +495,50 @@ pub const Session = struct {
         return event;
     }
 
-    pub fn destroy(self: Session) !void {
-        const parsed = try self.client.call(std.json.Value, "session.destroy", .{
-            .sessionId = self.id,
-        });
-        parsed.deinit();
-        self.client.removeSession(self.id);
+    pub fn disconnect(self: Session) !void {
+        for (0..2) |_| {
+            const parsed = try self.client.call(struct {
+                success: bool,
+                @"error": ?[]const u8 = null,
+            }, "session.detach", .{
+                .sessionId = self.id,
+            });
+            defer parsed.deinit();
+            if (parsed.value.success) {
+                self.client.removeSession(self.id);
+                return;
+            }
+        }
+        return error.SessionDetachFailed;
+    }
+
+    pub fn setAutoTier(
+        self: Session,
+        auto_tier: ?session_types.AutoTier,
+    ) !session_types.AutoTierSwitchResult {
+        const parsed = try self.client.call(
+            session_types.AutoTierSwitchResult,
+            "session.model.switchAutoTier",
+            .{
+                .sessionId = self.id,
+                .autoTier = if (auto_tier) |tier|
+                    std.json.Value{ .string = @tagName(tier) }
+                else
+                    std.json.Value.null,
+            },
+        );
+        defer parsed.deinit();
+        return parsed.value;
     }
 
     pub fn approvePermission(self: Session, request_id: []const u8) !void {
-        const parsed = try self.client.call(std.json.Value, "session.permissions.handlePendingPermissionRequest", .{
+        const parsed = try self.client.call(RpcSuccess, "session.permissions.handlePendingPermissionRequest", .{
             .sessionId = self.id,
             .requestId = request_id,
             .result = .{ .kind = "approve-once" },
         });
-        parsed.deinit();
+        defer parsed.deinit();
+        if (!parsed.value.success) return error.PermissionDecisionNotAccepted;
     }
 
     pub fn rejectPermission(
@@ -500,12 +546,67 @@ pub const Session = struct {
         request_id: []const u8,
         feedback: ?[]const u8,
     ) !void {
-        const parsed = try self.client.call(std.json.Value, "session.permissions.handlePendingPermissionRequest", .{
+        const parsed = try self.client.call(RpcSuccess, "session.permissions.handlePendingPermissionRequest", .{
             .sessionId = self.id,
             .requestId = request_id,
             .result = .{ .kind = "reject", .feedback = feedback },
         });
-        parsed.deinit();
+        defer parsed.deinit();
+        if (!parsed.value.success) return error.PermissionDecisionNotAccepted;
+    }
+
+    pub fn respondToPermissionJson(
+        self: Session,
+        request_id: []const u8,
+        decision_json: []const u8,
+        decision_context_json: ?[]const u8,
+    ) !void {
+        const decision = try std.json.parseFromSlice(
+            std.json.Value,
+            self.client.allocator,
+            decision_json,
+            .{},
+        );
+        defer decision.deinit();
+        if (decision.value != .object) return error.InvalidPermissionDecision;
+
+        const decision_context = if (decision_context_json) |context_json|
+            try std.json.parseFromSlice(
+                std.json.Value,
+                self.client.allocator,
+                context_json,
+                .{},
+            )
+        else
+            null;
+        defer if (decision_context) |context| context.deinit();
+        if (decision_context) |context| {
+            if (context.value != .object) return error.InvalidPermissionDecisionContext;
+        }
+
+        const parsed = if (decision_context) |context|
+            try self.client.call(
+                RpcSuccess,
+                "session.permissions.handlePendingPermissionRequest",
+                .{
+                    .sessionId = self.id,
+                    .requestId = request_id,
+                    .result = decision.value,
+                    .decisionContext = context.value,
+                },
+            )
+        else
+            try self.client.call(
+                RpcSuccess,
+                "session.permissions.handlePendingPermissionRequest",
+                .{
+                    .sessionId = self.id,
+                    .requestId = request_id,
+                    .result = decision.value,
+                },
+            );
+        defer parsed.deinit();
+        if (!parsed.value.success) return error.PermissionDecisionNotAccepted;
     }
 
     pub fn respondToTool(
@@ -518,6 +619,38 @@ pub const Session = struct {
             .requestId = request_id,
             .result = result,
         });
+        defer parsed.deinit();
+        if (!parsed.value.success) return error.ToolResultNotAccepted;
+    }
+
+    pub fn respondToToolResultJson(
+        self: Session,
+        request_id: []const u8,
+        result_json: []const u8,
+    ) !void {
+        const result = try std.json.parseFromSlice(
+            std.json.Value,
+            self.client.allocator,
+            result_json,
+            .{},
+        );
+        defer result.deinit();
+        const object = switch (result.value) {
+            .object => |object| object,
+            else => return error.InvalidToolResult,
+        };
+        const text = object.get("textResultForLlm") orelse return error.InvalidToolResult;
+        if (text != .string) return error.InvalidToolResult;
+
+        const parsed = try self.client.call(
+            struct { success: bool },
+            "session.tools.handlePendingToolCall",
+            .{
+                .sessionId = self.id,
+                .requestId = request_id,
+                .result = result.value,
+            },
+        );
         defer parsed.deinit();
         if (!parsed.value.success) return error.ToolResultNotAccepted;
     }
@@ -537,12 +670,48 @@ pub const Session = struct {
     }
 };
 
+fn completesSendAndWait(idle: session_types.SessionIdle) bool {
+    return idle.mode == null or !std.mem.eql(u8, idle.mode.?, "autopilot");
+}
+
 const WireTool = struct {
     name: []const u8,
     description: []const u8,
     parameters: std.json.Value,
+    overridesBuiltInTool: bool,
     skipPermission: bool,
+    @"defer": session_types.ToolLoading,
+    metadata: ?std.json.Value,
+    isTerminal: bool,
 };
+
+const RpcSuccess = struct {
+    success: bool,
+};
+
+const WireClientInfo = struct {
+    editorName: ?[]const u8 = null,
+    editorVersion: ?[]const u8 = null,
+    extensionName: ?[]const u8 = null,
+    extensionVersion: ?[]const u8 = null,
+};
+
+fn toWireClientInfo(info: ?ClientInfo) ?WireClientInfo {
+    const value = info orelse return null;
+    if (value.application_name == null and
+        value.application_version == null and
+        value.integration_name == null and
+        value.integration_version == null)
+    {
+        return null;
+    }
+    return .{
+        .editorName = value.application_name,
+        .editorVersion = value.application_version,
+        .extensionName = value.integration_name,
+        .extensionVersion = value.integration_version,
+    };
+}
 
 fn appendWireTools(
     allocator: std.mem.Allocator,
@@ -551,21 +720,43 @@ fn appendWireTools(
     tools: *std.ArrayList(WireTool),
 ) !void {
     for (definitions) |definition| {
-        const parsed = try std.json.parseFromSlice(
+        const parsed_parameters_value = try std.json.parseFromSlice(
             std.json.Value,
             allocator,
             definition.parameters_json,
             .{},
         );
-        errdefer parsed.deinit();
-        if (parsed.value != .object) return error.InvalidToolParameters;
+        errdefer parsed_parameters_value.deinit();
+        if (parsed_parameters_value.value != .object) return error.InvalidToolParameters;
+
+        var parsed_metadata: ?std.json.Parsed(std.json.Value) = null;
+        errdefer if (parsed_metadata) |parsed| parsed.deinit();
+        if (definition.metadata_json) |metadata_json| {
+            const parsed = try std.json.parseFromSlice(
+                std.json.Value,
+                allocator,
+                metadata_json,
+                .{},
+            );
+            if (parsed.value != .object) {
+                parsed.deinit();
+                return error.InvalidToolMetadata;
+            }
+            parsed_metadata = parsed;
+        }
+
         try tools.append(allocator, .{
             .name = definition.name,
             .description = definition.description,
-            .parameters = parsed.value,
+            .parameters = parsed_parameters_value.value,
+            .overridesBuiltInTool = definition.overrides_built_in_tool,
             .skipPermission = definition.skip_permission,
+            .@"defer" = definition.defer_loading,
+            .metadata = if (parsed_metadata) |parsed| parsed.value else null,
+            .isTerminal = definition.is_terminal,
         });
-        try parsed_parameters.append(allocator, parsed);
+        try parsed_parameters.append(allocator, parsed_parameters_value);
+        if (parsed_metadata) |parsed| try parsed_parameters.append(allocator, parsed);
     }
 }
 
@@ -577,11 +768,65 @@ test "public client API type checks" {
     _ = &Session.send;
     _ = &Session.sendAndWait;
     _ = &Session.nextEvent;
-    _ = &Session.destroy;
+    _ = &Session.disconnect;
+    _ = &Session.setAutoTier;
     _ = &Session.approvePermission;
     _ = &Session.rejectPermission;
+    _ = &Session.respondToPermissionJson;
     _ = &Session.respondToTool;
+    _ = &Session.respondToToolResultJson;
     _ = &Session.respondToToolError;
+}
+
+test "client info maps to connect wire fields" {
+    const info = toWireClientInfo(.{
+        .application_name = "acme",
+        .application_version = "2.4.0",
+        .integration_name = "zig",
+        .integration_version = "1.0.0",
+    }).?;
+
+    try std.testing.expectEqualStrings("acme", info.editorName.?);
+    try std.testing.expectEqualStrings("2.4.0", info.editorVersion.?);
+    try std.testing.expectEqualStrings("zig", info.extensionName.?);
+    try std.testing.expectEqualStrings("1.0.0", info.extensionVersion.?);
+    try std.testing.expect(toWireClientInfo(.{}) == null);
+}
+
+test "sendAndWait ignores autopilot idle events" {
+    try std.testing.expect(!completesSendAndWait(.{ .mode = @constCast("autopilot") }));
+    try std.testing.expect(completesSendAndWait(.{}));
+    try std.testing.expect(completesSendAndWait(.{ .mode = @constCast("interactive") }));
+}
+
+test "tool definitions map current wire fields" {
+    const allocator = std.testing.allocator;
+    var parsed_values: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty;
+    defer {
+        for (parsed_values.items) |parsed| parsed.deinit();
+        parsed_values.deinit(allocator);
+    }
+    var tools: std.ArrayList(WireTool) = .empty;
+    defer tools.deinit(allocator);
+
+    try appendWireTools(
+        allocator,
+        &.{.{
+            .name = "finish",
+            .overrides_built_in_tool = true,
+            .defer_loading = .never,
+            .metadata_json = "{\"acme:priority\":1}",
+            .is_terminal = true,
+        }},
+        &parsed_values,
+        &tools,
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), tools.items.len);
+    try std.testing.expect(tools.items[0].overridesBuiltInTool);
+    try std.testing.expectEqual(session_types.ToolLoading.never, tools.items[0].@"defer");
+    try std.testing.expect(tools.items[0].metadata.? == .object);
+    try std.testing.expect(tools.items[0].isTerminal);
 }
 
 fn validateConnectResult(ok: bool, protocol_version: u64) !void {
@@ -656,7 +901,7 @@ test "session.event notifications queue by session" {
     );
 }
 
-test "destroy removes session-owned allocations" {
+test "disconnect removes session-owned allocations" {
     const allocator = std.testing.allocator;
     var client = Client{
         .allocator = allocator,
@@ -680,7 +925,7 @@ test "destroy removes session-owned allocations" {
     try client.session_ids.append(allocator, session_id);
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "s1"),
-        .event = .{ .session_idle = {} },
+        .event = .{ .session_idle = .{} },
     });
 
     client.removeSession("s1");
@@ -711,7 +956,7 @@ test "session event queue has a fixed bound" {
     for (0..max_queued_events) |_| {
         try client.events.append(allocator, .{
             .session_id = try allocator.dupe(u8, "s1"),
-            .event = .{ .session_idle = {} },
+            .event = .{ .session_idle = .{} },
         });
     }
 

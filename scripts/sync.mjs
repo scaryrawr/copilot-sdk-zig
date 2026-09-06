@@ -5,7 +5,6 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -22,6 +21,8 @@ const metadataPath = join(vendorDirectory, "upstream.json");
 const generatedPath = join(root, "src", "protocol_version.zig");
 const compatibilityPath = join(root, "sync", "compatibility.json");
 const workDirectory = join(root, ".sync-work");
+const cliReleaseRepository = "github/copilot-cli";
+const cliReleasePlatform = "linux-x64";
 
 function parseJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
@@ -38,6 +39,8 @@ function assert(condition, message) {
 function validateMetadata(metadata) {
   const expectedKeys = [
     "cliPackageVersion",
+    "cliReleaseAsset",
+    "cliReleaseAssetDigest",
     "schemaDigests",
     "sdkProtocolVersion",
     "upstreamCommit",
@@ -50,6 +53,15 @@ function validateMetadata(metadata) {
   assert(/^[0-9a-f]{40}$/.test(metadata.upstreamCommit), "metadata commit is invalid");
   assert(Number.isSafeInteger(metadata.sdkProtocolVersion) && metadata.sdkProtocolVersion >= 0, "metadata protocol version is invalid");
   assert(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(metadata.cliPackageVersion), "metadata CLI package version is invalid");
+  assert(
+    metadata.cliReleaseAsset ===
+      `github-copilot-${metadata.cliPackageVersion}-${cliReleasePlatform}.tgz`,
+    "metadata CLI release asset is invalid",
+  );
+  assert(
+    /^sha256:[0-9a-f]{64}$/.test(metadata.cliReleaseAssetDigest),
+    "metadata CLI release asset digest is invalid",
+  );
   assert(metadata.schemaDigests && Object.keys(metadata.schemaDigests).sort().join(",") === schemaNames.sort().join(","), "metadata schema digests are invalid");
   for (const name of schemaNames) {
     assert(/^sha256:[0-9a-f]{64}$/.test(metadata.schemaDigests[name]), `metadata digest for ${name} is invalid`);
@@ -64,6 +76,29 @@ function collectPropertyValues(value, property, output = new Set()) {
     for (const item of Object.values(value)) collectPropertyValues(item, property, output);
   }
   return output;
+}
+
+function findObjectByProperty(value, property, expected) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findObjectByProperty(item, property, expected);
+      if (found) return found;
+    }
+  } else if (value && typeof value === "object") {
+    if (value[property] === expected) return value;
+    for (const item of Object.values(value)) {
+      const found = findObjectByProperty(item, property, expected);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function requireProperties(value, names, label) {
+  assert(value?.properties, `${label} has no properties`);
+  for (const name of names) {
+    assert(value.properties[name], `${label} is missing property: ${name}`);
+  }
 }
 
 function eventDiscriminators(schema) {
@@ -97,6 +132,43 @@ function verifyCompatibility(apiSchema, eventSchema) {
   for (const discriminator of compatibility.sessionEventDiscriminators) {
     assert(discriminators.has(discriminator), `required session event is missing: ${discriminator}`);
   }
+
+  requireProperties(
+    apiSchema.definitions?.ConnectClientInfo,
+    ["editorName", "editorVersion", "extensionName", "extensionVersion"],
+    "ConnectClientInfo",
+  );
+  requireProperties(
+    findObjectByProperty(apiSchema, "rpcMethod", "session.send")?.params,
+    ["sessionId", "prompt"],
+    "session.send params",
+  );
+  requireProperties(
+    findObjectByProperty(apiSchema, "rpcMethod", "session.permissions.handlePendingPermissionRequest")
+      ?.params,
+    ["sessionId", "requestId", "result", "decisionContext"],
+    "permission response params",
+  );
+  requireProperties(
+    findObjectByProperty(apiSchema, "rpcMethod", "session.tools.handlePendingToolCall")?.params,
+    ["sessionId", "requestId", "result", "error"],
+    "tool response params",
+  );
+  requireProperties(
+    eventSchema.definitions?.IdleData,
+    ["aborted", "mode"],
+    "session.idle data",
+  );
+  requireProperties(
+    eventSchema.definitions?.ExternalToolRequestedData,
+    ["requestId", "toolCallId", "toolName", "arguments"],
+    "external_tool.requested data",
+  );
+  requireProperties(
+    eventSchema.definitions?.PermissionRequestedData,
+    ["requestId", "permissionRequest"],
+    "permission.requested data",
+  );
 }
 
 function verify() {
@@ -114,7 +186,9 @@ function verify() {
   const expectedGenerated = `pub const sdk_protocol_version: u64 = ${metadata.sdkProtocolVersion};\n`;
   assert(readFileSync(generatedPath, "utf8") === expectedGenerated, "generated Zig protocol version is stale");
   verifyCompatibility(schemas["api.schema.json"], schemas["session-events.schema.json"]);
-  console.log(`Verified ${metadata.upstreamCommit} with @github/copilot ${metadata.cliPackageVersion}`);
+  console.log(
+    `Verified ${metadata.upstreamCommit} with Copilot CLI ${metadata.cliPackageVersion} (${metadata.cliReleaseAsset})`,
+  );
 }
 
 function requestHeaders() {
@@ -146,62 +220,81 @@ function rawUrl(commit, path) {
   return `https://raw.githubusercontent.com/${repository}/${commit}/${path}`;
 }
 
-function findSchemaSource() {
-  const scopeDirectory = join(workDirectory, "node_modules", "@github");
-  for (const entry of readdirSync(scopeDirectory).sort()) {
-    const candidate = join(scopeDirectory, entry, "schemas");
-    if (schemaNames.every((name) => existsSync(join(candidate, name)))) return candidate;
-  }
-  throw new Error("installed @github/copilot package does not contain the required schemas");
+function releaseAssetName(version) {
+  return `github-copilot-${version}-${cliReleasePlatform}.tgz`;
 }
 
-function installSchemaPackage(version, ifPublished) {
+async function fetchReleaseFile(url, ifPublished) {
+  const response = await fetch(url, { headers: requestHeaders() });
+  if (ifPublished && response.status === 404) return null;
+  if (!response.ok) throw new Error(`request failed with ${response.status}: ${url}`);
+  return response;
+}
+
+async function installSchemaPackage(version, ifPublished) {
   rmSync(workDirectory, { force: true, recursive: true });
   mkdirSync(workDirectory, { recursive: true });
-  try {
-    execFileSync(
-      "npm",
-      [
-        "install",
-        "--prefix",
-        workDirectory,
-        "--no-save",
-        "--package-lock=false",
-        "--ignore-scripts",
-        "--allow-remote=all",
-        `@github/copilot@${version}`,
-      ],
-      { stdio: ifPublished ? "pipe" : "inherit" },
-    );
-  } catch (error) {
-    const stderr = String(error.stderr);
-    if (ifPublished && (stderr.includes("E404") || stderr.includes("ETARGET"))) {
-      console.log(`Deferred sync because @github/copilot ${version} is not published`);
-      return null;
-    }
-    throw error;
+  const assetName = releaseAssetName(version);
+  const releaseBase = `https://github.com/${cliReleaseRepository}/releases/download/v${version}`;
+  const checksumsResponse = await fetchReleaseFile(`${releaseBase}/SHA256SUMS.txt`, ifPublished);
+  if (checksumsResponse === null) {
+    console.log(`Deferred sync because Copilot CLI ${version} is not published`);
+    return null;
   }
-  return findSchemaSource();
+  const checksumLine = (await checksumsResponse.text())
+    .split(/\r?\n/)
+    .find((line) => line.trim().split(/\s+/, 2)[1]?.replace(/^\*/, "") === assetName);
+  const expectedChecksum = checksumLine?.trim().split(/\s+/, 2)[0]?.toLowerCase();
+  assert(/^[0-9a-f]{64}$/.test(expectedChecksum), `release checksums do not contain ${assetName}`);
+
+  const archiveResponse = await fetchReleaseFile(`${releaseBase}/${assetName}`, ifPublished);
+  if (archiveResponse === null) {
+    console.log(`Deferred sync because Copilot CLI ${version} is not published`);
+    return null;
+  }
+  const archive = Buffer.from(await archiveResponse.arrayBuffer());
+  const actualChecksum = createHash("sha256").update(archive).digest("hex");
+  assert(actualChecksum === expectedChecksum, `checksum mismatch for ${assetName}`);
+
+  const archivePath = join(workDirectory, assetName);
+  writeFileSync(archivePath, archive);
+  execFileSync("tar", ["-xzf", archivePath, "-C", workDirectory]);
+  const sourceDirectory = join(workDirectory, "package", "schemas");
+  assert(
+    schemaNames.every((name) => existsSync(join(sourceDirectory, name))),
+    `${assetName} does not contain the required schemas`,
+  );
+  return {
+    sourceDirectory,
+    assetName,
+    assetDigest: `sha256:${actualChecksum}`,
+  };
 }
 
 async function synchronize(explicitCommit, ifPublished = false) {
   const commit = await resolveCommit(explicitCommit);
-  const [protocol, lock] = await Promise.all([
+  const [protocol, packageManifest, lock] = await Promise.all([
     fetchJson(rawUrl(commit, "sdk-protocol-version.json")),
+    fetchJson(rawUrl(commit, "nodejs/package.json")),
     fetchJson(rawUrl(commit, "nodejs/package-lock.json")),
   ]);
-  const cliPackage = lock.packages?.["node_modules/@github/copilot"];
+  const cliPackageVersion =
+    packageManifest.copilotCliVersion ??
+    lock.packages?.["node_modules/@github/copilot"]?.version;
   assert(Number.isSafeInteger(protocol.version), "upstream protocol version is invalid");
-  assert(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(cliPackage?.version), "upstream lockfile has no exact @github/copilot version");
+  assert(
+    /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(cliPackageVersion),
+    "upstream package manifest has no exact Copilot CLI version",
+  );
 
   try {
-    const sourceDirectory = installSchemaPackage(cliPackage.version, ifPublished);
-    if (sourceDirectory === null) return;
+    const schemaPackage = await installSchemaPackage(cliPackageVersion, ifPublished);
+    if (schemaPackage === null) return;
     mkdirSync(schemaDirectory, { recursive: true });
     const schemaDigests = {};
     for (const name of schemaNames) {
       const destination = join(schemaDirectory, name);
-      cpSync(join(sourceDirectory, name), destination);
+      cpSync(join(schemaPackage.sourceDirectory, name), destination);
       schemaDigests[name] = digest(readFileSync(destination));
     }
 
@@ -210,7 +303,9 @@ async function synchronize(explicitCommit, ifPublished = false) {
       upstreamRef: ref,
       upstreamCommit: commit,
       sdkProtocolVersion: protocol.version,
-      cliPackageVersion: cliPackage.version,
+      cliPackageVersion,
+      cliReleaseAsset: schemaPackage.assetName,
+      cliReleaseAssetDigest: schemaPackage.assetDigest,
       schemaDigests,
     };
     validateMetadata(metadata);
