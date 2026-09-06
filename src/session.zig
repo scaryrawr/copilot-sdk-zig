@@ -14,13 +14,41 @@ pub const MessageOptions = struct {
     prompt: []const u8,
 };
 
+pub const AutoTier = enum {
+    efficiency,
+    balance,
+    intelligence,
+};
+
+pub const AutoTierSwitchStatus = enum {
+    unchanged,
+    pending,
+};
+
+pub const AutoTierSwitchResult = struct {
+    status: AutoTierSwitchStatus,
+    effectiveAutoTier: ?AutoTier = null,
+    pendingAutoTier: ?AutoTier = null,
+    activatingAutoTier: ?AutoTier = null,
+    supersededAutoTier: ?AutoTier = null,
+};
+
 pub const Tool = struct {
     name: []const u8,
-    description: []const u8,
+    description: []const u8 = "",
     parameters_json: []const u8 = "{}",
+    overrides_built_in_tool: bool = false,
     skip_permission: bool = false,
+    defer_loading: ToolLoading = .auto,
+    metadata_json: ?[]const u8 = null,
+    is_terminal: bool = false,
     handler: ?ToolHandler = null,
     context: ?*anyopaque = null,
+};
+
+pub const ToolLoading = enum {
+    auto,
+    never,
 };
 
 pub const ToolHandler = *const fn (
@@ -56,6 +84,15 @@ pub const AssistantMessageDelta = struct {
 
 pub const SessionError = struct {
     message: []u8,
+};
+
+pub const SessionIdle = struct {
+    aborted: ?bool = null,
+    mode: ?[]u8 = null,
+
+    pub fn deinit(self: SessionIdle, allocator: std.mem.Allocator) void {
+        if (self.mode) |mode| allocator.free(mode);
+    }
 };
 
 pub const PermissionRequested = struct {
@@ -107,6 +144,7 @@ pub const PermissionRequestKind = enum {
     shell,
     write,
     read,
+    path,
     mcp,
     url,
     memory,
@@ -123,6 +161,7 @@ pub const PermissionRequestKind = enum {
             .{ "shell", PermissionRequestKind.shell },
             .{ "write", PermissionRequestKind.write },
             .{ "read", PermissionRequestKind.read },
+            .{ "path", PermissionRequestKind.path },
             .{ "mcp", PermissionRequestKind.mcp },
             .{ "url", PermissionRequestKind.url },
             .{ "memory", PermissionRequestKind.memory },
@@ -148,7 +187,7 @@ pub const UnknownEvent = struct {
 pub const SessionEvent = union(enum) {
     assistant_message: AssistantMessage,
     assistant_message_delta: AssistantMessageDelta,
-    session_idle,
+    session_idle: SessionIdle,
     session_error: SessionError,
     permission_requested: PermissionRequested,
     external_tool_requested: ExternalToolRequested,
@@ -161,7 +200,7 @@ pub const SessionEvent = union(enum) {
                 allocator.free(value.delta_content);
                 allocator.free(value.message_id);
             },
-            .session_idle => {},
+            .session_idle => |value| value.deinit(allocator),
             .session_error => |value| allocator.free(value.message),
             .permission_requested => |value| {
                 allocator.free(value.request_id);
@@ -198,6 +237,15 @@ fn optionalString(object: std.json.ObjectMap, name: []const u8) !?[]const u8 {
     };
 }
 
+fn optionalBool(object: std.json.ObjectMap, name: []const u8) !?bool {
+    const value = object.get(name) orelse return null;
+    return switch (value) {
+        .bool => |boolean| boolean,
+        .null => null,
+        else => error.InvalidSessionEvent,
+    };
+}
+
 pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionEvent {
     const object = switch (value) {
         .object => |object| object,
@@ -227,7 +275,13 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
             .message_id = try allocator.dupe(u8, try requiredString(data, "messageId")),
         } };
     }
-    if (std.mem.eql(u8, event_type, "session.idle")) return .session_idle;
+    if (std.mem.eql(u8, event_type, "session.idle")) {
+        const raw_mode = try optionalString(data, "mode");
+        return .{ .session_idle = .{
+            .aborted = try optionalBool(data, "aborted"),
+            .mode = if (raw_mode) |mode| try allocator.dupe(u8, mode) else null,
+        } };
+    }
     if (std.mem.eql(u8, event_type, "session.error")) {
         return .{ .session_error = .{
             .message = try allocator.dupe(u8, try requiredString(data, "message")),
@@ -299,6 +353,23 @@ test "known and unknown events retain owned data" {
 
     try std.testing.expectEqualStrings("future.event", unknown.unknown.event_type);
     try std.testing.expectEqualStrings("{\"answer\":42}", unknown.unknown.data_json);
+}
+
+test "session idle retains autopilot mode" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"session.idle","data":{"aborted":false,"mode":"autopilot"}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    var event = try parseEvent(allocator, parsed.value);
+    defer event.deinit(allocator);
+
+    try std.testing.expectEqual(false, event.session_idle.aborted.?);
+    try std.testing.expectEqualStrings("autopilot", event.session_idle.mode.?);
 }
 
 test "permission and external tool events retain opaque payloads" {

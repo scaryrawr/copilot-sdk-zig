@@ -67,7 +67,8 @@ const weather_tool = schema.defineTool(WeatherArguments, .{
 
 Pass a `std.Io` implementation to `Client.init`. The client starts
 `copilot --headless --stdio --no-auto-update` and completes the `connect`
-handshake before it returns.
+handshake before it returns. Set `ClientOptions.client_info` to identify the
+integrating application and SDK surface in runtime telemetry.
 
 ```zig
 const std = @import("std");
@@ -78,7 +79,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
     defer client.deinit();
 
     const session = try client.createSession(.{ .streaming = true });
-    defer session.destroy() catch {};
+    defer session.disconnect() catch {};
 
     const message_id = try session.send(.{ .prompt = "Explain this repository." });
     defer allocator.free(message_id);
@@ -104,7 +105,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
 
 `Session` borrows its `Client`. Keep the client alive while a session handle is
 in use. `SessionEvent` values and the message ID from `send` own memory from the
-client allocator.
+client allocator. `Session.disconnect` releases the client-side session
+resources while preserving the session state so it can be resumed later.
 
 ## Examples
 
@@ -132,7 +134,8 @@ The SDK supports only the stdio transport. It implements these wire methods:
 - `session.create`
 - `session.resume`
 - `session.send`
-- `session.destroy`
+- `session.model.switchAutoTier`
+- `session.detach`
 - `session.event`
 - `session.permissions.handlePendingPermissionRequest`
 - `session.tools.handlePendingToolCall`
@@ -173,18 +176,22 @@ and `src/protocol_version.zig`.
 ## Upstream sync policy
 
 `vendor/copilot/upstream.json` records the `github/copilot-sdk` main commit, the
-SDK protocol version, the exact `@github/copilot` version from the upstream
-lockfile, and SHA-256 digests for both schema snapshots.
+SDK protocol version, the exact Copilot CLI version from the upstream Node
+package manifest, the verified CLI release asset, and SHA-256 digests for the
+asset and both schema snapshots.
 
-The sync script installs that published `@github/copilot` version without
-running package scripts. It copies only `api.schema.json` and
-`session-events.schema.json`. The script then generates the Zig protocol
-version constant and checks the required methods and event discriminators in
+The sync script downloads the Linux x64 package from the corresponding
+`github/copilot-cli` release and verifies it against the release's
+`SHA256SUMS.txt`. It copies only `api.schema.json` and
+`session-events.schema.json`, then generates the Zig protocol version constant
+and checks the required methods and event discriminators in
 `sync/compatibility.json`.
 
-The published API schema declares `connect` and `session.send`. Copilot SDKs
-own the `session.create`, `session.destroy`, and `session.event` lifecycle
-messages, so the compatibility check verifies those names in `src/client.zig`.
+The published API schema declares the supported handshake, message, model,
+permission, and tool-response methods. Copilot SDKs own the
+`session.create`, `session.resume`, `session.detach`, and `session.event`
+lifecycle messages, so the compatibility check verifies those names in
+`src/client.zig`.
 
 The scheduled workflow checks upstream once a week. When inputs change, it
 updates one `sync/upstream` branch and opens or refreshes one pull request. The

@@ -33,7 +33,7 @@ pub fn main(init: std.process.Init) !void {
         .model = "gpt-5.6-luna",
         .tools = &.{weather_tool},
     });
-    defer session.destroy() catch {};
+    defer session.disconnect() catch {};
 
     const message_id = try session.send(.{
         .prompt = "Use get_weather to check the weather in Seattle, then summarize it.",

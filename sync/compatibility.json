@@ -9,7 +9,11 @@
       "declaredBy": "src/client.zig"
     },
     {
-      "name": "session.destroy",
+      "name": "session.resume",
+      "declaredBy": "src/client.zig"
+    },
+    {
+      "name": "session.detach",
       "declaredBy": "src/client.zig"
     },
     {
@@ -19,11 +23,25 @@
     {
       "name": "session.send",
       "declaredBy": "api.schema.json"
+    },
+    {
+      "name": "session.model.switchAutoTier",
+      "declaredBy": "api.schema.json"
+    },
+    {
+      "name": "session.permissions.handlePendingPermissionRequest",
+      "declaredBy": "api.schema.json"
+    },
+    {
+      "name": "session.tools.handlePendingToolCall",
+      "declaredBy": "api.schema.json"
     }
   ],
   "sessionEventDiscriminators": [
     "assistant.message",
     "assistant.message_delta",
+    "external_tool.requested",
+    "permission.requested",
     "session.error",
     "session.idle"
   ]

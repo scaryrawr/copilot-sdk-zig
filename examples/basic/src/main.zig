@@ -27,7 +27,7 @@ pub fn main(init: std.process.Init) !void {
         .streaming = true,
         .request_permission = true,
     });
-    defer session.destroy() catch {};
+    defer session.disconnect() catch {};
 
     const message_id = try session.send(.{ .prompt = "Explain this repository in one paragraph." });
     defer allocator.free(message_id);
