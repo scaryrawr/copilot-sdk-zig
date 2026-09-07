@@ -10,6 +10,11 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  checkSchemaSnapshot,
+  schemaContract,
+  writeSchemaSnapshot,
+} from "./schema-snapshot.mjs";
 
 const repository = "github/copilot-sdk";
 const ref = "main";
@@ -101,6 +106,22 @@ function requireProperties(value, names, label) {
   }
 }
 
+function requireExactStrings(actual, expected, label) {
+  assert(Array.isArray(expected), `${label} compatibility must be an array`);
+  assert(
+    [...actual].sort().join(",") === [...expected].sort().join(","),
+    `${label} changed`,
+  );
+}
+
+function requireSchemaContract(actual, expected, label) {
+  assert(expected && typeof expected === "object", `${label} contract is missing`);
+  assert(
+    JSON.stringify(schemaContract(actual)) === JSON.stringify(expected),
+    `${label} contract changed`,
+  );
+}
+
 function eventDiscriminators(schema) {
   const values = new Set();
   for (const definition of Object.values(schema.definitions ?? {})) {
@@ -114,6 +135,7 @@ function verifyCompatibility(apiSchema, eventSchema) {
   const compatibility = parseJson(compatibilityPath);
   assert(Array.isArray(compatibility.wireMethods), "wireMethods must be an array");
   assert(Array.isArray(compatibility.sessionEventDiscriminators), "sessionEventDiscriminators must be an array");
+  assert(compatibility.providerConfig, "providerConfig compatibility is missing");
 
   const methods = collectPropertyValues(apiSchema, "rpcMethod");
   const clientSource = readFileSync(join(root, "src", "client.zig"), "utf8");
@@ -169,6 +191,71 @@ function verifyCompatibility(apiSchema, eventSchema) {
     ["requestId", "permissionRequest"],
     "permission.requested data",
   );
+
+  const provider = apiSchema.definitions?.ProviderConfig;
+  const providerCompatibility = compatibility.providerConfig;
+  assert(provider?.properties, "ProviderConfig has no properties");
+  assert(providerCompatibility.properties, "ProviderConfig property classifications are missing");
+
+  const providerProperties = Object.keys(provider.properties).sort();
+  const classifiedProperties = Object.keys(providerCompatibility.properties).sort();
+  requireExactStrings(
+    providerProperties,
+    classifiedProperties,
+    "ProviderConfig properties",
+  );
+  for (const name of providerProperties) {
+    const classification = providerCompatibility.properties[name];
+    assert(
+      classification?.status === "supported" || classification?.status === "deferred",
+      `ProviderConfig property has an invalid classification: ${name}`,
+    );
+    if (classification.status === "deferred") {
+      assert(
+        typeof classification.reason === "string" && classification.reason.length > 0,
+        `deferred ProviderConfig property needs a reason: ${name}`,
+      );
+    }
+    requireSchemaContract(
+      provider.properties[name],
+      classification.contract,
+      `ProviderConfig.${name}`,
+    );
+  }
+
+  requireExactStrings(
+    provider.required ?? [],
+    providerCompatibility.required,
+    "ProviderConfig required fields",
+  );
+  requireExactStrings(
+    apiSchema.definitions?.ProviderConfigType?.enum ?? [],
+    providerCompatibility.families,
+    "ProviderConfig family enum",
+  );
+  requireExactStrings(
+    apiSchema.definitions?.ProviderConfigWireApi?.enum ?? [],
+    providerCompatibility.wireApis,
+    "ProviderConfig wire API enum",
+  );
+  requireExactStrings(
+    apiSchema.definitions?.ProviderConfigTransport?.enum ?? [],
+    providerCompatibility.transports,
+    "ProviderConfig transport enum",
+  );
+  const azureProperties = apiSchema.definitions?.ProviderConfigAzure?.properties ?? {};
+  requireExactStrings(
+    Object.keys(azureProperties),
+    Object.keys(providerCompatibility.azureProperties ?? {}),
+    "ProviderConfig Azure option fields",
+  );
+  for (const name of Object.keys(azureProperties)) {
+    requireSchemaContract(
+      azureProperties[name],
+      providerCompatibility.azureProperties[name],
+      `ProviderConfigAzure.${name}`,
+    );
+  }
 }
 
 function verify() {
@@ -185,6 +272,7 @@ function verify() {
 
   const expectedGenerated = `pub const sdk_protocol_version: u64 = ${metadata.sdkProtocolVersion};\n`;
   assert(readFileSync(generatedPath, "utf8") === expectedGenerated, "generated Zig protocol version is stale");
+  checkSchemaSnapshot();
   verifyCompatibility(schemas["api.schema.json"], schemas["session-events.schema.json"]);
   console.log(
     `Verified ${metadata.upstreamCommit} with Copilot CLI ${metadata.cliPackageVersion} (${metadata.cliReleaseAsset})`,
@@ -311,6 +399,7 @@ async function synchronize(explicitCommit, ifPublished = false) {
     validateMetadata(metadata);
     writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
     writeFileSync(generatedPath, `pub const sdk_protocol_version: u64 = ${protocol.version};\n`);
+    writeSchemaSnapshot();
   } finally {
     rmSync(workDirectory, { force: true, recursive: true });
   }

@@ -1,8 +1,10 @@
 const std = @import("std");
+const ProviderConfig = @import("provider.zig").ProviderConfig;
 
 pub const SessionConfig = struct {
     session_id: ?[]const u8 = null,
     model: ?[]const u8 = null,
+    provider: ?ProviderConfig = null,
     working_directory: ?[]const u8 = null,
     streaming: bool = false,
     tools: []const Tool = &.{},
