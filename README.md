@@ -97,7 +97,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
             },
             .session_idle => break,
             .session_error => return error.CopilotSessionError,
+            .commands_changed => {},
             .unknown => {},
+            else => {},
         }
     }
 }
@@ -107,6 +109,24 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
 in use. `SessionEvent` values and the message ID from `send` own memory from the
 client allocator. `Session.disconnect` releases the client-side session
 resources while preserving the session state so it can be resumed later.
+
+## Discover slash commands
+
+List runtime, skill, and client-contributed slash commands after creating a
+session. A `commands_changed` event indicates that extensions or another
+participant changed the available command set and the caller should list again.
+
+```zig
+var commands = try session.listCommands(.{});
+defer commands.deinit();
+
+for (commands.commands) |command| {
+    std.debug.print("/{s}\t{s}\n", .{
+        command.name,
+        command.description,
+    });
+}
+```
 
 ## Use a custom provider
 

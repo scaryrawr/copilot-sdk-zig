@@ -485,6 +485,60 @@ pub const Session = struct {
         return event;
     }
 
+    pub fn listCommands(
+        self: Session,
+        options: session_types.CommandListOptions,
+    ) !session_types.CommandList {
+        const WireCommand = struct {
+            name: []const u8,
+            description: []const u8,
+            kind: []const u8,
+            allowDuringAgentExecution: bool,
+        };
+        const parsed = try self.client.call(
+            struct { commands: []const WireCommand },
+            "session.commands.list",
+            .{
+                .sessionId = self.id,
+                .includeBuiltins = options.include_builtins,
+                .includeSkills = options.include_skills,
+                .includeClientCommands = options.include_client_commands,
+            },
+        );
+        defer parsed.deinit();
+
+        const commands = try self.client.allocator.alloc(
+            session_types.CommandInfo,
+            parsed.value.commands.len,
+        );
+        errdefer self.client.allocator.free(commands);
+        var initialized: usize = 0;
+        errdefer for (commands[0..initialized]) |*command| {
+            self.client.allocator.free(command.name);
+            self.client.allocator.free(command.description);
+        };
+
+        for (parsed.value.commands, 0..) |command, index| {
+            commands[index] = .{
+                .name = try self.client.allocator.dupe(u8, command.name),
+                .description = undefined,
+                .kind = session_types.CommandKind.fromString(command.kind),
+                .allow_during_agent_execution = command.allowDuringAgentExecution,
+            };
+            errdefer self.client.allocator.free(commands[index].name);
+            commands[index].description = try self.client.allocator.dupe(
+                u8,
+                command.description,
+            );
+            initialized += 1;
+        }
+
+        return .{
+            .allocator = self.client.allocator,
+            .commands = commands,
+        };
+    }
+
     pub fn disconnect(self: Session) !void {
         for (0..2) |_| {
             const parsed = try self.client.call(struct {
@@ -814,6 +868,7 @@ test "public client API type checks" {
     _ = &Session.send;
     _ = &Session.sendAndWait;
     _ = &Session.nextEvent;
+    _ = &Session.listCommands;
     _ = &Session.disconnect;
     _ = &Session.setAutoTier;
     _ = &Session.approvePermission;

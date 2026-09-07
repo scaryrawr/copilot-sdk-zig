@@ -16,6 +16,50 @@ pub const MessageOptions = struct {
     prompt: []const u8,
 };
 
+pub const CommandListOptions = struct {
+    include_builtins: bool = true,
+    include_skills: bool = true,
+    include_client_commands: bool = true,
+};
+
+pub const CommandKind = enum {
+    builtin,
+    skill,
+    client,
+    unknown,
+
+    pub fn fromString(value: []const u8) CommandKind {
+        if (std.mem.eql(u8, value, "builtin")) return .builtin;
+        if (std.mem.eql(u8, value, "skill")) return .skill;
+        if (std.mem.eql(u8, value, "client")) return .client;
+        return .unknown;
+    }
+};
+
+pub const CommandInfo = struct {
+    name: []u8,
+    description: []u8,
+    kind: CommandKind,
+    allow_during_agent_execution: bool,
+
+    fn deinit(self: *CommandInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.description);
+        self.* = undefined;
+    }
+};
+
+pub const CommandList = struct {
+    allocator: std.mem.Allocator,
+    commands: []CommandInfo,
+
+    pub fn deinit(self: *CommandList) void {
+        for (self.commands) |*command| command.deinit(self.allocator);
+        self.allocator.free(self.commands);
+        self.* = undefined;
+    }
+};
+
 pub const AutoTier = enum {
     efficiency,
     balance,
@@ -193,6 +237,7 @@ pub const SessionEvent = union(enum) {
     session_error: SessionError,
     permission_requested: PermissionRequested,
     external_tool_requested: ExternalToolRequested,
+    commands_changed,
     unknown: UnknownEvent,
 
     pub fn deinit(self: *SessionEvent, allocator: std.mem.Allocator) void {
@@ -214,6 +259,7 @@ pub const SessionEvent = union(enum) {
                 allocator.free(value.tool_name);
                 allocator.free(value.arguments_json);
             },
+            .commands_changed => {},
             .unknown => |value| {
                 allocator.free(value.event_type);
                 allocator.free(value.data_json);
@@ -317,6 +363,9 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
             ),
         } };
     }
+    if (std.mem.eql(u8, event_type, "commands.changed")) {
+        return .commands_changed;
+    }
 
     const owned_event_type = try allocator.dupe(u8, event_type);
     errdefer allocator.free(owned_event_type);
@@ -372,6 +421,22 @@ test "session idle retains autopilot mode" {
 
     try std.testing.expectEqual(false, event.session_idle.aborted.?);
     try std.testing.expectEqualStrings("autopilot", event.session_idle.mode.?);
+}
+
+test "commands changed is a typed event" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"commands.changed","data":{}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    var event = try parseEvent(allocator, parsed.value);
+    defer event.deinit(allocator);
+
+    try std.testing.expect(event == .commands_changed);
 }
 
 test "permission and external tool events retain opaque payloads" {
