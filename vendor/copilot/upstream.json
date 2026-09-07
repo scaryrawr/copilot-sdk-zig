@@ -1,7 +1,7 @@
 {
   "upstreamRepository": "github/copilot-sdk",
   "upstreamRef": "main",
-  "upstreamCommit": "d3755535869e97d2bcf5aa6a5b8c35de79f5a7d8",
+  "upstreamCommit": "1644e74578db3637bc7527951bac227aabbc0584",
   "sdkProtocolVersion": 3,
   "cliPackageVersion": "1.0.83",
   "cliReleaseAsset": "github-copilot-1.0.83-linux-x64.tgz",
