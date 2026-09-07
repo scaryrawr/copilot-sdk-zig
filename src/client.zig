@@ -341,6 +341,7 @@ pub const Client = struct {
                 };
                 if (object.get("id")) |request_id| {
                     try self.dispatchServerRequest(
+                        &self.writer.interface,
                         request_id,
                         name,
                         object.get("params"),
@@ -375,7 +376,11 @@ pub const Client = struct {
         }
     }
 
-    fn rejectServerRequest(self: *Client, id: std.json.Value) !void {
+    fn rejectServerRequest(
+        self: *Client,
+        writer: *std.Io.Writer,
+        id: std.json.Value,
+    ) !void {
         const response = try json_rpc.encodeErrorResponse(
             self.allocator,
             id,
@@ -383,17 +388,18 @@ pub const Client = struct {
             "method not found",
         );
         defer self.allocator.free(response);
-        try json_rpc.writeFrame(&self.writer.interface, response);
+        try json_rpc.writeFrame(writer, response);
     }
 
     fn dispatchServerRequest(
         self: *Client,
+        writer: *std.Io.Writer,
         id: std.json.Value,
         method: []const u8,
         params: ?std.json.Value,
     ) !void {
         const registered = self.findRpcHandler(method) orelse {
-            try self.rejectServerRequest(id);
+            try self.rejectServerRequest(writer, id);
             return;
         };
         const params_json = try stringifyRpcParams(self.allocator, params);
@@ -413,7 +419,7 @@ pub const Client = struct {
                 @errorName(err),
             );
             defer self.allocator.free(response);
-            try json_rpc.writeFrame(&self.writer.interface, response);
+            try json_rpc.writeFrame(writer, response);
             return;
         };
         defer self.allocator.free(result_json);
@@ -431,13 +437,13 @@ pub const Client = struct {
                 "invalid handler result",
             );
             defer self.allocator.free(response);
-            try json_rpc.writeFrame(&self.writer.interface, response);
+            try json_rpc.writeFrame(writer, response);
             return;
         };
         defer result.deinit();
         const response = try json_rpc.encodeSuccessResponse(self.allocator, id, result.value);
         defer self.allocator.free(response);
-        try json_rpc.writeFrame(&self.writer.interface, response);
+        try json_rpc.writeFrame(writer, response);
     }
 
     fn findRpcHandler(self: *Client, method: []const u8) ?RegisteredRpcHandler {
@@ -558,6 +564,7 @@ pub const Client = struct {
             };
             if (object.get("id")) |request_id| {
                 try self.dispatchServerRequest(
+                    &self.writer.interface,
                     request_id,
                     method,
                     object.get("params"),
@@ -1049,6 +1056,112 @@ test "inbound RPC params preserve omission and non-object values" {
     )).?;
     defer std.testing.allocator.free(scalar);
     try std.testing.expectEqualStrings("\"value\"", scalar);
+}
+
+test "inbound RPC dispatch writes success and error frames" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.rpc_handlers.items) |handler| handler.deinit(allocator);
+        client.rpc_handlers.deinit(allocator);
+    }
+
+    try client.registerRpcHandler("test.success", struct {
+        fn handle(
+            inner_allocator: std.mem.Allocator,
+            params_json: ?[]const u8,
+            _: ?*anyopaque,
+        ) ![]u8 {
+            if (params_json == null or
+                !std.mem.eql(u8, params_json.?, "{\"value\":7}"))
+            {
+                return error.UnexpectedParams;
+            }
+            return inner_allocator.dupe(u8, "{\"accepted\":true}");
+        }
+    }.handle, null);
+    try client.registerRpcHandler("test.failure", struct {
+        fn handle(
+            _: std.mem.Allocator,
+            _: ?[]const u8,
+            _: ?*anyopaque,
+        ) ![]u8 {
+            return error.HandlerFailed;
+        }
+    }.handle, null);
+    try client.registerRpcHandler("test.invalid", struct {
+        fn handle(
+            inner_allocator: std.mem.Allocator,
+            _: ?[]const u8,
+            _: ?*anyopaque,
+        ) ![]u8 {
+            return inner_allocator.dupe(u8, "not json");
+        }
+    }.handle, null);
+
+    var success_output: std.Io.Writer.Allocating = .init(allocator);
+    defer success_output.deinit();
+    var success_params: std.json.ObjectMap = .empty;
+    defer success_params.deinit(allocator);
+    try success_params.put(allocator, "value", .{ .integer = 7 });
+    try client.dispatchServerRequest(
+        &success_output.writer,
+        .{ .integer = 1 },
+        "test.success",
+        .{ .object = success_params },
+    );
+    const success_body = try framedBody(allocator, success_output.written());
+    defer allocator.free(success_body);
+    const success = try std.json.parseFromSlice(std.json.Value, allocator, success_body, .{});
+    defer success.deinit();
+    try std.testing.expect(success.value.object.get("result").?.object.get("accepted").?.bool);
+
+    var failure_output: std.Io.Writer.Allocating = .init(allocator);
+    defer failure_output.deinit();
+    try client.dispatchServerRequest(
+        &failure_output.writer,
+        .{ .integer = 2 },
+        "test.failure",
+        null,
+    );
+    const failure_body = try framedBody(allocator, failure_output.written());
+    defer allocator.free(failure_body);
+    const failure = try std.json.parseFromSlice(std.json.Value, allocator, failure_body, .{});
+    defer failure.deinit();
+    try std.testing.expectEqualStrings(
+        "HandlerFailed",
+        failure.value.object.get("error").?.object.get("message").?.string,
+    );
+
+    var invalid_output: std.Io.Writer.Allocating = .init(allocator);
+    defer invalid_output.deinit();
+    try client.dispatchServerRequest(
+        &invalid_output.writer,
+        .{ .integer = 3 },
+        "test.invalid",
+        null,
+    );
+    const invalid_body = try framedBody(allocator, invalid_output.written());
+    defer allocator.free(invalid_body);
+    const invalid = try std.json.parseFromSlice(std.json.Value, allocator, invalid_body, .{});
+    defer invalid.deinit();
+    try std.testing.expectEqual(
+        @as(i64, -32603),
+        invalid.value.object.get("error").?.object.get("code").?.integer,
+    );
+}
+
+fn framedBody(allocator: std.mem.Allocator, framed: []const u8) ![]u8 {
+    var reader = std.Io.Reader.fixed(framed);
+    return json_rpc.readFrame(allocator, &reader);
 }
 
 test "client info maps to connect wire fields" {
