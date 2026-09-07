@@ -1,5 +1,6 @@
 const std = @import("std");
 const json_rpc = @import("json_rpc.zig");
+const models = @import("models.zig");
 const provider = @import("provider.zig");
 const protocol = @import("protocol_version.zig");
 const session_types = @import("session.zig");
@@ -42,6 +43,27 @@ const RegisteredTool = struct {
     }
 };
 
+pub const RpcHandler = *const fn (
+    allocator: std.mem.Allocator,
+    params_json: []const u8,
+    context: ?*anyopaque,
+) anyerror![]u8;
+
+const WireModelsListRequest = struct {
+    selectionId: ?[]const u8 = null,
+    gitHubToken: ?[]const u8 = null,
+};
+
+const RegisteredRpcHandler = struct {
+    method: []u8,
+    handler: RpcHandler,
+    context: ?*anyopaque,
+
+    fn deinit(self: RegisteredRpcHandler, allocator: std.mem.Allocator) void {
+        allocator.free(self.method);
+    }
+};
+
 pub const Client = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -54,6 +76,8 @@ pub const Client = struct {
     session_ids: std.ArrayList([]u8) = .empty,
     events: std.ArrayList(QueuedEvent) = .empty,
     tools: std.ArrayList(RegisteredTool) = .empty,
+    rpc_handlers: std.ArrayList(RegisteredRpcHandler) = .empty,
+    dispatching_rpc_handler: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -145,6 +169,8 @@ pub const Client = struct {
         self.events.deinit(self.allocator);
         for (self.tools.items) |tool| tool.deinit(self.allocator);
         self.tools.deinit(self.allocator);
+        for (self.rpc_handlers.items) |handler| handler.deinit(self.allocator);
+        self.rpc_handlers.deinit(self.allocator);
         for (self.session_ids.items) |id| self.allocator.free(id);
         self.session_ids.deinit(self.allocator);
         if (self.child) |*child| child.kill(self.io);
@@ -231,12 +257,66 @@ pub const Client = struct {
         return .{ .client = self, .id = id };
     }
 
+    /// Calls any outbound RPC method from the pinned upstream schema.
+    ///
+    /// Prefer typed high-level methods when available. The caller owns the
+    /// returned parsed result and must call `deinit`.
+    pub fn callRpc(
+        self: *Client,
+        comptime Result: type,
+        method: []const u8,
+        params: anytype,
+    ) !std.json.Parsed(Result) {
+        return self.call(Result, method, params);
+    }
+
+    /// Lists models available to the authenticated or explicitly selected user.
+    pub fn listModels(
+        self: *Client,
+        options: models.ListOptions,
+    ) !std.json.Parsed(models.ModelList) {
+        return self.call(models.ModelList, "models.list", WireModelsListRequest{
+            .selectionId = options.selection_id,
+            .gitHubToken = options.github_token,
+        });
+    }
+
+    /// Registers a synchronous handler for an inbound RPC method.
+    pub fn registerRpcHandler(
+        self: *Client,
+        method: []const u8,
+        handler: RpcHandler,
+        context: ?*anyopaque,
+    ) !void {
+        if (method.len == 0) return error.InvalidRpcMethod;
+        if (self.findRpcHandler(method) != null) return error.RpcHandlerAlreadyRegistered;
+        const owned_method = try self.allocator.dupe(u8, method);
+        errdefer self.allocator.free(owned_method);
+        try self.rpc_handlers.append(self.allocator, .{
+            .method = owned_method,
+            .handler = handler,
+            .context = context,
+        });
+    }
+
+    pub fn unregisterRpcHandler(self: *Client, method: []const u8) bool {
+        for (self.rpc_handlers.items, 0..) |registered, index| {
+            if (std.mem.eql(u8, registered.method, method)) {
+                const removed = self.rpc_handlers.orderedRemove(index);
+                removed.deinit(self.allocator);
+                return true;
+            }
+        }
+        return false;
+    }
+
     fn call(
         self: *Client,
         comptime Result: type,
         method: []const u8,
         params: anytype,
     ) !std.json.Parsed(Result) {
+        if (self.dispatching_rpc_handler) return error.ReentrantRpcCall;
         const id = self.next_request_id;
         self.next_request_id += 1;
 
@@ -260,7 +340,11 @@ pub const Client = struct {
                     else => return error.InvalidJsonRpc,
                 };
                 if (object.get("id")) |request_id| {
-                    try self.rejectServerRequest(request_id);
+                    try self.dispatchServerRequest(
+                        request_id,
+                        name,
+                        object.get("params") orelse .{ .object = .empty },
+                    );
                     continue;
                 }
                 if (std.mem.eql(u8, name, "session.event")) {
@@ -300,6 +384,67 @@ pub const Client = struct {
         );
         defer self.allocator.free(response);
         try json_rpc.writeFrame(&self.writer.interface, response);
+    }
+
+    fn dispatchServerRequest(
+        self: *Client,
+        id: std.json.Value,
+        method: []const u8,
+        params: std.json.Value,
+    ) !void {
+        const registered = self.findRpcHandler(method) orelse {
+            try self.rejectServerRequest(id);
+            return;
+        };
+        const params_json = try std.json.Stringify.valueAlloc(self.allocator, params, .{});
+        defer self.allocator.free(params_json);
+
+        self.dispatching_rpc_handler = true;
+        defer self.dispatching_rpc_handler = false;
+        const result_json = registered.handler(
+            self.allocator,
+            params_json,
+            registered.context,
+        ) catch |err| {
+            const response = try json_rpc.encodeErrorResponse(
+                self.allocator,
+                id,
+                -32000,
+                @errorName(err),
+            );
+            defer self.allocator.free(response);
+            try json_rpc.writeFrame(&self.writer.interface, response);
+            return;
+        };
+        defer self.allocator.free(result_json);
+
+        const result = std.json.parseFromSlice(
+            std.json.Value,
+            self.allocator,
+            result_json,
+            .{},
+        ) catch {
+            const response = try json_rpc.encodeErrorResponse(
+                self.allocator,
+                id,
+                -32603,
+                "invalid handler result",
+            );
+            defer self.allocator.free(response);
+            try json_rpc.writeFrame(&self.writer.interface, response);
+            return;
+        };
+        defer result.deinit();
+        const response = try json_rpc.encodeSuccessResponse(self.allocator, id, result.value);
+        defer self.allocator.free(response);
+        try json_rpc.writeFrame(&self.writer.interface, response);
+    }
+
+    fn findRpcHandler(self: *Client, method: []const u8) ?RegisteredRpcHandler {
+        for (self.rpc_handlers.items) |registered| {
+            if (std.mem.eql(u8, registered.method, method)) return registered;
+        }
+        return null;
     }
 
     fn queueSessionEvent(self: *Client, params_value: std.json.Value) !void {
@@ -412,7 +557,11 @@ pub const Client = struct {
                 else => return error.InvalidJsonRpc,
             };
             if (object.get("id")) |request_id| {
-                try self.rejectServerRequest(request_id);
+                try self.dispatchServerRequest(
+                    request_id,
+                    method,
+                    object.get("params") orelse .{ .object = .empty },
+                );
                 continue;
             }
             if (std.mem.eql(u8, method, "session.event")) {
@@ -811,6 +960,10 @@ test "public client API type checks" {
     _ = &Client.initParent;
     _ = &Client.createSession;
     _ = &Client.joinSession;
+    _ = &Client.callRpc;
+    _ = &Client.listModels;
+    _ = &Client.registerRpcHandler;
+    _ = &Client.unregisterRpcHandler;
     _ = &Session.send;
     _ = &Session.sendAndWait;
     _ = &Session.nextEvent;
@@ -822,6 +975,61 @@ test "public client API type checks" {
     _ = &Session.respondToTool;
     _ = &Session.respondToToolResultJson;
     _ = &Session.respondToToolError;
+}
+
+test "RPC handler registration rejects duplicates and unregisters" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.rpc_handlers.items) |handler| handler.deinit(allocator);
+        client.rpc_handlers.deinit(allocator);
+    }
+
+    const handler = struct {
+        fn handle(
+            inner_allocator: std.mem.Allocator,
+            _: []const u8,
+            _: ?*anyopaque,
+        ) ![]u8 {
+            return inner_allocator.dupe(u8, "{}");
+        }
+    }.handle;
+
+    try client.registerRpcHandler("gitHubToken.getToken", handler, null);
+    try std.testing.expectError(
+        error.RpcHandlerAlreadyRegistered,
+        client.registerRpcHandler("gitHubToken.getToken", handler, null),
+    );
+    try std.testing.expect(client.unregisterRpcHandler("gitHubToken.getToken"));
+    try std.testing.expect(!client.unregisterRpcHandler("gitHubToken.getToken"));
+}
+
+test "model list options map to wire fields" {
+    const request = WireModelsListRequest{
+        .selectionId = "account-1",
+        .gitHubToken = "token",
+    };
+    const body = try json_rpc.encodeRequest(
+        std.testing.allocator,
+        4,
+        "models.list",
+        request,
+    );
+    defer std.testing.allocator.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+    const params = parsed.value.object.get("params").?.object;
+    try std.testing.expectEqualStrings("account-1", params.get("selectionId").?.string);
+    try std.testing.expectEqualStrings("token", params.get("gitHubToken").?.string);
 }
 
 test "client info maps to connect wire fields" {

@@ -86,6 +86,14 @@ function sessionEventDiscriminators(schema) {
   );
 }
 
+function rpcMethodsForScope(schema, scope) {
+  const value = schema[scope];
+  if (!value || typeof value !== "object") {
+    throw new Error(`missing RPC scope: ${scope}`);
+  }
+  return sortedStrings(collectStrings(value, "rpcMethod"));
+}
+
 export function buildSchemaSnapshot() {
   const apiSchema = parseSchema("api.schema.json");
   const eventSchema = parseSchema("session-events.schema.json");
@@ -93,6 +101,12 @@ export function buildSchemaSnapshot() {
 
   return {
     rpcMethods: sortedStrings(collectStrings(apiSchema, "rpcMethod")),
+    rpcScopes: {
+      outboundGlobal: rpcMethodsForScope(apiSchema, "server"),
+      outboundSession: rpcMethodsForScope(apiSchema, "session"),
+      inboundGlobal: rpcMethodsForScope(apiSchema, "clientGlobal"),
+      inboundSession: rpcMethodsForScope(apiSchema, "clientSession"),
+    },
     sessionEventDiscriminators: sessionEventDiscriminators(eventSchema),
     providerConfig: {
       properties: propertyContracts(provider, "ProviderConfig"),
