@@ -108,6 +108,25 @@ in use. `SessionEvent` values and the message ID from `send` own memory from the
 client allocator. `Session.disconnect` releases the client-side session
 resources while preserving the session state so it can be resumed later.
 
+## List available models
+
+`Client.listModels` calls the authenticated `models.list` RPC. The result
+includes model IDs and names, capabilities and limits, policy, billing and token
+prices, reasoning and context tiers, picker categories, promotions, warnings,
+messages, and provider metadata.
+
+```zig
+var result = try client.listModels(.{});
+defer result.deinit();
+
+for (result.value.models) |model| {
+    std.debug.print("{s}: {s}\n", .{ model.id, model.name });
+}
+```
+
+Pass `selection_id` to use an account returned by the upstream account APIs, or
+`github_token` for compatibility with hosts that already own a token.
+
 ## Use a custom provider
 
 Set `SessionConfig.provider` for a static custom provider:
@@ -160,19 +179,32 @@ The last command requires the Copilot CLI in `PATH`. Use
 CI builds every example and runs credential-free help paths, while the SDK unit
 tests verify protocol behavior without requiring Copilot credentials.
 
-## Supported scope
+## RPC coverage
 
-The SDK supports only the stdio transport. It implements these wire methods:
+The SDK supports only the stdio transport. Typed high-level methods implement:
 
 - `connect`
 - `session.create`
 - `session.resume`
 - `session.send`
+- `models.list`
 - `session.model.switchAutoTier`
 - `session.detach`
 - `session.event`
 - `session.permissions.handlePendingPermissionRequest`
 - `session.tools.handlePendingToolCall`
+
+`Client.callRpc` is the experimental typed transport escape hatch for every
+outbound method in the pinned upstream `server` and `session` RPC scopes. The
+caller supplies the expected result type and owns the returned
+`std.json.Parsed(Result)`.
+
+`Client.registerRpcHandler` and `unregisterRpcHandler` cover every inbound method
+in the pinned upstream `clientGlobal` and `clientSession` scopes. Handlers run
+synchronously while the client is reading RPC traffic and must not recursively
+call the same client; re-entry returns `error.ReentrantRpcCall`. A successful
+handler returns JSON allocated with the allocator passed to it.
+The handler receives `null` when the request omitted `params`.
 
 It recognizes these session events:
 
@@ -184,7 +216,10 @@ It recognizes these session events:
 - `external_tool.requested`
 
 Other session events use the `unknown` variant. The SDK does not support an
-external CLI server URL or the broader APIs in the upstream schema.
+external CLI server URL. `sync/schema-snapshot.json` records every method by
+direction and scope. `sync/public-rpc-surface.json` separately records direct
+RPC calls made by the pinned upstream Node client and session implementations.
+The sync checks fail if either inventory is stale or unclassified.
 
 The client stores at most 1,024 queued session events. An RPC call or event read
 returns `error.EventQueueFull` when callers leave other sessions undrained.

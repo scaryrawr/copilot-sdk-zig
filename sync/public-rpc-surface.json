@@ -1,0 +1,25 @@
+{
+  "upstreamCommit": "d3755535869e97d2bcf5aa6a5b8c35de79f5a7d8",
+  "directMethods": [
+    "auth.getStatus",
+    "llmInference.setProvider",
+    "models.list",
+    "ping",
+    "plugins.builtin.set",
+    "session.abort",
+    "session.create",
+    "session.delete",
+    "session.detach",
+    "session.eventLog.registerInterest",
+    "session.getForeground",
+    "session.getLastId",
+    "session.getMessages",
+    "session.getMetadata",
+    "session.list",
+    "session.resume",
+    "session.send",
+    "session.setForeground",
+    "sessionFs.setProvider",
+    "status.get"
+  ]
+}

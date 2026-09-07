@@ -1,11 +1,13 @@
 pub const json_rpc = @import("json_rpc.zig");
 pub const client = @import("client.zig");
 pub const session = @import("session.zig");
+pub const models = @import("models.zig");
 const provider = @import("provider.zig");
 
 pub const Client = client.Client;
 pub const ClientInfo = client.ClientInfo;
 pub const ClientOptions = client.ClientOptions;
+pub const RpcHandler = client.RpcHandler;
 pub const Session = client.Session;
 pub const AutoTier = session.AutoTier;
 pub const AutoTierSwitchResult = session.AutoTierSwitchResult;
@@ -26,10 +28,29 @@ pub const SystemMessageMode = session.SystemMessageMode;
 pub const Tool = session.Tool;
 pub const ToolLoading = session.ToolLoading;
 pub const UnknownEvent = session.UnknownEvent;
+pub const ModelListOptions = models.ListOptions;
+pub const ModelList = models.ModelList;
+pub const Model = models.Model;
+pub const ModelCapabilities = models.Capabilities;
+pub const ModelSupports = models.Supports;
+pub const ModelLimits = models.Limits;
+pub const ModelVisionLimits = models.VisionLimits;
+pub const ModelPolicy = models.Policy;
+pub const ModelPolicyState = models.PolicyState;
+pub const ModelBilling = models.Billing;
+pub const ModelTokenPrices = models.TokenPrices;
+pub const ModelLongContextTokenPrices = models.LongContextTokenPrices;
+pub const ModelPromotion = models.Promotion;
+pub const ModelPickerCategory = models.PickerCategory;
+pub const ModelPickerPriceCategory = models.PickerPriceCategory;
+pub const ModelWarningText = models.WarningText;
+pub const ModelMessage = models.Message;
+pub const ModelAdaptiveThinking = models.AdaptiveThinking;
 
 test {
     _ = json_rpc;
     _ = client;
     _ = session;
+    _ = models;
     _ = provider;
 }

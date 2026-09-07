@@ -25,6 +25,7 @@ const schemaDirectory = join(vendorDirectory, "schemas");
 const metadataPath = join(vendorDirectory, "upstream.json");
 const generatedPath = join(root, "src", "protocol_version.zig");
 const compatibilityPath = join(root, "sync", "compatibility.json");
+const publicRpcSurfacePath = join(root, "sync", "public-rpc-surface.json");
 const workDirectory = join(root, ".sync-work");
 const cliReleaseRepository = "github/copilot-cli";
 const cliReleasePlatform = "linux-x64";
@@ -71,6 +72,25 @@ function validateMetadata(metadata) {
   for (const name of schemaNames) {
     assert(/^sha256:[0-9a-f]{64}$/.test(metadata.schemaDigests[name]), `metadata digest for ${name} is invalid`);
   }
+}
+
+function directRpcMethods(...sources) {
+  const methods = new Set();
+  const pattern = /sendRequest\(\s*["']([^"']+)/g;
+  for (const source of sources) {
+    for (const match of source.matchAll(pattern)) methods.add(match[1]);
+  }
+  return [...methods].sort();
+}
+
+function writePublicRpcSurface(upstreamCommit, ...sources) {
+  writeFileSync(
+    publicRpcSurfacePath,
+    `${JSON.stringify({
+      upstreamCommit,
+      directMethods: directRpcMethods(...sources),
+    }, null, 2)}\n`,
+  );
 }
 
 function collectPropertyValues(value, property, output = new Set()) {
@@ -122,6 +142,47 @@ function requireSchemaContract(actual, expected, label) {
   );
 }
 
+function schemaSignature(value) {
+  if (typeof value?.$ref === "string") {
+    return `ref:${value.$ref.split("/").at(-1)}`;
+  }
+  if (value?.type === "array") {
+    return `array:${schemaSignature(value.items)}`;
+  }
+  if (value?.type === "object" && value.additionalProperties?.["x-opaque-json"] === true) {
+    return "object:opaque-values";
+  }
+  if (typeof value?.type === "string") return value.type;
+  throw new Error("unsupported schema signature");
+}
+
+function definitionCompatibility(schema, name) {
+  const value = schema.definitions?.[name];
+  assert(value, `missing schema definition: ${name}`);
+  let properties = value.properties;
+  if (name === "ModelsListRequest") {
+    properties = value.anyOf?.find((variant) => variant.properties)?.properties;
+  }
+  assert(properties, `${name} has no properties`);
+  return {
+    properties: Object.fromEntries(
+      Object.entries(properties)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([property, propertySchema]) => [property, schemaSignature(propertySchema)]),
+    ),
+    required: [...(value.required ?? [])].sort(),
+  };
+}
+
+function stringEnum(schema, name) {
+  const values = schema.definitions?.[name]?.enum;
+  assert(
+    Array.isArray(values) && values.every((value) => typeof value === "string"),
+    `${name} has no string enum`,
+  );
+  return [...values].sort();
+}
+
 function eventDiscriminators(schema) {
   const values = new Set();
   for (const definition of Object.values(schema.definitions ?? {})) {
@@ -135,10 +196,59 @@ function verifyCompatibility(apiSchema, eventSchema) {
   const compatibility = parseJson(compatibilityPath);
   assert(Array.isArray(compatibility.wireMethods), "wireMethods must be an array");
   assert(Array.isArray(compatibility.sessionEventDiscriminators), "sessionEventDiscriminators must be an array");
+  assert(compatibility.directRpcMethods, "directRpcMethods compatibility is missing");
+  assert(compatibility.modelDefinitions, "modelDefinitions compatibility is missing");
+  assert(compatibility.modelEnums, "modelEnums compatibility is missing");
   assert(compatibility.providerConfig, "providerConfig compatibility is missing");
 
   const methods = collectPropertyValues(apiSchema, "rpcMethod");
+  const scopeMethods = {
+    outboundGlobal: collectPropertyValues(apiSchema.server, "rpcMethod"),
+    outboundSession: collectPropertyValues(apiSchema.session, "rpcMethod"),
+    inboundGlobal: collectPropertyValues(apiSchema.clientGlobal, "rpcMethod"),
+    inboundSession: collectPropertyValues(apiSchema.clientSession, "rpcMethod"),
+  };
+  const coveredMethods = new Set(
+    Object.values(scopeMethods).flatMap((scope) => [...scope]),
+  );
+  requireExactStrings(methods, [...coveredMethods], "RPC scope coverage");
+  assert(
+    Object.values(scopeMethods).reduce((count, scope) => count + scope.size, 0) ===
+      methods.size,
+    "RPC methods must belong to exactly one scope",
+  );
   const clientSource = readFileSync(join(root, "src", "client.zig"), "utf8");
+  for (const symbol of ["callRpc", "registerRpcHandler", "unregisterRpcHandler"]) {
+    assert(clientSource.includes(`pub fn ${symbol}`), `missing generic RPC API: ${symbol}`);
+  }
+  requireExactStrings(
+    Object.keys(compatibility.directRpcMethods),
+    parseJson(publicRpcSurfacePath).directMethods,
+    "direct RPC method classifications",
+  );
+  for (const [method, coverage] of Object.entries(compatibility.directRpcMethods)) {
+    assert(
+      coverage === "typed" || coverage === "generic",
+      `invalid direct RPC coverage for ${method}`,
+    );
+  }
+  for (const [name, expected] of Object.entries(compatibility.modelDefinitions)) {
+    assert(
+      JSON.stringify(definitionCompatibility(apiSchema, name)) === JSON.stringify(expected),
+      `${name} model contract changed`,
+    );
+  }
+  for (const [name, expected] of Object.entries(compatibility.modelEnums)) {
+    requireExactStrings(stringEnum(apiSchema, name), expected, `${name} model enum`);
+  }
+  const modelDiscountPercent =
+    apiSchema.definitions?.ModelBilling?.properties?.discountPercent;
+  assert(
+    modelDiscountPercent?.type === "integer" &&
+      modelDiscountPercent.minimum === 0 &&
+      modelDiscountPercent.maximum === 100,
+    "ModelBilling.discountPercent range changed",
+  );
   for (const method of compatibility.wireMethods) {
     assert(typeof method.name === "string", "wire method name is invalid");
     if (method.declaredBy === "api.schema.json") {
@@ -261,6 +371,20 @@ function verifyCompatibility(apiSchema, eventSchema) {
 function verify() {
   const metadata = parseJson(metadataPath);
   validateMetadata(metadata);
+  const publicRpcSurface = parseJson(publicRpcSurfacePath);
+  assert(
+    publicRpcSurface.upstreamCommit === metadata.upstreamCommit,
+    "public RPC surface is from a different upstream commit",
+  );
+  requireExactStrings(
+    publicRpcSurface.directMethods,
+    [...new Set(publicRpcSurface.directMethods)].sort(),
+    "public direct RPC methods",
+  );
+  assert(
+    publicRpcSurface.directMethods.includes("models.list"),
+    "public RPC surface is missing models.list",
+  );
   const schemas = {};
 
   for (const name of schemaNames) {
@@ -292,6 +416,12 @@ async function fetchJson(url) {
   const response = await fetch(url, { headers: requestHeaders() });
   if (!response.ok) throw new Error(`request failed with ${response.status}: ${url}`);
   return response.json();
+}
+
+async function fetchText(url) {
+  const response = await fetch(url, { headers: requestHeaders() });
+  if (!response.ok) throw new Error(`request failed with ${response.status}: ${url}`);
+  return response.text();
 }
 
 async function resolveCommit(explicitCommit) {
@@ -361,10 +491,12 @@ async function installSchemaPackage(version, ifPublished) {
 
 async function synchronize(explicitCommit, ifPublished = false) {
   const commit = await resolveCommit(explicitCommit);
-  const [protocol, packageManifest, lock] = await Promise.all([
+  const [protocol, packageManifest, lock, nodeClient, nodeSession] = await Promise.all([
     fetchJson(rawUrl(commit, "sdk-protocol-version.json")),
     fetchJson(rawUrl(commit, "nodejs/package.json")),
     fetchJson(rawUrl(commit, "nodejs/package-lock.json")),
+    fetchText(rawUrl(commit, "nodejs/src/client.ts")),
+    fetchText(rawUrl(commit, "nodejs/src/session.ts")),
   ]);
   const cliPackageVersion =
     packageManifest.copilotCliVersion ??
@@ -399,6 +531,7 @@ async function synchronize(explicitCommit, ifPublished = false) {
     validateMetadata(metadata);
     writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
     writeFileSync(generatedPath, `pub const sdk_protocol_version: u64 = ${protocol.version};\n`);
+    writePublicRpcSurface(commit, nodeClient, nodeSession);
     writeSchemaSnapshot();
   } finally {
     rmSync(workDirectory, { force: true, recursive: true });

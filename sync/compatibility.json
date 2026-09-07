@@ -25,6 +25,10 @@
       "declaredBy": "api.schema.json"
     },
     {
+      "name": "models.list",
+      "declaredBy": "api.schema.json"
+    },
+    {
       "name": "session.model.switchAutoTier",
       "declaredBy": "api.schema.json"
     },
@@ -45,6 +49,199 @@
     "session.error",
     "session.idle"
   ],
+  "directRpcMethods": {
+    "auth.getStatus": "generic",
+    "llmInference.setProvider": "generic",
+    "models.list": "typed",
+    "ping": "generic",
+    "plugins.builtin.set": "generic",
+    "session.abort": "generic",
+    "session.create": "typed",
+    "session.delete": "generic",
+    "session.detach": "typed",
+    "session.eventLog.registerInterest": "generic",
+    "session.getForeground": "generic",
+    "session.getLastId": "generic",
+    "session.getMessages": "generic",
+    "session.getMetadata": "generic",
+    "session.list": "generic",
+    "session.resume": "typed",
+    "session.send": "typed",
+    "session.setForeground": "generic",
+    "sessionFs.setProvider": "generic",
+    "status.get": "generic"
+  },
+  "modelDefinitions": {
+    "ModelsListRequest": {
+      "properties": {
+        "gitHubToken": "string",
+        "selectionId": "string"
+      },
+      "required": []
+    },
+    "ModelList": {
+      "properties": {
+        "models": "array:ref:Model"
+      },
+      "required": [
+        "models"
+      ]
+    },
+    "Model": {
+      "properties": {
+        "billing": "ref:ModelBilling",
+        "capabilities": "ref:ModelCapabilities",
+        "defaultReasoningEffort": "string",
+        "id": "string",
+        "infoMessages": "array:ref:ModelMessage",
+        "metadata": "object:opaque-values",
+        "modelPickerCategory": "ref:ModelPickerCategory",
+        "modelPickerPriceCategory": "ref:ModelPickerPriceCategory",
+        "name": "string",
+        "policy": "ref:ModelPolicy",
+        "supportedContextTiers": "array:string",
+        "supportedReasoningEfforts": "array:string",
+        "warningMessages": "array:ref:ModelMessage",
+        "warningText": "ref:ModelWarningText"
+      },
+      "required": [
+        "capabilities",
+        "id",
+        "name"
+      ]
+    },
+    "ModelCapabilities": {
+      "properties": {
+        "limits": "ref:ModelCapabilitiesLimits",
+        "supports": "ref:ModelCapabilitiesSupports"
+      },
+      "required": []
+    },
+    "ModelCapabilitiesSupports": {
+      "properties": {
+        "adaptive_thinking": "ref:AdaptiveThinkingSupport",
+        "reasoningEffort": "boolean",
+        "vision": "boolean"
+      },
+      "required": []
+    },
+    "ModelCapabilitiesLimits": {
+      "properties": {
+        "max_context_window_tokens": "integer",
+        "max_output_tokens": "integer",
+        "max_prompt_tokens": "integer",
+        "vision": "ref:ModelCapabilitiesLimitsVision"
+      },
+      "required": []
+    },
+    "ModelCapabilitiesLimitsVision": {
+      "properties": {
+        "max_prompt_image_size": "integer",
+        "max_prompt_images": "integer",
+        "supported_media_types": "array:string"
+      },
+      "required": [
+        "max_prompt_image_size",
+        "max_prompt_images",
+        "supported_media_types"
+      ]
+    },
+    "ModelPolicy": {
+      "properties": {
+        "state": "ref:ModelPolicyState",
+        "terms": "string"
+      },
+      "required": [
+        "state"
+      ]
+    },
+    "ModelBilling": {
+      "properties": {
+        "discountPercent": "integer",
+        "multiplier": "number",
+        "promo": "ref:ModelBillingPromo",
+        "tokenPrices": "ref:ModelBillingTokenPrices"
+      },
+      "required": []
+    },
+    "ModelBillingTokenPrices": {
+      "properties": {
+        "batchSize": "integer",
+        "cachePrice": "number",
+        "cacheReadPrice": "number",
+        "cacheWrite1hPrice": "number",
+        "cacheWritePrice": "number",
+        "contextMax": "integer",
+        "inputPrice": "number",
+        "longContext": "ref:ModelBillingTokenPricesLongContext",
+        "maxPromptTokens": "integer",
+        "outputPrice": "number"
+      },
+      "required": []
+    },
+    "ModelBillingTokenPricesLongContext": {
+      "properties": {
+        "cachePrice": "number",
+        "cacheReadPrice": "number",
+        "cacheWrite1hPrice": "number",
+        "cacheWritePrice": "number",
+        "contextMax": "integer",
+        "inputPrice": "number",
+        "maxPromptTokens": "integer",
+        "outputPrice": "number"
+      },
+      "required": []
+    },
+    "ModelBillingPromo": {
+      "properties": {
+        "discountPercent": "number",
+        "endsAt": "string",
+        "id": "string",
+        "message": "string",
+        "showBanner": "boolean"
+      },
+      "required": []
+    },
+    "ModelWarningText": {
+      "properties": {
+        "dataRetention": "string"
+      },
+      "required": []
+    },
+    "ModelMessage": {
+      "properties": {
+        "code": "string",
+        "message": "string"
+      },
+      "required": [
+        "code",
+        "message"
+      ]
+    }
+  },
+  "modelEnums": {
+    "AdaptiveThinkingSupport": [
+      "optional",
+      "required",
+      "unsupported"
+    ],
+    "ModelPickerCategory": [
+      "lightweight",
+      "powerful",
+      "versatile"
+    ],
+    "ModelPickerPriceCategory": [
+      "high",
+      "low",
+      "medium",
+      "very_high"
+    ],
+    "ModelPolicyState": [
+      "disabled",
+      "enabled",
+      "unconfigured"
+    ]
+  },
   "providerConfig": {
     "required": [
       "baseUrl"
