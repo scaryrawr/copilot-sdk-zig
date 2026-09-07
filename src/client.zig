@@ -1,5 +1,6 @@
 const std = @import("std");
 const json_rpc = @import("json_rpc.zig");
+const provider = @import("provider.zig");
 const protocol = @import("protocol_version.zig");
 const session_types = @import("session.zig");
 
@@ -184,15 +185,12 @@ pub const Client = struct {
         defer tools.deinit(self.allocator);
         try appendWireTools(self.allocator, config.tools, &parsed_parameters, &tools);
 
-        const parsed = try self.call(struct { sessionId: []const u8 }, "session.create", .{
-            .sessionId = config.session_id,
-            .model = config.model,
-            .workingDirectory = config.working_directory,
-            .streaming = config.streaming,
-            .tools = tools.items,
-            .systemMessage = config.system_message,
-            .requestPermission = config.request_permission,
-        });
+        const request = try buildCreateSessionRequest(config, tools.items);
+        const parsed = try self.call(
+            struct { sessionId: []const u8 },
+            "session.create",
+            request,
+        );
         defer parsed.deinit();
 
         const id = try self.allocator.dupe(u8, parsed.value.sessionId);
@@ -219,16 +217,8 @@ pub const Client = struct {
         defer tools.deinit(self.allocator);
         try appendWireTools(self.allocator, config.tools, &parsed_parameters, &tools);
 
-        const parsed = try self.call(std.json.Value, "session.resume", .{
-            .sessionId = session_id,
-            .model = config.model,
-            .workingDirectory = config.working_directory,
-            .streaming = config.streaming,
-            .tools = tools.items,
-            .systemMessage = config.system_message,
-            .requestPermission = config.request_permission,
-            .disableResume = true,
-        });
+        const request = try buildResumeSessionRequest(session_id, config, tools.items);
+        const parsed = try self.call(std.json.Value, "session.resume", request);
         parsed.deinit();
 
         const id = try self.allocator.dupe(u8, session_id);
@@ -685,6 +675,62 @@ const WireTool = struct {
     isTerminal: bool,
 };
 
+const CreateSessionRequest = struct {
+    sessionId: ?[]const u8,
+    model: ?[]const u8,
+    provider: ?provider.WireProvider,
+    workingDirectory: ?[]const u8,
+    streaming: bool,
+    tools: []const WireTool,
+    systemMessage: ?session_types.SystemMessageConfig,
+    requestPermission: bool,
+};
+
+const ResumeSessionRequest = struct {
+    sessionId: []const u8,
+    model: ?[]const u8,
+    provider: ?provider.WireProvider,
+    workingDirectory: ?[]const u8,
+    streaming: bool,
+    tools: []const WireTool,
+    systemMessage: ?session_types.SystemMessageConfig,
+    requestPermission: bool,
+    disableResume: bool = true,
+};
+
+fn buildCreateSessionRequest(
+    config: session_types.SessionConfig,
+    tools: []const WireTool,
+) !CreateSessionRequest {
+    return .{
+        .sessionId = config.session_id,
+        .model = config.model,
+        .provider = if (config.provider) |value| try provider.lower(value) else null,
+        .workingDirectory = config.working_directory,
+        .streaming = config.streaming,
+        .tools = tools,
+        .systemMessage = config.system_message,
+        .requestPermission = config.request_permission,
+    };
+}
+
+fn buildResumeSessionRequest(
+    session_id: []const u8,
+    config: session_types.SessionConfig,
+    tools: []const WireTool,
+) !ResumeSessionRequest {
+    return .{
+        .sessionId = session_id,
+        .model = config.model,
+        .provider = if (config.provider) |value| try provider.lower(value) else null,
+        .workingDirectory = config.working_directory,
+        .streaming = config.streaming,
+        .tools = tools,
+        .systemMessage = config.system_message,
+        .requestPermission = config.request_permission,
+    };
+}
+
 const RpcSuccess = struct {
     success: bool,
 };
@@ -827,6 +873,95 @@ test "tool definitions map current wire fields" {
     try std.testing.expectEqual(session_types.ToolLoading.never, tools.items[0].@"defer");
     try std.testing.expect(tools.items[0].metadata.? == .object);
     try std.testing.expect(tools.items[0].isTerminal);
+}
+
+test "create request places the lowered provider in params" {
+    const allocator = std.testing.allocator;
+    const params = try buildCreateSessionRequest(.{
+        .provider = .{
+            .base_url = "https://api.openai.com/v1",
+            .protocol = .{ .openai = .{ .responses = .websockets } },
+            .authentication = .{ .bearer_token = "token" },
+        },
+    }, &.{});
+    const encoded = try json_rpc.encodeRequest(allocator, 9, "session.create", params);
+    defer allocator.free(encoded);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqualStrings("session.create", root.get("method").?.string);
+    const provider_value = root.get("params").?.object.get("provider").?.object;
+    try std.testing.expectEqualStrings("openai", provider_value.get("type").?.string);
+    try std.testing.expectEqualStrings("responses", provider_value.get("wireApi").?.string);
+    try std.testing.expectEqualStrings("websockets", provider_value.get("transport").?.string);
+    try std.testing.expectEqualStrings("token", provider_value.get("bearerToken").?.string);
+}
+
+test "resume request places provider in params and disables nested resume" {
+    const allocator = std.testing.allocator;
+    const params = try buildResumeSessionRequest("session-1", .{
+        .provider = .{
+            .base_url = "https://api.anthropic.com",
+            .protocol = .anthropic,
+            .authentication = .{ .api_key = "key" },
+        },
+    }, &.{});
+    const encoded = try json_rpc.encodeRequest(allocator, 10, "session.resume", params);
+    defer allocator.free(encoded);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqualStrings("session.resume", root.get("method").?.string);
+    const request_params = root.get("params").?.object;
+    try std.testing.expect(request_params.get("disableResume").?.bool);
+    const provider_value = request_params.get("provider").?.object;
+    try std.testing.expectEqualStrings("anthropic", provider_value.get("type").?.string);
+    try std.testing.expectEqualStrings("key", provider_value.get("apiKey").?.string);
+}
+
+test "session requests omit a null provider" {
+    const allocator = std.testing.allocator;
+    const create_params = try buildCreateSessionRequest(.{}, &.{});
+    const create_encoded = try json_rpc.encodeRequest(
+        allocator,
+        11,
+        "session.create",
+        create_params,
+    );
+    defer allocator.free(create_encoded);
+
+    const create_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        create_encoded,
+        .{},
+    );
+    defer create_parsed.deinit();
+    try std.testing.expect(
+        !create_parsed.value.object.get("params").?.object.contains("provider"),
+    );
+
+    const resume_params = try buildResumeSessionRequest("session-1", .{}, &.{});
+    const resume_encoded = try json_rpc.encodeRequest(
+        allocator,
+        12,
+        "session.resume",
+        resume_params,
+    );
+    defer allocator.free(resume_encoded);
+
+    const resume_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        resume_encoded,
+        .{},
+    );
+    defer resume_parsed.deinit();
+    try std.testing.expect(
+        !resume_parsed.value.object.get("params").?.object.contains("provider"),
+    );
 }
 
 fn validateConnectResult(ok: bool, protocol_version: u64) !void {

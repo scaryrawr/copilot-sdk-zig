@@ -44,5 +44,133 @@
     "permission.requested",
     "session.error",
     "session.idle"
-  ]
+  ],
+  "providerConfig": {
+    "required": [
+      "baseUrl"
+    ],
+    "families": [
+      "anthropic",
+      "azure",
+      "openai"
+    ],
+    "wireApis": [
+      "completions",
+      "responses"
+    ],
+    "transports": [
+      "http",
+      "websockets"
+    ],
+    "azureProperties": {
+      "apiVersion": {
+        "type": "string"
+      }
+    },
+    "properties": {
+      "apiKey": {
+        "status": "supported",
+        "contract": {
+          "type": "string"
+        }
+      },
+      "azure": {
+        "status": "supported",
+        "contract": {
+          "ref": "ProviderConfigAzure"
+        }
+      },
+      "baseUrl": {
+        "status": "supported",
+        "contract": {
+          "type": "string"
+        }
+      },
+      "bearerToken": {
+        "status": "supported",
+        "contract": {
+          "type": "string"
+        }
+      },
+      "hasBearerTokenProvider": {
+        "status": "deferred",
+        "reason": "Requires inbound providerToken.getToken callback dispatch.",
+        "contract": {
+          "type": "boolean"
+        }
+      },
+      "headers": {
+        "status": "supported",
+        "contract": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "maxContextWindowTokens": {
+        "status": "deferred",
+        "reason": "Absent from the pinned official singular Node and Go provider APIs.",
+        "contract": {
+          "type": "number"
+        }
+      },
+      "maxOutputTokens": {
+        "status": "supported",
+        "contract": {
+          "type": "number"
+        }
+      },
+      "maxPromptTokens": {
+        "status": "supported",
+        "contract": {
+          "type": "number"
+        }
+      },
+      "modelCapabilities": {
+        "status": "deferred",
+        "reason": "Absent from the pinned official singular Node and Go provider APIs.",
+        "contract": {
+          "ref": "ModelCapabilitiesOverride"
+        }
+      },
+      "modelId": {
+        "status": "supported",
+        "contract": {
+          "type": "string"
+        }
+      },
+      "providerName": {
+        "status": "deferred",
+        "reason": "Absent from the pinned official singular Node and Go provider APIs.",
+        "contract": {
+          "type": "string"
+        }
+      },
+      "transport": {
+        "status": "supported",
+        "contract": {
+          "ref": "ProviderConfigTransport"
+        }
+      },
+      "type": {
+        "status": "supported",
+        "contract": {
+          "ref": "ProviderConfigType"
+        }
+      },
+      "wireApi": {
+        "status": "supported",
+        "contract": {
+          "ref": "ProviderConfigWireApi"
+        }
+      },
+      "wireModel": {
+        "status": "supported",
+        "contract": {
+          "type": "string"
+        }
+      }
+    }
+  }
 }

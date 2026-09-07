@@ -59,7 +59,7 @@ jobs:
           if git diff --quiet && [ "$ahead" -eq 0 ]; then
             exit 0
           fi
-          git add vendor/copilot src/protocol_version.zig
+          git add vendor/copilot src/protocol_version.zig sync/schema-snapshot.json
           if ! git diff --cached --quiet; then
             git commit -m "Sync Copilot schemas"
           fi

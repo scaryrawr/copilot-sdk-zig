@@ -1,6 +1,7 @@
 pub const json_rpc = @import("json_rpc.zig");
 pub const client = @import("client.zig");
 pub const session = @import("session.zig");
+const provider = @import("provider.zig");
 
 pub const Client = client.Client;
 pub const ClientInfo = client.ClientInfo;
@@ -10,6 +11,7 @@ pub const AutoTier = session.AutoTier;
 pub const AutoTierSwitchResult = session.AutoTierSwitchResult;
 pub const AutoTierSwitchStatus = session.AutoTierSwitchStatus;
 pub const SessionConfig = session.SessionConfig;
+pub const ProviderConfig = provider.ProviderConfig;
 pub const MessageOptions = session.MessageOptions;
 pub const SessionEvent = session.SessionEvent;
 pub const AssistantMessage = session.AssistantMessage;
@@ -29,4 +31,5 @@ test {
     _ = json_rpc;
     _ = client;
     _ = session;
+    _ = provider;
 }

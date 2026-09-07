@@ -108,6 +108,40 @@ in use. `SessionEvent` values and the message ID from `send` own memory from the
 client allocator. `Session.disconnect` releases the client-side session
 resources while preserving the session state so it can be resumed later.
 
+## Use a custom provider
+
+Set `SessionConfig.provider` for a static custom provider:
+
+```zig
+const session = try client.createSession(.{
+    .provider = .{
+        .base_url = "https://api.openai.com/v1",
+        .protocol = .{ .openai = .{ .responses = .http } },
+        .authentication = .{ .api_key = "provider-api-key" },
+        .headers = &.{
+            .{ .name = "X-Tenant", .value = "acme" },
+        },
+        .model_id = "gpt-4.1",
+        .wire_model = "deployment-name",
+        .max_prompt_tokens = 100_000,
+        .max_output_tokens = 16_384,
+    },
+});
+```
+
+`ProviderConfig.Protocol` supports OpenAI Chat Completions, OpenAI Responses
+over HTTP or WebSocket, Azure with an optional API version, and Anthropic.
+`ProviderConfig.Authentication` supports no credentials, one API key, or one
+static bearer token. Credentials are optional so local providers work without
+authentication.
+
+The SDK rejects empty header names and duplicate names without regard to ASCII
+case. It does not parse `base_url`.
+
+`bearerTokenProvider`, `hasBearerTokenProvider`, named providers and models,
+`providerName`, `modelCapabilities`, `maxContextWindowTokens`, alternate SDK
+transports, new events, and callback dispatch are deferred.
+
 ## Examples
 
 Runnable projects are listed in [`examples`](examples). They cover streaming,
@@ -183,8 +217,12 @@ asset and both schema snapshots.
 The sync script downloads the Linux x64 package from the corresponding
 `github/copilot-cli` release and verifies it against the release's
 `SHA256SUMS.txt`. It copies only `api.schema.json` and
-`session-events.schema.json`, then generates the Zig protocol version constant
-and checks the required methods and event discriminators in
+`session-events.schema.json`. It then generates the Zig protocol version
+constant and `sync/schema-snapshot.json`.
+
+The snapshot contains every RPC method, every session event discriminator, and
+the vendored `ProviderConfig` contract. `npm test` checks the snapshot and the
+supported or deferred classification for every provider property in
 `sync/compatibility.json`.
 
 The published API schema declares the supported handshake, message, model,
