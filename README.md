@@ -204,6 +204,7 @@ in the pinned upstream `clientGlobal` and `clientSession` scopes. Handlers run
 synchronously while the client is reading RPC traffic and must not recursively
 call the same client; re-entry returns `error.ReentrantRpcCall`. A successful
 handler returns JSON allocated with the allocator passed to it.
+The handler receives `null` when the request omitted `params`.
 
 It recognizes these session events:
 

@@ -241,6 +241,14 @@ function verifyCompatibility(apiSchema, eventSchema) {
   for (const [name, expected] of Object.entries(compatibility.modelEnums)) {
     requireExactStrings(stringEnum(apiSchema, name), expected, `${name} model enum`);
   }
+  const modelDiscountPercent =
+    apiSchema.definitions?.ModelBilling?.properties?.discountPercent;
+  assert(
+    modelDiscountPercent?.type === "integer" &&
+      modelDiscountPercent.minimum === 0 &&
+      modelDiscountPercent.maximum === 100,
+    "ModelBilling.discountPercent range changed",
+  );
   for (const method of compatibility.wireMethods) {
     assert(typeof method.name === "string", "wire method name is invalid");
     if (method.declaredBy === "api.schema.json") {

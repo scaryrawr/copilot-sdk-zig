@@ -45,7 +45,7 @@ const RegisteredTool = struct {
 
 pub const RpcHandler = *const fn (
     allocator: std.mem.Allocator,
-    params_json: []const u8,
+    params_json: ?[]const u8,
     context: ?*anyopaque,
 ) anyerror![]u8;
 
@@ -343,7 +343,7 @@ pub const Client = struct {
                     try self.dispatchServerRequest(
                         request_id,
                         name,
-                        object.get("params") orelse .{ .object = .empty },
+                        object.get("params"),
                     );
                     continue;
                 }
@@ -390,14 +390,14 @@ pub const Client = struct {
         self: *Client,
         id: std.json.Value,
         method: []const u8,
-        params: std.json.Value,
+        params: ?std.json.Value,
     ) !void {
         const registered = self.findRpcHandler(method) orelse {
             try self.rejectServerRequest(id);
             return;
         };
-        const params_json = try std.json.Stringify.valueAlloc(self.allocator, params, .{});
-        defer self.allocator.free(params_json);
+        const params_json = try stringifyRpcParams(self.allocator, params);
+        defer if (params_json) |json| self.allocator.free(json);
 
         self.dispatching_rpc_handler = true;
         defer self.dispatching_rpc_handler = false;
@@ -560,7 +560,7 @@ pub const Client = struct {
                 try self.dispatchServerRequest(
                     request_id,
                     method,
-                    object.get("params") orelse .{ .object = .empty },
+                    object.get("params"),
                 );
                 continue;
             }
@@ -809,6 +809,14 @@ pub const Session = struct {
     }
 };
 
+fn stringifyRpcParams(
+    allocator: std.mem.Allocator,
+    params: ?std.json.Value,
+) !?[]u8 {
+    const value = params orelse return null;
+    return @as(?[]u8, try std.json.Stringify.valueAlloc(allocator, value, .{}));
+}
+
 fn completesSendAndWait(idle: session_types.SessionIdle) bool {
     return idle.mode == null or !std.mem.eql(u8, idle.mode.?, "autopilot");
 }
@@ -996,7 +1004,7 @@ test "RPC handler registration rejects duplicates and unregisters" {
     const handler = struct {
         fn handle(
             inner_allocator: std.mem.Allocator,
-            _: []const u8,
+            _: ?[]const u8,
             _: ?*anyopaque,
         ) ![]u8 {
             return inner_allocator.dupe(u8, "{}");
@@ -1030,6 +1038,17 @@ test "model list options map to wire fields" {
     const params = parsed.value.object.get("params").?.object;
     try std.testing.expectEqualStrings("account-1", params.get("selectionId").?.string);
     try std.testing.expectEqualStrings("token", params.get("gitHubToken").?.string);
+}
+
+test "inbound RPC params preserve omission and non-object values" {
+    try std.testing.expect(try stringifyRpcParams(std.testing.allocator, null) == null);
+
+    const scalar = (try stringifyRpcParams(
+        std.testing.allocator,
+        .{ .string = "value" },
+    )).?;
+    defer std.testing.allocator.free(scalar);
+    try std.testing.expectEqualStrings("\"value\"", scalar);
 }
 
 test "client info maps to connect wire fields" {
