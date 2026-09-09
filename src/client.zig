@@ -43,6 +43,18 @@ const RegisteredTool = struct {
     }
 };
 
+const RegisteredUserInputHandler = struct {
+    session_id: []const u8,
+    handler: session_types.UserInputHandler,
+    context: ?*anyopaque,
+};
+
+const RegisteredPermissionHandler = struct {
+    session_id: []const u8,
+    handler: session_types.PermissionHandler,
+    context: ?*anyopaque,
+};
+
 pub const RpcHandler = *const fn (
     allocator: std.mem.Allocator,
     params_json: ?[]const u8,
@@ -76,6 +88,8 @@ pub const Client = struct {
     session_ids: std.ArrayList([]u8) = .empty,
     events: std.ArrayList(QueuedEvent) = .empty,
     tools: std.ArrayList(RegisteredTool) = .empty,
+    user_input_handlers: std.ArrayList(RegisteredUserInputHandler) = .empty,
+    permission_handlers: std.ArrayList(RegisteredPermissionHandler) = .empty,
     rpc_handlers: std.ArrayList(RegisteredRpcHandler) = .empty,
     dispatching_rpc_handler: bool = false,
 
@@ -169,6 +183,8 @@ pub const Client = struct {
         self.events.deinit(self.allocator);
         for (self.tools.items) |tool| tool.deinit(self.allocator);
         self.tools.deinit(self.allocator);
+        self.user_input_handlers.deinit(self.allocator);
+        self.permission_handlers.deinit(self.allocator);
         for (self.rpc_handlers.items) |handler| handler.deinit(self.allocator);
         self.rpc_handlers.deinit(self.allocator);
         for (self.session_ids.items) |id| self.allocator.free(id);
@@ -226,6 +242,8 @@ pub const Client = struct {
         };
         errdefer self.removeSession(id);
         try self.registerToolHandlers(id, config.tools);
+        try self.registerPermissionHandler(id, config.on_permission_request, config.permission_context);
+        try self.registerUserInputHandler(id, config.on_user_input_request, config.user_input_context);
         return .{ .client = self, .id = id };
     }
 
@@ -254,6 +272,8 @@ pub const Client = struct {
         };
         errdefer self.removeSession(id);
         try self.registerToolHandlers(id, config.tools);
+        try self.registerPermissionHandler(id, config.on_permission_request, config.permission_context);
+        try self.registerUserInputHandler(id, config.on_user_input_request, config.user_input_context);
         return .{ .client = self, .id = id };
     }
 
@@ -398,6 +418,11 @@ pub const Client = struct {
         method: []const u8,
         params: ?std.json.Value,
     ) !void {
+        if (std.mem.eql(u8, method, "userInput.request") and
+            self.findUserInputHandlerFromParams(params) != null)
+        {
+            return self.dispatchUserInputRequest(writer, id, params);
+        }
         const registered = self.findRpcHandler(method) orelse {
             try self.rejectServerRequest(writer, id);
             return;
@@ -453,6 +478,75 @@ pub const Client = struct {
         return null;
     }
 
+    fn dispatchUserInputRequest(
+        self: *Client,
+        writer: *std.Io.Writer,
+        id: std.json.Value,
+        params: ?std.json.Value,
+    ) !void {
+        const params_json = try stringifyRpcParams(self.allocator, params) orelse
+            return self.writeServerRequestError(writer, id, -32602, "invalid user input request");
+        defer self.allocator.free(params_json);
+
+        const parsed = std.json.parseFromSlice(
+            WireUserInputRequest,
+            self.allocator,
+            params_json,
+            .{ .allocate = .alloc_always, .ignore_unknown_fields = true },
+        ) catch {
+            return self.writeServerRequestError(writer, id, -32602, "invalid user input request");
+        };
+        defer parsed.deinit();
+
+        const registered = self.findUserInputHandler(parsed.value.sessionId) orelse
+            return self.writeServerRequestError(writer, id, -32000, "user input handler not registered");
+
+        self.dispatching_rpc_handler = true;
+        defer self.dispatching_rpc_handler = false;
+        const response = registered.handler(self.allocator, .{
+            .session_id = parsed.value.sessionId,
+            .question = parsed.value.question,
+            .choices = parsed.value.choices,
+            .allow_freeform = parsed.value.allowFreeform,
+        }, registered.context) catch |err| {
+            return self.writeServerRequestError(writer, id, -32000, @errorName(err));
+        };
+        defer self.allocator.free(response.answer);
+
+        const result_json = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .answer = response.answer,
+            .wasFreeform = response.was_freeform,
+        }, .{});
+        defer self.allocator.free(result_json);
+        const result = try std.json.parseFromSlice(
+            std.json.Value,
+            self.allocator,
+            result_json,
+            .{},
+        );
+        defer result.deinit();
+        const frame = try json_rpc.encodeSuccessResponse(self.allocator, id, result.value);
+        defer self.allocator.free(frame);
+        try json_rpc.writeFrame(writer, frame);
+    }
+
+    fn writeServerRequestError(
+        self: *Client,
+        writer: *std.Io.Writer,
+        id: std.json.Value,
+        code: i64,
+        message: []const u8,
+    ) !void {
+        const response = try json_rpc.encodeErrorResponse(
+            self.allocator,
+            id,
+            code,
+            message,
+        );
+        defer self.allocator.free(response);
+        try json_rpc.writeFrame(writer, response);
+    }
+
     fn queueSessionEvent(self: *Client, params_value: std.json.Value) !void {
         if (self.events.items.len >= max_queued_events) return error.EventQueueFull;
         const params = switch (params_value) {
@@ -498,6 +592,24 @@ pub const Client = struct {
             }
         }
 
+        var user_input_handler_index: usize = 0;
+        while (user_input_handler_index < self.user_input_handlers.items.len) {
+            if (std.mem.eql(u8, self.user_input_handlers.items[user_input_handler_index].session_id, session_id)) {
+                _ = self.user_input_handlers.orderedRemove(user_input_handler_index);
+            } else {
+                user_input_handler_index += 1;
+            }
+        }
+
+        var permission_handler_index: usize = 0;
+        while (permission_handler_index < self.permission_handlers.items.len) {
+            if (std.mem.eql(u8, self.permission_handlers.items[permission_handler_index].session_id, session_id)) {
+                _ = self.permission_handlers.orderedRemove(permission_handler_index);
+            } else {
+                permission_handler_index += 1;
+            }
+        }
+
         for (self.session_ids.items, 0..) |id, session_index| {
             if (std.mem.eql(u8, id, session_id)) {
                 self.allocator.free(id);
@@ -538,6 +650,69 @@ pub const Client = struct {
             }
         }
         return null;
+    }
+
+    fn registerUserInputHandler(
+        self: *Client,
+        session_id: []const u8,
+        handler: ?session_types.UserInputHandler,
+        context: ?*anyopaque,
+    ) !void {
+        const callback = handler orelse return;
+        try self.user_input_handlers.append(self.allocator, .{
+            .session_id = session_id,
+            .handler = callback,
+            .context = context,
+        });
+    }
+
+    fn registerPermissionHandler(
+        self: *Client,
+        session_id: []const u8,
+        handler: ?session_types.PermissionHandler,
+        context: ?*anyopaque,
+    ) !void {
+        const callback = handler orelse return;
+        try self.permission_handlers.append(self.allocator, .{
+            .session_id = session_id,
+            .handler = callback,
+            .context = context,
+        });
+    }
+
+    fn findPermissionHandler(
+        self: *Client,
+        session_id: []const u8,
+    ) ?RegisteredPermissionHandler {
+        for (self.permission_handlers.items) |registered| {
+            if (std.mem.eql(u8, registered.session_id, session_id)) return registered;
+        }
+        return null;
+    }
+
+    fn findUserInputHandler(
+        self: *Client,
+        session_id: []const u8,
+    ) ?RegisteredUserInputHandler {
+        for (self.user_input_handlers.items) |registered| {
+            if (std.mem.eql(u8, registered.session_id, session_id)) return registered;
+        }
+        return null;
+    }
+
+    fn findUserInputHandlerFromParams(
+        self: *Client,
+        params: ?std.json.Value,
+    ) ?RegisteredUserInputHandler {
+        const object = switch (params orelse return null) {
+            .object => |object| object,
+            else => return null,
+        };
+        const session_id = switch (object.get("sessionId") orelse return null) {
+            .string => |value| value,
+            else => return null,
+        };
+        return self.findUserInputHandler(session_id);
     }
 
     fn nextEvent(self: *Client, session_id: []const u8) !session_types.SessionEvent {
@@ -638,6 +813,22 @@ pub const Session = struct {
                 try self.respondToTool(request.request_id, result);
             }
         }
+        if (event == .permission_requested) {
+            const request = event.permission_requested;
+            if (self.client.findPermissionHandler(self.id)) |handler| {
+                const decision = try handler.handler(request, handler.context);
+                switch (decision) {
+                    .approve_once => try self.approvePermission(request.request_id),
+                    .reject => |feedback| try self.rejectPermission(request.request_id, feedback),
+                    .json => |decision_json| try self.respondToPermissionJson(
+                        request.request_id,
+                        decision_json,
+                        null,
+                    ),
+                    .no_result => {},
+                }
+            }
+        }
         return event;
     }
 
@@ -675,6 +866,53 @@ pub const Session = struct {
         );
         defer parsed.deinit();
         return parsed.value;
+    }
+
+    /// Aborts the current agent turn. The caller owns the returned result.
+    pub fn abort(self: Session) !std.json.Parsed(session_types.AbortResult) {
+        return self.client.call(session_types.AbortResult, "session.abort", .{
+            .sessionId = self.id,
+        });
+    }
+
+    /// Changes the selected model for subsequent turns. The caller owns the
+    /// returned result.
+    pub fn setModel(
+        self: Session,
+        model_id: []const u8,
+        options: session_types.ModelSwitchOptions,
+    ) !std.json.Parsed(session_types.ModelSwitchResult) {
+        return self.client.call(
+            session_types.ModelSwitchResult,
+            "session.model.switchTo",
+            WireModelSwitchRequest{
+                .sessionId = self.id,
+                .modelId = model_id,
+                .autoTier = options.auto_tier,
+                .reasoningEffort = options.reasoning_effort,
+                .reasoningSummary = options.reasoning_summary,
+                .contextTier = options.context_tier,
+            },
+        );
+    }
+
+    /// Emits a user-visible timeline entry and returns its event ID.
+    pub fn log(
+        self: Session,
+        message: []const u8,
+        options: session_types.LogOptions,
+    ) ![]u8 {
+        const parsed = try self.client.call(struct { eventId: []const u8 }, "session.log", WireLogRequest{
+            .sessionId = self.id,
+            .message = message,
+            .level = options.level,
+            .type = options.log_type,
+            .ephemeral = options.ephemeral,
+            .url = options.url,
+            .tip = options.tip,
+        });
+        defer parsed.deinit();
+        return self.client.allocator.dupe(u8, parsed.value.eventId);
     }
 
     pub fn approvePermission(self: Session, request_id: []const u8) !void {
@@ -839,6 +1077,32 @@ const WireTool = struct {
     isTerminal: bool,
 };
 
+const WireModelSwitchRequest = struct {
+    sessionId: []const u8,
+    modelId: []const u8,
+    autoTier: ?session_types.AutoTier = null,
+    reasoningEffort: ?[]const u8 = null,
+    reasoningSummary: ?session_types.ReasoningSummary = null,
+    contextTier: ?session_types.ContextTier = null,
+};
+
+const WireLogRequest = struct {
+    sessionId: []const u8,
+    message: []const u8,
+    level: session_types.LogLevel,
+    type: ?[]const u8,
+    ephemeral: bool,
+    url: ?[]const u8,
+    tip: ?[]const u8,
+};
+
+const WireUserInputRequest = struct {
+    sessionId: []const u8,
+    question: []const u8,
+    choices: ?[]const []const u8 = null,
+    allowFreeform: ?bool = null,
+};
+
 const CreateSessionRequest = struct {
     sessionId: ?[]const u8,
     model: ?[]const u8,
@@ -848,6 +1112,7 @@ const CreateSessionRequest = struct {
     tools: []const WireTool,
     systemMessage: ?session_types.SystemMessageConfig,
     requestPermission: bool,
+    requestUserInput: bool,
 };
 
 const ResumeSessionRequest = struct {
@@ -859,6 +1124,7 @@ const ResumeSessionRequest = struct {
     tools: []const WireTool,
     systemMessage: ?session_types.SystemMessageConfig,
     requestPermission: bool,
+    requestUserInput: bool,
     disableResume: bool = true,
 };
 
@@ -874,7 +1140,8 @@ fn buildCreateSessionRequest(
         .streaming = config.streaming,
         .tools = tools,
         .systemMessage = config.system_message,
-        .requestPermission = config.request_permission,
+        .requestPermission = config.request_permission or config.on_permission_request != null,
+        .requestUserInput = config.on_user_input_request != null,
     };
 }
 
@@ -891,7 +1158,8 @@ fn buildResumeSessionRequest(
         .streaming = config.streaming,
         .tools = tools,
         .systemMessage = config.system_message,
-        .requestPermission = config.request_permission,
+        .requestPermission = config.request_permission or config.on_permission_request != null,
+        .requestUserInput = config.on_user_input_request != null,
     };
 }
 
@@ -983,7 +1251,10 @@ test "public client API type checks" {
     _ = &Session.sendAndWait;
     _ = &Session.nextEvent;
     _ = &Session.disconnect;
+    _ = &Session.abort;
+    _ = &Session.setModel;
     _ = &Session.setAutoTier;
+    _ = &Session.log;
     _ = &Session.approvePermission;
     _ = &Session.rejectPermission;
     _ = &Session.respondToPermissionJson;
@@ -1159,6 +1430,126 @@ test "inbound RPC dispatch writes success and error frames" {
     );
 }
 
+test "user input handler receives requests and returns responses" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer client.user_input_handlers.deinit(allocator);
+
+    var called = false;
+    const handler = struct {
+        fn handle(
+            inner_allocator: std.mem.Allocator,
+            request: session_types.UserInputRequest,
+            context: ?*anyopaque,
+        ) !session_types.UserInputResponse {
+            const did_call: *bool = @ptrCast(@alignCast(context.?));
+            try std.testing.expectEqualStrings("session-1", request.session_id);
+            try std.testing.expectEqualStrings("Continue?", request.question);
+            try std.testing.expectEqual(@as(usize, 2), request.choices.?.len);
+            try std.testing.expectEqualStrings("Yes", request.choices.?[0]);
+            try std.testing.expectEqualStrings("No", request.choices.?[1]);
+            try std.testing.expect(request.allow_freeform.?);
+            did_call.* = true;
+            return .{
+                .answer = try inner_allocator.dupe(u8, "Yes"),
+                .was_freeform = false,
+            };
+        }
+    }.handle;
+    try client.registerUserInputHandler("session-1", handler, &called);
+
+    const parsed_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"session-1","question":"Continue?","choices":["Yes","No"],"allowFreeform":true}
+    ,
+        .{},
+    );
+    defer parsed_params.deinit();
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try client.dispatchServerRequest(
+        &output.writer,
+        .{ .integer = 3 },
+        "userInput.request",
+        parsed_params.value,
+    );
+
+    try std.testing.expect(called);
+    const body = try framedBody(allocator, output.written());
+    defer allocator.free(body);
+    const response = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer response.deinit();
+    const result = response.value.object.get("result").?.object;
+    try std.testing.expectEqualStrings("Yes", result.get("answer").?.string);
+    try std.testing.expect(!result.get("wasFreeform").?.bool);
+}
+
+test "permission handler receives events and can leave requests pending" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
+    defer {
+        client.removeSession("session-1");
+        client.events.deinit(allocator);
+        client.permission_handlers.deinit(allocator);
+        client.session_ids.deinit(allocator);
+    }
+
+    var called = false;
+    const handler = struct {
+        fn handle(
+            request: session_types.PermissionRequested,
+            context: ?*anyopaque,
+        ) !session_types.PermissionDecision {
+            const did_call: *bool = @ptrCast(@alignCast(context.?));
+            try std.testing.expectEqualStrings("permission-1", request.request_id);
+            try std.testing.expectEqualStrings(
+                "{\"kind\":\"shell\",\"fullCommandText\":\"pwd\"}",
+                request.permission_request_json,
+            );
+            did_call.* = true;
+            return .no_result;
+        }
+    }.handle;
+    try client.registerPermissionHandler("session-1", handler, &called);
+
+    const parsed_event = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"shell","fullCommandText":"pwd"}}}
+    ,
+        .{},
+    );
+    defer parsed_event.deinit();
+    try client.events.append(allocator, .{
+        .session_id = try allocator.dupe(u8, "session-1"),
+        .event = try session_types.parseEvent(allocator, parsed_event.value),
+    });
+
+    const session = Session{ .client = &client, .id = "session-1" };
+    var event = try session.nextEvent();
+    defer event.deinit(allocator);
+    try std.testing.expect(called);
+    try std.testing.expect(event == .permission_requested);
+}
+
 fn framedBody(allocator: std.mem.Allocator, framed: []const u8) ![]u8 {
     var reader = std.Io.Reader.fixed(framed);
     return json_rpc.readFrame(allocator, &reader);
@@ -1215,6 +1606,89 @@ test "tool definitions map current wire fields" {
     try std.testing.expect(tools.items[0].isTerminal);
 }
 
+test "session lifecycle requests map upstream wire fields" {
+    const allocator = std.testing.allocator;
+    const abort_encoded = try json_rpc.encodeRequest(
+        allocator,
+        6,
+        "session.abort",
+        .{ .sessionId = "session-1" },
+    );
+    defer allocator.free(abort_encoded);
+    const abort_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        abort_encoded,
+        .{},
+    );
+    defer abort_parsed.deinit();
+    try std.testing.expectEqualStrings(
+        "session-1",
+        abort_parsed.value.object.get("params").?.object.get("sessionId").?.string,
+    );
+
+    const model_encoded = try json_rpc.encodeRequest(
+        allocator,
+        7,
+        "session.model.switchTo",
+        WireModelSwitchRequest{
+            .sessionId = "session-1",
+            .modelId = "auto",
+            .autoTier = .intelligence,
+            .reasoningEffort = "high",
+            .reasoningSummary = .detailed,
+            .contextTier = .long_context,
+        },
+    );
+    defer allocator.free(model_encoded);
+    const model_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        model_encoded,
+        .{},
+    );
+    defer model_parsed.deinit();
+    const model_params = model_parsed.value.object.get("params").?.object;
+    try std.testing.expectEqualStrings("session-1", model_params.get("sessionId").?.string);
+    try std.testing.expectEqualStrings("auto", model_params.get("modelId").?.string);
+    try std.testing.expectEqualStrings("intelligence", model_params.get("autoTier").?.string);
+    try std.testing.expectEqualStrings("high", model_params.get("reasoningEffort").?.string);
+    try std.testing.expectEqualStrings("detailed", model_params.get("reasoningSummary").?.string);
+    try std.testing.expectEqualStrings("long_context", model_params.get("contextTier").?.string);
+
+    const log_encoded = try json_rpc.encodeRequest(
+        allocator,
+        8,
+        "session.log",
+        WireLogRequest{
+            .sessionId = "session-1",
+            .message = "Disk usage is high",
+            .level = .warning,
+            .type = "system",
+            .ephemeral = true,
+            .url = "https://example.com/status",
+            .tip = "Free some space.",
+        },
+    );
+    defer allocator.free(log_encoded);
+    const log_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        log_encoded,
+        .{},
+    );
+    defer log_parsed.deinit();
+    const log_params = log_parsed.value.object.get("params").?.object;
+    try std.testing.expectEqualStrings("warning", log_params.get("level").?.string);
+    try std.testing.expectEqualStrings("system", log_params.get("type").?.string);
+    try std.testing.expect(log_params.get("ephemeral").?.bool);
+    try std.testing.expectEqualStrings(
+        "https://example.com/status",
+        log_params.get("url").?.string,
+    );
+    try std.testing.expectEqualStrings("Free some space.", log_params.get("tip").?.string);
+}
+
 test "create request places the lowered provider in params" {
     const allocator = std.testing.allocator;
     const params = try buildCreateSessionRequest(.{
@@ -1259,6 +1733,80 @@ test "resume request places provider in params and disables nested resume" {
     const provider_value = request_params.get("provider").?.object;
     try std.testing.expectEqualStrings("anthropic", provider_value.get("type").?.string);
     try std.testing.expectEqualStrings("key", provider_value.get("apiKey").?.string);
+}
+
+test "session requests enable configured callbacks" {
+    const allocator = std.testing.allocator;
+    const user_input_handler = struct {
+        fn handle(
+            inner_allocator: std.mem.Allocator,
+            _: session_types.UserInputRequest,
+            _: ?*anyopaque,
+        ) !session_types.UserInputResponse {
+            return .{
+                .answer = try inner_allocator.dupe(u8, "Continue"),
+                .was_freeform = false,
+            };
+        }
+    }.handle;
+    const permission_handler = struct {
+        fn handle(
+            _: session_types.PermissionRequested,
+            _: ?*anyopaque,
+        ) !session_types.PermissionDecision {
+            return .no_result;
+        }
+    }.handle;
+
+    const create_params = try buildCreateSessionRequest(.{
+        .on_permission_request = permission_handler,
+        .on_user_input_request = user_input_handler,
+    }, &.{});
+    const create_encoded = try json_rpc.encodeRequest(
+        allocator,
+        11,
+        "session.create",
+        create_params,
+    );
+    defer allocator.free(create_encoded);
+    const create_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        create_encoded,
+        .{},
+    );
+    defer create_parsed.deinit();
+    try std.testing.expect(
+        create_parsed.value.object.get("params").?.object.get("requestUserInput").?.bool,
+    );
+    try std.testing.expect(
+        create_parsed.value.object.get("params").?.object.get("requestPermission").?.bool,
+    );
+
+    const resume_params = try buildResumeSessionRequest("session-1", .{
+        .on_permission_request = permission_handler,
+        .on_user_input_request = user_input_handler,
+    }, &.{});
+    const resume_encoded = try json_rpc.encodeRequest(
+        allocator,
+        12,
+        "session.resume",
+        resume_params,
+    );
+    defer allocator.free(resume_encoded);
+    const resume_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        resume_encoded,
+        .{},
+    );
+    defer resume_parsed.deinit();
+    try std.testing.expect(
+        resume_parsed.value.object.get("params").?.object.get("requestUserInput").?.bool,
+    );
+    try std.testing.expect(
+        resume_parsed.value.object.get("params").?.object.get("requestPermission").?.bool,
+    );
 }
 
 test "session requests omit a null provider" {

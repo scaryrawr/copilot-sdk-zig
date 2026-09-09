@@ -54,6 +54,7 @@ pub fn main(init: std.process.Init) !void {
                 received_delta = true;
                 try stdout.print("{s}", .{delta.delta_content});
             },
+            .assistant_reasoning, .assistant_reasoning_delta => {},
             .session_idle => break,
             .session_error => |err| {
                 try stdout.print("Copilot session error: {s}\n", .{err.message});

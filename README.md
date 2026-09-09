@@ -159,7 +159,46 @@ case. It does not parse `base_url`.
 
 `bearerTokenProvider`, `hasBearerTokenProvider`, named providers and models,
 `providerName`, `modelCapabilities`, `maxContextWindowTokens`, alternate SDK
-transports, new events, and callback dispatch are deferred.
+transports, and new events are deferred.
+
+## Handle legacy ask_user requests
+
+Set `SessionConfig.on_user_input_request` to enable Copilot's legacy
+question-and-answer `ask_user` tool. The handler receives the session ID,
+question, optional choices, and optional freeform setting. Its answer must be
+allocated with the provided allocator; the SDK frees it after responding.
+`UserInputRequest` exposes these values as `session_id`, `question`, `choices`,
+and `allow_freeform`; return the allocated `answer` and `was_freeform` in
+`UserInputResponse`. Set `user_input_context` to pass handler-specific state.
+
+```zig
+const session = try client.createSession(.{
+    .on_user_input_request = struct {
+        fn handle(
+            allocator: std.mem.Allocator,
+            request: copilot.UserInputRequest,
+            _: ?*anyopaque,
+        ) !copilot.UserInputResponse {
+            _ = request;
+            return .{
+                .answer = try allocator.dupe(u8, "Continue"),
+                .was_freeform = false,
+            };
+        }
+    }.handle,
+});
+```
+
+The SDK sends `requestUserInput: true` for session creation and resumption
+when this handler is configured, then synchronously dispatches inbound
+`userInput.request` RPCs to it.
+
+## Handle permission requests automatically
+
+Set `SessionConfig.on_permission_request` to handle `permission.requested`
+events while they are read. Return `.approve_once`, `.reject`, or `.no_result`;
+use `.json` with `respondToPermissionJson`'s decision format for advanced
+upstream decisions. `permission_context` passes handler-specific state.
 
 ## Examples
 
@@ -187,8 +226,11 @@ The SDK supports only the stdio transport. Typed high-level methods implement:
 - `session.create`
 - `session.resume`
 - `session.send`
+- `session.abort`
+- `session.model.switchTo`
 - `models.list`
 - `session.model.switchAutoTier`
+- `session.log`
 - `session.detach`
 - `session.event`
 - `session.permissions.handlePendingPermissionRequest`
@@ -210,6 +252,8 @@ It recognizes these session events:
 
 - `assistant.message`
 - `assistant.message_delta`
+- `assistant.reasoning`
+- `assistant.reasoning_delta`
 - `session.idle`
 - `session.error`
 - `permission.requested`
