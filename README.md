@@ -193,6 +193,13 @@ The SDK sends `requestUserInput: true` for session creation and resumption
 when this handler is configured, then synchronously dispatches inbound
 `userInput.request` RPCs to it.
 
+## Handle permission requests automatically
+
+Set `SessionConfig.on_permission_request` to handle `permission.requested`
+events while they are read. Return `.approve_once`, `.reject`, or `.no_result`;
+use `.json` with `respondToPermissionJson`'s decision format for advanced
+upstream decisions. `permission_context` passes handler-specific state.
+
 ## Examples
 
 Runnable projects are listed in [`examples`](examples). They cover streaming,
@@ -219,8 +226,11 @@ The SDK supports only the stdio transport. Typed high-level methods implement:
 - `session.create`
 - `session.resume`
 - `session.send`
+- `session.abort`
+- `session.model.switchTo`
 - `models.list`
 - `session.model.switchAutoTier`
+- `session.log`
 - `session.detach`
 - `session.event`
 - `session.permissions.handlePendingPermissionRequest`
@@ -242,6 +252,8 @@ It recognizes these session events:
 
 - `assistant.message`
 - `assistant.message_delta`
+- `assistant.reasoning`
+- `assistant.reasoning_delta`
 - `session.idle`
 - `session.error`
 - `permission.requested`

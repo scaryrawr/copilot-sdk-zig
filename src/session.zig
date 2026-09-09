@@ -10,6 +10,8 @@ pub const SessionConfig = struct {
     tools: []const Tool = &.{},
     system_message: ?SystemMessageConfig = null,
     request_permission: bool = false,
+    on_permission_request: ?PermissionHandler = null,
+    permission_context: ?*anyopaque = null,
     on_user_input_request: ?UserInputHandler = null,
     user_input_context: ?*anyopaque = null,
 };
@@ -22,6 +24,53 @@ pub const AutoTier = enum {
     efficiency,
     balance,
     intelligence,
+};
+
+pub const ReasoningSummary = enum {
+    none,
+    concise,
+    detailed,
+};
+
+pub const ContextTier = enum {
+    default,
+    long_context,
+};
+
+pub const ModelSwitchOptions = struct {
+    reasoning_effort: ?[]const u8 = null,
+    reasoning_summary: ?ReasoningSummary = null,
+    context_tier: ?ContextTier = null,
+    auto_tier: ?AutoTier = null,
+};
+
+pub const ModelSwitchResult = struct {
+    modelId: ?[]const u8 = null,
+    deferred: ?bool = null,
+    status: ?[]const u8 = null,
+    persistenceError: ?[]const u8 = null,
+    message: ?[]const u8 = null,
+    warning: ?[]const u8 = null,
+    deprecationWarnings: ?[]const []const u8 = null,
+};
+
+pub const AbortResult = struct {
+    success: bool,
+    @"error": ?[]const u8 = null,
+};
+
+pub const LogLevel = enum {
+    info,
+    warning,
+    @"error",
+};
+
+pub const LogOptions = struct {
+    level: LogLevel = .info,
+    log_type: ?[]const u8 = null,
+    ephemeral: bool = false,
+    url: ?[]const u8 = null,
+    tip: ?[]const u8 = null,
 };
 
 pub const AutoTierSwitchStatus = enum {
@@ -106,6 +155,17 @@ pub const AssistantMessageDelta = struct {
     message_id: []u8,
 };
 
+pub const AssistantReasoning = struct {
+    reasoning_id: []u8,
+    content: []u8,
+    rte: ?bool = null,
+};
+
+pub const AssistantReasoningDelta = struct {
+    reasoning_id: []u8,
+    delta_content: []u8,
+};
+
 pub const SessionError = struct {
     message: []u8,
 };
@@ -145,6 +205,21 @@ pub const PermissionRequested = struct {
         });
     }
 };
+
+pub const PermissionDecision = union(enum) {
+    approve_once,
+    reject: ?[]const u8,
+    /// Sends an advanced upstream decision shape. The JSON must describe an
+    /// object accepted by `session.permissions.handlePendingPermissionRequest`.
+    json: []const u8,
+    /// Leaves the permission request pending for manual resolution.
+    no_result,
+};
+
+pub const PermissionHandler = *const fn (
+    request: PermissionRequested,
+    context: ?*anyopaque,
+) anyerror!PermissionDecision;
 
 pub const ExternalToolRequested = struct {
     request_id: []u8,
@@ -211,6 +286,8 @@ pub const UnknownEvent = struct {
 pub const SessionEvent = union(enum) {
     assistant_message: AssistantMessage,
     assistant_message_delta: AssistantMessageDelta,
+    assistant_reasoning: AssistantReasoning,
+    assistant_reasoning_delta: AssistantReasoningDelta,
     session_idle: SessionIdle,
     session_error: SessionError,
     permission_requested: PermissionRequested,
@@ -223,6 +300,14 @@ pub const SessionEvent = union(enum) {
             .assistant_message_delta => |value| {
                 allocator.free(value.delta_content);
                 allocator.free(value.message_id);
+            },
+            .assistant_reasoning => |value| {
+                allocator.free(value.reasoning_id);
+                allocator.free(value.content);
+            },
+            .assistant_reasoning_delta => |value| {
+                allocator.free(value.reasoning_id);
+                allocator.free(value.delta_content);
             },
             .session_idle => |value| value.deinit(allocator),
             .session_error => |value| allocator.free(value.message),
@@ -299,6 +384,23 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
             .message_id = try allocator.dupe(u8, try requiredString(data, "messageId")),
         } };
     }
+    if (std.mem.eql(u8, event_type, "assistant.reasoning")) {
+        const reasoning_id = try allocator.dupe(u8, try requiredString(data, "reasoningId"));
+        errdefer allocator.free(reasoning_id);
+        return .{ .assistant_reasoning = .{
+            .reasoning_id = reasoning_id,
+            .content = try allocator.dupe(u8, try requiredString(data, "content")),
+            .rte = try optionalBool(data, "rte"),
+        } };
+    }
+    if (std.mem.eql(u8, event_type, "assistant.reasoning_delta")) {
+        const reasoning_id = try allocator.dupe(u8, try requiredString(data, "reasoningId"));
+        errdefer allocator.free(reasoning_id);
+        return .{ .assistant_reasoning_delta = .{
+            .reasoning_id = reasoning_id,
+            .delta_content = try allocator.dupe(u8, try requiredString(data, "deltaContent")),
+        } };
+    }
     if (std.mem.eql(u8, event_type, "session.idle")) {
         const raw_mode = try optionalString(data, "mode");
         return .{ .session_idle = .{
@@ -363,6 +465,39 @@ test "known and unknown events retain owned data" {
 
     try std.testing.expectEqualStrings("hi", known.assistant_message_delta.delta_content);
     try std.testing.expectEqualStrings("m1", known.assistant_message_delta.message_id);
+
+    const reasoning_json = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"assistant.reasoning","data":{"reasoningId":"r1","content":"I should inspect the source.","rte":true}}
+    ,
+        .{},
+    );
+    defer reasoning_json.deinit();
+    var reasoning = try parseEvent(allocator, reasoning_json.value);
+    defer reasoning.deinit(allocator);
+    try std.testing.expectEqualStrings("r1", reasoning.assistant_reasoning.reasoning_id);
+    try std.testing.expectEqualStrings(
+        "I should inspect the source.",
+        reasoning.assistant_reasoning.content,
+    );
+    try std.testing.expect(reasoning.assistant_reasoning.rte.?);
+
+    const reasoning_delta_json = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"assistant.reasoning_delta","data":{"reasoningId":"r1","deltaContent":"Inspect."}}
+    ,
+        .{},
+    );
+    defer reasoning_delta_json.deinit();
+    var reasoning_delta = try parseEvent(allocator, reasoning_delta_json.value);
+    defer reasoning_delta.deinit(allocator);
+    try std.testing.expectEqualStrings("r1", reasoning_delta.assistant_reasoning_delta.reasoning_id);
+    try std.testing.expectEqualStrings(
+        "Inspect.",
+        reasoning_delta.assistant_reasoning_delta.delta_content,
+    );
 
     const unknown_json = try std.json.parseFromSlice(
         std.json.Value,
