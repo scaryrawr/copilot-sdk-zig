@@ -159,7 +159,7 @@ case. It does not parse `base_url`.
 
 `bearerTokenProvider`, `hasBearerTokenProvider`, named providers and models,
 `providerName`, `modelCapabilities`, `maxContextWindowTokens`, alternate SDK
-transports, and new events are deferred.
+transports, and remaining unsupported event variants are deferred.
 
 ## Handle legacy ask_user requests
 
@@ -196,9 +196,10 @@ when this handler is configured, then synchronously dispatches inbound
 ## Handle permission requests automatically
 
 Set `SessionConfig.on_permission_request` to handle `permission.requested`
-events while they are read. Return `.approve_once`, `.reject`, or `.no_result`;
-use `.json` with `respondToPermissionJson`'s decision format for advanced
-upstream decisions. `permission_context` passes handler-specific state.
+events while they are read. Return `.approve_once`, `.{ .reject = "reason" }`,
+or `.no_result`; use `.{ .json = "{\"kind\":\"approve-once\"}" }` with
+`respondToPermissionJson`'s decision format for advanced upstream decisions.
+`permission_context` passes handler-specific state.
 
 ## Examples
 

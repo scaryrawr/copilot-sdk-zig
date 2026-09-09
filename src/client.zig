@@ -816,15 +816,15 @@ pub const Session = struct {
         if (event == .permission_requested) {
             const request = event.permission_requested;
             if (self.client.findPermissionHandler(self.id)) |handler| {
-                const decision = try handler.handler(request, handler.context);
+                const decision = handler.handler(request, handler.context) catch return event;
                 switch (decision) {
-                    .approve_once => try self.approvePermission(request.request_id),
-                    .reject => |feedback| try self.rejectPermission(request.request_id, feedback),
-                    .json => |decision_json| try self.respondToPermissionJson(
+                    .approve_once => self.approvePermission(request.request_id) catch return event,
+                    .reject => |feedback| self.rejectPermission(request.request_id, feedback) catch return event,
+                    .json => |decision_json| self.respondToPermissionJson(
                         request.request_id,
                         decision_json,
                         null,
-                    ),
+                    ) catch return event,
                     .no_result => {},
                 }
             }
@@ -892,6 +892,8 @@ pub const Session = struct {
                 .reasoningEffort = options.reasoning_effort,
                 .reasoningSummary = options.reasoning_summary,
                 .contextTier = options.context_tier,
+                .compactionDecision = options.compaction_decision,
+                .runCompactionPreflight = options.run_compaction_preflight,
             },
         );
     }
@@ -1084,6 +1086,8 @@ const WireModelSwitchRequest = struct {
     reasoningEffort: ?[]const u8 = null,
     reasoningSummary: ?session_types.ReasoningSummary = null,
     contextTier: ?session_types.ContextTier = null,
+    compactionDecision: ?[]const u8 = null,
+    runCompactionPreflight: ?bool = null,
 };
 
 const WireLogRequest = struct {
@@ -1550,6 +1554,114 @@ test "permission handler receives events and can leave requests pending" {
     try std.testing.expect(event == .permission_requested);
 }
 
+test "permission handler failures leave requests available for manual handling" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
+    defer {
+        client.removeSession("session-1");
+        client.events.deinit(allocator);
+        client.permission_handlers.deinit(allocator);
+        client.session_ids.deinit(allocator);
+    }
+
+    const handler = struct {
+        fn handle(
+            _: session_types.PermissionRequested,
+            _: ?*anyopaque,
+        ) !session_types.PermissionDecision {
+            return error.PermissionHandlerFailed;
+        }
+    }.handle;
+    try client.registerPermissionHandler("session-1", handler, null);
+
+    const parsed_event = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"shell","fullCommandText":"pwd"}}}
+    ,
+        .{},
+    );
+    defer parsed_event.deinit();
+    try client.events.append(allocator, .{
+        .session_id = try allocator.dupe(u8, "session-1"),
+        .event = try session_types.parseEvent(allocator, parsed_event.value),
+    });
+
+    const session = Session{ .client = &client, .id = "session-1" };
+    var event = try session.nextEvent();
+    defer event.deinit(allocator);
+    try std.testing.expectEqualStrings("permission-1", event.permission_requested.request_id);
+}
+
+test "permission response delivery failures leave requests available for manual handling" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "read-only", .data = "" });
+    const transport = try tmp.dir.openFile(
+        std.testing.io,
+        "read-only",
+        .{ .mode = .read_only },
+    );
+    defer transport.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = transport.writer(std.testing.io, &writer_buffer);
+
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = undefined,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
+    defer {
+        client.removeSession("session-1");
+        client.events.deinit(allocator);
+        client.permission_handlers.deinit(allocator);
+        client.session_ids.deinit(allocator);
+    }
+
+    const handler = struct {
+        fn handle(
+            _: session_types.PermissionRequested,
+            _: ?*anyopaque,
+        ) !session_types.PermissionDecision {
+            return .approve_once;
+        }
+    }.handle;
+    try client.registerPermissionHandler("session-1", handler, null);
+
+    const parsed_event = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"shell","fullCommandText":"pwd"}}}
+    ,
+        .{},
+    );
+    defer parsed_event.deinit();
+    try client.events.append(allocator, .{
+        .session_id = try allocator.dupe(u8, "session-1"),
+        .event = try session_types.parseEvent(allocator, parsed_event.value),
+    });
+
+    const session = Session{ .client = &client, .id = "session-1" };
+    var event = try session.nextEvent();
+    defer event.deinit(allocator);
+    try std.testing.expectEqualStrings("permission-1", event.permission_requested.request_id);
+}
+
 fn framedBody(allocator: std.mem.Allocator, framed: []const u8) ![]u8 {
     var reader = std.Io.Reader.fixed(framed);
     return json_rpc.readFrame(allocator, &reader);
@@ -1638,6 +1750,8 @@ test "session lifecycle requests map upstream wire fields" {
             .reasoningEffort = "high",
             .reasoningSummary = .detailed,
             .contextTier = .long_context,
+            .compactionDecision = "proceed",
+            .runCompactionPreflight = true,
         },
     );
     defer allocator.free(model_encoded);
@@ -1655,6 +1769,36 @@ test "session lifecycle requests map upstream wire fields" {
     try std.testing.expectEqualStrings("high", model_params.get("reasoningEffort").?.string);
     try std.testing.expectEqualStrings("detailed", model_params.get("reasoningSummary").?.string);
     try std.testing.expectEqualStrings("long_context", model_params.get("contextTier").?.string);
+    try std.testing.expectEqualStrings("proceed", model_params.get("compactionDecision").?.string);
+    try std.testing.expect(model_params.get("runCompactionPreflight").?.bool);
+
+    const model_result = try std.json.parseFromSlice(
+        session_types.ModelSwitchResult,
+        allocator,
+        \\{"modelId":"gpt-5.6","status":"confirmation_required","confirmation":{"targetModelDisplayName":"GPT 5.6","currentTokens":16000,"targetLimit":8192},"modelState":{"modelId":"gpt-5.4","reasoningEffort":"high","contextTier":"long_context","autoTier":"balance","pendingAutoTier":null,"activatingAutoTier":"intelligence"}}
+    ,
+        .{},
+    );
+    defer model_result.deinit();
+    try std.testing.expectEqualStrings(
+        "GPT 5.6",
+        model_result.value.confirmation.?.targetModelDisplayName,
+    );
+    try std.testing.expectEqual(@as(f64, 16_000), model_result.value.confirmation.?.currentTokens);
+    try std.testing.expectEqual(@as(f64, 8_192), model_result.value.confirmation.?.targetLimit);
+    try std.testing.expectEqualStrings("gpt-5.4", model_result.value.modelState.?.modelId.?);
+    try std.testing.expectEqual(
+        session_types.ContextTier.long_context,
+        model_result.value.modelState.?.contextTier.?,
+    );
+    try std.testing.expectEqual(
+        session_types.AutoTier.balance,
+        model_result.value.modelState.?.autoTier.?,
+    );
+    try std.testing.expectEqual(
+        session_types.AutoTier.intelligence,
+        model_result.value.modelState.?.activatingAutoTier.?,
+    );
 
     const log_encoded = try json_rpc.encodeRequest(
         allocator,
