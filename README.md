@@ -159,7 +159,36 @@ case. It does not parse `base_url`.
 
 `bearerTokenProvider`, `hasBearerTokenProvider`, named providers and models,
 `providerName`, `modelCapabilities`, `maxContextWindowTokens`, alternate SDK
-transports, new events, and callback dispatch are deferred.
+transports, and new events are deferred.
+
+## Handle legacy ask_user requests
+
+Set `SessionConfig.on_user_input_request` to enable Copilot's legacy
+question-and-answer `ask_user` tool. The handler receives the session ID,
+question, optional choices, and optional freeform setting. Its answer must be
+allocated with the provided allocator; the SDK frees it after responding.
+
+```zig
+const session = try client.createSession(.{
+    .on_user_input_request = struct {
+        fn handle(
+            allocator: std.mem.Allocator,
+            request: copilot.UserInputRequest,
+            _: ?*anyopaque,
+        ) !copilot.UserInputResponse {
+            _ = request;
+            return .{
+                .answer = try allocator.dupe(u8, "Continue"),
+                .was_freeform = false,
+            };
+        }
+    }.handle,
+});
+```
+
+The SDK sends `requestUserInput: true` for session creation and resumption
+when this handler is configured, then synchronously dispatches inbound
+`userInput.request` RPCs to it.
 
 ## Examples
 

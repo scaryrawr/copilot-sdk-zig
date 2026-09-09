@@ -10,6 +10,8 @@ pub const SessionConfig = struct {
     tools: []const Tool = &.{},
     system_message: ?SystemMessageConfig = null,
     request_permission: bool = false,
+    on_user_input_request: ?UserInputHandler = null,
+    user_input_context: ?*anyopaque = null,
 };
 
 pub const MessageOptions = struct {
@@ -58,6 +60,26 @@ pub const ToolHandler = *const fn (
     arguments_json: []const u8,
     context: ?*anyopaque,
 ) anyerror![]u8;
+
+pub const UserInputRequest = struct {
+    session_id: []const u8,
+    question: []const u8,
+    choices: ?[]const []const u8 = null,
+    allow_freeform: ?bool = null,
+};
+
+pub const UserInputResponse = struct {
+    answer: []u8,
+    was_freeform: bool,
+};
+
+/// Returns an answer allocated with `allocator`. The SDK frees the answer
+/// after sending the response to Copilot.
+pub const UserInputHandler = *const fn (
+    allocator: std.mem.Allocator,
+    request: UserInputRequest,
+    context: ?*anyopaque,
+) anyerror!UserInputResponse;
 
 pub const SystemMessageMode = enum {
     append,

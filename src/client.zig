@@ -43,6 +43,12 @@ const RegisteredTool = struct {
     }
 };
 
+const RegisteredUserInputHandler = struct {
+    session_id: []const u8,
+    handler: session_types.UserInputHandler,
+    context: ?*anyopaque,
+};
+
 pub const RpcHandler = *const fn (
     allocator: std.mem.Allocator,
     params_json: ?[]const u8,
@@ -76,6 +82,7 @@ pub const Client = struct {
     session_ids: std.ArrayList([]u8) = .empty,
     events: std.ArrayList(QueuedEvent) = .empty,
     tools: std.ArrayList(RegisteredTool) = .empty,
+    user_input_handlers: std.ArrayList(RegisteredUserInputHandler) = .empty,
     rpc_handlers: std.ArrayList(RegisteredRpcHandler) = .empty,
     dispatching_rpc_handler: bool = false,
 
@@ -169,6 +176,7 @@ pub const Client = struct {
         self.events.deinit(self.allocator);
         for (self.tools.items) |tool| tool.deinit(self.allocator);
         self.tools.deinit(self.allocator);
+        self.user_input_handlers.deinit(self.allocator);
         for (self.rpc_handlers.items) |handler| handler.deinit(self.allocator);
         self.rpc_handlers.deinit(self.allocator);
         for (self.session_ids.items) |id| self.allocator.free(id);
@@ -226,6 +234,7 @@ pub const Client = struct {
         };
         errdefer self.removeSession(id);
         try self.registerToolHandlers(id, config.tools);
+        try self.registerUserInputHandler(id, config.on_user_input_request, config.user_input_context);
         return .{ .client = self, .id = id };
     }
 
@@ -254,6 +263,7 @@ pub const Client = struct {
         };
         errdefer self.removeSession(id);
         try self.registerToolHandlers(id, config.tools);
+        try self.registerUserInputHandler(id, config.on_user_input_request, config.user_input_context);
         return .{ .client = self, .id = id };
     }
 
@@ -398,6 +408,11 @@ pub const Client = struct {
         method: []const u8,
         params: ?std.json.Value,
     ) !void {
+        if (std.mem.eql(u8, method, "userInput.request") and
+            self.findUserInputHandlerFromParams(params) != null)
+        {
+            return self.dispatchUserInputRequest(writer, id, params);
+        }
         const registered = self.findRpcHandler(method) orelse {
             try self.rejectServerRequest(writer, id);
             return;
@@ -453,6 +468,75 @@ pub const Client = struct {
         return null;
     }
 
+    fn dispatchUserInputRequest(
+        self: *Client,
+        writer: *std.Io.Writer,
+        id: std.json.Value,
+        params: ?std.json.Value,
+    ) !void {
+        const params_json = try stringifyRpcParams(self.allocator, params) orelse
+            return self.writeServerRequestError(writer, id, -32602, "invalid user input request");
+        defer self.allocator.free(params_json);
+
+        const parsed = std.json.parseFromSlice(
+            WireUserInputRequest,
+            self.allocator,
+            params_json,
+            .{ .allocate = .alloc_always, .ignore_unknown_fields = true },
+        ) catch {
+            return self.writeServerRequestError(writer, id, -32602, "invalid user input request");
+        };
+        defer parsed.deinit();
+
+        const registered = self.findUserInputHandler(parsed.value.sessionId) orelse
+            return self.writeServerRequestError(writer, id, -32000, "user input handler not registered");
+
+        self.dispatching_rpc_handler = true;
+        defer self.dispatching_rpc_handler = false;
+        const response = registered.handler(self.allocator, .{
+            .session_id = parsed.value.sessionId,
+            .question = parsed.value.question,
+            .choices = parsed.value.choices,
+            .allow_freeform = parsed.value.allowFreeform,
+        }, registered.context) catch |err| {
+            return self.writeServerRequestError(writer, id, -32000, @errorName(err));
+        };
+        defer self.allocator.free(response.answer);
+
+        const result_json = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .answer = response.answer,
+            .wasFreeform = response.was_freeform,
+        }, .{});
+        defer self.allocator.free(result_json);
+        const result = try std.json.parseFromSlice(
+            std.json.Value,
+            self.allocator,
+            result_json,
+            .{},
+        );
+        defer result.deinit();
+        const frame = try json_rpc.encodeSuccessResponse(self.allocator, id, result.value);
+        defer self.allocator.free(frame);
+        try json_rpc.writeFrame(writer, frame);
+    }
+
+    fn writeServerRequestError(
+        self: *Client,
+        writer: *std.Io.Writer,
+        id: std.json.Value,
+        code: i64,
+        message: []const u8,
+    ) !void {
+        const response = try json_rpc.encodeErrorResponse(
+            self.allocator,
+            id,
+            code,
+            message,
+        );
+        defer self.allocator.free(response);
+        try json_rpc.writeFrame(writer, response);
+    }
+
     fn queueSessionEvent(self: *Client, params_value: std.json.Value) !void {
         if (self.events.items.len >= max_queued_events) return error.EventQueueFull;
         const params = switch (params_value) {
@@ -498,6 +582,15 @@ pub const Client = struct {
             }
         }
 
+        var user_input_handler_index: usize = 0;
+        while (user_input_handler_index < self.user_input_handlers.items.len) {
+            if (std.mem.eql(u8, self.user_input_handlers.items[user_input_handler_index].session_id, session_id)) {
+                _ = self.user_input_handlers.orderedRemove(user_input_handler_index);
+            } else {
+                user_input_handler_index += 1;
+            }
+        }
+
         for (self.session_ids.items, 0..) |id, session_index| {
             if (std.mem.eql(u8, id, session_id)) {
                 self.allocator.free(id);
@@ -538,6 +631,45 @@ pub const Client = struct {
             }
         }
         return null;
+    }
+
+    fn registerUserInputHandler(
+        self: *Client,
+        session_id: []const u8,
+        handler: ?session_types.UserInputHandler,
+        context: ?*anyopaque,
+    ) !void {
+        const callback = handler orelse return;
+        try self.user_input_handlers.append(self.allocator, .{
+            .session_id = session_id,
+            .handler = callback,
+            .context = context,
+        });
+    }
+
+    fn findUserInputHandler(
+        self: *Client,
+        session_id: []const u8,
+    ) ?RegisteredUserInputHandler {
+        for (self.user_input_handlers.items) |registered| {
+            if (std.mem.eql(u8, registered.session_id, session_id)) return registered;
+        }
+        return null;
+    }
+
+    fn findUserInputHandlerFromParams(
+        self: *Client,
+        params: ?std.json.Value,
+    ) ?RegisteredUserInputHandler {
+        const object = switch (params orelse return null) {
+            .object => |object| object,
+            else => return null,
+        };
+        const session_id = switch (object.get("sessionId") orelse return null) {
+            .string => |value| value,
+            else => return null,
+        };
+        return self.findUserInputHandler(session_id);
     }
 
     fn nextEvent(self: *Client, session_id: []const u8) !session_types.SessionEvent {
@@ -839,6 +971,13 @@ const WireTool = struct {
     isTerminal: bool,
 };
 
+const WireUserInputRequest = struct {
+    sessionId: []const u8,
+    question: []const u8,
+    choices: ?[]const []const u8 = null,
+    allowFreeform: ?bool = null,
+};
+
 const CreateSessionRequest = struct {
     sessionId: ?[]const u8,
     model: ?[]const u8,
@@ -848,6 +987,7 @@ const CreateSessionRequest = struct {
     tools: []const WireTool,
     systemMessage: ?session_types.SystemMessageConfig,
     requestPermission: bool,
+    requestUserInput: bool,
 };
 
 const ResumeSessionRequest = struct {
@@ -859,6 +999,7 @@ const ResumeSessionRequest = struct {
     tools: []const WireTool,
     systemMessage: ?session_types.SystemMessageConfig,
     requestPermission: bool,
+    requestUserInput: bool,
     disableResume: bool = true,
 };
 
@@ -875,6 +1016,7 @@ fn buildCreateSessionRequest(
         .tools = tools,
         .systemMessage = config.system_message,
         .requestPermission = config.request_permission,
+        .requestUserInput = config.on_user_input_request != null,
     };
 }
 
@@ -892,6 +1034,7 @@ fn buildResumeSessionRequest(
         .tools = tools,
         .systemMessage = config.system_message,
         .requestPermission = config.request_permission,
+        .requestUserInput = config.on_user_input_request != null,
     };
 }
 
@@ -1159,6 +1302,69 @@ test "inbound RPC dispatch writes success and error frames" {
     );
 }
 
+test "user input handler receives requests and returns responses" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer client.user_input_handlers.deinit(allocator);
+
+    var called = false;
+    const handler = struct {
+        fn handle(
+            inner_allocator: std.mem.Allocator,
+            request: session_types.UserInputRequest,
+            context: ?*anyopaque,
+        ) !session_types.UserInputResponse {
+            const did_call: *bool = @ptrCast(@alignCast(context.?));
+            try std.testing.expectEqualStrings("session-1", request.session_id);
+            try std.testing.expectEqualStrings("Continue?", request.question);
+            try std.testing.expectEqual(@as(usize, 2), request.choices.?.len);
+            try std.testing.expectEqualStrings("Yes", request.choices.?[0]);
+            try std.testing.expectEqualStrings("No", request.choices.?[1]);
+            try std.testing.expect(request.allow_freeform.?);
+            did_call.* = true;
+            return .{
+                .answer = try inner_allocator.dupe(u8, "Yes"),
+                .was_freeform = false,
+            };
+        }
+    }.handle;
+    try client.registerUserInputHandler("session-1", handler, &called);
+
+    const parsed_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"session-1","question":"Continue?","choices":["Yes","No"],"allowFreeform":true}
+    ,
+        .{},
+    );
+    defer parsed_params.deinit();
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try client.dispatchServerRequest(
+        &output.writer,
+        .{ .integer = 3 },
+        "userInput.request",
+        parsed_params.value,
+    );
+
+    try std.testing.expect(called);
+    const body = try framedBody(allocator, output.written());
+    defer allocator.free(body);
+    const response = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer response.deinit();
+    const result = response.value.object.get("result").?.object;
+    try std.testing.expectEqualStrings("Yes", result.get("answer").?.string);
+    try std.testing.expect(!result.get("wasFreeform").?.bool);
+}
+
 fn framedBody(allocator: std.mem.Allocator, framed: []const u8) ![]u8 {
     var reader = std.Io.Reader.fixed(framed);
     return json_rpc.readFrame(allocator, &reader);
@@ -1259,6 +1465,64 @@ test "resume request places provider in params and disables nested resume" {
     const provider_value = request_params.get("provider").?.object;
     try std.testing.expectEqualStrings("anthropic", provider_value.get("type").?.string);
     try std.testing.expectEqualStrings("key", provider_value.get("apiKey").?.string);
+}
+
+test "session requests enable user input for a configured handler" {
+    const allocator = std.testing.allocator;
+    const handler = struct {
+        fn handle(
+            inner_allocator: std.mem.Allocator,
+            _: session_types.UserInputRequest,
+            _: ?*anyopaque,
+        ) !session_types.UserInputResponse {
+            return .{
+                .answer = try inner_allocator.dupe(u8, "Continue"),
+                .was_freeform = false,
+            };
+        }
+    }.handle;
+
+    const create_params = try buildCreateSessionRequest(.{
+        .on_user_input_request = handler,
+    }, &.{});
+    const create_encoded = try json_rpc.encodeRequest(
+        allocator,
+        11,
+        "session.create",
+        create_params,
+    );
+    defer allocator.free(create_encoded);
+    const create_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        create_encoded,
+        .{},
+    );
+    defer create_parsed.deinit();
+    try std.testing.expect(
+        create_parsed.value.object.get("params").?.object.get("requestUserInput").?.bool,
+    );
+
+    const resume_params = try buildResumeSessionRequest("session-1", .{
+        .on_user_input_request = handler,
+    }, &.{});
+    const resume_encoded = try json_rpc.encodeRequest(
+        allocator,
+        12,
+        "session.resume",
+        resume_params,
+    );
+    defer allocator.free(resume_encoded);
+    const resume_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        resume_encoded,
+        .{},
+    );
+    defer resume_parsed.deinit();
+    try std.testing.expect(
+        resume_parsed.value.object.get("params").?.object.get("requestUserInput").?.bool,
+    );
 }
 
 test "session requests omit a null provider" {
