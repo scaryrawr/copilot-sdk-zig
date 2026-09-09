@@ -42,16 +42,35 @@ pub const ModelSwitchOptions = struct {
     reasoning_summary: ?ReasoningSummary = null,
     context_tier: ?ContextTier = null,
     auto_tier: ?AutoTier = null,
+    compaction_decision: ?[]const u8 = null,
+    run_compaction_preflight: ?bool = null,
+};
+
+pub const ModelSwitchConfirmation = struct {
+    targetModelDisplayName: []const u8,
+    currentTokens: f64,
+    targetLimit: f64,
+};
+
+pub const CurrentModel = struct {
+    modelId: ?[]const u8 = null,
+    reasoningEffort: ?[]const u8 = null,
+    contextTier: ?ContextTier = null,
+    autoTier: ?AutoTier = null,
+    pendingAutoTier: ?AutoTier = null,
+    activatingAutoTier: ?AutoTier = null,
 };
 
 pub const ModelSwitchResult = struct {
     modelId: ?[]const u8 = null,
     deferred: ?bool = null,
     status: ?[]const u8 = null,
+    confirmation: ?ModelSwitchConfirmation = null,
     persistenceError: ?[]const u8 = null,
     message: ?[]const u8 = null,
     warning: ?[]const u8 = null,
     deprecationWarnings: ?[]const []const u8 = null,
+    modelState: ?CurrentModel = null,
 };
 
 pub const AbortResult = struct {
