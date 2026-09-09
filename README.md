@@ -167,6 +167,9 @@ Set `SessionConfig.on_user_input_request` to enable Copilot's legacy
 question-and-answer `ask_user` tool. The handler receives the session ID,
 question, optional choices, and optional freeform setting. Its answer must be
 allocated with the provided allocator; the SDK frees it after responding.
+`UserInputRequest` exposes these values as `session_id`, `question`, `choices`,
+and `allow_freeform`; return the allocated `answer` and `was_freeform` in
+`UserInputResponse`.
 
 ```zig
 const session = try client.createSession(.{
