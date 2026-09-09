@@ -169,7 +169,7 @@ question, optional choices, and optional freeform setting. Its answer must be
 allocated with the provided allocator; the SDK frees it after responding.
 `UserInputRequest` exposes these values as `session_id`, `question`, `choices`,
 and `allow_freeform`; return the allocated `answer` and `was_freeform` in
-`UserInputResponse`.
+`UserInputResponse`. Set `user_input_context` to pass handler-specific state.
 
 ```zig
 const session = try client.createSession(.{
