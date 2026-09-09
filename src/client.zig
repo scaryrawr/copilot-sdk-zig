@@ -1602,6 +1602,66 @@ test "permission handler failures leave requests available for manual handling" 
     try std.testing.expectEqualStrings("permission-1", event.permission_requested.request_id);
 }
 
+test "permission response delivery failures leave requests available for manual handling" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "read-only", .data = "" });
+    const transport = try tmp.dir.openFile(
+        std.testing.io,
+        "read-only",
+        .{ .mode = .read_only },
+    );
+    defer transport.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = transport.writer(std.testing.io, &writer_buffer);
+
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = undefined,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
+    defer {
+        client.removeSession("session-1");
+        client.events.deinit(allocator);
+        client.permission_handlers.deinit(allocator);
+        client.session_ids.deinit(allocator);
+    }
+
+    const handler = struct {
+        fn handle(
+            _: session_types.PermissionRequested,
+            _: ?*anyopaque,
+        ) !session_types.PermissionDecision {
+            return .approve_once;
+        }
+    }.handle;
+    try client.registerPermissionHandler("session-1", handler, null);
+
+    const parsed_event = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"shell","fullCommandText":"pwd"}}}
+    ,
+        .{},
+    );
+    defer parsed_event.deinit();
+    try client.events.append(allocator, .{
+        .session_id = try allocator.dupe(u8, "session-1"),
+        .event = try session_types.parseEvent(allocator, parsed_event.value),
+    });
+
+    const session = Session{ .client = &client, .id = "session-1" };
+    var event = try session.nextEvent();
+    defer event.deinit(allocator);
+    try std.testing.expectEqualStrings("permission-1", event.permission_requested.request_id);
+}
+
 fn framedBody(allocator: std.mem.Allocator, framed: []const u8) ![]u8 {
     var reader = std.Io.Reader.fixed(framed);
     return json_rpc.readFrame(allocator, &reader);
