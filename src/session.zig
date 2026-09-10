@@ -10,6 +10,8 @@ pub const SessionConfig = struct {
     tools: []const Tool = &.{},
     system_message: ?SystemMessageConfig = null,
     request_permission: bool = false,
+    enable_managed_settings: bool = false,
+    managed_settings: ?ManagedSettings = null,
     on_permission_request: ?PermissionHandler = null,
     permission_context: ?*anyopaque = null,
     on_user_input_request: ?UserInputHandler = null,
@@ -159,6 +161,17 @@ pub const SystemMessageConfig = struct {
     content: []const u8,
 };
 
+pub const ManagedSettings = struct {
+    permissions: ?ManagedSettingsPermissions = null,
+};
+
+pub const ManagedSettingsPermissions = struct {
+    disable_bypass_permissions_mode: ?[]const u8 = null,
+    deny: ?[]const []const u8 = null,
+    ask: ?[]const []const u8 = null,
+    allow: ?[]const []const u8 = null,
+};
+
 pub const AssistantMessage = struct {
     content: []u8,
     message_id: ?[]u8,
@@ -201,6 +214,7 @@ pub const SessionIdle = struct {
 pub const PermissionRequested = struct {
     request_id: []u8,
     permission_request_json: []u8,
+    managed_approval_required: bool = false,
 
     pub fn kind(self: PermissionRequested) !PermissionRequestKind {
         const parsed = try std.json.parseFromSlice(
@@ -235,10 +249,30 @@ pub const PermissionDecision = union(enum) {
     no_result,
 };
 
+pub const PermissionInvocation = struct {
+    session_id: []const u8,
+    managed_settings_enabled: bool,
+};
+
 pub const PermissionHandler = *const fn (
     request: PermissionRequested,
+    invocation: PermissionInvocation,
     context: ?*anyopaque,
 ) anyerror!PermissionDecision;
+
+/// Approves requests unless managed settings require the host or a person to
+/// make the decision.
+pub fn approveAll(
+    request: PermissionRequested,
+    invocation: PermissionInvocation,
+    _: ?*anyopaque,
+) anyerror!PermissionDecision {
+    if (invocation.managed_settings_enabled) {
+        return error.ApproveAllWithManagedSettings;
+    }
+    if (request.managed_approval_required) return .no_result;
+    return .approve_once;
+}
 
 pub const ExternalToolRequested = struct {
     request_id: []u8,
@@ -433,11 +467,26 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
         } };
     }
     if (std.mem.eql(u8, event_type, "permission.requested")) {
+        const permission_request = data.get("permissionRequest") orelse
+            return error.InvalidSessionEvent;
+        const permission_request_object = switch (permission_request) {
+            .object => |request_object| request_object,
+            else => return error.InvalidSessionEvent,
+        };
+        const managed_approval_required = if (permission_request_object.get(
+            "managedApprovalRequired",
+        )) |managed_value| switch (managed_value) {
+            .bool => |boolean| boolean,
+            else => return error.InvalidSessionEvent,
+        } else false;
+        const request_id = try allocator.dupe(u8, try requiredString(data, "requestId"));
+        errdefer allocator.free(request_id);
         return .{ .permission_requested = .{
-            .request_id = try allocator.dupe(u8, try requiredString(data, "requestId")),
+            .request_id = request_id,
+            .managed_approval_required = managed_approval_required,
             .permission_request_json = try std.json.Stringify.valueAlloc(
                 allocator,
-                data.get("permissionRequest") orelse return error.InvalidSessionEvent,
+                permission_request,
                 .{},
             ),
         } };
@@ -564,6 +613,7 @@ test "permission and external tool events retain opaque payloads" {
     defer permission.deinit(allocator);
 
     try std.testing.expectEqualStrings("p1", permission.permission_requested.request_id);
+    try std.testing.expect(!permission.permission_requested.managed_approval_required);
     try std.testing.expectEqualStrings(
         "{\"kind\":\"shell\",\"fullCommandText\":\"pwd\"}",
         permission.permission_requested.permission_request_json,
@@ -591,4 +641,103 @@ test "permission and external tool events retain opaque payloads" {
     defer arguments.deinit();
     try std.testing.expectEqualStrings("alpha", arguments.value.id);
     try std.testing.expectEqual(PermissionRequestKind.shell, try permission.permission_requested.kind());
+}
+
+test "permission event parses managed approval metadata" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"permission.requested","data":{"requestId":"p1","permissionRequest":{"kind":"future-kind","managedApprovalRequired":true}}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    var event = try parseEvent(allocator, parsed.value);
+    defer event.deinit(allocator);
+
+    try std.testing.expect(event.permission_requested.managed_approval_required);
+}
+
+test "permission event rejects invalid managed approval metadata" {
+    const allocator = std.testing.allocator;
+    const invalid_values = [_][]const u8{
+        "null",
+        "\"true\"",
+        "1",
+        "[]",
+        "{}",
+    };
+
+    for (invalid_values) |invalid_value| {
+        const json = try std.fmt.allocPrint(
+            allocator,
+            "{{\"type\":\"permission.requested\",\"data\":{{\"requestId\":\"p1\",\"permissionRequest\":{{\"managedApprovalRequired\":{s}}}}}}}",
+            .{invalid_value},
+        );
+        defer allocator.free(json);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+        defer parsed.deinit();
+        try std.testing.expectError(error.InvalidSessionEvent, parseEvent(allocator, parsed.value));
+    }
+}
+
+test "permission event rejects non-object request" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"permission.requested","data":{"requestId":"p1","permissionRequest":"invalid"}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    try std.testing.expectError(error.InvalidSessionEvent, parseEvent(allocator, parsed.value));
+}
+
+test "approveAll matches official permission semantics" {
+    const ordinary = PermissionRequested{
+        .request_id = @constCast("p1"),
+        .permission_request_json = @constCast("{}"),
+    };
+    try std.testing.expectEqual(
+        PermissionDecision.approve_once,
+        try approveAll(ordinary, .{
+            .session_id = "session-1",
+            .managed_settings_enabled = false,
+        }, null),
+    );
+
+    const unknown_kind = PermissionRequested{
+        .request_id = @constCast("p2"),
+        .permission_request_json = @constCast("{\"kind\":\"future-kind\"}"),
+    };
+    try std.testing.expectEqual(
+        PermissionDecision.approve_once,
+        try approveAll(unknown_kind, .{
+            .session_id = "session-1",
+            .managed_settings_enabled = false,
+        }, null),
+    );
+
+    const managed = PermissionRequested{
+        .request_id = @constCast("p3"),
+        .permission_request_json = @constCast("{}"),
+        .managed_approval_required = true,
+    };
+    try std.testing.expectEqual(
+        PermissionDecision.no_result,
+        try approveAll(managed, .{
+            .session_id = "session-1",
+            .managed_settings_enabled = false,
+        }, null),
+    );
+
+    try std.testing.expectError(
+        error.ApproveAllWithManagedSettings,
+        approveAll(ordinary, .{
+            .session_id = "session-1",
+            .managed_settings_enabled = true,
+        }, null),
+    );
 }
