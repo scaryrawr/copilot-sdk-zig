@@ -196,10 +196,72 @@ when this handler is configured, then synchronously dispatches inbound
 ## Handle permission requests automatically
 
 Set `SessionConfig.on_permission_request` to handle `permission.requested`
-events while they are read. Return `.approve_once`, `.{ .reject = "reason" }`,
-or `.no_result`; use `.{ .json = "{\"kind\":\"approve-once\"}" }` with
+events while they are read. Use the prebuilt `copilot.approveAll` handler to
+approve ordinary requests without manually responding from the event loop:
+
+```zig
+const session = try client.createSession(.{
+    .on_permission_request = copilot.approveAll,
+});
+```
+
+`approveAll` matches the official SDK behavior. It returns an error instead of
+approving when either managed-settings source is configured, leaves requests
+with `managedApprovalRequired: true` pending, and approves every other valid
+request once. The SDK rejects a permission event if
+`managedApprovalRequired` is present but is not a boolean.
+
+Managed settings may be fetched by the runtime or injected by the host:
+
+```zig
+const session = try client.createSession(.{
+    .enable_managed_settings = true,
+    .managed_settings = .{
+        .permissions = .{
+            .deny = &.{"Shell(git push *)"},
+            .ask = &.{"Write(**)"},
+        },
+    },
+    .on_permission_request = customPermissionHandler,
+});
+```
+
+Do not combine `approveAll` with either managed-settings source. Both
+`.enable_managed_settings = true` and a non-null `.managed_settings` set
+`PermissionInvocation.managed_settings_enabled`, causing `approveAll` to fail
+without sending a decision so the request remains available for manual
+handling.
+
+Custom handlers receive SDK-owned invocation metadata and the existing opaque
+context:
+
+```zig
+fn customPermissionHandler(
+    request: copilot.PermissionRequested,
+    invocation: copilot.PermissionInvocation,
+    context: ?*anyopaque,
+) !copilot.PermissionDecision {
+    _ = context;
+    if (invocation.managed_settings_enabled or
+        request.managed_approval_required)
+    {
+        return .no_result;
+    }
+    return .approve_once;
+}
+```
+
+Return `.approve_once`, `.{ .reject = "reason" }`, or `.no_result`; use
+`.{ .json = "{\"kind\":\"approve-once\"}" }` with
 `respondToPermissionJson`'s decision format for advanced upstream decisions.
-`permission_context` passes handler-specific state.
+`permission_context` passes handler-specific state. Configuring a handler
+automatically sends `requestPermission: true` on both create and resume, and
+the handler must be supplied again when resuming because callbacks are
+process-local.
+
+Automatically handled permission events remain observable through
+`Session.nextEvent`. If a handler or response delivery fails, the SDK sends no
+decision and returns the event for manual handling.
 
 ## Examples
 

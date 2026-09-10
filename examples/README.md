@@ -5,10 +5,10 @@ local path.
 
 | Example | Demonstrates |
 | --- | --- |
-| [`basic`](basic) | Sending a prompt and streaming response deltas |
+| [`basic`](basic) | Sending a prompt, streaming response deltas, and automatically approving ordinary permissions |
 | [`custom-tools`](custom-tools) | Declaring a JSON Schema tool and returning its result |
 | [`external-tools`](external-tools) | Manually resolving a declaration-only tool request |
-| [`permissions`](permissions) | Inspecting and approving tool permission requests |
+| [`permissions`](permissions) | Inspecting permission requests and applying a selective manual policy |
 | [`prompt-customization`](prompt-customization) | Appending instructions to the system message |
 | [`send-and-wait`](send-and-wait) | Waiting for one complete non-streaming response |
 | [`join-session`](join-session) | Joining a foreground CLI session from an extension |

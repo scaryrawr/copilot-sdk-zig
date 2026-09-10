@@ -52,6 +52,7 @@ const RegisteredUserInputHandler = struct {
 const RegisteredPermissionHandler = struct {
     session_id: []const u8,
     handler: session_types.PermissionHandler,
+    managed_settings_enabled: bool,
     context: ?*anyopaque,
 };
 
@@ -242,7 +243,7 @@ pub const Client = struct {
         };
         errdefer self.removeSession(id);
         try self.registerToolHandlers(id, config.tools);
-        try self.registerPermissionHandler(id, config.on_permission_request, config.permission_context);
+        try self.registerPermissionHandler(id, config);
         try self.registerUserInputHandler(id, config.on_user_input_request, config.user_input_context);
         return .{ .client = self, .id = id };
     }
@@ -272,7 +273,7 @@ pub const Client = struct {
         };
         errdefer self.removeSession(id);
         try self.registerToolHandlers(id, config.tools);
-        try self.registerPermissionHandler(id, config.on_permission_request, config.permission_context);
+        try self.registerPermissionHandler(id, config);
         try self.registerUserInputHandler(id, config.on_user_input_request, config.user_input_context);
         return .{ .client = self, .id = id };
     }
@@ -669,14 +670,14 @@ pub const Client = struct {
     fn registerPermissionHandler(
         self: *Client,
         session_id: []const u8,
-        handler: ?session_types.PermissionHandler,
-        context: ?*anyopaque,
+        config: session_types.SessionConfig,
     ) !void {
-        const callback = handler orelse return;
+        const callback = config.on_permission_request orelse return;
         try self.permission_handlers.append(self.allocator, .{
             .session_id = session_id,
             .handler = callback,
-            .context = context,
+            .managed_settings_enabled = managedSettingsEnabled(config),
+            .context = config.permission_context,
         });
     }
 
@@ -816,7 +817,14 @@ pub const Session = struct {
         if (event == .permission_requested) {
             const request = event.permission_requested;
             if (self.client.findPermissionHandler(self.id)) |handler| {
-                const decision = handler.handler(request, handler.context) catch return event;
+                const decision = handler.handler(
+                    request,
+                    .{
+                        .session_id = self.id,
+                        .managed_settings_enabled = handler.managed_settings_enabled,
+                    },
+                    handler.context,
+                ) catch return event;
                 switch (decision) {
                     .approve_once => self.approvePermission(request.request_id) catch return event,
                     .reject => |feedback| self.rejectPermission(request.request_id, feedback) catch return event,
@@ -1107,6 +1115,17 @@ const WireUserInputRequest = struct {
     allowFreeform: ?bool = null,
 };
 
+const WireManagedSettingsPermissions = struct {
+    disableBypassPermissionsMode: ?[]const u8 = null,
+    deny: ?[]const []const u8 = null,
+    ask: ?[]const []const u8 = null,
+    allow: ?[]const []const u8 = null,
+};
+
+const WireManagedSettings = struct {
+    permissions: ?WireManagedSettingsPermissions = null,
+};
+
 const CreateSessionRequest = struct {
     sessionId: ?[]const u8,
     model: ?[]const u8,
@@ -1117,6 +1136,8 @@ const CreateSessionRequest = struct {
     systemMessage: ?session_types.SystemMessageConfig,
     requestPermission: bool,
     requestUserInput: bool,
+    enableManagedSettings: bool,
+    managedSettings: ?WireManagedSettings,
 };
 
 const ResumeSessionRequest = struct {
@@ -1129,8 +1150,28 @@ const ResumeSessionRequest = struct {
     systemMessage: ?session_types.SystemMessageConfig,
     requestPermission: bool,
     requestUserInput: bool,
+    enableManagedSettings: bool,
+    managedSettings: ?WireManagedSettings,
     disableResume: bool = true,
 };
+
+fn managedSettingsEnabled(config: session_types.SessionConfig) bool {
+    return config.enable_managed_settings or config.managed_settings != null;
+}
+
+fn lowerManagedSettings(
+    settings: ?session_types.ManagedSettings,
+) ?WireManagedSettings {
+    const value = settings orelse return null;
+    return .{
+        .permissions = if (value.permissions) |permissions| .{
+            .disableBypassPermissionsMode = permissions.disable_bypass_permissions_mode,
+            .deny = permissions.deny,
+            .ask = permissions.ask,
+            .allow = permissions.allow,
+        } else null,
+    };
+}
 
 fn buildCreateSessionRequest(
     config: session_types.SessionConfig,
@@ -1146,6 +1187,8 @@ fn buildCreateSessionRequest(
         .systemMessage = config.system_message,
         .requestPermission = config.request_permission or config.on_permission_request != null,
         .requestUserInput = config.on_user_input_request != null,
+        .enableManagedSettings = config.enable_managed_settings,
+        .managedSettings = lowerManagedSettings(config.managed_settings),
     };
 }
 
@@ -1164,6 +1207,8 @@ fn buildResumeSessionRequest(
         .systemMessage = config.system_message,
         .requestPermission = config.request_permission or config.on_permission_request != null,
         .requestUserInput = config.on_user_input_request != null,
+        .enableManagedSettings = config.enable_managed_settings,
+        .managedSettings = lowerManagedSettings(config.managed_settings),
     };
 }
 
@@ -1520,10 +1565,13 @@ test "permission handler receives events and can leave requests pending" {
     const handler = struct {
         fn handle(
             request: session_types.PermissionRequested,
+            invocation: session_types.PermissionInvocation,
             context: ?*anyopaque,
         ) !session_types.PermissionDecision {
             const did_call: *bool = @ptrCast(@alignCast(context.?));
             try std.testing.expectEqualStrings("permission-1", request.request_id);
+            try std.testing.expectEqualStrings("session-1", invocation.session_id);
+            try std.testing.expect(!invocation.managed_settings_enabled);
             try std.testing.expectEqualStrings(
                 "{\"kind\":\"shell\",\"fullCommandText\":\"pwd\"}",
                 request.permission_request_json,
@@ -1532,12 +1580,83 @@ test "permission handler receives events and can leave requests pending" {
             return .no_result;
         }
     }.handle;
-    try client.registerPermissionHandler("session-1", handler, &called);
+    try client.registerPermissionHandler("session-1", .{
+        .on_permission_request = handler,
+        .permission_context = &called,
+    });
 
     const parsed_event = try std.json.parseFromSlice(
         std.json.Value,
         allocator,
         \\{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"shell","fullCommandText":"pwd"}}}
+    ,
+        .{},
+    );
+    defer parsed_event.deinit();
+    try client.events.append(allocator, .{
+        .session_id = try allocator.dupe(u8, "session-1"),
+        .event = try session_types.parseEvent(allocator, parsed_event.value),
+    });
+
+    const session = Session{ .client = &client, .id = "session-1" };
+    var event = try session.nextEvent();
+    defer event.deinit(allocator);
+    try std.testing.expect(called);
+    try std.testing.expect(event == .permission_requested);
+
+    try client.registerPermissionHandler("session-2", .{
+        .enable_managed_settings = true,
+        .on_permission_request = handler,
+        .permission_context = &called,
+    });
+    try std.testing.expect(
+        client.findPermissionHandler("session-2").?.managed_settings_enabled,
+    );
+}
+
+test "permission handler receives injected managed settings metadata" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
+    defer {
+        client.removeSession("session-1");
+        client.events.deinit(allocator);
+        client.permission_handlers.deinit(allocator);
+        client.session_ids.deinit(allocator);
+    }
+
+    var called = false;
+    const handler = struct {
+        fn handle(
+            _: session_types.PermissionRequested,
+            invocation: session_types.PermissionInvocation,
+            context: ?*anyopaque,
+        ) !session_types.PermissionDecision {
+            const did_call: *bool = @ptrCast(@alignCast(context.?));
+            try std.testing.expectEqualStrings("session-1", invocation.session_id);
+            try std.testing.expect(invocation.managed_settings_enabled);
+            did_call.* = true;
+            return .no_result;
+        }
+    }.handle;
+    try client.registerPermissionHandler("session-1", .{
+        .managed_settings = .{},
+        .on_permission_request = handler,
+        .permission_context = &called,
+    });
+
+    const parsed_event = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"future-kind"}}}
     ,
         .{},
     );
@@ -1576,12 +1695,15 @@ test "permission handler failures leave requests available for manual handling" 
     const handler = struct {
         fn handle(
             _: session_types.PermissionRequested,
+            _: session_types.PermissionInvocation,
             _: ?*anyopaque,
         ) !session_types.PermissionDecision {
             return error.PermissionHandlerFailed;
         }
     }.handle;
-    try client.registerPermissionHandler("session-1", handler, null);
+    try client.registerPermissionHandler("session-1", .{
+        .on_permission_request = handler,
+    });
 
     const parsed_event = try std.json.parseFromSlice(
         std.json.Value,
@@ -1600,6 +1722,71 @@ test "permission handler failures leave requests available for manual handling" 
     var event = try session.nextEvent();
     defer event.deinit(allocator);
     try std.testing.expectEqualStrings("permission-1", event.permission_requested.request_id);
+}
+
+test "approveAll leaves managed permission events observable" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    try client.session_ids.append(allocator, try allocator.dupe(u8, "managed-session"));
+    try client.session_ids.append(allocator, try allocator.dupe(u8, "managed-request"));
+    defer {
+        client.removeSession("managed-session");
+        client.removeSession("managed-request");
+        client.events.deinit(allocator);
+        client.permission_handlers.deinit(allocator);
+        client.session_ids.deinit(allocator);
+    }
+    try client.registerPermissionHandler("managed-session", .{
+        .enable_managed_settings = true,
+        .on_permission_request = session_types.approveAll,
+    });
+    try client.registerPermissionHandler("managed-request", .{
+        .on_permission_request = session_types.approveAll,
+    });
+
+    const managed_session_event = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"read"}}}
+    ,
+        .{},
+    );
+    defer managed_session_event.deinit();
+    try client.events.append(allocator, .{
+        .session_id = try allocator.dupe(u8, "managed-session"),
+        .event = try session_types.parseEvent(allocator, managed_session_event.value),
+    });
+
+    const managed_request_event = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"permission.requested","data":{"requestId":"permission-2","permissionRequest":{"kind":"future-kind","managedApprovalRequired":true}}}
+    ,
+        .{},
+    );
+    defer managed_request_event.deinit();
+    try client.events.append(allocator, .{
+        .session_id = try allocator.dupe(u8, "managed-request"),
+        .event = try session_types.parseEvent(allocator, managed_request_event.value),
+    });
+
+    const managed_session = Session{ .client = &client, .id = "managed-session" };
+    var first = try managed_session.nextEvent();
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("permission-1", first.permission_requested.request_id);
+
+    const managed_request = Session{ .client = &client, .id = "managed-request" };
+    var second = try managed_request.nextEvent();
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("permission-2", second.permission_requested.request_id);
 }
 
 test "permission response delivery failures leave requests available for manual handling" {
@@ -1636,12 +1823,15 @@ test "permission response delivery failures leave requests available for manual 
     const handler = struct {
         fn handle(
             _: session_types.PermissionRequested,
+            _: session_types.PermissionInvocation,
             _: ?*anyopaque,
         ) !session_types.PermissionDecision {
             return .approve_once;
         }
     }.handle;
-    try client.registerPermissionHandler("session-1", handler, null);
+    try client.registerPermissionHandler("session-1", .{
+        .on_permission_request = handler,
+    });
 
     const parsed_event = try std.json.parseFromSlice(
         std.json.Value,
@@ -1896,6 +2086,7 @@ test "session requests enable configured callbacks" {
     const permission_handler = struct {
         fn handle(
             _: session_types.PermissionRequested,
+            _: session_types.PermissionInvocation,
             _: ?*anyopaque,
         ) !session_types.PermissionDecision {
             return .no_result;
@@ -1950,6 +2141,87 @@ test "session requests enable configured callbacks" {
     );
     try std.testing.expect(
         resume_parsed.value.object.get("params").?.object.get("requestPermission").?.bool,
+    );
+}
+
+test "session requests lower both managed settings sources" {
+    const allocator = std.testing.allocator;
+    const permission_handler = struct {
+        fn handle(
+            _: session_types.PermissionRequested,
+            _: session_types.PermissionInvocation,
+            _: ?*anyopaque,
+        ) !session_types.PermissionDecision {
+            return .no_result;
+        }
+    }.handle;
+    const config = session_types.SessionConfig{
+        .enable_managed_settings = false,
+        .managed_settings = .{
+            .permissions = .{
+                .disable_bypass_permissions_mode = "allow-auto-only",
+                .deny = &.{"Shell(git push *)"},
+                .ask = &.{"Read(**)"},
+                .allow = &.{"Read(src/**)"},
+            },
+        },
+        .on_permission_request = permission_handler,
+    };
+
+    try std.testing.expect(managedSettingsEnabled(config));
+
+    const create_encoded = try json_rpc.encodeRequest(
+        allocator,
+        13,
+        "session.create",
+        try buildCreateSessionRequest(config, &.{}),
+    );
+    defer allocator.free(create_encoded);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"session.create\",\"params\":{\"streaming\":false,\"tools\":[],\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":false,\"managedSettings\":{\"permissions\":{\"disableBypassPermissionsMode\":\"allow-auto-only\",\"deny\":[\"Shell(git push *)\"],\"ask\":[\"Read(**)\"],\"allow\":[\"Read(src/**)\"]}}}}",
+        create_encoded,
+    );
+
+    const resume_encoded = try json_rpc.encodeRequest(
+        allocator,
+        14,
+        "session.resume",
+        try buildResumeSessionRequest("session-1", config, &.{}),
+    );
+    defer allocator.free(resume_encoded);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"session-1\",\"streaming\":false,\"tools\":[],\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":false,\"managedSettings\":{\"permissions\":{\"disableBypassPermissionsMode\":\"allow-auto-only\",\"deny\":[\"Shell(git push *)\"],\"ask\":[\"Read(**)\"],\"allow\":[\"Read(src/**)\"]}},\"disableResume\":true}}",
+        resume_encoded,
+    );
+
+    const fetched_config = session_types.SessionConfig{
+        .enable_managed_settings = true,
+        .on_permission_request = permission_handler,
+    };
+    try std.testing.expect(managedSettingsEnabled(fetched_config));
+
+    const fetched_create_encoded = try json_rpc.encodeRequest(
+        allocator,
+        15,
+        "session.create",
+        try buildCreateSessionRequest(fetched_config, &.{}),
+    );
+    defer allocator.free(fetched_create_encoded);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"session.create\",\"params\":{\"streaming\":false,\"tools\":[],\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":true}}",
+        fetched_create_encoded,
+    );
+
+    const fetched_resume_encoded = try json_rpc.encodeRequest(
+        allocator,
+        16,
+        "session.resume",
+        try buildResumeSessionRequest("session-1", fetched_config, &.{}),
+    );
+    defer allocator.free(fetched_resume_encoded);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"session-1\",\"streaming\":false,\"tools\":[],\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":true,\"disableResume\":true}}",
+        fetched_resume_encoded,
     );
 }
 

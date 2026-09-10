@@ -25,7 +25,7 @@ pub fn main(init: std.process.Init) !void {
     var session = try client.createSession(.{
         .model = "gpt-5.6-luna",
         .streaming = true,
-        .request_permission = true,
+        .on_permission_request = copilot.approveAll,
     });
     defer session.disconnect() catch {};
 
@@ -61,9 +61,7 @@ pub fn main(init: std.process.Init) !void {
                 try stdout.flush();
                 return error.CopilotSessionError;
             },
-            .permission_requested => |request| {
-                try session.approvePermission(request.request_id);
-            },
+            .permission_requested => {},
             .external_tool_requested => {},
             .unknown => {},
         }
