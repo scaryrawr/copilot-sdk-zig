@@ -824,17 +824,37 @@ pub const Session = struct {
                         .managed_settings_enabled = handler.managed_settings_enabled,
                     },
                     handler.context,
-                ) catch return event;
+                ) catch |err| {
+                    event.permission_requested.automatic_handling =
+                        .{ .handler_failed = err };
+                    return event;
+                };
                 switch (decision) {
-                    .approve_once => self.approvePermission(request.request_id) catch return event,
-                    .reject => |feedback| self.rejectPermission(request.request_id, feedback) catch return event,
+                    .approve_once => self.approvePermission(request.request_id) catch |err| {
+                        event.permission_requested.automatic_handling =
+                            .{ .delivery_failed = err };
+                        return event;
+                    },
+                    .reject => |feedback| self.rejectPermission(request.request_id, feedback) catch |err| {
+                        event.permission_requested.automatic_handling =
+                            .{ .delivery_failed = err };
+                        return event;
+                    },
                     .json => |decision_json| self.respondToPermissionJson(
                         request.request_id,
                         decision_json,
                         null,
-                    ) catch return event,
-                    .no_result => {},
+                    ) catch |err| {
+                        event.permission_requested.automatic_handling =
+                            .{ .delivery_failed = err };
+                        return event;
+                    },
+                    .no_result => {
+                        event.permission_requested.automatic_handling = .no_result;
+                        return event;
+                    },
                 }
+                event.permission_requested.automatic_handling = .handled;
             }
         }
         return event;
@@ -1603,6 +1623,7 @@ test "permission handler receives events and can leave requests pending" {
     defer event.deinit(allocator);
     try std.testing.expect(called);
     try std.testing.expect(event == .permission_requested);
+    try std.testing.expect(event.permission_requested.automatic_handling == .no_result);
 
     try client.registerPermissionHandler("session-2", .{
         .enable_managed_settings = true,
@@ -1671,6 +1692,7 @@ test "permission handler receives injected managed settings metadata" {
     defer event.deinit(allocator);
     try std.testing.expect(called);
     try std.testing.expect(event == .permission_requested);
+    try std.testing.expect(event.permission_requested.automatic_handling == .no_result);
 }
 
 test "permission handler failures leave requests available for manual handling" {
@@ -1722,6 +1744,13 @@ test "permission handler failures leave requests available for manual handling" 
     var event = try session.nextEvent();
     defer event.deinit(allocator);
     try std.testing.expectEqualStrings("permission-1", event.permission_requested.request_id);
+    switch (event.permission_requested.automatic_handling) {
+        .handler_failed => |err| try std.testing.expectEqual(
+            error.PermissionHandlerFailed,
+            err,
+        ),
+        else => return error.TestExpectedHandlerFailure,
+    }
 }
 
 test "approveAll leaves managed permission events observable" {
@@ -1782,14 +1811,178 @@ test "approveAll leaves managed permission events observable" {
     var first = try managed_session.nextEvent();
     defer first.deinit(allocator);
     try std.testing.expectEqualStrings("permission-1", first.permission_requested.request_id);
+    switch (first.permission_requested.automatic_handling) {
+        .handler_failed => |err| try std.testing.expectEqual(
+            error.ApproveAllWithManagedSettings,
+            err,
+        ),
+        else => return error.TestExpectedHandlerFailure,
+    }
 
     const managed_request = Session{ .client = &client, .id = "managed-request" };
     var second = try managed_request.nextEvent();
     defer second.deinit(allocator);
     try std.testing.expectEqualStrings("permission-2", second.permission_requested.request_id);
+    try std.testing.expect(second.permission_requested.automatic_handling == .no_result);
 }
 
-test "permission response delivery failures leave requests available for manual handling" {
+fn runAutomaticPermissionRpc(
+    allocator: std.mem.Allocator,
+    response_body: []const u8,
+) !struct {
+    handling: session_types.AutomaticPermissionHandling,
+    request_body: []u8,
+} {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const response_frame = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ response_body.len, response_body },
+    );
+    defer allocator.free(response_frame);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "response",
+        .data = response_frame,
+    });
+
+    const response_file = try tmp.dir.openFile(
+        std.testing.io,
+        "response",
+        .{ .mode = .read_only },
+    );
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+
+    const request_file = try tmp.dir.createFile(
+        std.testing.io,
+        "request",
+        .{},
+    );
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
+    defer {
+        client.removeSession("session-1");
+        client.events.deinit(allocator);
+        client.permission_handlers.deinit(allocator);
+        client.session_ids.deinit(allocator);
+    }
+
+    const handler = struct {
+        fn handle(
+            _: session_types.PermissionRequested,
+            _: session_types.PermissionInvocation,
+            _: ?*anyopaque,
+        ) !session_types.PermissionDecision {
+            return .approve_once;
+        }
+    }.handle;
+    try client.registerPermissionHandler("session-1", .{
+        .on_permission_request = handler,
+    });
+
+    const parsed_event = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"shell","fullCommandText":"pwd"}}}
+    ,
+        .{},
+    );
+    defer parsed_event.deinit();
+    try client.events.append(allocator, .{
+        .session_id = try allocator.dupe(u8, "session-1"),
+        .event = try session_types.parseEvent(allocator, parsed_event.value),
+    });
+
+    const session = Session{ .client = &client, .id = "session-1" };
+    var event = try session.nextEvent();
+    defer event.deinit(allocator);
+
+    const request_bytes = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "request",
+        allocator,
+        .limited(4096),
+    );
+    defer allocator.free(request_bytes);
+    const request_body = try framedBody(allocator, request_bytes);
+    errdefer allocator.free(request_body);
+    return .{
+        .handling = event.permission_requested.automatic_handling,
+        .request_body = request_body,
+    };
+}
+
+test "successful automatic permission handling writes one exact RPC and marks the event handled" {
+    const allocator = std.testing.allocator;
+    const result = try runAutomaticPermissionRpc(allocator,
+        \\{"jsonrpc":"2.0","id":1,"result":{"success":true}}
+    );
+    defer allocator.free(result.request_body);
+
+    try std.testing.expect(result.handling == .handled);
+    const request = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        result.request_body,
+        .{},
+    );
+    defer request.deinit();
+    try std.testing.expectEqualStrings(
+        "session.permissions.handlePendingPermissionRequest",
+        request.value.object.get("method").?.string,
+    );
+    const params = request.value.object.get("params").?.object;
+    try std.testing.expectEqualStrings("session-1", params.get("sessionId").?.string);
+    try std.testing.expectEqualStrings("permission-1", params.get("requestId").?.string);
+    try std.testing.expectEqualStrings(
+        "approve-once",
+        params.get("result").?.object.get("kind").?.string,
+    );
+}
+
+test "rejected automatic permission RPC returns an explicit delivery failure" {
+    const allocator = std.testing.allocator;
+    const result = try runAutomaticPermissionRpc(allocator,
+        \\{"jsonrpc":"2.0","id":1,"result":{"success":false}}
+    );
+    defer allocator.free(result.request_body);
+
+    switch (result.handling) {
+        .delivery_failed => |err| try std.testing.expectEqual(
+            error.PermissionDecisionNotAccepted,
+            err,
+        ),
+        else => return error.TestExpectedDeliveryFailure,
+    }
+    const request = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        result.request_body,
+        .{},
+    );
+    defer request.deinit();
+    try std.testing.expectEqualStrings(
+        "session.permissions.handlePendingPermissionRequest",
+        request.value.object.get("method").?.string,
+    );
+}
+
+test "permission response delivery failures are explicit" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1850,6 +2043,10 @@ test "permission response delivery failures leave requests available for manual 
     var event = try session.nextEvent();
     defer event.deinit(allocator);
     try std.testing.expectEqualStrings("permission-1", event.permission_requested.request_id);
+    switch (event.permission_requested.automatic_handling) {
+        .delivery_failed => {},
+        else => return error.TestExpectedDeliveryFailure,
+    }
 }
 
 fn framedBody(allocator: std.mem.Allocator, framed: []const u8) ![]u8 {

@@ -260,8 +260,27 @@ the handler must be supplied again when resuming because callbacks are
 process-local.
 
 Automatically handled permission events remain observable through
-`Session.nextEvent`. If a handler or response delivery fails, the SDK sends no
-decision and returns the event for manual handling.
+`Session.nextEvent`. Inspect `PermissionRequested.automatic_handling` before
+responding manually:
+
+```zig
+.permission_requested => |request| switch (request.automatic_handling) {
+    .handled => {}, // The automatic response succeeded; do not respond again.
+    .not_configured, .no_result, .handler_failed => {
+        try handlePermissionManually(session, request);
+    },
+    .delivery_failed => |err| {
+        // Delivery may be indeterminate. Surface or reconcile the failure
+        // instead of blindly sending a duplicate response.
+        std.log.err("permission response failed: {s}", .{@errorName(err)});
+    },
+},
+```
+
+`.no_result` preserves the request for manual handling.
+`.handler_failed` also occurs before any response is attempted and carries the
+handler error. `.delivery_failed` carries response preparation, transport, RPC,
+or rejection errors; it does not promise that retrying is safe.
 
 ## Examples
 
