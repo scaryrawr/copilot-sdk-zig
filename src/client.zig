@@ -1831,7 +1831,7 @@ fn runAutomaticPermissionRpc(
     response_body: []const u8,
 ) !struct {
     handling: session_types.AutomaticPermissionHandling,
-    request_body: []u8,
+    request_frame: []u8,
 } {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1912,18 +1912,15 @@ fn runAutomaticPermissionRpc(
     var event = try session.nextEvent();
     defer event.deinit(allocator);
 
-    const request_bytes = try tmp.dir.readFileAlloc(
+    const request_frame = try tmp.dir.readFileAlloc(
         std.testing.io,
         "request",
         allocator,
         .limited(4096),
     );
-    defer allocator.free(request_bytes);
-    const request_body = try framedBody(allocator, request_bytes);
-    errdefer allocator.free(request_body);
     return .{
         .handling = event.permission_requested.automatic_handling,
-        .request_body = request_body,
+        .request_frame = request_frame,
     };
 }
 
@@ -1932,27 +1929,19 @@ test "successful automatic permission handling writes one exact RPC and marks th
     const result = try runAutomaticPermissionRpc(allocator,
         \\{"jsonrpc":"2.0","id":1,"result":{"success":true}}
     );
-    defer allocator.free(result.request_body);
+    defer allocator.free(result.request_frame);
 
     try std.testing.expect(result.handling == .handled);
-    const request = try std.json.parseFromSlice(
-        std.json.Value,
+    const expected_body =
+        \\{"jsonrpc":"2.0","id":1,"method":"session.permissions.handlePendingPermissionRequest","params":{"sessionId":"session-1","requestId":"permission-1","result":{"kind":"approve-once"}}}
+    ;
+    const expected_frame = try std.fmt.allocPrint(
         allocator,
-        result.request_body,
-        .{},
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ expected_body.len, expected_body },
     );
-    defer request.deinit();
-    try std.testing.expectEqualStrings(
-        "session.permissions.handlePendingPermissionRequest",
-        request.value.object.get("method").?.string,
-    );
-    const params = request.value.object.get("params").?.object;
-    try std.testing.expectEqualStrings("session-1", params.get("sessionId").?.string);
-    try std.testing.expectEqualStrings("permission-1", params.get("requestId").?.string);
-    try std.testing.expectEqualStrings(
-        "approve-once",
-        params.get("result").?.object.get("kind").?.string,
-    );
+    defer allocator.free(expected_frame);
+    try std.testing.expectEqualStrings(expected_frame, result.request_frame);
 }
 
 test "rejected automatic permission RPC returns an explicit delivery failure" {
@@ -1960,7 +1949,7 @@ test "rejected automatic permission RPC returns an explicit delivery failure" {
     const result = try runAutomaticPermissionRpc(allocator,
         \\{"jsonrpc":"2.0","id":1,"result":{"success":false}}
     );
-    defer allocator.free(result.request_body);
+    defer allocator.free(result.request_frame);
 
     switch (result.handling) {
         .delivery_failed => |err| try std.testing.expectEqual(
@@ -1969,10 +1958,12 @@ test "rejected automatic permission RPC returns an explicit delivery failure" {
         ),
         else => return error.TestExpectedDeliveryFailure,
     }
+    const request_body = try framedBody(allocator, result.request_frame);
+    defer allocator.free(request_body);
     const request = try std.json.parseFromSlice(
         std.json.Value,
         allocator,
-        result.request_body,
+        request_body,
         .{},
     );
     defer request.deinit();
