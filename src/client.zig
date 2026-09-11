@@ -1958,19 +1958,16 @@ test "rejected automatic permission RPC returns an explicit delivery failure" {
         ),
         else => return error.TestExpectedDeliveryFailure,
     }
-    const request_body = try framedBody(allocator, result.request_frame);
-    defer allocator.free(request_body);
-    const request = try std.json.parseFromSlice(
-        std.json.Value,
+    const expected_body =
+        \\{"jsonrpc":"2.0","id":1,"method":"session.permissions.handlePendingPermissionRequest","params":{"sessionId":"session-1","requestId":"permission-1","result":{"kind":"approve-once"}}}
+    ;
+    const expected_frame = try std.fmt.allocPrint(
         allocator,
-        request_body,
-        .{},
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ expected_body.len, expected_body },
     );
-    defer request.deinit();
-    try std.testing.expectEqualStrings(
-        "session.permissions.handlePendingPermissionRequest",
-        request.value.object.get("method").?.string,
-    );
+    defer allocator.free(expected_frame);
+    try std.testing.expectEqualStrings(expected_frame, result.request_frame);
 }
 
 test "permission response delivery failures are explicit" {
