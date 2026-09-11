@@ -211,10 +211,27 @@ pub const SessionIdle = struct {
     }
 };
 
+/// Result of automatic permission handling before `Session.nextEvent` returns
+/// the permission event.
+pub const AutomaticPermissionHandling = union(enum) {
+    /// No automatic permission handler was configured.
+    not_configured,
+    /// The handler's decision was accepted by the runtime.
+    handled,
+    /// The handler deliberately left the request pending for manual handling.
+    no_result,
+    /// The handler failed before a response was attempted.
+    handler_failed: anyerror,
+    /// Preparing or delivering the response failed. Callers must not blindly
+    /// retry because the runtime may already have received the decision.
+    delivery_failed: anyerror,
+};
+
 pub const PermissionRequested = struct {
     request_id: []u8,
     permission_request_json: []u8,
     managed_approval_required: bool = false,
+    automatic_handling: AutomaticPermissionHandling = .not_configured,
 
     pub fn kind(self: PermissionRequested) !PermissionRequestKind {
         const parsed = try std.json.parseFromSlice(
@@ -614,6 +631,9 @@ test "permission and external tool events retain opaque payloads" {
 
     try std.testing.expectEqualStrings("p1", permission.permission_requested.request_id);
     try std.testing.expect(!permission.permission_requested.managed_approval_required);
+    try std.testing.expect(
+        permission.permission_requested.automatic_handling == .not_configured,
+    );
     try std.testing.expectEqualStrings(
         "{\"kind\":\"shell\",\"fullCommandText\":\"pwd\"}",
         permission.permission_requested.permission_request_json,
