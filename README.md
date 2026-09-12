@@ -98,6 +98,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
             .session_idle => break,
             .session_error => return error.CopilotSessionError,
             .unknown => {},
+            else => {},
         }
     }
 }
@@ -458,7 +459,8 @@ call the same client; re-entry returns `error.ReentrantRpcCall`. A successful
 handler returns JSON allocated with the allocator passed to it.
 The handler receives `null` when the request omitted `params`.
 
-It recognizes these session events:
+It parses every event discriminator in the pinned schema into an explicit
+`SessionEvent` tag. These events retain focused payload types:
 
 - `assistant.message`
 - `assistant.message_delta`
@@ -469,11 +471,18 @@ It recognizes these session events:
 - `permission.requested`
 - `external_tool.requested`
 
-Other session events use the `unknown` variant. The SDK does not support an
-external CLI server URL. `sync/schema-snapshot.json` records every method by
-direction and scope. `sync/public-rpc-surface.json` separately records direct
-RPC calls made by the pinned upstream Node client and session implementations.
-The sync checks fail if either inventory is stale or unclassified.
+Other pinned events carry an owned `RawEvent`. Use `event.rawData()` to read the
+canonical `data` JSON. The `unknown` variant is only for discriminators that are
+absent from the pinned schema. Keep an `else` branch in a switch that must
+compile after a schema sync adds event tags.
+
+The SDK does not support an external CLI server URL.
+`sync/schema-snapshot.json` records every method by direction and scope.
+`sync/public-rpc-surface.json` separately records direct RPC calls made by the
+pinned upstream Node client and session implementations. The sync checks fail
+if either inventory is stale or unclassified. The checks also regenerate the
+event registry in memory and reject drift in the union, parser, or cleanup
+mapping.
 
 The client stores at most 1,024 queued session events. An RPC call or event read
 returns `error.EventQueueFull` when callers leave other sessions undrained.

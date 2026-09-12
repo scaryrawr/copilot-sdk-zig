@@ -15,6 +15,7 @@ import {
   schemaContract,
   writeSchemaSnapshot,
 } from "./schema-snapshot.mjs";
+import { generateSessionEvents } from "./generate-session-events.mjs";
 
 const repository = "github/copilot-sdk";
 const ref = "main";
@@ -690,6 +691,7 @@ function verify() {
   const expectedGenerated = `pub const sdk_protocol_version: u64 = ${metadata.sdkProtocolVersion};\n`;
   assert(readFileSync(generatedPath, "utf8") === expectedGenerated, "generated Zig protocol version is stale");
   checkSchemaSnapshot();
+  generateSessionEvents({ check: true });
   verifyCompatibility(schemas["api.schema.json"], schemas["session-events.schema.json"]);
   const extensibility = parseJson(extensibilityContractPath);
   assert(
@@ -866,6 +868,7 @@ async function synchronize(explicitCommit, ifPublished = false) {
     writePublicRpcSurface(commit, nodeClient, nodeSession);
     writeExtensibilityContract(commit, nodeClient, nodeTypes, nodeExtension);
     writeSchemaSnapshot();
+    generateSessionEvents();
   } finally {
     rmSync(workDirectory, { force: true, recursive: true });
   }
