@@ -1070,7 +1070,8 @@ pub const Client = struct {
             defer if (meta) |value| self.allocator.free(value);
             const output = handler(self.allocator, .{
                 .base = base,
-                .tool_call_id = jsonOptionalString(input, "toolCallId") catch null,
+                .tool_call_id = jsonOptionalString(input, "toolCallId") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
                 .server_name = jsonRequiredString(input, "serverName") catch
                     return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
                 .tool_name = jsonRequiredString(input, "toolName") catch
@@ -1194,7 +1195,8 @@ pub const Client = struct {
             const output = handler(self.allocator, .{
                 .base = base,
                 .source = source,
-                .initial_prompt = jsonOptionalString(input, "initialPrompt") catch null,
+                .initial_prompt = jsonOptionalString(input, "initialPrompt") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
             }, invocation, runtime.hooks.context) catch |err|
                 return self.writeServerRequestError(writer, id, -32000, @errorName(err));
             const modified = parseOptionalJson(
@@ -1230,8 +1232,10 @@ pub const Client = struct {
             const output = handler(self.allocator, .{
                 .base = base,
                 .reason = reason,
-                .final_message = jsonOptionalString(input, "finalMessage") catch null,
-                .message = jsonOptionalString(input, "error") catch null,
+                .final_message = jsonOptionalString(input, "finalMessage") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+                .message = jsonOptionalString(input, "error") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
             }, invocation, runtime.hooks.context) catch |err|
                 return self.writeServerRequestError(writer, id, -32000, @errorName(err));
             return self.writeTypedSuccess(writer, id, .{ .output = .{
@@ -1276,9 +1280,12 @@ pub const Client = struct {
                 return self.writeTypedSuccess(writer, id, .{});
             const output = handler(self.allocator, .{
                 .base = base,
-                .stop_reason = jsonOptionalString(input, "stopReason") catch null,
-                .transcript_path = jsonOptionalString(input, "transcriptPath") catch null,
-                .stop_hook_active = jsonOptionalBool(input, "stopHookActive") catch null orelse false,
+                .stop_reason = jsonOptionalString(input, "stopReason") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+                .transcript_path = jsonOptionalString(input, "transcriptPath") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+                .stop_hook_active = (jsonOptionalBool(input, "stopHookActive") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input")) orelse false,
             }, invocation, runtime.hooks.context) catch |err|
                 return self.writeServerRequestError(writer, id, -32000, @errorName(err));
             return self.writeTypedSuccess(writer, id, .{ .output = .{
@@ -4979,8 +4986,8 @@ test "invalid required hook fields receive an invalid-params response" {
         .writer_buffer = &.{},
     };
     defer client.rollbackExtensionRuntime();
-    const handler = struct {
-        fn handle(
+    const handlers = struct {
+        fn postTool(
             _: std.mem.Allocator,
             _: ext.PostToolUseInput,
             _: ext.HookInvocation,
@@ -4988,10 +4995,19 @@ test "invalid required hook fields receive an invalid-params response" {
         ) !ext.PostToolUseOutput {
             return error.TestUnexpectedHookInvocation;
         }
-    }.handle;
+        fn preMcp(
+            _: std.mem.Allocator,
+            _: ext.PreMcpToolCallInput,
+            _: ext.HookInvocation,
+            _: ?*anyopaque,
+        ) !ext.PreMcpToolCallOutput {
+            return error.TestUnexpectedHookInvocation;
+        }
+    };
     try client.beginExtensionRuntime(null, session_types.CreateSessionConfig{
         .extensions = .{ .common = .{ .hooks = .{
-            .on_post_tool_use = handler,
+            .on_post_tool_use = handlers.postTool,
+            .on_pre_mcp_tool_call = handlers.preMcp,
         } } },
     }, &.{});
     const params = try std.json.parseFromSlice(
@@ -5015,6 +5031,28 @@ test "invalid required hook fields receive an invalid-params response" {
     const body = try framedBody(allocator, output.written());
     defer allocator.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"code\":-32602") != null);
+
+    const optional_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"s1","hookType":"preMcpToolCall","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","toolCallId":42,"serverName":"server","toolName":"tool","arguments":{}}}
+    ,
+        .{},
+    );
+    defer optional_params.deinit();
+    var optional_output: std.Io.Writer.Allocating = .init(allocator);
+    defer optional_output.deinit();
+    try client.dispatchServerRequest(
+        &optional_output.writer,
+        .{ .integer = 10 },
+        "hooks.invoke",
+        optional_params.value,
+    );
+    const optional_body = try framedBody(allocator, optional_output.written());
+    defer allocator.free(optional_body);
+    try std.testing.expect(
+        std.mem.indexOf(u8, optional_body, "\"code\":-32602") != null,
+    );
 }
 
 test "resident resume prefers and commits replacement runtime" {

@@ -494,12 +494,23 @@ pub fn validate(features: SessionFeatures) !void {
             if (std.mem.eql(u8, previous.name, server.name)) return error.DuplicateMcpServerName;
         }
         switch (server.config) {
-            .stdio => |value| if (value.command.len == 0 or
-                (value.timeout_ms != null and value.timeout_ms.? == 0))
-                return error.InvalidMcpServer,
-            .http => |value| if (value.url.len == 0 or
-                (value.timeout_ms != null and value.timeout_ms.? == 0))
-                return error.InvalidMcpServer,
+            .stdio => |value| {
+                if (value.command.len == 0 or
+                    (value.timeout_ms != null and value.timeout_ms.? == 0))
+                    return error.InvalidMcpServer;
+            },
+            .http => |value| {
+                if (value.url.len == 0 or
+                    (value.timeout_ms != null and value.timeout_ms.? == 0))
+                    return error.InvalidMcpServer;
+                for (value.headers, 0..) |header, header_index| {
+                    if (header.name.len == 0) return error.InvalidMcpServer;
+                    for (value.headers[0..header_index]) |previous| {
+                        if (std.ascii.eqlIgnoreCase(previous.name, header.name))
+                            return error.DuplicateMcpHeaderName;
+                    }
+                }
+            },
         }
     }
     for (features.canvases, 0..) |canvas, index| {
@@ -594,6 +605,18 @@ test "configuration rejects duplicate identities and invalid schemas" {
             .config = .{ .http = .{
                 .url = "https://example.test",
                 .timeout_ms = 0,
+            } },
+        }} },
+    }));
+    try std.testing.expectError(error.DuplicateMcpHeaderName, validate(.{
+        .mcp = .{ .servers = &.{.{
+            .name = "http",
+            .config = .{ .http = .{
+                .url = "https://example.test",
+                .headers = &.{
+                    .{ .name = "Authorization", .value = "one" },
+                    .{ .name = "authorization", .value = "two" },
+                },
             } },
         }} },
     }));
