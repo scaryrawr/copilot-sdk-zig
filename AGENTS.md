@@ -51,3 +51,5 @@ after SDK or synchronization changes. Build affected examples with
   public names; those layers may intentionally rename fields. JSON
   Schema-valued fields accept boolean schemas as well as object schemas even
   when the wire definition is opaque.
+- Reject duplicate MCP HTTP header names case-insensitively; JSON object key
+  equality does not model HTTP header semantics.
