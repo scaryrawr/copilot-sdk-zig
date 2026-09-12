@@ -157,8 +157,36 @@ authentication.
 The SDK rejects empty header names and duplicate names without regard to ASCII
 case. It does not parse `base_url`.
 
+Set `SessionConfig.model_capabilities` when a custom model needs capability
+overrides, for example to enable image input for a local vision model:
+
+```zig
+const session = try client.createSession(.{
+    .model = "local-vision-model",
+    .provider = .{
+        .base_url = "http://localhost:8000/v1",
+        .model_id = "local-vision-model",
+    },
+    .model_capabilities = .{
+        .supports = .{ .vision = true },
+    },
+});
+```
+
+`Client.joinSession` accepts the same configuration for `session.resume`.
+`ModelCapabilitiesOverride` is a typed deep-partial override: every nested field
+is optional. Null fields are omitted so the runtime keeps its defaults; explicit
+`false` disables a capability. Overrides do not change the model ID or wire model.
+The nested types follow the existing model metadata field names: `ModelSupports`
+has `vision`, `reasoningEffort`, and `adaptive_thinking`; `ModelLimitsOverride`
+has `max_prompt_tokens`, `max_output_tokens`, `max_context_window_tokens`, and
+optional `vision`. `ModelVisionLimitsOverride` has optional
+`supported_media_types`, `max_prompt_images`, and `max_prompt_image_size`.
+Capability overrides require a runtime that supports `modelCapabilities`; they
+do not add image support to a text-only model.
+
 `bearerTokenProvider`, `hasBearerTokenProvider`, named providers and models,
-`providerName`, `modelCapabilities`, `maxContextWindowTokens`, alternate SDK
+`providerName`, `maxContextWindowTokens`, alternate SDK
 transports, and remaining unsupported event variants are deferred.
 
 ## Handle legacy ask_user requests

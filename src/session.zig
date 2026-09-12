@@ -1,10 +1,12 @@
 const std = @import("std");
 const ProviderConfig = @import("provider.zig").ProviderConfig;
+const ModelCapabilitiesOverride = @import("models.zig").CapabilitiesOverride;
 
 pub const SessionConfig = struct {
     session_id: ?[]const u8 = null,
     model: ?[]const u8 = null,
     provider: ?ProviderConfig = null,
+    model_capabilities: ?ModelCapabilitiesOverride = null,
     working_directory: ?[]const u8 = null,
     streaming: bool = false,
     tools: []const Tool = &.{},
