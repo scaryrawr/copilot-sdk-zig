@@ -183,6 +183,39 @@ ambient config discovery. Set `.enable_skills = true` to activate skill loading
 from the explicit directories. All three fields are omitted when left as
 `null`.
 
+### Configure custom agents
+
+Define custom agents on create, resume, or join. Select the initial agent with
+`.agent` while keeping the built-in agent policy in `.default_agent`:
+
+```zig
+const session = try client.createSession(.{
+    .tools = &.{ read_tool, search_tool, deploy_tool },
+    .custom_agents = &.{.{
+        .name = "reviewer",
+        .display_name = "Code reviewer",
+        .description = "Reviews changes without deploying them.",
+        .tools = &.{ "read", "search" },
+        .prompt = "Review the change and report concrete defects.",
+        .skills = &.{"code-review"},
+        .model = "claude-sonnet-5",
+        .reasoning_effort = .high,
+    }},
+    .default_agent = .{
+        .excluded_tools = &.{"deploy"},
+    },
+    .agent = .{ .custom_agent = "reviewer" },
+    .excluded_builtin_agents = &.{"explore"},
+});
+defer session.disconnect() catch {};
+```
+
+A null custom-agent `tools` field inherits the session tools. An empty slice
+grants no tools. Null optional slices omit their wire fields, while explicit
+empty slices remain empty arrays or maps. The SDK rejects duplicate custom
+agent names and an initial custom-agent name that is not in `custom_agents`
+before it changes local session state or sends a lifecycle request.
+
 ## List available models
 
 `Client.listModels` calls the authenticated `models.list` RPC. The result

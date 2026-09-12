@@ -26,6 +26,10 @@ pub const SessionConfig = session.SessionConfig;
 pub const CreateSessionConfig = session.CreateSessionConfig;
 pub const ResumeSessionConfig = session.ResumeSessionConfig;
 pub const JoinSessionConfig = session.JoinSessionConfig;
+pub const CustomAgentConfig = session.CustomAgentConfig;
+pub const DefaultAgentConfig = session.DefaultAgentConfig;
+pub const InitialAgent = session.InitialAgent;
+pub const ReasoningEffort = session.ReasoningEffort;
 pub const McpApps = client.McpApps;
 pub const JoinedSession = client.JoinedSession;
 pub const Capability = extensibility.Capability;
@@ -115,4 +119,8 @@ test {
     _ = models;
     _ = provider;
     _ = extensibility;
+    _ = CustomAgentConfig;
+    _ = DefaultAgentConfig;
+    _ = InitialAgent;
+    _ = ReasoningEffort;
 }
