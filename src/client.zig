@@ -3131,7 +3131,7 @@ fn buildCreateSessionRequest(
         .authClientIdMetadataUrl = features.mcp.auth_client_id_metadata_url,
         .enableSkills = features.skills.enabled,
         .skillDirectories = optionalSlice(features.skills.directories),
-        .includedBuiltinSkills = optionalSlice(features.skills.included_builtin),
+        .includedBuiltinSkills = features.skills.included_builtin,
         .pluginDirectories = optionalSlice(features.plugin_directories),
         .disabledSkills = optionalSlice(features.skills.disabled),
         .disabledMcpServers = optionalSlice(features.mcp.disabled_servers),
@@ -3205,7 +3205,7 @@ fn buildResumeSessionRequest(
         .authClientIdMetadataUrl = features.mcp.auth_client_id_metadata_url,
         .enableSkills = features.skills.enabled,
         .skillDirectories = optionalSlice(features.skills.directories),
-        .includedBuiltinSkills = optionalSlice(features.skills.included_builtin),
+        .includedBuiltinSkills = features.skills.included_builtin,
         .pluginDirectories = optionalSlice(features.plugin_directories),
         .disabledSkills = optionalSlice(features.skills.disabled),
         .disabledMcpServers = optionalSlice(features.mcp.disabled_servers),
@@ -4770,11 +4770,87 @@ test "extension fields lower to exact lifecycle wire names" {
     const params = parsed.value.object.get("params").?.object;
     try std.testing.expectEqualStrings("plugins", params.get("pluginDirectories").?.array.items[0].string);
     try std.testing.expectEqualStrings("skills", params.get("skillDirectories").?.array.items[0].string);
+    try std.testing.expectEqualStrings("review", params.get("includedBuiltinSkills").?.array.items[0].string);
     try std.testing.expectEqualStrings("docs-mcp", params.get("mcpServers").?.object.get("docs").?.object.get("command").?.string);
     try std.testing.expectEqualStrings("review", params.get("canvases").?.array.items[0].object.get("id").?.string);
     try std.testing.expect(params.get("requestCanvasRenderer").?.bool);
     try std.testing.expect(params.get("requestMcpApps").?.bool);
     try std.testing.expectEqualStrings("/sdk", params.get("extensionSdkPath").?.string);
+}
+
+test "built-in skill allowlists distinguish omitted from empty" {
+    const allocator = std.testing.allocator;
+    var values = ExtensionWireValues.init(allocator);
+    defer values.deinit();
+
+    const omitted_request = try buildCreateSessionRequest(.{}, &.{}, &values);
+    const omitted_encoded = try json_rpc.encodeRequest(
+        allocator,
+        1,
+        "session.create",
+        omitted_request,
+    );
+    defer allocator.free(omitted_encoded);
+    const omitted = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        omitted_encoded,
+        .{},
+    );
+    defer omitted.deinit();
+    try std.testing.expect(
+        !omitted.value.object.get("params").?.object.contains("includedBuiltinSkills"),
+    );
+
+    const empty_request = try buildCreateSessionRequest(.{
+        .extensions = .{ .common = .{
+            .skills = .{ .included_builtin = &.{} },
+        } },
+    }, &.{}, &values);
+    const empty_encoded = try json_rpc.encodeRequest(
+        allocator,
+        2,
+        "session.create",
+        empty_request,
+    );
+    defer allocator.free(empty_encoded);
+    const empty = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        empty_encoded,
+        .{},
+    );
+    defer empty.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        empty.value.object.get("params").?.object
+            .get("includedBuiltinSkills").?.array.items.len,
+    );
+
+    const resume_request = try buildResumeSessionRequest("session-1", .{
+        .extensions = .{ .common = .{
+            .skills = .{ .included_builtin = &.{} },
+        } },
+    }, &.{}, &values, &.{});
+    const resume_encoded = try json_rpc.encodeRequest(
+        allocator,
+        3,
+        "session.resume",
+        resume_request,
+    );
+    defer allocator.free(resume_encoded);
+    const resumed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        resume_encoded,
+        .{},
+    );
+    defer resumed.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        resumed.value.object.get("params").?.object
+            .get("includedBuiltinSkills").?.array.items.len,
+    );
 }
 
 test "capability updates are tri-state and canvas state is defensive" {

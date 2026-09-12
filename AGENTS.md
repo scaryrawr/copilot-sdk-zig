@@ -8,6 +8,9 @@
   `scripts/sync.mjs`; do not edit them by hand.
 - Generate and verify compatibility ledgers from the same canonical expected
   structure; checking only their upstream commit allows manual drift to pass.
+- Scope upstream API checks to the TypeScript interface that owns each field,
+  including inherited lifecycle fields and explicit `Omit` exclusions; searching
+  concatenated source only proves that a name exists somewhere.
 - `npm run sync` advances to the latest upstream `github/copilot-sdk` commit and
   Copilot CLI package. Do not use it when refreshing generated files for an
   existing branch unless advancing the pin is intentional.
@@ -51,5 +54,8 @@ after SDK or synchronization changes. Build affected examples with
   public names; those layers may intentionally rename fields. JSON
   Schema-valued fields accept boolean schemas as well as object schemas even
   when the wire definition is opaque.
+- Preserve omitted versus explicitly empty optional arrays when the runtime
+  assigns them different semantics; model these as optional slices and cover
+  both JSON shapes in request-lowering tests.
 - Reject duplicate MCP HTTP header names case-insensitively; JSON object key
   equality does not model HTTP header semantics.

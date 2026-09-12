@@ -41,7 +41,7 @@ pub const SkillsConfig = struct {
     enabled: ?bool = null,
     directories: []const []const u8 = &.{},
     disabled: []const []const u8 = &.{},
-    included_builtin: []const []const u8 = &.{},
+    included_builtin: ?[]const []const u8 = null,
 };
 
 pub const NameValue = struct {

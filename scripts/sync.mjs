@@ -181,39 +181,121 @@ function expectedExtensibilityContract(upstreamCommit) {
   };
 }
 
+function sourceSection(source, startMarker, endMarker, owner) {
+  const start = source.indexOf(startMarker);
+  assert(start >= 0, `upstream ${owner} declaration is missing: ${startMarker}`);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  assert(end >= 0, `upstream ${owner} declaration has no boundary: ${endMarker}`);
+  return source.slice(start, end);
+}
+
+function requireSourceFragments(source, fragments, owner) {
+  for (const fragment of fragments) {
+    assert(source.includes(fragment), `upstream ${owner} declaration is missing: ${fragment}`);
+  }
+}
+
+function verifyLifecycleContract(contract, typesSource, extensionSource) {
+  const base = sourceSection(
+    typesSource,
+    "export interface SessionConfigBase {",
+    "export interface SessionConfig extends SessionConfigBase {",
+    "SessionConfigBase",
+  );
+  const create = sourceSection(
+    typesSource,
+    "export interface SessionConfig extends SessionConfigBase {",
+    "export interface ResumeSessionConfig extends SessionConfigBase {",
+    "SessionConfig",
+  );
+  const resume = sourceSection(
+    typesSource,
+    "export interface ResumeSessionConfig extends SessionConfigBase {",
+    "export interface ExtensionJoinOptions {",
+    "ResumeSessionConfig",
+  );
+  const join = sourceSection(
+    extensionSource,
+    "export type JoinSessionConfig = Omit<",
+    "export async function joinSession",
+    "JoinSessionConfig",
+  );
+
+  const commonDeclarations = {
+    pluginDirectories: "pluginDirectories?: string[]",
+    skillDirectories: "skillDirectories?: string[]",
+    disabledSkills: "disabledSkills?: string[]",
+    includedBuiltinSkills: "includedBuiltinSkills?: string[]",
+    enableSkills: "enableSkills?: boolean",
+    hooks: "hooks?: SessionHooks",
+    mcpServers: "mcpServers?: Record<string, MCPServerConfig>",
+    mcpOAuthTokenStorage: 'mcpOAuthTokenStorage?: "persistent" | "in-memory"',
+    authClientIdMetadataUrl: "authClientIdMetadataUrl?: string",
+    disabledMcpServers: "disabledMcpServers?: string[]",
+    canvases: "canvases?: Canvas[]",
+    requestCanvasRenderer: "requestCanvasRenderer?: boolean",
+    requestExtensions: "requestExtensions?: boolean",
+    extensionSdkPath: "extensionSdkPath?: string",
+    extensionInfo: "extensionInfo?: ExtensionInfo",
+    canvasProvider: "canvasProvider?: CanvasProviderIdentity",
+    requestMcpApps: "enableMcpApps?: boolean",
+  };
+  const resumeDeclarations = {
+    openCanvases: "openCanvases?: OpenCanvasInstance[]",
+    disableResume: "suppressResumeEvent?: boolean",
+    continuePendingWork: "continuePendingWork?: boolean",
+  };
+  const assertFieldsOwnedBy = (fields, declarations, source, owner) => {
+    for (const field of fields) {
+      const declaration = declarations[field];
+      assert(declaration, `no upstream ${owner} declaration mapping for lifecycle field: ${field}`);
+      requireSourceFragments(source, [declaration], owner);
+    }
+  };
+
+  requireSourceFragments(base, ["onMcpAuthRequest?: McpAuthHandler"], "SessionConfigBase");
+  assertFieldsOwnedBy(contract.lifecycle.create.fields, commonDeclarations, base, "SessionConfigBase");
+  assert(create.startsWith("export interface SessionConfig extends SessionConfigBase {"), "upstream SessionConfig no longer extends SessionConfigBase");
+  for (const field of contract.lifecycle.resume.fields) {
+    if (commonDeclarations[field]) {
+      requireSourceFragments(base, [commonDeclarations[field]], "SessionConfigBase");
+    } else {
+      assertFieldsOwnedBy([field], resumeDeclarations, resume, "ResumeSessionConfig");
+    }
+  }
+  assert(resume.startsWith("export interface ResumeSessionConfig extends SessionConfigBase {"), "upstream ResumeSessionConfig no longer extends SessionConfigBase");
+
+  assertFieldsOwnedBy(
+    contract.lifecycle.extensionJoin.fields,
+    { requestedEnvironmentVariables: "requestedEnvironmentVariables?: string[]" },
+    join,
+    "JoinSessionConfig",
+  );
+  for (const field of contract.lifecycle.extensionJoin.omitted) {
+    assert(field === "extensionSdkPath", `no upstream JoinSessionConfig omission check for: ${field}`);
+    assert(
+      /Omit<\s*ResumeSessionConfig,\s*"onPermissionRequest"\s*\|\s*"extensionSdkPath"\s*>/.test(join),
+      "upstream JoinSessionConfig no longer omits extensionSdkPath",
+    );
+    assert(
+      !/extensionSdkPath\s*\?:/.test(join),
+      "upstream JoinSessionConfig directly declares extensionSdkPath",
+    );
+  }
+}
+
 function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, extensionSource) {
-  const requiredSourceFragments = [
-    "builtinPluginDirectories?: readonly string[]",
+  const requiredClientFragments = [
     'sendRequest("plugins.builtin.set"',
-    "pluginDirectories?: string[]",
-    "skillDirectories?: string[]",
-    "disabledSkills?: string[]",
-    "includedBuiltinSkills?: string[]",
-    "enableSkills?: boolean",
-    "disabledMcpServers?: string[]",
-    "mcpServers?: Record<string, MCPServerConfig>",
-    "mcpOAuthTokenStorage?: \"persistent\" | \"in-memory\"",
-    "authClientIdMetadataUrl?: string",
-    "onMcpAuthRequest?: McpAuthHandler",
-    "hooks?: SessionHooks",
-    "canvases?: Canvas[]",
-    "requestCanvasRenderer?: boolean",
-    "requestExtensions?: boolean",
-    "extensionSdkPath?: string",
-    "extensionInfo?: ExtensionInfo",
-    "canvasProvider?: CanvasProviderIdentity",
-    "enableMcpApps?: boolean",
-    "openCanvases?: OpenCanvasInstance[]",
-    "suppressResumeEvent?: boolean",
-    "continuePendingWork?: boolean",
-    "requestedEnvironmentVariables?: string[]",
     "grantedEnvironmentVariables?: Record<string, string>",
   ];
-  const combined = `${clientSource}\n${typesSource}\n${extensionSource}`;
-  for (const fragment of requiredSourceFragments) {
-    assert(combined.includes(fragment), `upstream extensibility declaration is missing: ${fragment}`);
-  }
+  const requiredTypeFragments = [
+    "builtinPluginDirectories?: readonly string[]",
+  ];
   const contract = expectedExtensibilityContract(upstreamCommit);
+  requireSourceFragments(clientSource, requiredClientFragments, "CopilotClient");
+  requireSourceFragments(typesSource, requiredTypeFragments, "SDK types");
+  verifyLifecycleContract(contract, typesSource, extensionSource);
   writeFileSync(extensibilityContractPath, `${JSON.stringify(contract, null, 2)}\n`);
 }
 
