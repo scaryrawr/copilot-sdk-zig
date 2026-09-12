@@ -108,6 +108,11 @@ in use. `SessionEvent` values and the message ID from `send` own memory from the
 client allocator. `Session.disconnect` releases the client-side session
 resources while preserving the session state so it can be resumed later.
 
+Set `.enable_config_discovery = true` when creating or joining a session to
+load project instructions and skills from supported configuration directories.
+An explicit `false` disables discovery; the default `null` leaves the field
+omitted so Copilot CLI applies its default behavior.
+
 ## List available models
 
 `Client.listModels` calls the authenticated `models.list` RPC. The result

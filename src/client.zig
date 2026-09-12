@@ -1157,6 +1157,7 @@ const CreateSessionRequest = struct {
     systemMessage: ?session_types.SystemMessageConfig,
     requestPermission: bool,
     requestUserInput: bool,
+    enableConfigDiscovery: ?bool,
     enableManagedSettings: bool,
     managedSettings: ?WireManagedSettings,
 };
@@ -1172,6 +1173,7 @@ const ResumeSessionRequest = struct {
     systemMessage: ?session_types.SystemMessageConfig,
     requestPermission: bool,
     requestUserInput: bool,
+    enableConfigDiscovery: ?bool,
     enableManagedSettings: bool,
     managedSettings: ?WireManagedSettings,
     disableResume: bool = true,
@@ -1220,6 +1222,7 @@ fn buildCreateSessionRequest(
         .systemMessage = config.system_message,
         .requestPermission = config.request_permission or config.on_permission_request != null,
         .requestUserInput = config.on_user_input_request != null,
+        .enableConfigDiscovery = config.enable_config_discovery,
         .enableManagedSettings = config.enable_managed_settings,
         .managedSettings = lowerManagedSettings(config.managed_settings),
     };
@@ -1241,6 +1244,7 @@ fn buildResumeSessionRequest(
         .systemMessage = config.system_message,
         .requestPermission = config.request_permission or config.on_permission_request != null,
         .requestUserInput = config.on_user_input_request != null,
+        .enableConfigDiscovery = config.enable_config_discovery,
         .enableManagedSettings = config.enable_managed_settings,
         .managedSettings = lowerManagedSettings(config.managed_settings),
     };
@@ -2470,6 +2474,70 @@ test "session requests enable configured callbacks" {
     try std.testing.expect(
         resume_parsed.value.object.get("params").?.object.get("requestPermission").?.bool,
     );
+}
+
+test "session requests preserve config discovery semantics" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        value: ?bool,
+        wire: ?bool,
+    }{
+        .{ .value = null, .wire = null },
+        .{ .value = false, .wire = false },
+        .{ .value = true, .wire = true },
+    };
+
+    for (cases) |case| {
+        const create_encoded = try json_rpc.encodeRequest(
+            allocator,
+            13,
+            "session.create",
+            try buildCreateSessionRequest(.{
+                .enable_config_discovery = case.value,
+            }, &.{}),
+        );
+        defer allocator.free(create_encoded);
+        const create_parsed = try std.json.parseFromSlice(
+            std.json.Value,
+            allocator,
+            create_encoded,
+            .{},
+        );
+        defer create_parsed.deinit();
+        const create_params = create_parsed.value.object.get("params").?.object;
+
+        const resume_encoded = try json_rpc.encodeRequest(
+            allocator,
+            14,
+            "session.resume",
+            try buildResumeSessionRequest("session-1", .{
+                .enable_config_discovery = case.value,
+            }, &.{}),
+        );
+        defer allocator.free(resume_encoded);
+        const resume_parsed = try std.json.parseFromSlice(
+            std.json.Value,
+            allocator,
+            resume_encoded,
+            .{},
+        );
+        defer resume_parsed.deinit();
+        const resume_params = resume_parsed.value.object.get("params").?.object;
+
+        if (case.wire) |expected| {
+            try std.testing.expectEqual(
+                expected,
+                create_params.get("enableConfigDiscovery").?.bool,
+            );
+            try std.testing.expectEqual(
+                expected,
+                resume_params.get("enableConfigDiscovery").?.bool,
+            );
+        } else {
+            try std.testing.expect(!create_params.contains("enableConfigDiscovery"));
+            try std.testing.expect(!resume_params.contains("enableConfigDiscovery"));
+        }
+    }
 }
 
 test "session requests lower both managed settings sources" {

@@ -12,6 +12,7 @@ pub const SessionConfig = struct {
     tools: []const Tool = &.{},
     system_message: ?SystemMessageConfig = null,
     request_permission: bool = false,
+    enable_config_discovery: ?bool = null,
     enable_managed_settings: bool = false,
     managed_settings: ?ManagedSettings = null,
     on_permission_request: ?PermissionHandler = null,
