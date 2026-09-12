@@ -1107,7 +1107,8 @@ pub const Client = struct {
             defer self.allocator.free(tool_result);
             const output = handler(self.allocator, .{
                 .base = base,
-                .tool_name = try jsonRequiredString(input, "toolName"),
+                .tool_name = jsonRequiredString(input, "toolName") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
                 .tool_args_json = args,
                 .tool_result_json = tool_result,
             }, invocation, runtime.hooks.context) catch |err|
@@ -1135,9 +1136,11 @@ pub const Client = struct {
             defer self.allocator.free(args);
             const output = handler(self.allocator, .{
                 .base = base,
-                .tool_name = try jsonRequiredString(input, "toolName"),
+                .tool_name = jsonRequiredString(input, "toolName") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
                 .tool_args_json = args,
-                .message = try jsonRequiredString(input, "error"),
+                .message = jsonRequiredString(input, "error") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
             }, invocation, runtime.hooks.context) catch |err|
                 return self.writeServerRequestError(writer, id, -32000, @errorName(err));
             return self.writeTypedSuccess(writer, id, .{ .output = .{
@@ -1149,7 +1152,8 @@ pub const Client = struct {
                 return self.writeTypedSuccess(writer, id, .{});
             const output = handler(self.allocator, .{
                 .base = base,
-                .prompt = try jsonRequiredString(input, "prompt"),
+                .prompt = jsonRequiredString(input, "prompt") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
             }, invocation, runtime.hooks.context) catch |err|
                 return self.writeServerRequestError(writer, id, -32000, @errorName(err));
             return self.writeTypedSuccess(writer, id, .{ .output = .{
@@ -1163,8 +1167,10 @@ pub const Client = struct {
                 return self.writeTypedSuccess(writer, id, .{});
             const output = handler(self.allocator, .{
                 .base = base,
-                .prompt = try jsonRequiredString(input, "prompt"),
-                .transformed_prompt = try jsonRequiredString(input, "transformedPrompt"),
+                .prompt = jsonRequiredString(input, "prompt") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+                .transformed_prompt = jsonRequiredString(input, "transformedPrompt") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
             }, invocation, runtime.hooks.context) catch |err|
                 return self.writeServerRequestError(writer, id, -32000, @errorName(err));
             return self.writeTypedSuccess(writer, id, .{ .output = .{
@@ -1174,7 +1180,8 @@ pub const Client = struct {
         if (std.mem.eql(u8, hook_type, "sessionStart")) {
             const handler = runtime.hooks.on_session_start orelse
                 return self.writeTypedSuccess(writer, id, .{});
-            const source_string = try jsonRequiredString(input, "source");
+            const source_string = jsonRequiredString(input, "source") catch
+                return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
             const source: @TypeOf(@as(ext.SessionStartInput, undefined).source) =
                 if (std.mem.eql(u8, source_string, "startup"))
                     .startup
@@ -1208,7 +1215,8 @@ pub const Client = struct {
         if (std.mem.eql(u8, hook_type, "sessionEnd")) {
             const handler = runtime.hooks.on_session_end orelse
                 return self.writeTypedSuccess(writer, id, .{});
-            const reason_string = try jsonRequiredString(input, "reason");
+            const reason_string = jsonRequiredString(input, "reason") catch
+                return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
             const reason: @TypeOf(@as(ext.SessionEndInput, undefined).reason) =
                 if (std.mem.eql(u8, reason_string, "complete")) .complete else if (std.mem.eql(
                     u8,
@@ -1235,7 +1243,8 @@ pub const Client = struct {
         if (std.mem.eql(u8, hook_type, "errorOccurred")) {
             const handler = runtime.hooks.on_error_occurred orelse
                 return self.writeTypedSuccess(writer, id, .{});
-            const context_string = try jsonRequiredString(input, "errorContext");
+            const context_string = jsonRequiredString(input, "errorContext") catch
+                return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
             const context: @TypeOf(@as(ext.ErrorOccurredInput, undefined).context) =
                 if (std.mem.eql(u8, context_string, "model_call")) .model_call else if (std.mem.eql(
                     u8,
@@ -1248,9 +1257,11 @@ pub const Client = struct {
                 )) .user_input else return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
             const output = handler(self.allocator, .{
                 .base = base,
-                .message = try jsonRequiredString(input, "error"),
+                .message = jsonRequiredString(input, "error") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
                 .context = context,
-                .recoverable = try jsonRequiredBool(input, "recoverable"),
+                .recoverable = jsonRequiredBool(input, "recoverable") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
             }, invocation, runtime.hooks.context) catch |err|
                 return self.writeServerRequestError(writer, id, -32000, @errorName(err));
             return self.writeTypedSuccess(writer, id, .{ .output = .{
@@ -4954,6 +4965,56 @@ test "invalid hook output receives an internal-error response" {
     try std.testing.expect(
         std.mem.indexOf(u8, body, "\"code\":-32603") != null,
     );
+}
+
+test "invalid required hook fields receive an invalid-params response" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer client.rollbackExtensionRuntime();
+    const handler = struct {
+        fn handle(
+            _: std.mem.Allocator,
+            _: ext.PostToolUseInput,
+            _: ext.HookInvocation,
+            _: ?*anyopaque,
+        ) !ext.PostToolUseOutput {
+            return error.TestUnexpectedHookInvocation;
+        }
+    }.handle;
+    try client.beginExtensionRuntime(null, session_types.CreateSessionConfig{
+        .extensions = .{ .common = .{ .hooks = .{
+            .on_post_tool_use = handler,
+        } } },
+    }, &.{});
+    const params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"s1","hookType":"postToolUse","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","toolArgs":{},"toolResult":{}}}
+    ,
+        .{},
+    );
+    defer params.deinit();
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+
+    try client.dispatchServerRequest(
+        &output.writer,
+        .{ .integer = 9 },
+        "hooks.invoke",
+        params.value,
+    );
+
+    const body = try framedBody(allocator, output.written());
+    defer allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"code\":-32602") != null);
 }
 
 test "resident resume prefers and commits replacement runtime" {

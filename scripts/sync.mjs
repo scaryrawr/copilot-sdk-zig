@@ -109,39 +109,8 @@ const extensibilityMethods = [
   "session.mcp.apps.readResource",
 ];
 
-function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, extensionSource) {
-  const requiredSourceFragments = [
-    "builtinPluginDirectories?: readonly string[]",
-    'sendRequest("plugins.builtin.set"',
-    "pluginDirectories?: string[]",
-    "skillDirectories?: string[]",
-    "disabledSkills?: string[]",
-    "includedBuiltinSkills?: string[]",
-    "enableSkills?: boolean",
-    "disabledMcpServers?: string[]",
-    "mcpServers?: Record<string, MCPServerConfig>",
-    "mcpOAuthTokenStorage?: \"persistent\" | \"in-memory\"",
-    "authClientIdMetadataUrl?: string",
-    "onMcpAuthRequest?: McpAuthHandler",
-    "hooks?: SessionHooks",
-    "canvases?: Canvas[]",
-    "requestCanvasRenderer?: boolean",
-    "requestExtensions?: boolean",
-    "extensionSdkPath?: string",
-    "extensionInfo?: ExtensionInfo",
-    "canvasProvider?: CanvasProviderIdentity",
-    "enableMcpApps?: boolean",
-    "openCanvases?: OpenCanvasInstance[]",
-    "suppressResumeEvent?: boolean",
-    "continuePendingWork?: boolean",
-    "requestedEnvironmentVariables?: string[]",
-    "grantedEnvironmentVariables?: Record<string, string>",
-  ];
-  const combined = `${clientSource}\n${typesSource}\n${extensionSource}`;
-  for (const fragment of requiredSourceFragments) {
-    assert(combined.includes(fragment), `upstream extensibility declaration is missing: ${fragment}`);
-  }
-  const contract = {
+function expectedExtensibilityContract(upstreamCommit) {
+  return {
     upstreamCommit,
     startup: {
       builtinPluginDirectories: { status: "typed", wireMethod: "plugins.builtin.set" },
@@ -210,6 +179,41 @@ function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, e
       mcpAppsHostContextAndDiagnose: "Not required for the verified list/call/read parity slice; schemas remain experimental.",
     },
   };
+}
+
+function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, extensionSource) {
+  const requiredSourceFragments = [
+    "builtinPluginDirectories?: readonly string[]",
+    'sendRequest("plugins.builtin.set"',
+    "pluginDirectories?: string[]",
+    "skillDirectories?: string[]",
+    "disabledSkills?: string[]",
+    "includedBuiltinSkills?: string[]",
+    "enableSkills?: boolean",
+    "disabledMcpServers?: string[]",
+    "mcpServers?: Record<string, MCPServerConfig>",
+    "mcpOAuthTokenStorage?: \"persistent\" | \"in-memory\"",
+    "authClientIdMetadataUrl?: string",
+    "onMcpAuthRequest?: McpAuthHandler",
+    "hooks?: SessionHooks",
+    "canvases?: Canvas[]",
+    "requestCanvasRenderer?: boolean",
+    "requestExtensions?: boolean",
+    "extensionSdkPath?: string",
+    "extensionInfo?: ExtensionInfo",
+    "canvasProvider?: CanvasProviderIdentity",
+    "enableMcpApps?: boolean",
+    "openCanvases?: OpenCanvasInstance[]",
+    "suppressResumeEvent?: boolean",
+    "continuePendingWork?: boolean",
+    "requestedEnvironmentVariables?: string[]",
+    "grantedEnvironmentVariables?: Record<string, string>",
+  ];
+  const combined = `${clientSource}\n${typesSource}\n${extensionSource}`;
+  for (const fragment of requiredSourceFragments) {
+    assert(combined.includes(fragment), `upstream extensibility declaration is missing: ${fragment}`);
+  }
+  const contract = expectedExtensibilityContract(upstreamCommit);
   writeFileSync(extensibilityContractPath, `${JSON.stringify(contract, null, 2)}\n`);
 }
 
@@ -520,8 +524,8 @@ function verify() {
   verifyCompatibility(schemas["api.schema.json"], schemas["session-events.schema.json"]);
   const extensibility = parseJson(extensibilityContractPath);
   assert(
-    extensibility.upstreamCommit === metadata.upstreamCommit,
-    "extensibility contract is from a different upstream commit",
+    JSON.stringify(extensibility) === JSON.stringify(expectedExtensibilityContract(metadata.upstreamCommit)),
+    "extensibility contract is stale",
   );
   const methods = collectPropertyValues(schemas["api.schema.json"], "rpcMethod");
   for (const method of extensibilityMethods) {
