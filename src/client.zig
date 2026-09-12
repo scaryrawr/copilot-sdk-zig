@@ -344,6 +344,12 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
+        if (self.pending_extension_runtime) |*runtime| {
+            self.releaseMcpOAuthInterest(runtime) catch {};
+        }
+        for (self.extension_runtimes.items) |*runtime| {
+            self.releaseMcpOAuthInterest(runtime) catch {};
+        }
         for (self.events.items) |*event| event.deinit(self.allocator);
         self.events.deinit(self.allocator);
         for (self.tools.items) |tool| tool.deinit(self.allocator);
@@ -351,11 +357,9 @@ pub const Client = struct {
         self.user_input_handlers.deinit(self.allocator);
         self.permission_handlers.deinit(self.allocator);
         if (self.pending_extension_runtime) |*runtime| {
-            self.releaseMcpOAuthInterest(runtime) catch {};
             runtime.deinit(self.allocator);
         }
         for (self.extension_runtimes.items) |*runtime| {
-            self.releaseMcpOAuthInterest(runtime) catch {};
             runtime.deinit(self.allocator);
         }
         self.extension_runtimes.deinit(self.allocator);
@@ -1764,9 +1768,15 @@ pub const Client = struct {
             }
 
             const body = try json_rpc.readFrame(self.allocator, &self.reader.interface);
-            defer self.allocator.free(body);
+            defer {
+                wipeSecret(body);
+                self.allocator.free(body);
+            }
             const value = try std.json.parseFromSlice(std.json.Value, self.allocator, body, .{});
-            defer value.deinit();
+            defer {
+                wipeJsonStrings(value.value);
+                value.deinit();
+            }
             const object = switch (value.value) {
                 .object => |object| object,
                 else => return error.InvalidJsonRpc,
@@ -2060,22 +2070,40 @@ pub const Session = struct {
             data_json,
             .{ .allocate = .alloc_always, .ignore_unknown_fields = true },
         );
-        defer parsed.deinit();
+        defer {
+            wipeSecret(parsed.value.requestId);
+            wipeSecret(parsed.value.serverName);
+            wipeSecret(parsed.value.serverUrl);
+            if (parsed.value.resourceMetadata) |value| wipeSecret(value);
+            if (parsed.value.wwwAuthenticateParams) |value| wipeJsonStrings(value);
+            if (parsed.value.httpResponse) |value| wipeJsonStrings(value);
+            if (parsed.value.staticClientConfig) |value| wipeJsonStrings(value);
+            parsed.deinit();
+        }
         const www_json = if (parsed.value.wwwAuthenticateParams) |value|
             try std.json.Stringify.valueAlloc(self.client.allocator, value, .{})
         else
             null;
-        defer if (www_json) |value| self.client.allocator.free(value);
+        defer if (www_json) |value| {
+            wipeSecret(value);
+            self.client.allocator.free(value);
+        };
         const http_json = if (parsed.value.httpResponse) |value|
             try std.json.Stringify.valueAlloc(self.client.allocator, value, .{})
         else
             null;
-        defer if (http_json) |value| self.client.allocator.free(value);
+        defer if (http_json) |value| {
+            wipeSecret(value);
+            self.client.allocator.free(value);
+        };
         const static_json = if (parsed.value.staticClientConfig) |value|
             try std.json.Stringify.valueAlloc(self.client.allocator, value, .{})
         else
             null;
-        defer if (static_json) |value| self.client.allocator.free(value);
+        defer if (static_json) |value| {
+            wipeSecret(value);
+            self.client.allocator.free(value);
+        };
         var outcome = invokeMcpAuthHandler(handler, self.client.allocator, .{
             .request_id = parsed.value.requestId,
             .server_name = parsed.value.serverName,
@@ -5066,6 +5094,62 @@ test "MCP OAuth event interest is retained and released" {
             "\"method\":\"session.eventLog.releaseInterest\"",
         ) != null,
     );
+}
+
+test "client teardown releases OAuth interests before event storage" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const event =
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"s1","event":{"type":"mcp.oauth_required","data":{"staticClientConfig":{"clientSecret":"secret"}}}}}
+    ;
+    const release_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"success":true}}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{ event.len, event, release_response.len, release_response },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "responses",
+        .data = responses,
+    });
+    const response_file = try tmp.dir.openFile(
+        std.testing.io,
+        "responses",
+        .{ .mode = .read_only },
+    );
+    defer response_file.close(std.testing.io);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+
+    const reader_buffer = try allocator.alloc(u8, 1024);
+    const writer_buffer = try allocator.alloc(u8, 1024);
+    const reader = try allocator.create(std.Io.File.Reader);
+    const writer = try allocator.create(std.Io.File.Writer);
+    reader.* = response_file.readerStreaming(std.testing.io, reader_buffer);
+    writer.* = request_file.writer(std.testing.io, writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = reader,
+        .writer = writer,
+        .reader_buffer = reader_buffer,
+        .writer_buffer = writer_buffer,
+    };
+    try client.beginExtensionRuntime(
+        "s1",
+        session_types.ResumeSessionConfig{},
+        &.{},
+    );
+    try client.commitExtensionRuntime("s1", .{}, &.{});
+    client.findExtensionRuntime("s1").?.mcp_oauth_interest_handle =
+        try allocator.dupe(u8, "interest-1");
+
+    client.deinit();
 }
 
 test "review regressions preserve protocol semantics" {

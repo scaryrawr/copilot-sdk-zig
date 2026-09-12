@@ -444,6 +444,7 @@ pub const SessionEvent = union(enum) {
             },
             .unknown => |value| {
                 allocator.free(value.event_type);
+                @memset(value.data_json, 0);
                 allocator.free(value.data_json);
             },
         }
