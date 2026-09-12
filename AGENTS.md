@@ -29,6 +29,9 @@ after SDK or synchronization changes. Build affected examples with
   local response processing finishes. Detach newly attached sessions on
   post-response failure; for resident resume, keep the previous local runtime
   and session-ID allocation until the replacement is fully prepared.
+- During lifecycle RPCs, resolve an exact pending session runtime first, then
+  committed runtimes, and use an ID-less create runtime only as a final fallback
+  so unrelated interleaved callbacks cannot mutate the new session.
 - Release remote event-interest handles before deinitializing event queues,
   tools, callback registries, or extension runtimes because the release RPC can
   dispatch interleaved notifications and server requests.
@@ -36,5 +39,8 @@ after SDK or synchronization changes. Build affected examples with
   representation. Wipe encoded requests, flushed writer buffers, raw responses,
   intermediate JSON, owned copies, and partial-construction cleanup paths
   before releasing their storage.
+- Validate handler-produced values against the wire schema before responding;
+  invalid OAuth token results must securely deinitialize and cancel the pending
+  request rather than sending a response the CLI will reject.
 - Derive wire field names from the pinned schemas, not upstream language SDK
   public names; those layers may intentionally rename fields.
