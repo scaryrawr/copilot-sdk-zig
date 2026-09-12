@@ -182,6 +182,8 @@ has `vision`, `reasoningEffort`, and `adaptive_thinking`; `ModelLimitsOverride`
 has `max_prompt_tokens`, `max_output_tokens`, `max_context_window_tokens`, and
 optional `vision`. `ModelVisionLimitsOverride` has optional
 `supported_media_types`, `max_prompt_images`, and `max_prompt_image_size`.
+When supplied, `max_prompt_images` must be at least 1; both session APIs return
+`error.InvalidMaxPromptImages` for zero before sending an RPC.
 Capability overrides require a runtime that supports `modelCapabilities`; they
 do not add image support to a text-only model.
 

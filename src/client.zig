@@ -1195,6 +1195,16 @@ fn lowerManagedSettings(
     };
 }
 
+fn lowerModelCapabilities(
+    capabilities: ?models.CapabilitiesOverride,
+) !?models.CapabilitiesOverride {
+    const value = capabilities orelse return null;
+    const limits = value.limits orelse return value;
+    const vision = limits.vision orelse return value;
+    if (vision.max_prompt_images == 0) return error.InvalidMaxPromptImages;
+    return value;
+}
+
 fn buildCreateSessionRequest(
     config: session_types.SessionConfig,
     tools: []const WireTool,
@@ -1203,7 +1213,7 @@ fn buildCreateSessionRequest(
         .sessionId = config.session_id,
         .model = config.model,
         .provider = if (config.provider) |value| try provider.lower(value) else null,
-        .modelCapabilities = config.model_capabilities,
+        .modelCapabilities = try lowerModelCapabilities(config.model_capabilities),
         .workingDirectory = config.working_directory,
         .streaming = config.streaming,
         .tools = tools,
@@ -1224,7 +1234,7 @@ fn buildResumeSessionRequest(
         .sessionId = session_id,
         .model = config.model,
         .provider = if (config.provider) |value| try provider.lower(value) else null,
-        .modelCapabilities = config.model_capabilities,
+        .modelCapabilities = try lowerModelCapabilities(config.model_capabilities),
         .workingDirectory = config.working_directory,
         .streaming = config.streaming,
         .tools = tools,
@@ -2354,6 +2364,11 @@ test "createSession and joinSession preserve deep partial model capability overr
         try std.testing.expectEqualStrings("created-session", created.id);
         const joined = try client.joinSession("existing-session", config);
         try std.testing.expectEqualStrings("existing-session", joined.id);
+
+        var invalid_config = config;
+        invalid_config.model_capabilities = .{ .limits = .{ .vision = .{ .max_prompt_images = 0 } } };
+        try std.testing.expectError(error.InvalidMaxPromptImages, client.createSession(invalid_config));
+        try std.testing.expectError(error.InvalidMaxPromptImages, client.joinSession("existing-session", invalid_config));
 
         const requests = try tmp.dir.readFileAlloc(std.testing.io, "requests", allocator, .limited(8192));
         defer allocator.free(requests);
