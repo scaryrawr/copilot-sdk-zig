@@ -180,7 +180,9 @@ const SessionExtensionRuntime = struct {
             initialized_canvases += 1;
         }
         for (initial_open_canvases) |canvas| {
-            try result.open_canvases.append(allocator, try cloneOpenCanvas(allocator, canvas));
+            const clone = try cloneOpenCanvas(allocator, canvas);
+            errdefer ext.freeOpenCanvas(allocator, clone);
+            try result.open_canvases.append(allocator, clone);
         }
         return result;
     }
@@ -424,11 +426,8 @@ pub const Client = struct {
             self.allocator.free(id);
             return err;
         };
-        errdefer self.removeSession(id);
+        errdefer self.removeSessionId(id);
         try self.commitExtensionRuntime(returned_id, parsed.value, &.{});
-        if (config.extensions.common.mcp.on_auth_request != null) {
-            try self.registerMcpOAuthInterest(returned_id);
-        }
         return .{ .client = self, .id = id };
     }
 
@@ -484,20 +483,22 @@ pub const Client = struct {
         const parsed = try self.call(WireSessionLifecycleResponse, "session.resume", request);
         defer parsed.deinit();
 
-        const id = try self.allocator.dupe(u8, session_id);
-        self.session_ids.append(self.allocator, id) catch |err| {
-            self.allocator.free(id);
-            return err;
+        var added_session_id = false;
+        const id = self.findSessionId(session_id) orelse id: {
+            const copy = try self.allocator.dupe(u8, session_id);
+            self.session_ids.append(self.allocator, copy) catch |err| {
+                self.allocator.free(copy);
+                return err;
+            };
+            added_session_id = true;
+            break :id copy;
         };
-        errdefer self.removeSession(id);
+        errdefer if (added_session_id) self.removeSessionId(id);
         try self.commitExtensionRuntime(
             session_id,
             parsed.value,
             requested_environment_variables,
         );
-        if (config.extensions.common.mcp.on_auth_request != null) {
-            try self.registerMcpOAuthInterest(session_id);
-        }
         return .{ .client = self, .id = id };
     }
 
@@ -518,7 +519,10 @@ pub const Client = struct {
     }
 
     fn rollbackExtensionRuntime(self: *Client) void {
-        if (self.pending_extension_runtime) |*runtime| runtime.deinit(self.allocator);
+        if (self.pending_extension_runtime) |*runtime| {
+            self.releaseMcpOAuthInterest(runtime) catch {};
+            runtime.deinit(self.allocator);
+        }
         self.pending_extension_runtime = null;
     }
 
@@ -528,10 +532,7 @@ pub const Client = struct {
         response: WireSessionLifecycleResponse,
         requested_environment_variables: []const []const u8,
     ) !void {
-        var runtime = self.pending_extension_runtime orelse
-            return error.MissingExtensionRuntime;
-        self.pending_extension_runtime = null;
-        errdefer runtime.deinit(self.allocator);
+        const runtime = if (self.pending_extension_runtime) |*value| value else return error.MissingExtensionRuntime;
         if (runtime.session_id) |id| {
             if (!std.mem.eql(u8, id, session_id)) return error.UnexpectedSessionId;
         } else {
@@ -542,10 +543,9 @@ pub const Client = struct {
             for (runtime.open_canvases.items) |canvas| ext.freeOpenCanvas(self.allocator, canvas);
             runtime.open_canvases.clearRetainingCapacity();
             for (canvases) |canvas| {
-                try runtime.open_canvases.append(
-                    self.allocator,
-                    try cloneWireOpenCanvas(self.allocator, canvas),
-                );
+                const clone = try cloneWireOpenCanvas(self.allocator, canvas);
+                errdefer ext.freeOpenCanvas(self.allocator, clone);
+                try runtime.open_canvases.append(self.allocator, clone);
             }
         }
         if (response.grantedEnvironmentVariables) |grants_value| {
@@ -590,21 +590,33 @@ pub const Client = struct {
                     runtime.mcp_oauth_interest_handle =
                         existing.mcp_oauth_interest_handle;
                     existing.mcp_oauth_interest_handle = null;
+                } else if (runtime.mcp_auth_handler != null) {
+                    try self.registerMcpOAuthInterest(runtime);
                 } else {
                     try self.releaseMcpOAuthInterest(existing);
                 }
+                const replacement = self.pending_extension_runtime.?;
+                self.pending_extension_runtime = null;
                 existing.deinit(self.allocator);
-                self.extension_runtimes.items[index] = runtime;
+                self.extension_runtimes.items[index] = replacement;
                 return;
             }
         }
-        try self.extension_runtimes.append(self.allocator, runtime);
+        try self.extension_runtimes.ensureUnusedCapacity(self.allocator, 1);
+        if (runtime.mcp_auth_handler != null) {
+            try self.registerMcpOAuthInterest(runtime);
+        }
+        const committed = self.pending_extension_runtime.?;
+        self.pending_extension_runtime = null;
+        self.extension_runtimes.appendAssumeCapacity(committed);
     }
 
-    fn registerMcpOAuthInterest(self: *Client, session_id: []const u8) !void {
-        const runtime = self.findExtensionRuntime(session_id) orelse
-            return error.MissingExtensionRuntime;
+    fn registerMcpOAuthInterest(
+        self: *Client,
+        runtime: *SessionExtensionRuntime,
+    ) !void {
         if (runtime.mcp_oauth_interest_handle != null) return;
+        const session_id = runtime.session_id orelse return error.MissingSessionId;
         const parsed = try self.call(struct {
             handle: []const u8,
         }, "session.eventLog.registerInterest", .{
@@ -682,9 +694,19 @@ pub const Client = struct {
             resume_config,
             config.extensions.requested_environment_variables,
         );
+        const grants = session.snapshotEnvironmentGrants(self.allocator) catch |err| {
+            session.disconnect() catch |cleanup_err| {
+                if (self.findExtensionRuntime(session.id)) |runtime| {
+                    self.releaseMcpOAuthInterest(runtime) catch {};
+                }
+                self.removeSession(session.id);
+                return cleanup_err;
+            };
+            return err;
+        };
         return .{
             .session = session,
-            .grants = try session.snapshotEnvironmentGrants(self.allocator),
+            .grants = grants,
         };
     }
 
@@ -1536,6 +1558,17 @@ pub const Client = struct {
             }
         }
 
+        self.removeSessionId(session_id);
+    }
+
+    fn findSessionId(self: *Client, session_id: []const u8) ?[]u8 {
+        for (self.session_ids.items) |id| {
+            if (std.mem.eql(u8, id, session_id)) return id;
+        }
+        return null;
+    }
+
+    fn removeSessionId(self: *Client, session_id: []const u8) void {
         for (self.session_ids.items, 0..) |id, session_index| {
             if (std.mem.eql(u8, id, session_id)) {
                 self.allocator.free(id);
@@ -4820,6 +4853,61 @@ test "resident resume prefers and commits replacement runtime" {
     );
 }
 
+test "failed resident resume preserves committed runtime and session id" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        if (client.pending_extension_runtime) |*runtime| runtime.deinit(allocator);
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+        for (client.session_ids.items) |id| allocator.free(id);
+        client.session_ids.deinit(allocator);
+    }
+    var old_context: u8 = 1;
+    var new_context: u8 = 2;
+    const session_id = try allocator.dupe(u8, "s1");
+    try client.session_ids.append(allocator, session_id);
+    try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
+        .extensions = .{ .common = .{ .hooks = .{
+            .context = &old_context,
+        } } },
+    }, &.{});
+    try client.commitExtensionRuntime("s1", .{}, &.{});
+    try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
+        .extensions = .{ .common = .{ .hooks = .{
+            .context = &new_context,
+        } } },
+    }, &.{});
+    const response = try std.json.parseFromSlice(
+        WireSessionLifecycleResponse,
+        allocator,
+        \\{"grantedEnvironmentVariables":{"TOKEN":1}}
+    ,
+        .{ .allocate = .alloc_always },
+    );
+    defer response.deinit();
+    try std.testing.expectError(
+        error.InvalidGrantedEnvironmentVariables,
+        client.commitExtensionRuntime("s1", response.value, &.{"TOKEN"}),
+    );
+    client.rollbackExtensionRuntime();
+    try std.testing.expectEqual(@as(usize, 1), client.extension_runtimes.items.len);
+    try std.testing.expectEqual(@as(usize, 1), client.session_ids.items.len);
+    try std.testing.expectEqual(
+        @as(?*anyopaque, &old_context),
+        client.findExtensionRuntime("s1").?.hooks.context,
+    );
+    try std.testing.expect(client.findSessionId("s1").?.ptr == session_id.ptr);
+}
+
 test "MCP OAuth event interest is retained and released" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -4885,8 +4973,8 @@ test "MCP OAuth event interest is retained and released" {
         } } },
     }, &.{});
     try client.commitExtensionRuntime("s1", .{}, &.{});
-    try client.registerMcpOAuthInterest("s1");
     const runtime = client.findExtensionRuntime("s1").?;
+    try client.registerMcpOAuthInterest(runtime);
     try std.testing.expectEqualStrings(
         "interest-1",
         runtime.mcp_oauth_interest_handle.?,

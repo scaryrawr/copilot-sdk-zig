@@ -494,8 +494,12 @@ pub fn validate(features: SessionFeatures) !void {
             if (std.mem.eql(u8, previous.name, server.name)) return error.DuplicateMcpServerName;
         }
         switch (server.config) {
-            .stdio => |value| if (value.command.len == 0) return error.InvalidMcpServer,
-            .http => |value| if (value.url.len == 0) return error.InvalidMcpServer,
+            .stdio => |value| if (value.command.len == 0 or
+                (value.timeout_ms != null and value.timeout_ms.? == 0))
+                return error.InvalidMcpServer,
+            .http => |value| if (value.url.len == 0 or
+                (value.timeout_ms != null and value.timeout_ms.? == 0))
+                return error.InvalidMcpServer,
         }
     }
     for (features.canvases, 0..) |canvas, index| {
@@ -569,5 +573,23 @@ test "configuration rejects duplicate identities and invalid schemas" {
                 }
             }.open,
         }},
+    }));
+    try std.testing.expectError(error.InvalidMcpServer, validate(.{
+        .mcp = .{ .servers = &.{.{
+            .name = "stdio",
+            .config = .{ .stdio = .{
+                .command = "server",
+                .timeout_ms = 0,
+            } },
+        }} },
+    }));
+    try std.testing.expectError(error.InvalidMcpServer, validate(.{
+        .mcp = .{ .servers = &.{.{
+            .name = "http",
+            .config = .{ .http = .{
+                .url = "https://example.test",
+                .timeout_ms = 0,
+            } },
+        }} },
     }));
 }
