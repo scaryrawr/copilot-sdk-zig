@@ -1158,6 +1158,8 @@ const CreateSessionRequest = struct {
     requestPermission: bool,
     requestUserInput: bool,
     enableConfigDiscovery: ?bool,
+    skillDirectories: ?[]const []const u8,
+    instructionDirectories: ?[]const []const u8,
     skipCustomInstructions: ?bool,
     enableOnDemandInstructionDiscovery: ?bool,
     enableManagedSettings: bool,
@@ -1176,6 +1178,8 @@ const ResumeSessionRequest = struct {
     requestPermission: bool,
     requestUserInput: bool,
     enableConfigDiscovery: ?bool,
+    skillDirectories: ?[]const []const u8,
+    instructionDirectories: ?[]const []const u8,
     skipCustomInstructions: ?bool,
     enableOnDemandInstructionDiscovery: ?bool,
     enableManagedSettings: bool,
@@ -1227,6 +1231,8 @@ fn buildCreateSessionRequest(
         .requestPermission = config.request_permission or config.on_permission_request != null,
         .requestUserInput = config.on_user_input_request != null,
         .enableConfigDiscovery = config.enable_config_discovery,
+        .skillDirectories = config.skill_directories,
+        .instructionDirectories = config.instruction_directories,
         .skipCustomInstructions = config.skip_custom_instructions,
         .enableOnDemandInstructionDiscovery = config.enable_on_demand_instruction_discovery,
         .enableManagedSettings = config.enable_managed_settings,
@@ -1251,6 +1257,8 @@ fn buildResumeSessionRequest(
         .requestPermission = config.request_permission or config.on_permission_request != null,
         .requestUserInput = config.on_user_input_request != null,
         .enableConfigDiscovery = config.enable_config_discovery,
+        .skillDirectories = config.skill_directories,
+        .instructionDirectories = config.instruction_directories,
         .skipCustomInstructions = config.skip_custom_instructions,
         .enableOnDemandInstructionDiscovery = config.enable_on_demand_instruction_discovery,
         .enableManagedSettings = config.enable_managed_settings,
@@ -2569,6 +2577,99 @@ test "session requests preserve discovery semantics" {
             try std.testing.expect(!create_params.contains("enableOnDemandInstructionDiscovery"));
             try std.testing.expect(!resume_params.contains("enableOnDemandInstructionDiscovery"));
         }
+    }
+}
+
+test "session requests preserve explicit discovery directories" {
+    const allocator = std.testing.allocator;
+    const skill_directories = &.{ ".agents/skills", ".github/skills" };
+    const instruction_directories = &.{ ".", ".github/instructions" };
+
+    const create_encoded = try json_rpc.encodeRequest(
+        allocator,
+        15,
+        "session.create",
+        try buildCreateSessionRequest(.{
+            .skill_directories = skill_directories,
+            .instruction_directories = instruction_directories,
+        }, &.{}),
+    );
+    defer allocator.free(create_encoded);
+    const create_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        create_encoded,
+        .{},
+    );
+    defer create_parsed.deinit();
+    const create_params = create_parsed.value.object.get("params").?.object;
+
+    const resume_encoded = try json_rpc.encodeRequest(
+        allocator,
+        16,
+        "session.resume",
+        try buildResumeSessionRequest("session-1", .{
+            .skill_directories = skill_directories,
+            .instruction_directories = instruction_directories,
+        }, &.{}),
+    );
+    defer allocator.free(resume_encoded);
+    const resume_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        resume_encoded,
+        .{},
+    );
+    defer resume_parsed.deinit();
+    const resume_params = resume_parsed.value.object.get("params").?.object;
+
+    for ([_]std.json.ObjectMap{ create_params, resume_params }) |params| {
+        const skills = params.get("skillDirectories").?.array.items;
+        try std.testing.expectEqual(@as(usize, 2), skills.len);
+        try std.testing.expectEqualStrings(".agents/skills", skills[0].string);
+        try std.testing.expectEqualStrings(".github/skills", skills[1].string);
+
+        const instructions = params.get("instructionDirectories").?.array.items;
+        try std.testing.expectEqual(@as(usize, 2), instructions.len);
+        try std.testing.expectEqualStrings(".", instructions[0].string);
+        try std.testing.expectEqualStrings(".github/instructions", instructions[1].string);
+    }
+
+    const omitted_create = try json_rpc.encodeRequest(
+        allocator,
+        17,
+        "session.create",
+        try buildCreateSessionRequest(.{}, &.{}),
+    );
+    defer allocator.free(omitted_create);
+    const omitted_create_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        omitted_create,
+        .{},
+    );
+    defer omitted_create_parsed.deinit();
+    const omitted_create_params = omitted_create_parsed.value.object.get("params").?.object;
+
+    const omitted_resume = try json_rpc.encodeRequest(
+        allocator,
+        18,
+        "session.resume",
+        try buildResumeSessionRequest("session-1", .{}, &.{}),
+    );
+    defer allocator.free(omitted_resume);
+    const omitted_resume_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        omitted_resume,
+        .{},
+    );
+    defer omitted_resume_parsed.deinit();
+    const omitted_resume_params = omitted_resume_parsed.value.object.get("params").?.object;
+
+    for ([_]std.json.ObjectMap{ omitted_create_params, omitted_resume_params }) |params| {
+        try std.testing.expect(!params.contains("skillDirectories"));
+        try std.testing.expect(!params.contains("instructionDirectories"));
     }
 }
 

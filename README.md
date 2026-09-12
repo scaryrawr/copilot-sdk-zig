@@ -120,6 +120,10 @@ Set `.enable_on_demand_instruction_discovery = true` to discover `AGENTS.md`,
 `CLAUDE.md`, and `.github/copilot-instructions.md` after successful file views.
 Both options default to `null`, which leaves their runtime defaults unchanged.
 
+To load skills and custom instructions only from explicit trusted locations,
+set `.skill_directories` and `.instruction_directories` instead of enabling
+ambient config discovery. Both fields are omitted when left as `null`.
+
 ## List available models
 
 `Client.listModels` calls the authenticated `models.list` RPC. The result
