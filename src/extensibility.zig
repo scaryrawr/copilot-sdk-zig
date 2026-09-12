@@ -508,7 +508,7 @@ pub fn validate(features: SessionFeatures) !void {
             if (std.mem.eql(u8, previous.declaration.id, canvas.declaration.id))
                 return error.DuplicateCanvasId;
         }
-        if (canvas.declaration.input_schema_json) |json| try validateObjectJson(json);
+        if (canvas.declaration.input_schema_json) |json| try validateJsonSchema(json);
         for (canvas.actions, 0..) |action, action_index| {
             if (action.name.len == 0 or std.mem.startsWith(u8, action.name, "canvas."))
                 return error.ReservedCanvasActionName;
@@ -516,7 +516,7 @@ pub fn validate(features: SessionFeatures) !void {
                 if (std.mem.eql(u8, previous.name, action.name))
                     return error.DuplicateCanvasAction;
             }
-            if (action.input_schema_json) |json| try validateObjectJson(json);
+            if (action.input_schema_json) |json| try validateJsonSchema(json);
         }
     }
 }
@@ -530,11 +530,14 @@ fn uniqueNonEmpty(values: []const []const u8, duplicate_error: anyerror) !void {
     }
 }
 
-fn validateObjectJson(json: []const u8) !void {
+fn validateJsonSchema(json: []const u8) !void {
     const parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, json, .{}) catch
         return error.InvalidJsonSchema;
     defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidJsonSchema;
+    switch (parsed.value) {
+        .object, .bool => {},
+        else => return error.InvalidJsonSchema,
+    }
 }
 
 pub fn freeOpenCanvas(allocator: std.mem.Allocator, value: OpenCanvas) void {
@@ -556,6 +559,8 @@ test "capabilities fail closed" {
 }
 
 test "configuration rejects duplicate identities and invalid schemas" {
+    try validateJsonSchema("true");
+    try validateJsonSchema("false");
     try std.testing.expectError(error.DuplicatePluginDirectory, validate(.{
         .plugin_directories = &.{ "a", "a" },
     }));
