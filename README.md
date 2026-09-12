@@ -188,8 +188,10 @@ Capability overrides require a runtime that supports `modelCapabilities`; they
 do not add image support to a text-only model.
 
 `bearerTokenProvider`, `hasBearerTokenProvider`, named providers and models,
-`providerName`, `maxContextWindowTokens`, alternate SDK
-transports, and remaining unsupported event variants are deferred.
+`providerName`, provider-level `ProviderConfig.modelCapabilities`,
+`maxContextWindowTokens`, alternate SDK transports, and remaining unsupported
+event variants are deferred. The provider-level field is separate from the
+supported top-level `SessionConfig.model_capabilities` override above.
 
 ## Handle legacy ask_user requests
 
