@@ -48,4 +48,6 @@ after SDK or synchronization changes. Build affected examples with
   map malformed fields to `-32602` and invalid handler output to `-32603`
   instead of propagating errors out of the dispatch loop.
 - Derive wire field names from the pinned schemas, not upstream language SDK
-  public names; those layers may intentionally rename fields.
+  public names; those layers may intentionally rename fields. JSON
+  Schema-valued fields accept boolean schemas as well as object schemas even
+  when the wire definition is opaque.
