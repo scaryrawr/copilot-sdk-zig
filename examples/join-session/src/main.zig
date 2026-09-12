@@ -26,10 +26,22 @@ pub fn main(init: std.process.Init) !void {
 
     var client = try copilot.Client.initParent(init.gpa, init.io);
     defer client.deinit();
-    const session = try client.joinSession(args[2], .{
+    var joined = try client.joinParentSession(args[2], .{
         .model = "gpt-5.6-luna",
         .tools = &.{extension_tool},
+        .extensions = .{
+            .common = .{
+                .skills = .{ .directories = &.{"./.github/skills"} },
+                .extension_info = .{ .source = "plugin", .name = "zig-extension" },
+            },
+            .requested_environment_variables = &.{"GITHUB_TOKEN"},
+        },
     });
+    defer joined.deinit();
+    const session = joined.session;
+    if (joined.grants.get("GITHUB_TOKEN")) |token| {
+        _ = token;
+    }
 
     while (true) {
         var event = session.nextEvent() catch break;

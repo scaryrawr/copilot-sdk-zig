@@ -26,6 +26,7 @@ const metadataPath = join(vendorDirectory, "upstream.json");
 const generatedPath = join(root, "src", "protocol_version.zig");
 const compatibilityPath = join(root, "sync", "compatibility.json");
 const publicRpcSurfacePath = join(root, "sync", "public-rpc-surface.json");
+const extensibilityContractPath = join(root, "sync", "extensibility-contract.json");
 const workDirectory = join(root, ".sync-work");
 const cliReleaseRepository = "github/copilot-cli";
 const cliReleasePlatform = "linux-x64";
@@ -91,6 +92,121 @@ function writePublicRpcSurface(upstreamCommit, ...sources) {
       directMethods: directRpcMethods(...sources),
     }, null, 2)}\n`,
   );
+}
+
+const extensibilityMethods = [
+  "plugins.builtin.set",
+  "hooks.invoke",
+  "session.canvas.open",
+  "session.canvas.close",
+  "session.canvas.action.invoke",
+  "canvas.open",
+  "canvas.close",
+  "canvas.action.invoke",
+  "session.mcp.oauth.handlePendingRequest",
+  "session.mcp.apps.listTools",
+  "session.mcp.apps.callTool",
+  "session.mcp.apps.readResource",
+];
+
+function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, extensionSource) {
+  const requiredSourceFragments = [
+    "builtinPluginDirectories?: readonly string[]",
+    'sendRequest("plugins.builtin.set"',
+    "pluginDirectories?: string[]",
+    "skillDirectories?: string[]",
+    "disabledSkills?: string[]",
+    "disabledMcpServers?: string[]",
+    "mcpServers?: Record<string, MCPServerConfig>",
+    "mcpOAuthTokenStorage?: \"persistent\" | \"in-memory\"",
+    "onMcpAuthRequest?: McpAuthHandler",
+    "hooks?: SessionHooks",
+    "canvases?: Canvas[]",
+    "requestCanvasRenderer?: boolean",
+    "requestExtensions?: boolean",
+    "extensionSdkPath?: string",
+    "extensionInfo?: ExtensionInfo",
+    "canvasProvider?: CanvasProviderIdentity",
+    "enableMcpApps?: boolean",
+    "openCanvases?: OpenCanvasInstance[]",
+    "suppressResumeEvent?: boolean",
+    "continuePendingWork?: boolean",
+    "requestedEnvironmentVariables?: string[]",
+  ];
+  const combined = `${clientSource}\n${typesSource}\n${extensionSource}`;
+  for (const fragment of requiredSourceFragments) {
+    assert(combined.includes(fragment), `upstream extensibility declaration is missing: ${fragment}`);
+  }
+  const contract = {
+    upstreamCommit,
+    startup: {
+      builtinPluginDirectories: { status: "typed", wireMethod: "plugins.builtin.set" },
+    },
+    lifecycle: {
+      create: {
+        wireMethod: "session.create",
+        fields: [
+          "pluginDirectories", "skillDirectories", "disabledSkills", "includedBuiltinSkills",
+          "enableSkills", "hooks", "mcpServers", "mcpOAuthTokenStorage",
+          "authClientIdMetadataUrl", "disabledMcpServers", "canvases",
+          "requestCanvasRenderer", "requestExtensions", "extensionSdkPath",
+          "extensionInfo", "canvasProvider", "requestMcpApps",
+        ],
+      },
+      resume: {
+        wireMethod: "session.resume",
+        fields: [
+          "pluginDirectories", "skillDirectories", "disabledSkills", "includedBuiltinSkills",
+          "enableSkills", "hooks", "mcpServers", "mcpOAuthTokenStorage",
+          "authClientIdMetadataUrl", "disabledMcpServers", "canvases",
+          "requestCanvasRenderer", "requestExtensions", "extensionSdkPath",
+          "extensionInfo", "canvasProvider", "requestMcpApps", "openCanvases",
+          "disableResume", "continuePendingWork",
+        ],
+      },
+      extensionJoin: {
+        wireMethod: "session.resume",
+        fields: ["requestedEnvironmentVariables"],
+        responseFields: ["grantedEnvironmentVariables"],
+        ownership: "owned-result",
+        omitted: ["extensionSdkPath"],
+      },
+    },
+    callbacks: {
+      hooks: { status: "typed", method: "hooks.invoke" },
+      canvasProvider: {
+        status: "typed",
+        methods: ["canvas.open", "canvas.close", "canvas.action.invoke"],
+      },
+      mcpOAuth: {
+        status: "typed",
+        event: "mcp.oauth_required",
+        responseMethod: "session.mcp.oauth.handlePendingRequest",
+        tokenStorage: "runtime-owned",
+      },
+    },
+    capabilities: {
+      path: "capabilities.ui",
+      fields: ["canvases", "mcpApps"],
+      status: "typed-tristate",
+      liveEvent: "capabilities.changed",
+    },
+    experimentalMcpApps: {
+      status: "typed-opaque-results",
+      reason: "The pinned schemas mark MCP Apps experimental; request arguments are typed and evolving result JSON is owned.",
+      methods: [
+        "session.mcp.apps.listTools",
+        "session.mcp.apps.callTool",
+        "session.mcp.apps.readResource",
+      ],
+    },
+    deferred: {
+      extensionsCapability: "The pinned lifecycle response has no extension-management acknowledgement bit.",
+      hostTokenStoreCallback: "The pinned contract exposes runtime-owned persistent or in-memory token storage, not an SDK token-store callback.",
+      mcpAppsHostContextAndDiagnose: "Not required for the verified list/call/read parity slice; schemas remain experimental.",
+    },
+  };
+  writeFileSync(extensibilityContractPath, `${JSON.stringify(contract, null, 2)}\n`);
 }
 
 function collectPropertyValues(value, property, output = new Set()) {
@@ -398,6 +514,22 @@ function verify() {
   assert(readFileSync(generatedPath, "utf8") === expectedGenerated, "generated Zig protocol version is stale");
   checkSchemaSnapshot();
   verifyCompatibility(schemas["api.schema.json"], schemas["session-events.schema.json"]);
+  const extensibility = parseJson(extensibilityContractPath);
+  assert(
+    extensibility.upstreamCommit === metadata.upstreamCommit,
+    "extensibility contract is from a different upstream commit",
+  );
+  const methods = collectPropertyValues(schemas["api.schema.json"], "rpcMethod");
+  for (const method of extensibilityMethods) {
+    assert(methods.has(method), `extensibility RPC method is missing: ${method}`);
+  }
+  const events = eventDiscriminators(schemas["session-events.schema.json"]);
+  for (const event of ["mcp.oauth_required", "capabilities.changed", "session.canvas.opened", "session.canvas.closed"]) {
+    assert(events.has(event), `extensibility event is missing: ${event}`);
+  }
+  for (const [feature, reason] of Object.entries(extensibility.deferred ?? {})) {
+    assert(typeof reason === "string" && reason.length > 0, `deferred ${feature} needs a reason`);
+  }
   console.log(
     `Verified ${metadata.upstreamCommit} with Copilot CLI ${metadata.cliPackageVersion} (${metadata.cliReleaseAsset})`,
   );
@@ -491,12 +623,14 @@ async function installSchemaPackage(version, ifPublished) {
 
 async function synchronize(explicitCommit, ifPublished = false) {
   const commit = await resolveCommit(explicitCommit);
-  const [protocol, packageManifest, lock, nodeClient, nodeSession] = await Promise.all([
+  const [protocol, packageManifest, lock, nodeClient, nodeSession, nodeTypes, nodeExtension] = await Promise.all([
     fetchJson(rawUrl(commit, "sdk-protocol-version.json")),
     fetchJson(rawUrl(commit, "nodejs/package.json")),
     fetchJson(rawUrl(commit, "nodejs/package-lock.json")),
     fetchText(rawUrl(commit, "nodejs/src/client.ts")),
     fetchText(rawUrl(commit, "nodejs/src/session.ts")),
+    fetchText(rawUrl(commit, "nodejs/src/types.ts")),
+    fetchText(rawUrl(commit, "nodejs/src/extension.ts")),
   ]);
   const cliPackageVersion =
     packageManifest.copilotCliVersion ??
@@ -532,6 +666,7 @@ async function synchronize(explicitCommit, ifPublished = false) {
     writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
     writeFileSync(generatedPath, `pub const sdk_protocol_version: u64 = ${protocol.version};\n`);
     writePublicRpcSurface(commit, nodeClient, nodeSession);
+    writeExtensibilityContract(commit, nodeClient, nodeTypes, nodeExtension);
     writeSchemaSnapshot();
   } finally {
     rmSync(workDirectory, { force: true, recursive: true });

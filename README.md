@@ -108,6 +108,53 @@ in use. `SessionEvent` values and the message ID from `send` own memory from the
 client allocator. `Session.disconnect` releases the client-side session
 resources while preserving the session state so it can be resumed later.
 
+## Configure extensions
+
+Trusted built-in plugins are installed transactionally after `connect` and
+before `Client.init` returns:
+
+```zig
+var client = try copilot.Client.init(allocator, io, .{
+    .builtin_plugin_directories = &.{"/opt/acme/copilot-plugins"},
+});
+```
+
+Create, resume, and extension-child join use distinct configuration types.
+Their `.extensions.common` bundle supports plugin directories, skill
+directories and disabled/built-in skill names, typed hooks, stdio/HTTP/SSE MCP
+servers, runtime-managed MCP OAuth, canvas providers, extension identity, and
+the MCP Apps opt-in. Configuration is validated before a lifecycle RPC.
+
+MCP OAuth uses the pinned runtime's real flow: set
+`mcp.on_auth_request`, receive `mcp.oauth_required`, and return an allocated
+token or cancellation. Select `.oauth_token_storage = .persistent` to request
+OS-keychain storage; the default is runtime-owned in-memory storage.
+
+Canvas and MCP Apps methods fail closed until the create/resume response
+advertises their capability. Capability state is `unknown`, `unsupported`, or
+`supported`, and live `capabilities.changed` events update it. Use
+`snapshotOpenCanvases` for an owned, defensive resume snapshot:
+
+```zig
+if (session.capabilities().supports(.canvases)) {
+    var opened = try session.openCanvas(allocator, .{
+        .canvas_id = "review",
+        .instance_id = "review:main",
+    });
+    defer opened.deinit();
+}
+
+const apps = try session.experimental(.mcp_apps);
+var tools = try apps.listTools(allocator, "tickets", "tickets");
+defer tools.deinit();
+```
+
+MCP Apps results are intentionally returned as owned JSON while the pinned
+protocol remains experimental. Extension-management acknowledgement and
+host-owned OAuth token-store callbacks are not present in the pinned contract;
+see `sync/extensibility-contract.json` for the reproducible compatibility
+classification.
+
 ## List available models
 
 `Client.listModels` calls the authenticated `models.list` RPC. The result
@@ -129,7 +176,7 @@ Pass `selection_id` to use an account returned by the upstream account APIs, or
 
 ## Use a custom provider
 
-Set `SessionConfig.provider` for a static custom provider:
+Set `CreateSessionConfig.provider` for a static custom provider:
 
 ```zig
 const session = try client.createSession(.{
@@ -157,7 +204,7 @@ authentication.
 The SDK rejects empty header names and duplicate names without regard to ASCII
 case. It does not parse `base_url`.
 
-Set `SessionConfig.model_capabilities` when a custom model needs capability
+Set `CreateSessionConfig.model_capabilities` when a custom model needs capability
 overrides, for example to enable image input for a local vision model:
 
 ```zig
@@ -173,7 +220,14 @@ const session = try client.createSession(.{
 });
 ```
 
-`Client.joinSession` accepts the same configuration for `session.resume`.
+Use `Client.resumeSession(session_id, config)` to resume an existing host
+session. The former ID-based `joinSession` name was misleading and has been
+replaced. Extensions connected with `Client.initParent` use
+`joinParentSession(session_id, config)`; its `JoinSessionConfig` deliberately
+cannot set `extension_sdk_path`. It returns a `JoinedSession`; its owned
+`grants` exposes only approved requested environment values and must be
+deinitialized. The deprecated `joinSession(session_id, SessionConfig)` wrapper
+remains available for source compatibility and delegates to `resumeSession`.
 `ModelCapabilitiesOverride` is a typed deep-partial override: every nested field
 is optional. Null fields are omitted so the runtime keeps its defaults; explicit
 `false` disables a capability. Overrides do not change the model ID or wire model.
@@ -191,11 +245,11 @@ do not add image support to a text-only model.
 `providerName`, provider-level `ProviderConfig.modelCapabilities`,
 `maxContextWindowTokens`, alternate SDK transports, and remaining unsupported
 event variants are deferred. The provider-level field is separate from the
-supported top-level `SessionConfig.model_capabilities` override above.
+supported top-level session `model_capabilities` override above.
 
 ## Handle legacy ask_user requests
 
-Set `SessionConfig.on_user_input_request` to enable Copilot's legacy
+Set `CreateSessionConfig.on_user_input_request` to enable Copilot's legacy
 question-and-answer `ask_user` tool. The handler receives the session ID,
 question, optional choices, and optional freeform setting. Its answer must be
 allocated with the provided allocator; the SDK frees it after responding.
@@ -227,7 +281,7 @@ when this handler is configured, then synchronously dispatches inbound
 
 ## Handle permission requests automatically
 
-Set `SessionConfig.on_permission_request` to handle `permission.requested`
+Set `CreateSessionConfig.on_permission_request` to handle `permission.requested`
 events while they are read. Use the prebuilt `copilot.approveAll` handler to
 approve ordinary requests without manually responding from the event loop:
 

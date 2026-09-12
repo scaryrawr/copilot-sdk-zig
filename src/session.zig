@@ -1,8 +1,9 @@
 const std = @import("std");
 const ProviderConfig = @import("provider.zig").ProviderConfig;
 const ModelCapabilitiesOverride = @import("models.zig").CapabilitiesOverride;
+const extensibility = @import("extensibility.zig");
 
-pub const SessionConfig = struct {
+pub const CreateSessionConfig = struct {
     session_id: ?[]const u8 = null,
     model: ?[]const u8 = null,
     provider: ?ProviderConfig = null,
@@ -18,7 +19,52 @@ pub const SessionConfig = struct {
     permission_context: ?*anyopaque = null,
     on_user_input_request: ?UserInputHandler = null,
     user_input_context: ?*anyopaque = null,
+    extensions: extensibility.CreateExtensions = .{},
 };
+
+pub const ResumeSessionConfig = struct {
+    model: ?[]const u8 = null,
+    provider: ?ProviderConfig = null,
+    model_capabilities: ?ModelCapabilitiesOverride = null,
+    working_directory: ?[]const u8 = null,
+    streaming: bool = false,
+    tools: []const Tool = &.{},
+    system_message: ?SystemMessageConfig = null,
+    request_permission: bool = false,
+    enable_managed_settings: bool = false,
+    managed_settings: ?ManagedSettings = null,
+    on_permission_request: ?PermissionHandler = null,
+    permission_context: ?*anyopaque = null,
+    on_user_input_request: ?UserInputHandler = null,
+    user_input_context: ?*anyopaque = null,
+    suppress_resume_event: bool = false,
+    continue_pending_work: bool = false,
+    extensions: extensibility.ResumeExtensions = .{},
+};
+
+pub const JoinSessionConfig = struct {
+    model: ?[]const u8 = null,
+    provider: ?ProviderConfig = null,
+    model_capabilities: ?ModelCapabilitiesOverride = null,
+    working_directory: ?[]const u8 = null,
+    streaming: bool = false,
+    tools: []const Tool = &.{},
+    system_message: ?SystemMessageConfig = null,
+    request_permission: bool = false,
+    enable_managed_settings: bool = false,
+    managed_settings: ?ManagedSettings = null,
+    on_permission_request: ?PermissionHandler = null,
+    permission_context: ?*anyopaque = null,
+    on_user_input_request: ?UserInputHandler = null,
+    user_input_context: ?*anyopaque = null,
+    suppress_resume_event: bool = true,
+    continue_pending_work: bool = false,
+    extensions: extensibility.JoinExtensions = .{},
+};
+
+/// Compatibility alias for callers constructing create-session options.
+/// Use `CreateSessionConfig` in new code.
+pub const SessionConfig = CreateSessionConfig;
 
 pub const MessageOptions = struct {
     prompt: []const u8,
