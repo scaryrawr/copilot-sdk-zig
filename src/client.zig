@@ -12,6 +12,18 @@ fn wipeSecret(value: []const u8) void {
     @memset(@constCast(value), 0);
 }
 
+fn wipeJsonStrings(value: std.json.Value) void {
+    switch (value) {
+        .string, .number_string => |string| wipeSecret(string),
+        .array => |array| for (array.items) |item| wipeJsonStrings(item),
+        .object => |object| {
+            var iterator = object.iterator();
+            while (iterator.next()) |entry| wipeJsonStrings(entry.value_ptr.*);
+        },
+        else => {},
+    }
+}
+
 pub const ClientOptions = struct {
     cli_path: []const u8 = "copilot",
     working_directory: ?[]const u8 = null,
@@ -418,8 +430,15 @@ pub const Client = struct {
             "session.create",
             request,
         );
-        defer parsed.deinit();
+        defer {
+            wipeLifecycleResponseSecrets(parsed.value);
+            parsed.deinit();
+        }
         const returned_id = parsed.value.sessionId orelse return error.MissingSessionId;
+        errdefer {
+            self.rollbackExtensionRuntime();
+            self.detachSessionBestEffort(returned_id);
+        }
 
         const id = try self.allocator.dupe(u8, returned_id);
         self.session_ids.append(self.allocator, id) catch |err| {
@@ -455,6 +474,7 @@ pub const Client = struct {
         requested_environment_variables: []const []const u8,
     ) !Session {
         try ext.validate(config.extensions.common);
+        const existing_session_id = self.findSessionId(session_id);
         var parsed_parameters: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty;
         defer {
             for (parsed_parameters.items) |parsed| parsed.deinit();
@@ -481,10 +501,17 @@ pub const Client = struct {
             requested_environment_variables,
         );
         const parsed = try self.call(WireSessionLifecycleResponse, "session.resume", request);
-        defer parsed.deinit();
+        defer {
+            wipeLifecycleResponseSecrets(parsed.value);
+            parsed.deinit();
+        }
+        errdefer if (existing_session_id == null) {
+            self.rollbackExtensionRuntime();
+            self.detachSessionBestEffort(session_id);
+        };
 
         var added_session_id = false;
-        const id = self.findSessionId(session_id) orelse id: {
+        const id = existing_session_id orelse id: {
             const copy = try self.allocator.dupe(u8, session_id);
             self.session_ids.append(self.allocator, copy) catch |err| {
                 self.allocator.free(copy);
@@ -500,6 +527,16 @@ pub const Client = struct {
             requested_environment_variables,
         );
         return .{ .client = self, .id = id };
+    }
+
+    fn detachSessionBestEffort(self: *Client, session_id: []const u8) void {
+        const parsed = self.call(struct {
+            success: bool,
+            @"error": ?[]const u8 = null,
+        }, "session.detach", .{
+            .sessionId = session_id,
+        }) catch return;
+        parsed.deinit();
     }
 
     fn beginExtensionRuntime(
@@ -774,14 +811,24 @@ pub const Client = struct {
         self.next_request_id += 1;
 
         const request = try json_rpc.encodeRequest(self.allocator, id, method, params);
-        defer self.allocator.free(request);
+        defer {
+            wipeSecret(request);
+            self.allocator.free(request);
+        }
         try json_rpc.writeFrame(&self.writer.interface, request);
+        wipeSecret(self.writer_buffer);
 
         while (true) {
             const body = try json_rpc.readFrame(self.allocator, &self.reader.interface);
-            defer self.allocator.free(body);
+            defer {
+                wipeSecret(body);
+                self.allocator.free(body);
+            }
             const value = try std.json.parseFromSlice(std.json.Value, self.allocator, body, .{});
-            defer value.deinit();
+            defer {
+                wipeJsonStrings(value.value);
+                value.deinit();
+            }
             const object = switch (value.value) {
                 .object => |object| object,
                 else => return error.InvalidJsonRpc,
@@ -818,7 +865,10 @@ pub const Client = struct {
             }
             const result = object.get("result") orelse return error.MissingResult;
             const result_json = try std.json.Stringify.valueAlloc(self.allocator, result, .{});
-            defer self.allocator.free(result_json);
+            defer {
+                wipeSecret(result_json);
+                self.allocator.free(result_json);
+            }
             // The CLI may add response metadata as the protocol evolves. Parse the
             // fields this SDK needs without rejecting compatible extra fields. The
             // parsed result must own strings because result_json is freed below.
@@ -2444,8 +2494,13 @@ fn parseHookBase(input: std.json.ObjectMap) !ext.HookBaseInput {
     return .{
         .runtime_session_id = try jsonRequiredString(input, "sessionId"),
         .timestamp_ms = timestamp,
-        .working_directory = try jsonRequiredString(input, "workingDirectory"),
+        .working_directory = try jsonRequiredString(input, "cwd"),
     };
+}
+
+fn wipeLifecycleResponseSecrets(response: WireSessionLifecycleResponse) void {
+    const grants = response.grantedEnvironmentVariables orelse return;
+    wipeJsonStrings(grants);
 }
 
 fn stringifyJsonValue(
@@ -3743,7 +3798,7 @@ fn runAutomaticPermissionRpc(
         .reader = &reader,
         .writer = &writer,
         .reader_buffer = &.{},
-        .writer_buffer = &.{},
+        .writer_buffer = &writer_buffer,
     };
     try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
     defer {
@@ -4206,7 +4261,7 @@ test "createSession and resumeSession preserve deep partial model capability ove
             .reader = &reader,
             .writer = &writer,
             .reader_buffer = &.{},
-            .writer_buffer = &.{},
+            .writer_buffer = &writer_buffer,
         };
         defer {
             for (client.session_ids.items) |id| allocator.free(id);
@@ -4743,7 +4798,7 @@ test "typed hooks dispatch through a provisional session runtime" {
     const params = try std.json.parseFromSlice(
         std.json.Value,
         allocator,
-        \\{"sessionId":"s1","hookType":"preToolUse","input":{"sessionId":"s1","timestamp":42,"workingDirectory":"/repo","toolName":"shell","toolArgs":{"command":"pwd"}}}
+        \\{"sessionId":"s1","hookType":"preToolUse","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","toolName":"shell","toolArgs":{"command":"pwd"}}}
     ,
         .{},
     );
@@ -4792,7 +4847,7 @@ test "invalid hook output receives an internal-error response" {
     const params = try std.json.parseFromSlice(
         std.json.Value,
         allocator,
-        \\{"sessionId":"s1","hookType":"preToolUse","input":{"sessionId":"s1","timestamp":42,"workingDirectory":"/repo","toolName":"shell","toolArgs":{}}}
+        \\{"sessionId":"s1","hookType":"preToolUse","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","toolName":"shell","toolArgs":{}}}
     ,
         .{},
     );
@@ -4952,7 +5007,7 @@ test "MCP OAuth event interest is retained and released" {
         .reader = &reader,
         .writer = &writer,
         .reader_buffer = &.{},
-        .writer_buffer = &.{},
+        .writer_buffer = &writer_buffer,
     };
     defer {
         for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
@@ -4981,6 +5036,9 @@ test "MCP OAuth event interest is retained and released" {
     );
     try client.releaseMcpOAuthInterest(runtime);
     try std.testing.expect(runtime.mcp_oauth_interest_handle == null);
+    for (writer_buffer) |byte| {
+        try std.testing.expectEqual(@as(u8, 0), byte);
+    }
 
     const requests = try tmp.dir.readFileAlloc(
         std.testing.io,
