@@ -29,6 +29,9 @@ after SDK or synchronization changes. Build affected examples with
   local response processing finishes. Detach newly attached sessions on
   post-response failure; for resident resume, keep the previous local runtime
   and session-ID allocation until the replacement is fully prepared.
+- Release remote event-interest handles before deinitializing event queues,
+  tools, callback registries, or extension runtimes because the release RPC can
+  dispatch interleaved notifications and server requests.
 - Treat OAuth tokens and granted environment variables as secrets in every
   representation. Wipe encoded requests, flushed writer buffers, raw responses,
   intermediate JSON, owned copies, and partial-construction cleanup paths
