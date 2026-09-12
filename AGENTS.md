@@ -6,6 +6,8 @@
   `sync/schema-snapshot.json`, `sync/public-rpc-surface.json`, and
   `sync/extensibility-contract.json` as generated outputs owned by
   `scripts/sync.mjs`; do not edit them by hand.
+- Generate and verify compatibility ledgers from the same canonical expected
+  structure; checking only their upstream commit allows manual drift to pass.
 - `npm run sync` advances to the latest upstream `github/copilot-sdk` commit and
   Copilot CLI package. Do not use it when refreshing generated files for an
   existing branch unless advancing the pin is intentional.
@@ -42,5 +44,8 @@ after SDK or synchronization changes. Build affected examples with
 - Validate handler-produced values against the wire schema before responding;
   invalid OAuth token results must securely deinitialize and cancel the pending
   request rather than sending a response the CLI will reject.
+- Inbound server requests must always receive a correlated JSON-RPC response;
+  map malformed fields to `-32602` and invalid handler output to `-32603`
+  instead of propagating errors out of the dispatch loop.
 - Derive wire field names from the pinned schemas, not upstream language SDK
   public names; those layers may intentionally rename fields.
