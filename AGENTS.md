@@ -8,6 +8,9 @@
   `scripts/sync.mjs`; do not edit them by hand.
 - Generate and verify compatibility ledgers from the same canonical expected
   structure; checking only their upstream commit allows manual drift to pass.
+- When Zig manually mirrors an enum from the pinned schemas, verify the exact
+  upstream value set in `npm test`; pinning the schema does not update the Zig
+  type when upstream adds a variant.
 - Scope upstream API checks to the TypeScript declaration that owns each field,
   including inherited lifecycle fields, `Omit` exclusions, intersection
   re-declarations, startup initialization, and response handling; searching
