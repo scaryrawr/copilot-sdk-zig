@@ -1223,9 +1223,7 @@ export function renderSessionEvents(schema) {
   const generated = entries.filter((entry) => !entry.rich);
   const permissionKinds = model.nodes.get("PermissionRequest").selection.values;
 
-  const output = `// Generated file. Do not edit directly.
-
-const std = @import("std");
+  const output = `const std = @import("std");
 const payloads = @import("session_event_payloads.zig");
 
 ${typeModels.map(renderType).join("\n\n")}

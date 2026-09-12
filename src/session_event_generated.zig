@@ -1,5 +1,3 @@
-// Generated file. Do not edit directly.
-
 const std = @import("std");
 const payloads = @import("session_event_payloads.zig");
 
