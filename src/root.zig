@@ -63,6 +63,7 @@ pub const ProviderConfig = provider.ProviderConfig;
 pub const MessageOptions = session.MessageOptions;
 pub const SessionEvent = session.SessionEvent;
 pub const SessionEventTag = session.SessionEventTag;
+pub const SessionEventTypes = session.SessionEventTypes;
 pub const RawEvent = session.RawEvent;
 pub const AssistantMessage = session.AssistantMessage;
 pub const AssistantMessageDelta = session.AssistantMessageDelta;

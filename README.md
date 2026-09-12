@@ -460,7 +460,9 @@ handler returns JSON allocated with the allocator passed to it.
 The handler receives `null` when the request omitted `params`.
 
 It parses every event discriminator in the pinned schema into an explicit
-`SessionEvent` tag. These events retain focused payload types:
+`SessionEvent` tag with schema-generated public fields. The generated payload
+types are available through `SessionEventTypes`. These events retain focused
+helpers and compatibility fields:
 
 - `assistant.message`
 - `assistant.message_delta`
@@ -471,8 +473,8 @@ It parses every event discriminator in the pinned schema into an explicit
 - `permission.requested`
 - `external_tool.requested`
 
-Other pinned events carry an owned `RawEvent`. Use `event.rawData()` to read the
-canonical `data` JSON. The `unknown` variant is only for discriminators that are
+Use `event.rawData()` to read the additional owned canonical `data` JSON for
+every parsed event. The `unknown` variant is only for discriminators that are
 absent from the pinned schema. Keep an `else` branch in a switch that must
 compile after a schema sync adds event tags.
 

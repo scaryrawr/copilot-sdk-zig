@@ -5,6 +5,8 @@ const extensibility = @import("extensibility.zig");
 const event_payloads = @import("session_event_payloads.zig");
 const session_events = @import("session_event_generated.zig");
 
+pub const SessionEventTypes = session_events;
+
 pub const CreateSessionConfig = struct {
     session_id: ?[]const u8 = null,
     model: ?[]const u8 = null,
@@ -247,17 +249,17 @@ pub const ManagedSettingsPermissions = struct {
     allow: ?[]const []const u8 = null,
 };
 
-pub const AssistantMessage = event_payloads.AssistantMessage;
-pub const AssistantMessageDelta = event_payloads.AssistantMessageDelta;
-pub const AssistantReasoning = event_payloads.AssistantReasoning;
-pub const AssistantReasoningDelta = event_payloads.AssistantReasoningDelta;
-pub const SessionError = event_payloads.SessionError;
-pub const SessionIdle = event_payloads.SessionIdle;
+pub const AssistantMessage = session_events.AssistantMessage;
+pub const AssistantMessageDelta = session_events.AssistantMessageDelta;
+pub const AssistantReasoning = session_events.AssistantReasoning;
+pub const AssistantReasoningDelta = session_events.AssistantReasoningDelta;
+pub const SessionError = session_events.SessionError;
+pub const SessionIdle = session_events.SessionIdle;
 
 /// Result of automatic permission handling before `Session.nextEvent` returns
 /// the permission event.
 pub const AutomaticPermissionHandling = event_payloads.AutomaticPermissionHandling;
-pub const PermissionRequested = event_payloads.PermissionRequested;
+pub const PermissionRequested = session_events.PermissionRequested;
 
 pub const PermissionDecision = union(enum) {
     approve_once,
@@ -302,7 +304,7 @@ pub fn defaultJoinSessionPermissionHandler(
     return .no_result;
 }
 
-pub const ExternalToolRequested = event_payloads.ExternalToolRequested;
+pub const ExternalToolRequested = session_events.ExternalToolRequested;
 pub const PermissionRequestKind = event_payloads.PermissionRequestKind;
 pub const RawEvent = event_payloads.RawEvent;
 pub const UnknownEvent = event_payloads.UnknownEvent;
@@ -380,7 +382,7 @@ test "raw rich and unknown events outlive the source JSON tree" {
     var raw_json = try std.json.parseFromSlice(
         std.json.Value,
         allocator,
-        \\{"type":"session.start","data":{"token":"raw-secret"}}
+        \\{"type":"session.start","data":{"sessionId":"s1","version":1,"producer":"test","copilotVersion":"1.0","startTime":"2026-01-01T00:00:00Z","selectedModel":"raw-secret","contextTier":null}}
     ,
         .{},
     );
@@ -388,7 +390,14 @@ test "raw rich and unknown events outlive the source JSON tree" {
     raw_json.deinit();
     defer raw.deinit(allocator);
     try std.testing.expectEqual(.session_start, std.meta.activeTag(raw));
-    try std.testing.expectEqualStrings("{\"token\":\"raw-secret\"}", raw.rawData());
+    try std.testing.expectEqualStrings("s1", raw.session_start.data.session_id);
+    try std.testing.expectEqual(@as(u64, 1), raw.session_start.data.version);
+    try std.testing.expectEqualStrings("raw-secret", raw.session_start.data.selected_model.?);
+    try std.testing.expectEqual(null, raw.session_start.data.context_tier);
+    try std.testing.expectEqualStrings(
+        "{\"sessionId\":\"s1\",\"version\":1,\"producer\":\"test\",\"copilotVersion\":\"1.0\",\"startTime\":\"2026-01-01T00:00:00Z\",\"selectedModel\":\"raw-secret\",\"contextTier\":null}",
+        raw.rawData(),
+    );
 
     var rich_json = try std.json.parseFromSlice(
         std.json.Value,
@@ -422,6 +431,153 @@ test "raw rich and unknown events outlive the source JSON tree" {
     try std.testing.expectEqualStrings("{\"answer\":42}", future.rawData());
 }
 
+test "generated payloads expose nested arrays enums unions and opaque values" {
+    const allocator = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"tool.execution_complete","data":{"toolCallId":"tool-1","success":true,"model":"gpt-test","result":{"content":"done","binaryResultsForLlm":[{"type":"image","assetId":"sha256:abc","mimeType":"image/png","byteLength":4,"metadata":{"trace":{"id":"abc"}}}],"structuredContent":{"answer":42}}}}
+    ,
+        .{},
+    );
+    var event = try parseEvent(allocator, parsed.value);
+    parsed.deinit();
+    defer event.deinit(allocator);
+
+    const payload = event.tool_execution_complete.data;
+    try std.testing.expectEqualStrings("tool-1", payload.tool_call_id);
+    try std.testing.expect(payload.success);
+    try std.testing.expectEqualStrings("gpt-test", payload.model.?);
+    const result = payload.result.?;
+    try std.testing.expectEqualStrings("done", result.content);
+    try std.testing.expectEqual(@as(usize, 1), result.binary_results_for_llm.?.len);
+    switch (result.binary_results_for_llm.?[0]) {
+        .asset_id => |asset| {
+            try std.testing.expectEqual(
+                SessionEventTypes.BinaryAssetReferenceType.image,
+                asset.type,
+            );
+            try std.testing.expectEqualStrings("sha256:abc", asset.asset_id);
+            try std.testing.expectEqual(@as(u64, 4), asset.byte_length);
+            try std.testing.expectEqualStrings(
+                "abc",
+                asset.metadata.?.map.get("trace").?.object.get("id").?.string,
+            );
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(
+        @as(i64, 42),
+        result.structured_content.?.object.get("answer").?.integer,
+    );
+}
+
+test "generated integers accept full u64 range and raw data keeps future fields" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"session.start","data":{"sessionId":"s1","version":9223372036854775808,"producer":"test","copilotVersion":"1.0","startTime":"2026-01-01T00:00:00Z","futureField":{"enabled":true}}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    var event = try parseEvent(allocator, parsed.value);
+    defer event.deinit(allocator);
+
+    try std.testing.expectEqual(
+        @as(u64, 9_223_372_036_854_775_808),
+        event.session_start.data.version,
+    );
+    try std.testing.expectEqualStrings(
+        "{\"sessionId\":\"s1\",\"version\":9223372036854775808,\"producer\":\"test\",\"copilotVersion\":\"1.0\",\"startTime\":\"2026-01-01T00:00:00Z\",\"futureField\":{\"enabled\":true}}",
+        event.rawData(),
+    );
+}
+
+test "failed generated parsing wipes initialized fields" {
+    const source_allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        source_allocator,
+        \\{"type":"session.start","data":{"sessionId":"s1","version":1,"producer":"test","copilotVersion":"1.0","startTime":"2026-01-01T00:00:00Z","selectedModel":"wipe-me","reasoningSummary":"invalid"}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+
+    var storage = [_]u8{0xaa} ** 16_384;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    try std.testing.expectError(
+        error.InvalidSessionEvent,
+        parseEvent(fixed.allocator(), parsed.value),
+    );
+    try std.testing.expectEqual(
+        null,
+        std.mem.indexOf(u8, &storage, "wipe-me"),
+    );
+}
+
+fn rejectGeneratedEventForAllocationFailures(allocator: std.mem.Allocator) !void {
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"session.start","data":{"sessionId":"s1","version":1,"producer":"test","copilotVersion":"1.0","startTime":"2026-01-01T00:00:00Z","selectedModel":"wipe-me","reasoningSummary":"invalid"}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    if (parseEvent(allocator, parsed.value)) |event_value| {
+        var event = event_value;
+        event.deinit(allocator);
+        return error.TestUnexpectedResult;
+    } else |err| switch (err) {
+        error.InvalidSessionEvent => {},
+        else => return err,
+    }
+}
+
+test "failed generated parsing handles every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        rejectGeneratedEventForAllocationFailures,
+        .{},
+    );
+}
+
+test "focused payloads include schema required fields" {
+    const allocator = std.testing.allocator;
+    const error_json = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"session.error","data":{"errorType":"authentication","message":"sign in"}}
+    ,
+        .{},
+    );
+    defer error_json.deinit();
+    var session_error = try parseEvent(allocator, error_json.value);
+    defer session_error.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "authentication",
+        session_error.session_error.error_type,
+    );
+
+    const tool_json = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"external_tool.requested","data":{"requestId":"r1","sessionId":"session-7","toolCallId":"t1","toolName":"lookup","arguments":{"id":"alpha"}}}
+    ,
+        .{},
+    );
+    defer tool_json.deinit();
+    var tool = try parseEvent(allocator, tool_json.value);
+    defer tool.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "session-7",
+        tool.external_tool_requested.session_id,
+    );
+}
+
 test "malformed known rich events return an error" {
     const allocator = std.testing.allocator;
     const parsed = try std.json.parseFromSlice(
@@ -438,6 +594,23 @@ test "malformed known rich events return an error" {
     );
 }
 
+test "schema-required generated and focused fields reject malformed events" {
+    const allocator = std.testing.allocator;
+    const samples = [_][]const u8{
+        \\{"type":"session.start","data":{"version":1,"producer":"test","copilotVersion":"1.0","startTime":"2026-01-01T00:00:00Z"}}
+        ,
+        \\{"type":"session.error","data":{"message":"missing category"}}
+        ,
+        \\{"type":"external_tool.requested","data":{"requestId":"r1","toolCallId":"t1","toolName":"lookup"}}
+        ,
+    };
+    for (samples) |sample| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, sample, .{});
+        defer parsed.deinit();
+        try std.testing.expectError(error.InvalidSessionEvent, parseEvent(allocator, parsed.value));
+    }
+}
+
 fn parseAndDeinitForAllocationFailures(
     allocator: std.mem.Allocator,
     json: []const u8,
@@ -450,12 +623,12 @@ fn parseAndDeinitForAllocationFailures(
     try std.testing.expectEqual(expected_tag, std.meta.activeTag(event));
 }
 
-test "raw event ownership handles every allocation failure" {
+test "generated event ownership handles every allocation failure" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
         parseAndDeinitForAllocationFailures,
         .{
-            \\{"type":"session.start","data":{"token":"raw-secret"}}
+            \\{"type":"session.start","data":{"sessionId":"s1","version":1,"producer":"test","copilotVersion":"1.0","startTime":"2026-01-01T00:00:00Z","selectedModel":"raw-secret"}}
             ,
             SessionEventTag.session_start,
         },
@@ -508,7 +681,7 @@ test "permission and external tool events retain opaque payloads" {
     const permission_json = try std.json.parseFromSlice(
         std.json.Value,
         allocator,
-        \\{"type":"permission.requested","data":{"requestId":"p1","permissionRequest":{"kind":"shell","fullCommandText":"pwd"}}}
+        \\{"type":"permission.requested","data":{"requestId":"p1","permissionRequest":{"kind":"shell","fullCommandText":"pwd","intention":"show directory","commands":[],"possiblePaths":[],"possibleUrls":[],"hasWriteFileRedirection":false,"canOfferSessionApproval":false}}}
     ,
         .{},
     );
@@ -522,14 +695,21 @@ test "permission and external tool events retain opaque payloads" {
         permission.permission_requested.automatic_handling == .not_configured,
     );
     try std.testing.expectEqualStrings(
-        "{\"kind\":\"shell\",\"fullCommandText\":\"pwd\"}",
+        "{\"kind\":\"shell\",\"fullCommandText\":\"pwd\",\"intention\":\"show directory\",\"commands\":[],\"possiblePaths\":[],\"possibleUrls\":[],\"hasWriteFileRedirection\":false,\"canOfferSessionApproval\":false}",
         permission.permission_requested.permission_request_json,
     );
+    switch (permission.permission_requested.permission_request.?) {
+        .shell => |request| {
+            try std.testing.expectEqualStrings("pwd", request.full_command_text);
+            try std.testing.expectEqual(@as(usize, 0), request.commands.len);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 
     const tool_json = try std.json.parseFromSlice(
         std.json.Value,
         allocator,
-        \\{"type":"external_tool.requested","data":{"requestId":"r1","toolCallId":"t1","toolName":"lookup","arguments":{"id":"alpha"}}}
+        \\{"type":"external_tool.requested","data":{"requestId":"r1","sessionId":"s1","toolCallId":"t1","toolName":"lookup","arguments":{"id":"alpha"}}}
     ,
         .{},
     );
