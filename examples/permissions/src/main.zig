@@ -26,18 +26,18 @@ pub fn main(init: std.process.Init) !void {
         return printHelp(init.io);
     }
 
-    var client = try copilot.Client.init(init.gpa, init.io, .{});
+    var client = try copilot.Client.init(init.gpa, init.io, .{}, null);
     defer client.deinit();
     const session = try client.createSession(.{
         .model = "gpt-5.6-luna",
         .tools = &.{status_tool},
         .request_permission = true,
-    });
-    defer session.disconnect() catch {};
+    }, null);
+    defer session.disconnect(null) catch {};
 
     const message_id = try session.send(.{
         .prompt = "Use read_deployment_status for production and report the result.",
-    });
+    }, null);
     defer init.gpa.free(message_id);
 
     var stdout_buffer: [4096]u8 = undefined;
@@ -45,7 +45,7 @@ pub fn main(init: std.process.Init) !void {
     const stdout = &stdout_writer.interface;
 
     while (true) {
-        var event = try session.nextEvent();
+        var event = try session.nextEvent(null);
         defer event.deinit(init.gpa);
 
         switch (event) {
@@ -53,10 +53,11 @@ pub fn main(init: std.process.Init) !void {
                 const kind = try request.kind();
                 try stdout.print("permission kind: {s}\n", .{@tagName(kind)});
                 switch (kind) {
-                    .custom_tool => try session.approvePermission(request.request_id),
+                    .custom_tool => try session.approvePermission(request.request_id, null),
                     else => try session.rejectPermission(
                         request.request_id,
                         "This example approves only custom tools.",
+                        null,
                     ),
                 }
             },

@@ -7,16 +7,16 @@ pub fn main(init: std.process.Init) !void {
         return printHelp(init.io);
     }
 
-    var client = try copilot.Client.init(init.gpa, init.io, .{});
+    var client = try copilot.Client.init(init.gpa, init.io, .{}, null);
     defer client.deinit();
     const session = try client.createSession(.{
         .model = "gpt-5.6-luna",
-    });
-    defer session.disconnect() catch {};
+    }, null);
+    defer session.disconnect(null) catch {};
 
     const response = try session.sendAndWait(.{
         .prompt = "Explain Zig error unions in one sentence.",
-    }) orelse return error.MissingAssistantResponse;
+    }, null) orelse return error.MissingAssistantResponse;
     defer response.deinit(init.gpa);
 
     var stdout_buffer: [4096]u8 = undefined;

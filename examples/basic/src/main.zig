@@ -19,17 +19,17 @@ pub fn main(init: std.process.Init) !void {
         cli_path = args[2];
     }
 
-    var client = try copilot.Client.init(allocator, init.io, .{ .cli_path = cli_path });
+    var client = try copilot.Client.init(allocator, init.io, .{ .cli_path = cli_path }, null);
     defer client.deinit();
 
     var session = try client.createSession(.{
         .model = "gpt-5.6-luna",
         .streaming = true,
         .on_permission_request = copilot.approveAll,
-    });
-    defer session.disconnect() catch {};
+    }, null);
+    defer session.disconnect(null) catch {};
 
-    const message_id = try session.send(.{ .prompt = "Explain this repository in one paragraph." });
+    const message_id = try session.send(.{ .prompt = "Explain this repository in one paragraph." }, null);
     defer allocator.free(message_id);
 
     var stdout_buffer: [4096]u8 = undefined;
@@ -39,7 +39,7 @@ pub fn main(init: std.process.Init) !void {
 
     var received_delta = false;
     while (true) {
-        var event = try session.nextEvent();
+        var event = try session.nextEvent(null);
         defer event.deinit(allocator);
 
         switch (event) {

@@ -27,17 +27,17 @@ pub fn main(init: std.process.Init) !void {
         return printHelp(init.io);
     }
 
-    var client = try copilot.Client.init(init.gpa, init.io, .{});
+    var client = try copilot.Client.init(init.gpa, init.io, .{}, null);
     defer client.deinit();
     const session = try client.createSession(.{
         .model = "gpt-5.6-luna",
         .tools = &.{weather_tool},
-    });
-    defer session.disconnect() catch {};
+    }, null);
+    defer session.disconnect(null) catch {};
 
     const message_id = try session.send(.{
         .prompt = "Use get_weather to check the weather in Seattle, then summarize it.",
-    });
+    }, null);
     defer init.gpa.free(message_id);
 
     var stdout_buffer: [4096]u8 = undefined;
@@ -45,7 +45,7 @@ pub fn main(init: std.process.Init) !void {
     const stdout = &stdout_writer.interface;
 
     while (true) {
-        var event = try session.nextEvent();
+        var event = try session.nextEvent(null);
         defer event.deinit(init.gpa);
 
         switch (event) {
