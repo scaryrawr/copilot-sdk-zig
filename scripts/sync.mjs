@@ -116,9 +116,11 @@ function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, e
     "pluginDirectories?: string[]",
     "skillDirectories?: string[]",
     "disabledSkills?: string[]",
+    "includedBuiltinSkills?: string[]",
     "disabledMcpServers?: string[]",
     "mcpServers?: Record<string, MCPServerConfig>",
     "mcpOAuthTokenStorage?: \"persistent\" | \"in-memory\"",
+    "authClientIdMetadataUrl?: string",
     "onMcpAuthRequest?: McpAuthHandler",
     "hooks?: SessionHooks",
     "canvases?: Canvas[]",
@@ -132,6 +134,7 @@ function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, e
     "suppressResumeEvent?: boolean",
     "continuePendingWork?: boolean",
     "requestedEnvironmentVariables?: string[]",
+    "grantedEnvironmentVariables?: Record<string, string>",
   ];
   const combined = `${clientSource}\n${typesSource}\n${extensionSource}`;
   for (const fragment of requiredSourceFragments) {

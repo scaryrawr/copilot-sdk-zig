@@ -421,6 +421,10 @@ pub const EnvironmentGrant = struct {
     value: []const u8,
 };
 
+fn wipeSecret(value: []const u8) void {
+    @memset(@constCast(value), 0);
+}
+
 pub const EnvironmentGrants = struct {
     allocator: std.mem.Allocator,
     items: []EnvironmentGrant,
@@ -428,6 +432,7 @@ pub const EnvironmentGrants = struct {
     pub fn deinit(self: *EnvironmentGrants) void {
         for (self.items) |item| {
             self.allocator.free(item.name);
+            wipeSecret(item.value);
             self.allocator.free(item.value);
         }
         self.allocator.free(self.items);
@@ -441,6 +446,12 @@ pub const EnvironmentGrants = struct {
         return null;
     }
 };
+
+test "environment grant teardown wipes secret bytes" {
+    var secret = [_]u8{ 's', 'e', 'c', 'r', 'e', 't' };
+    wipeSecret(&secret);
+    for (secret) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+}
 
 pub const SessionFeatures = struct {
     plugin_directories: []const []const u8 = &.{},

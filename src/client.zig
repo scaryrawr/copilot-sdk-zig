@@ -8,6 +8,10 @@ const ext = @import("extensibility.zig");
 
 const max_queued_events: usize = 1024;
 
+fn wipeSecret(value: []const u8) void {
+    @memset(@constCast(value), 0);
+}
+
 pub const ClientOptions = struct {
     cli_path: []const u8 = "copilot",
     working_directory: ?[]const u8 = null,
@@ -100,6 +104,7 @@ const SessionExtensionRuntime = struct {
     user_input_handler: ?session_types.UserInputHandler,
     user_input_context: ?*anyopaque,
     granted_environment_variables: std.ArrayList(ext.EnvironmentGrant) = .empty,
+    mcp_oauth_interest_handle: ?[]u8 = null,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -118,7 +123,6 @@ const SessionExtensionRuntime = struct {
             return err;
         };
         var result = SessionExtensionRuntime{
-            .session_id = if (session_id) |id| try allocator.dupe(u8, id) else null,
             .hooks = features.hooks,
             .mcp_auth_handler = features.mcp.on_auth_request,
             .mcp_auth_context = features.mcp.auth_context,
@@ -142,6 +146,7 @@ const SessionExtensionRuntime = struct {
             for (result.open_canvases.items) |canvas| ext.freeOpenCanvas(allocator, canvas);
             result.open_canvases.deinit(allocator);
         }
+        if (session_id) |id| result.session_id = try allocator.dupe(u8, id);
         for (config.tools) |tool| {
             const handler = tool.handler orelse continue;
             result.tools[initialized_tools] = .{
@@ -190,9 +195,11 @@ const SessionExtensionRuntime = struct {
         self.open_canvases.deinit(allocator);
         for (self.granted_environment_variables.items) |grant| {
             allocator.free(grant.name);
+            wipeSecret(grant.value);
             allocator.free(grant.value);
         }
         self.granted_environment_variables.deinit(allocator);
+        if (self.mcp_oauth_interest_handle) |handle| allocator.free(handle);
     }
 };
 
@@ -329,8 +336,14 @@ pub const Client = struct {
         self.tools.deinit(self.allocator);
         self.user_input_handlers.deinit(self.allocator);
         self.permission_handlers.deinit(self.allocator);
-        if (self.pending_extension_runtime) |*runtime| runtime.deinit(self.allocator);
-        for (self.extension_runtimes.items) |*runtime| runtime.deinit(self.allocator);
+        if (self.pending_extension_runtime) |*runtime| {
+            self.releaseMcpOAuthInterest(runtime) catch {};
+            runtime.deinit(self.allocator);
+        }
+        for (self.extension_runtimes.items) |*runtime| {
+            self.releaseMcpOAuthInterest(runtime) catch {};
+            runtime.deinit(self.allocator);
+        }
         self.extension_runtimes.deinit(self.allocator);
         for (self.rpc_handlers.items) |handler| handler.deinit(self.allocator);
         self.rpc_handlers.deinit(self.allocator);
@@ -414,11 +427,7 @@ pub const Client = struct {
         errdefer self.removeSession(id);
         try self.commitExtensionRuntime(returned_id, parsed.value, &.{});
         if (config.extensions.common.mcp.on_auth_request != null) {
-            const interest = try self.call(std.json.Value, "session.eventLog.registerInterest", .{
-                .sessionId = returned_id,
-                .eventType = "mcp.oauth_required",
-            });
-            interest.deinit();
+            try self.registerMcpOAuthInterest(returned_id);
         }
         return .{ .client = self, .id = id };
     }
@@ -487,11 +496,7 @@ pub const Client = struct {
             requested_environment_variables,
         );
         if (config.extensions.common.mcp.on_auth_request != null) {
-            const interest = try self.call(std.json.Value, "session.eventLog.registerInterest", .{
-                .sessionId = session_id,
-                .eventType = "mcp.oauth_required",
-            });
-            interest.deinit();
+            try self.registerMcpOAuthInterest(session_id);
         }
         return .{ .client = self, .id = id };
     }
@@ -565,14 +570,78 @@ pub const Client = struct {
                 const name_copy = try self.allocator.dupe(u8, entry.key_ptr.*);
                 errdefer self.allocator.free(name_copy);
                 const value_copy = try self.allocator.dupe(u8, value);
-                errdefer self.allocator.free(value_copy);
+                errdefer {
+                    wipeSecret(value_copy);
+                    self.allocator.free(value_copy);
+                }
                 try runtime.granted_environment_variables.append(self.allocator, .{
                     .name = name_copy,
                     .value = value_copy,
                 });
             }
         }
+        for (self.extension_runtimes.items, 0..) |*existing, index| {
+            if (existing.session_id != null and
+                std.mem.eql(u8, existing.session_id.?, session_id))
+            {
+                if (existing.mcp_oauth_interest_handle != null and
+                    runtime.mcp_auth_handler != null)
+                {
+                    runtime.mcp_oauth_interest_handle =
+                        existing.mcp_oauth_interest_handle;
+                    existing.mcp_oauth_interest_handle = null;
+                } else {
+                    try self.releaseMcpOAuthInterest(existing);
+                }
+                existing.deinit(self.allocator);
+                self.extension_runtimes.items[index] = runtime;
+                return;
+            }
+        }
         try self.extension_runtimes.append(self.allocator, runtime);
+    }
+
+    fn registerMcpOAuthInterest(self: *Client, session_id: []const u8) !void {
+        const runtime = self.findExtensionRuntime(session_id) orelse
+            return error.MissingExtensionRuntime;
+        if (runtime.mcp_oauth_interest_handle != null) return;
+        const parsed = try self.call(struct {
+            handle: []const u8,
+        }, "session.eventLog.registerInterest", .{
+            .sessionId = session_id,
+            .eventType = "mcp.oauth_required",
+        });
+        defer parsed.deinit();
+        runtime.mcp_oauth_interest_handle =
+            self.allocator.dupe(u8, parsed.value.handle) catch |err| {
+                const released = self.call(struct {
+                    success: bool,
+                }, "session.eventLog.releaseInterest", .{
+                    .sessionId = session_id,
+                    .handle = parsed.value.handle,
+                }) catch return err;
+                released.deinit();
+                return err;
+            };
+    }
+
+    fn releaseMcpOAuthInterest(
+        self: *Client,
+        runtime: *SessionExtensionRuntime,
+    ) !void {
+        const handle = runtime.mcp_oauth_interest_handle orelse return;
+        const session_id = runtime.session_id orelse
+            return error.MissingSessionId;
+        const parsed = try self.call(struct {
+            success: bool,
+        }, "session.eventLog.releaseInterest", .{
+            .sessionId = session_id,
+            .handle = handle,
+        });
+        defer parsed.deinit();
+        if (!parsed.value.success) return error.EventInterestNotReleased;
+        self.allocator.free(handle);
+        runtime.mcp_oauth_interest_handle = null;
     }
 
     /// Joins a parent-selected extension session. The session id is injected by
@@ -889,7 +958,15 @@ pub const Client = struct {
                 .tool_args_json = args,
             }, invocation, runtime.hooks.context) catch |err|
                 return self.writeServerRequestError(writer, id, -32000, @errorName(err));
-            const modified = try parseOptionalJson(self.allocator, output.modified_args_json);
+            const modified = parseOptionalJson(
+                self.allocator,
+                output.modified_args_json,
+            ) catch return self.writeServerRequestError(
+                writer,
+                id,
+                -32603,
+                "invalid hook output",
+            );
             defer if (modified) |value| value.deinit();
             return self.writeTypedSuccess(writer, id, .{ .output = .{
                 .permissionDecision = output.permission_decision,
@@ -920,7 +997,15 @@ pub const Client = struct {
                 .meta_json = meta,
             }, invocation, runtime.hooks.context) catch |err|
                 return self.writeServerRequestError(writer, id, -32000, @errorName(err));
-            const meta_value = try parseOptionalJson(self.allocator, output.meta_to_use_json);
+            const meta_value = parseOptionalJson(
+                self.allocator,
+                output.meta_to_use_json,
+            ) catch return self.writeServerRequestError(
+                writer,
+                id,
+                -32603,
+                "invalid hook output",
+            );
             defer if (meta_value) |value| value.deinit();
             return self.writeTypedSuccess(writer, id, .{ .output = .{
                 .metaToUse = if (output.omit_meta)
@@ -945,7 +1030,15 @@ pub const Client = struct {
                 .tool_result_json = tool_result,
             }, invocation, runtime.hooks.context) catch |err|
                 return self.writeServerRequestError(writer, id, -32000, @errorName(err));
-            const modified = try parseOptionalJson(self.allocator, output.modified_result_json);
+            const modified = parseOptionalJson(
+                self.allocator,
+                output.modified_result_json,
+            ) catch return self.writeServerRequestError(
+                writer,
+                id,
+                -32603,
+                "invalid hook output",
+            );
             defer if (modified) |value| value.deinit();
             return self.writeTypedSuccess(writer, id, .{ .output = .{
                 .modifiedResult = if (modified) |value| value.value else null,
@@ -1015,7 +1108,15 @@ pub const Client = struct {
                 .initial_prompt = jsonOptionalString(input, "initialPrompt") catch null,
             }, invocation, runtime.hooks.context) catch |err|
                 return self.writeServerRequestError(writer, id, -32000, @errorName(err));
-            const modified = try parseOptionalJson(self.allocator, output.modified_config_json);
+            const modified = parseOptionalJson(
+                self.allocator,
+                output.modified_config_json,
+            ) catch return self.writeServerRequestError(
+                writer,
+                id,
+                -32603,
+                "invalid hook output",
+            );
             defer if (modified) |value| value.deinit();
             return self.writeTypedSuccess(writer, id, .{ .output = .{
                 .additionalContext = output.additional_context,
@@ -1311,16 +1412,16 @@ pub const Client = struct {
     }
 
     fn findExtensionRuntime(self: *Client, session_id: []const u8) ?*SessionExtensionRuntime {
-        for (self.extension_runtimes.items) |*runtime| {
-            if (runtime.session_id) |id| {
-                if (std.mem.eql(u8, id, session_id)) return runtime;
-            }
-        }
         if (self.pending_extension_runtime) |*runtime| {
             if (runtime.session_id) |id| {
                 if (std.mem.eql(u8, id, session_id)) return runtime;
             } else {
                 return runtime;
+            }
+        }
+        for (self.extension_runtimes.items) |*runtime| {
+            if (runtime.session_id) |id| {
+                if (std.mem.eql(u8, id, session_id)) return runtime;
             }
         }
         return null;
@@ -1850,6 +1951,7 @@ pub const Session = struct {
         errdefer {
             for (items[0..initialized]) |item| {
                 allocator.free(item.name);
+                wipeSecret(item.value);
                 allocator.free(item.value);
             }
             allocator.free(items);
@@ -1945,6 +2047,9 @@ pub const Session = struct {
             });
             defer parsed.deinit();
             if (parsed.value.success) {
+                if (self.client.findExtensionRuntime(self.id)) |runtime| {
+                    try self.client.releaseMcpOAuthInterest(runtime);
+                }
                 self.client.removeSession(self.id);
                 return;
             }
@@ -2665,7 +2770,7 @@ fn lowerStdioMcp(allocator: std.mem.Allocator, config: ext.McpServerConfig.Stdio
         .command = config.command,
         .args = config.args,
         .env = env,
-        .workingDirectory = config.working_directory,
+        .cwd = config.working_directory,
         .tools = config.tools,
         .timeout = config.timeout_ms,
     }, .{ .emit_null_optional_fields = false });
@@ -2784,6 +2889,7 @@ fn resumeConfigFromCreate(config: session_types.CreateSessionConfig) session_typ
         .permission_context = config.permission_context,
         .on_user_input_request = config.on_user_input_request,
         .user_input_context = config.user_input_context,
+        .suppress_resume_event = true,
         .extensions = .{
             .common = config.extensions.common,
             .extension_sdk_path = config.extensions.extension_sdk_path,
@@ -4623,6 +4729,199 @@ test "typed hooks dispatch through a provisional session runtime" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"permissionDecision\":\"deny\"") != null);
 }
 
+test "invalid hook output receives an internal-error response" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer client.rollbackExtensionRuntime();
+    const handler = struct {
+        fn handle(
+            _: std.mem.Allocator,
+            _: ext.PreToolUseInput,
+            _: ext.HookInvocation,
+            _: ?*anyopaque,
+        ) !ext.PreToolUseOutput {
+            return .{ .modified_args_json = "{" };
+        }
+    }.handle;
+    try client.beginExtensionRuntime(null, session_types.CreateSessionConfig{
+        .extensions = .{ .common = .{ .hooks = .{
+            .on_pre_tool_use = handler,
+        } } },
+    }, &.{});
+    const params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"s1","hookType":"preToolUse","input":{"sessionId":"s1","timestamp":42,"workingDirectory":"/repo","toolName":"shell","toolArgs":{}}}
+    ,
+        .{},
+    );
+    defer params.deinit();
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try client.dispatchServerRequest(
+        &output.writer,
+        .{ .integer = 8 },
+        "hooks.invoke",
+        params.value,
+    );
+    const body = try framedBody(allocator, output.written());
+    defer allocator.free(body);
+    try std.testing.expect(
+        std.mem.indexOf(u8, body, "\"code\":-32603") != null,
+    );
+}
+
+test "resident resume prefers and commits replacement runtime" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        if (client.pending_extension_runtime) |*runtime| runtime.deinit(allocator);
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+    }
+    var old_context: u8 = 1;
+    var new_context: u8 = 2;
+    try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
+        .extensions = .{ .common = .{ .hooks = .{
+            .context = &old_context,
+        } } },
+    }, &.{});
+    try client.commitExtensionRuntime("s1", .{}, &.{});
+    try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
+        .extensions = .{ .common = .{ .hooks = .{
+            .context = &new_context,
+        } } },
+    }, &.{});
+    try std.testing.expectEqual(
+        @as(?*anyopaque, &new_context),
+        client.findExtensionRuntime("s1").?.hooks.context,
+    );
+    try client.commitExtensionRuntime("s1", .{}, &.{});
+    try std.testing.expectEqual(@as(usize, 1), client.extension_runtimes.items.len);
+    try std.testing.expectEqual(
+        @as(?*anyopaque, &new_context),
+        client.findExtensionRuntime("s1").?.hooks.context,
+    );
+}
+
+test "MCP OAuth event interest is retained and released" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const register_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"handle":"interest-1"}}
+    ;
+    const release_response =
+        \\{"jsonrpc":"2.0","id":2,"result":{"success":true}}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            register_response.len,
+            register_response,
+            release_response.len,
+            release_response,
+        },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "responses",
+        .data = responses,
+    });
+    const response_file = try tmp.dir.openFile(
+        std.testing.io,
+        "responses",
+        .{ .mode = .read_only },
+    );
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+    }
+    const handler = struct {
+        fn handle(
+            _: std.mem.Allocator,
+            _: ext.McpAuthRequest,
+            _: ?*anyopaque,
+        ) !ext.McpAuthResult {
+            return .cancelled;
+        }
+    }.handle;
+    try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
+        .extensions = .{ .common = .{ .mcp = .{
+            .on_auth_request = handler,
+        } } },
+    }, &.{});
+    try client.commitExtensionRuntime("s1", .{}, &.{});
+    try client.registerMcpOAuthInterest("s1");
+    const runtime = client.findExtensionRuntime("s1").?;
+    try std.testing.expectEqualStrings(
+        "interest-1",
+        runtime.mcp_oauth_interest_handle.?,
+    );
+    try client.releaseMcpOAuthInterest(runtime);
+    try std.testing.expect(runtime.mcp_oauth_interest_handle == null);
+
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "requests",
+        allocator,
+        .limited(4096),
+    );
+    defer allocator.free(requests);
+    var frames = std.Io.Reader.fixed(requests);
+    const register_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(register_body);
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            register_body,
+            "\"method\":\"session.eventLog.registerInterest\"",
+        ) != null,
+    );
+    const release_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(release_body);
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            release_body,
+            "\"method\":\"session.eventLog.releaseInterest\"",
+        ) != null,
+    );
+}
+
 test "review regressions preserve protocol semantics" {
     const allocator = std.testing.allocator;
     var client = Client{
@@ -4678,7 +4977,21 @@ test "review regressions preserve protocol semantics" {
     });
     try std.testing.expectEqualStrings("model", mapped.model.?);
     try std.testing.expect(mapped.streaming);
+    try std.testing.expect(mapped.suppress_resume_event);
     try std.testing.expectEqualStrings("/sdk", mapped.extensions.extension_sdk_path.?);
+
+    const stdio_json = try lowerStdioMcp(allocator, .{
+        .command = "server",
+        .working_directory = "/repo",
+    });
+    defer allocator.free(stdio_json);
+    const stdio = try std.json.parseFromSlice(std.json.Value, allocator, stdio_json, .{});
+    defer stdio.deinit();
+    try std.testing.expectEqualStrings(
+        "/repo",
+        stdio.value.object.get("cwd").?.string,
+    );
+    try std.testing.expect(!stdio.value.object.contains("workingDirectory"));
 }
 
 test "OAuth errors cancel and canvas identity is instance-only" {

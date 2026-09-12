@@ -398,6 +398,7 @@ tests verify protocol behavior without requiring Copilot credentials.
 The SDK supports only the stdio transport. Typed high-level methods implement:
 
 - `connect`
+- `plugins.builtin.set`
 - `session.create`
 - `session.resume`
 - `session.send`
@@ -408,6 +409,19 @@ The SDK supports only the stdio transport. Typed high-level methods implement:
 - `session.log`
 - `session.detach`
 - `session.event`
+- `hooks.invoke`
+- `canvas.open`
+- `canvas.close`
+- `canvas.action.invoke`
+- `session.canvas.open`
+- `session.canvas.close`
+- `session.canvas.action.invoke`
+- `session.eventLog.registerInterest`
+- `session.eventLog.releaseInterest`
+- `session.mcp.oauth.handlePendingRequest`
+- `session.mcp.apps.listTools`
+- `session.mcp.apps.callTool`
+- `session.mcp.apps.readResource`
 - `session.permissions.handlePendingPermissionRequest`
 - `session.tools.handlePendingToolCall`
 
