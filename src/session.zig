@@ -14,6 +14,7 @@ pub const SessionConfig = struct {
     request_permission: bool = false,
     enable_config_discovery: ?bool = null,
     skill_directories: ?[]const []const u8 = null,
+    enable_skills: ?bool = null,
     instruction_directories: ?[]const []const u8 = null,
     skip_custom_instructions: ?bool = null,
     enable_on_demand_instruction_discovery: ?bool = null,

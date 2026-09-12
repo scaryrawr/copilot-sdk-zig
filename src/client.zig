@@ -1159,6 +1159,7 @@ const CreateSessionRequest = struct {
     requestUserInput: bool,
     enableConfigDiscovery: ?bool,
     skillDirectories: ?[]const []const u8,
+    enableSkills: ?bool,
     instructionDirectories: ?[]const []const u8,
     skipCustomInstructions: ?bool,
     enableOnDemandInstructionDiscovery: ?bool,
@@ -1179,6 +1180,7 @@ const ResumeSessionRequest = struct {
     requestUserInput: bool,
     enableConfigDiscovery: ?bool,
     skillDirectories: ?[]const []const u8,
+    enableSkills: ?bool,
     instructionDirectories: ?[]const []const u8,
     skipCustomInstructions: ?bool,
     enableOnDemandInstructionDiscovery: ?bool,
@@ -1232,6 +1234,7 @@ fn buildCreateSessionRequest(
         .requestUserInput = config.on_user_input_request != null,
         .enableConfigDiscovery = config.enable_config_discovery,
         .skillDirectories = config.skill_directories,
+        .enableSkills = config.enable_skills,
         .instructionDirectories = config.instruction_directories,
         .skipCustomInstructions = config.skip_custom_instructions,
         .enableOnDemandInstructionDiscovery = config.enable_on_demand_instruction_discovery,
@@ -1258,6 +1261,7 @@ fn buildResumeSessionRequest(
         .requestUserInput = config.on_user_input_request != null,
         .enableConfigDiscovery = config.enable_config_discovery,
         .skillDirectories = config.skill_directories,
+        .enableSkills = config.enable_skills,
         .instructionDirectories = config.instruction_directories,
         .skipCustomInstructions = config.skip_custom_instructions,
         .enableOnDemandInstructionDiscovery = config.enable_on_demand_instruction_discovery,
@@ -2510,6 +2514,7 @@ test "session requests preserve discovery semantics" {
             "session.create",
             try buildCreateSessionRequest(.{
                 .enable_config_discovery = case.value,
+                .enable_skills = case.value,
                 .skip_custom_instructions = case.value,
                 .enable_on_demand_instruction_discovery = case.value,
             }, &.{}),
@@ -2530,6 +2535,7 @@ test "session requests preserve discovery semantics" {
             "session.resume",
             try buildResumeSessionRequest("session-1", .{
                 .enable_config_discovery = case.value,
+                .enable_skills = case.value,
                 .skip_custom_instructions = case.value,
                 .enable_on_demand_instruction_discovery = case.value,
             }, &.{}),
@@ -2555,6 +2561,14 @@ test "session requests preserve discovery semantics" {
             );
             try std.testing.expectEqual(
                 expected,
+                create_params.get("enableSkills").?.bool,
+            );
+            try std.testing.expectEqual(
+                expected,
+                resume_params.get("enableSkills").?.bool,
+            );
+            try std.testing.expectEqual(
+                expected,
                 create_params.get("skipCustomInstructions").?.bool,
             );
             try std.testing.expectEqual(
@@ -2572,6 +2586,8 @@ test "session requests preserve discovery semantics" {
         } else {
             try std.testing.expect(!create_params.contains("enableConfigDiscovery"));
             try std.testing.expect(!resume_params.contains("enableConfigDiscovery"));
+            try std.testing.expect(!create_params.contains("enableSkills"));
+            try std.testing.expect(!resume_params.contains("enableSkills"));
             try std.testing.expect(!create_params.contains("skipCustomInstructions"));
             try std.testing.expect(!resume_params.contains("skipCustomInstructions"));
             try std.testing.expect(!create_params.contains("enableOnDemandInstructionDiscovery"));

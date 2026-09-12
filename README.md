@@ -122,7 +122,9 @@ Both options default to `null`, which leaves their runtime defaults unchanged.
 
 To load skills and custom instructions only from explicit trusted locations,
 set `.skill_directories` and `.instruction_directories` instead of enabling
-ambient config discovery. Both fields are omitted when left as `null`.
+ambient config discovery. Set `.enable_skills = true` to activate skill loading
+from the explicit directories. All three fields are omitted when left as
+`null`.
 
 ## List available models
 
