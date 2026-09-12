@@ -108,6 +108,14 @@ in use. `SessionEvent` values and the message ID from `send` own memory from the
 client allocator. `Session.disconnect` releases the client-side session
 resources while preserving the session state so it can be resumed later.
 
+Use `SessionConfig.available_tools` and `SessionConfig.excluded_tools` to
+constrain the model-visible tool set for each created or resumed session. Tool
+filters use source-qualified names such as `builtin:ask_user`, `custom:*`, and
+`mcp:server-tool`; a bare `*` does not match all sources. The SDK sends
+`toolFilterPrecedence: "excluded"` so an exclusion still applies when both
+lists are present. Process-level CLI arguments do not replace these
+session-level fields in headless SDK mode.
+
 Set `.enable_config_discovery = true` when creating or joining a session to
 discover MCP server configurations (`.mcp.json` and `.vscode/mcp.json`) and
 skill directories from the working directory. Treat enabling discovery as a

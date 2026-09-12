@@ -1154,6 +1154,9 @@ const CreateSessionRequest = struct {
     workingDirectory: ?[]const u8,
     streaming: bool,
     tools: []const WireTool,
+    availableTools: ?[]const []const u8,
+    excludedTools: ?[]const []const u8,
+    toolFilterPrecedence: ToolFilterPrecedence = .excluded,
     systemMessage: ?session_types.SystemMessageConfig,
     requestPermission: bool,
     requestUserInput: bool,
@@ -1175,6 +1178,9 @@ const ResumeSessionRequest = struct {
     workingDirectory: ?[]const u8,
     streaming: bool,
     tools: []const WireTool,
+    availableTools: ?[]const []const u8,
+    excludedTools: ?[]const []const u8,
+    toolFilterPrecedence: ToolFilterPrecedence = .excluded,
     systemMessage: ?session_types.SystemMessageConfig,
     requestPermission: bool,
     requestUserInput: bool,
@@ -1187,6 +1193,11 @@ const ResumeSessionRequest = struct {
     enableManagedSettings: bool,
     managedSettings: ?WireManagedSettings,
     disableResume: bool = true,
+};
+
+const ToolFilterPrecedence = enum {
+    available,
+    excluded,
 };
 
 fn managedSettingsEnabled(config: session_types.SessionConfig) bool {
@@ -1229,6 +1240,8 @@ fn buildCreateSessionRequest(
         .workingDirectory = config.working_directory,
         .streaming = config.streaming,
         .tools = tools,
+        .availableTools = config.available_tools,
+        .excludedTools = config.excluded_tools,
         .systemMessage = config.system_message,
         .requestPermission = config.request_permission or config.on_permission_request != null,
         .requestUserInput = config.on_user_input_request != null,
@@ -1256,6 +1269,8 @@ fn buildResumeSessionRequest(
         .workingDirectory = config.working_directory,
         .streaming = config.streaming,
         .tools = tools,
+        .availableTools = config.available_tools,
+        .excludedTools = config.excluded_tools,
         .systemMessage = config.system_message,
         .requestPermission = config.request_permission or config.on_permission_request != null,
         .requestUserInput = config.on_user_input_request != null,
@@ -2398,7 +2413,7 @@ test "createSession and joinSession preserve deep partial model capability overr
         defer allocator.free(requests);
         var frames = std.Io.Reader.fixed(requests);
         const model_and_provider = "\"model\":\"local-vision-model\",\"provider\":{\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"http://localhost:8000/v1\",\"modelId\":\"local-vision-model\",\"wireModel\":\"local-vision-model\"}";
-        const defaults = ",\"streaming\":false,\"tools\":[],\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false";
+        const defaults = ",\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false";
         const expected_create = try std.fmt.allocPrint(
             allocator,
             "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.create\",\"params\":{{{s}{s}{s}}}}}",
@@ -2596,6 +2611,66 @@ test "session requests preserve discovery semantics" {
     }
 }
 
+test "session requests preserve tool filters with excluded precedence" {
+    const allocator = std.testing.allocator;
+    const available_tools = &.{ "custom:*", "builtin:ask_user" };
+    const excluded_tools = &.{"builtin:web_fetch"};
+
+    const create_encoded = try json_rpc.encodeRequest(
+        allocator,
+        15,
+        "session.create",
+        try buildCreateSessionRequest(.{
+            .available_tools = available_tools,
+            .excluded_tools = excluded_tools,
+        }, &.{}),
+    );
+    defer allocator.free(create_encoded);
+    const create_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        create_encoded,
+        .{},
+    );
+    defer create_parsed.deinit();
+
+    const resume_encoded = try json_rpc.encodeRequest(
+        allocator,
+        16,
+        "session.resume",
+        try buildResumeSessionRequest("session-1", .{
+            .available_tools = available_tools,
+            .excluded_tools = excluded_tools,
+        }, &.{}),
+    );
+    defer allocator.free(resume_encoded);
+    const resume_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        resume_encoded,
+        .{},
+    );
+    defer resume_parsed.deinit();
+
+    for ([_]std.json.ObjectMap{
+        create_parsed.value.object.get("params").?.object,
+        resume_parsed.value.object.get("params").?.object,
+    }) |params| {
+        const available = params.get("availableTools").?.array.items;
+        try std.testing.expectEqual(@as(usize, 2), available.len);
+        try std.testing.expectEqualStrings("custom:*", available[0].string);
+        try std.testing.expectEqualStrings("builtin:ask_user", available[1].string);
+
+        const excluded = params.get("excludedTools").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), excluded.len);
+        try std.testing.expectEqualStrings("builtin:web_fetch", excluded[0].string);
+        try std.testing.expectEqualStrings(
+            "excluded",
+            params.get("toolFilterPrecedence").?.string,
+        );
+    }
+}
+
 test "session requests preserve explicit discovery directories" {
     const allocator = std.testing.allocator;
     const skill_directories = &.{ ".agents/skills", ".github/skills" };
@@ -2723,7 +2798,7 @@ test "session requests lower both managed settings sources" {
     );
     defer allocator.free(create_encoded);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"session.create\",\"params\":{\"streaming\":false,\"tools\":[],\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":false,\"managedSettings\":{\"permissions\":{\"disableBypassPermissionsMode\":\"allow-auto-only\",\"deny\":[\"Shell(git push *)\"],\"ask\":[\"Read(**)\"],\"allow\":[\"Read(src/**)\"]}}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"session.create\",\"params\":{\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":false,\"managedSettings\":{\"permissions\":{\"disableBypassPermissionsMode\":\"allow-auto-only\",\"deny\":[\"Shell(git push *)\"],\"ask\":[\"Read(**)\"],\"allow\":[\"Read(src/**)\"]}}}}",
         create_encoded,
     );
 
@@ -2735,7 +2810,7 @@ test "session requests lower both managed settings sources" {
     );
     defer allocator.free(resume_encoded);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"session-1\",\"streaming\":false,\"tools\":[],\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":false,\"managedSettings\":{\"permissions\":{\"disableBypassPermissionsMode\":\"allow-auto-only\",\"deny\":[\"Shell(git push *)\"],\"ask\":[\"Read(**)\"],\"allow\":[\"Read(src/**)\"]}},\"disableResume\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"session-1\",\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":false,\"managedSettings\":{\"permissions\":{\"disableBypassPermissionsMode\":\"allow-auto-only\",\"deny\":[\"Shell(git push *)\"],\"ask\":[\"Read(**)\"],\"allow\":[\"Read(src/**)\"]}},\"disableResume\":true}}",
         resume_encoded,
     );
 
@@ -2753,7 +2828,7 @@ test "session requests lower both managed settings sources" {
     );
     defer allocator.free(fetched_create_encoded);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"session.create\",\"params\":{\"streaming\":false,\"tools\":[],\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"session.create\",\"params\":{\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":true}}",
         fetched_create_encoded,
     );
 
@@ -2765,7 +2840,7 @@ test "session requests lower both managed settings sources" {
     );
     defer allocator.free(fetched_resume_encoded);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"session-1\",\"streaming\":false,\"tools\":[],\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":true,\"disableResume\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"session-1\",\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":true,\"disableResume\":true}}",
         fetched_resume_encoded,
     );
 }
