@@ -122,8 +122,10 @@ var client = try copilot.Client.init(allocator, io, .{
 Create, resume, and extension-child join use distinct configuration types.
 Their `.extensions.common` bundle supports plugin directories, skill
 directories and disabled/built-in skill names, typed hooks, stdio/HTTP/SSE MCP
-servers, runtime-managed MCP OAuth, canvas providers, extension identity, and
-the MCP Apps opt-in. Configuration is validated before a lifecycle RPC.
+servers, runtime-managed MCP OAuth, canvas declarations, extension identity,
+and the MCP Apps opt-in. Each lifecycle-specific `.extensions` config exposes
+`canvas_provider` as a sibling of `.common`; resume and join also expose restored
+canvas state. Configuration is validated before a lifecycle RPC.
 
 MCP OAuth uses the pinned runtime's real flow: set
 `mcp.on_auth_request`, receive `mcp.oauth_required`, and return an allocated

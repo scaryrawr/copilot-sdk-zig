@@ -370,9 +370,15 @@ pub const Client = struct {
         if (self.child) |*child| child.kill(self.io);
         self.allocator.destroy(self.reader);
         self.allocator.destroy(self.writer);
+        self.wipeTransportBuffers();
         self.allocator.free(self.reader_buffer);
         self.allocator.free(self.writer_buffer);
         self.* = undefined;
+    }
+
+    fn wipeTransportBuffers(self: *Client) void {
+        wipeSecret(self.reader_buffer);
+        wipeSecret(self.writer_buffer);
     }
 
     fn connect(
@@ -5205,6 +5211,26 @@ test "client teardown releases OAuth interests before event storage" {
         try allocator.dupe(u8, "interest-1");
 
     client.deinit();
+}
+
+test "transport buffer teardown wipes reader and writer storage" {
+    var reader_buffer = [_]u8{0x5a} ** 16;
+    var writer_buffer = [_]u8{0xa5} ** 16;
+    var client = Client{
+        .allocator = std.testing.allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &reader_buffer,
+        .writer_buffer = &writer_buffer,
+    };
+
+    client.wipeTransportBuffers();
+
+    for (reader_buffer ++ writer_buffer) |byte| {
+        try std.testing.expectEqual(@as(u8, 0), byte);
+    }
 }
 
 test "zero OAuth token lifetime cancels the pending request" {
