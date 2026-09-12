@@ -117,6 +117,7 @@ function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, e
     "skillDirectories?: string[]",
     "disabledSkills?: string[]",
     "includedBuiltinSkills?: string[]",
+    "enableSkills?: boolean",
     "disabledMcpServers?: string[]",
     "mcpServers?: Record<string, MCPServerConfig>",
     "mcpOAuthTokenStorage?: \"persistent\" | \"in-memory\"",

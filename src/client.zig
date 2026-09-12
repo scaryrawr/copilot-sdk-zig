@@ -1491,14 +1491,15 @@ pub const Client = struct {
         if (self.pending_extension_runtime) |*runtime| {
             if (runtime.session_id) |id| {
                 if (std.mem.eql(u8, id, session_id)) return runtime;
-            } else {
-                return runtime;
             }
         }
         for (self.extension_runtimes.items) |*runtime| {
             if (runtime.session_id) |id| {
                 if (std.mem.eql(u8, id, session_id)) return runtime;
             }
+        }
+        if (self.pending_extension_runtime) |*runtime| {
+            if (runtime.session_id == null) return runtime;
         }
         return null;
     }
@@ -2126,6 +2127,20 @@ pub const Session = struct {
             ),
             .token => |*token| blk: {
                 defer token.deinitSecure(self.client.allocator);
+                if (token.expires_in_seconds) |expires_in_seconds| {
+                    if (expires_in_seconds == 0) {
+                        outcome.handler_error = error.InvalidMcpAuthTokenExpiration;
+                        break :blk self.client.call(
+                            RpcSuccess,
+                            "session.mcp.oauth.handlePendingRequest",
+                            .{
+                                .sessionId = self.id,
+                                .requestId = parsed.value.requestId,
+                                .result = .{ .kind = "cancelled" },
+                            },
+                        );
+                    }
+                }
                 break :blk self.client.call(
                     RpcSuccess,
                     "session.mcp.oauth.handlePendingRequest",
@@ -4845,6 +4860,46 @@ test "typed hooks dispatch through a provisional session runtime" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"permissionDecision\":\"deny\"") != null);
 }
 
+test "provisional create runtime does not shadow existing sessions" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        client.rollbackExtensionRuntime();
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+    }
+    var existing_context: u8 = 1;
+    var create_context: u8 = 2;
+    try client.beginExtensionRuntime("existing", session_types.ResumeSessionConfig{
+        .extensions = .{ .common = .{ .hooks = .{
+            .context = &existing_context,
+        } } },
+    }, &.{});
+    try client.commitExtensionRuntime("existing", .{}, &.{});
+    try client.beginExtensionRuntime(null, session_types.CreateSessionConfig{
+        .extensions = .{ .common = .{ .hooks = .{
+            .context = &create_context,
+        } } },
+    }, &.{});
+
+    try std.testing.expectEqual(
+        @as(?*anyopaque, &existing_context),
+        client.findExtensionRuntime("existing").?.hooks.context,
+    );
+    try std.testing.expectEqual(
+        @as(?*anyopaque, &create_context),
+        client.findExtensionRuntime("new-session").?.hooks.context,
+    );
+}
+
 test "invalid hook output receives an internal-error response" {
     const allocator = std.testing.allocator;
     var client = Client{
@@ -5150,6 +5205,104 @@ test "client teardown releases OAuth interests before event storage" {
         try allocator.dupe(u8, "interest-1");
 
     client.deinit();
+}
+
+test "zero OAuth token lifetime cancels the pending request" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const register_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"handle":"interest-1"}}
+    ;
+    const event =
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"s1","event":{"type":"mcp.oauth_required","data":{"requestId":"oauth-1","serverName":"server","serverUrl":"https://example.test","reason":"initial"}}}}
+    ;
+    const cancel_response =
+        \\{"jsonrpc":"2.0","id":2,"result":{"success":true}}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            register_response.len,
+            register_response,
+            event.len,
+            event,
+            cancel_response.len,
+            cancel_response,
+        },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "responses",
+        .data = responses,
+    });
+    const response_file = try tmp.dir.openFile(
+        std.testing.io,
+        "responses",
+        .{ .mode = .read_only },
+    );
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+    };
+    defer {
+        if (client.pending_extension_runtime) |*runtime| runtime.deinit(allocator);
+        for (client.events.items) |*queued| queued.deinit(allocator);
+        client.events.deinit(allocator);
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+    }
+    const handler = struct {
+        fn handle(
+            callback_allocator: std.mem.Allocator,
+            _: ext.McpAuthRequest,
+            _: ?*anyopaque,
+        ) !ext.McpAuthResult {
+            return .{ .token = .{
+                .access_token = try callback_allocator.dupe(u8, "secret"),
+                .expires_in_seconds = 0,
+            } };
+        }
+    }.handle;
+    try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
+        .extensions = .{ .common = .{ .mcp = .{
+            .on_auth_request = handler,
+        } } },
+    }, &.{});
+    try client.commitExtensionRuntime("s1", .{}, &.{});
+
+    const session = Session{ .client = &client, .id = "s1" };
+    try std.testing.expectError(
+        error.InvalidMcpAuthTokenExpiration,
+        session.nextEvent(),
+    );
+    try writer.interface.flush();
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "requests",
+        allocator,
+        .limited(4096),
+    );
+    defer allocator.free(requests);
+    try std.testing.expect(
+        std.mem.indexOf(u8, requests, "\"kind\":\"cancelled\"") != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, requests, "\"accessToken\"") == null,
+    );
 }
 
 test "review regressions preserve protocol semantics" {
