@@ -7,7 +7,7 @@ pub fn main(init: std.process.Init) !void {
         return printHelp(init.io);
     }
 
-    var client = try copilot.Client.init(init.gpa, init.io, .{}, null);
+    var client = try copilot.Client.init(init.gpa, init.io, .{});
     defer client.deinit();
     const session = try client.createSession(.{
         .model = "gpt-5.6-luna",
@@ -15,12 +15,14 @@ pub fn main(init: std.process.Init) !void {
             .mode = .append,
             .content = "Answer as a concise Zig mentor and include one practical tip.",
         },
-    }, null);
-    defer session.disconnect(null) catch {};
+    });
+    defer session.disconnect() catch |err| {
+        std.log.err("session cleanup failed: {s}", .{@errorName(err)});
+    };
 
     const message_id = try session.send(.{
         .prompt = "What is an error union?",
-    }, null);
+    });
     defer init.gpa.free(message_id);
 
     var stdout_buffer: [4096]u8 = undefined;
@@ -28,7 +30,7 @@ pub fn main(init: std.process.Init) !void {
     const stdout = &stdout_writer.interface;
 
     while (true) {
-        var event = try session.nextEvent(null);
+        var event = try session.nextEvent();
         defer event.deinit(init.gpa);
 
         switch (event) {

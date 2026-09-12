@@ -13,53 +13,18 @@ pub const SdkError = error{
     ToolFailure,
 };
 
-pub const Error = SdkError || std.mem.Allocator.Error || error{ErrorCaptureNotEmpty};
+pub const DetailedError = std.mem.Allocator.Error;
 
-pub const ErrorCapture = struct {
-    allocator: std.mem.Allocator,
-    captured: ?Failure = null,
-
-    pub fn init(allocator: std.mem.Allocator) ErrorCapture {
-        return .{ .allocator = allocator };
-    }
-
-    pub fn get(self: *const ErrorCapture) ?*const Failure {
-        return if (self.captured) |*failure| failure else null;
-    }
-
-    pub fn take(self: *ErrorCapture) ?Failure {
-        const failure = self.captured;
-        self.captured = null;
-        return failure;
-    }
-
-    pub fn reset(self: *ErrorCapture) void {
-        if (self.captured) |*failure| failure.deinit();
-        self.captured = null;
-    }
-
-    pub fn deinit(self: *ErrorCapture) void {
-        self.reset();
-        self.* = undefined;
-    }
-
-    pub fn ensureEmpty(self: *const ErrorCapture) error{ErrorCaptureNotEmpty}!void {
-        if (self.captured != null) return error.ErrorCaptureNotEmpty;
-    }
-
-    pub fn recordOwned(self: *ErrorCapture, failure: Failure) Error {
-        if (self.captured != null) {
-            var rejected = failure;
-            rejected.deinit();
-            return error.ErrorCaptureNotEmpty;
-        }
-        self.captured = failure;
-        return failure.errorTag();
-    }
-};
+pub fn DetailedResult(comptime T: type) type {
+    return union(enum) {
+        success: T,
+        failure: Failure,
+    };
+}
 
 pub const Failure = struct {
     allocator: std.mem.Allocator,
+    native_error: anyerror = error.UnknownFailure,
     detail: FailureDetail,
 
     pub fn deinit(self: *Failure) void {
@@ -86,6 +51,7 @@ pub const Failure = struct {
             .queue => error.QueueFailure,
             .permission => error.PermissionFailure,
             .tool => error.ToolFailure,
+            .shutdown => error.ClientFailure,
         };
     }
 
@@ -117,21 +83,22 @@ pub const Failure = struct {
                 else => null,
             },
             .queue => |value| switch (value) {
-                .rejected => |detail| detail.rpc.message,
+                .rejected => |detail| detail.message,
                 else => null,
             },
             .permission => |value| switch (value) {
                 .invalid_decision => |detail| detail.message,
-                .delivery_failed => |detail| if (detail.rpc) |rpc| rpc.message else null,
+                .delivery_failed => |detail| detail.message,
                 .not_accepted => |detail| detail.message,
                 else => null,
             },
             .tool => |value| switch (value) {
                 .invalid_result => |detail| detail.message,
-                .delivery_failed => |detail| if (detail.rpc) |rpc| rpc.message else null,
+                .delivery_failed => |detail| detail.message,
                 .not_accepted => |detail| detail.message,
                 else => null,
             },
+            .shutdown => null,
         };
     }
 
@@ -145,17 +112,18 @@ pub const Failure = struct {
                 else => null,
             },
             .queue => |value| switch (value) {
-                .rejected => |detail| detail.rpc.machine_code,
+                .rejected => |detail| detail.machine_code,
                 else => null,
             },
             .permission => |value| switch (value) {
-                .delivery_failed => |detail| if (detail.rpc) |rpc| rpc.machine_code else null,
+                .delivery_failed => |detail| detail.machine_code,
                 else => null,
             },
             .tool => |value| switch (value) {
-                .delivery_failed => |detail| if (detail.rpc) |rpc| rpc.machine_code else null,
+                .delivery_failed => |detail| detail.machine_code,
                 else => null,
             },
+            .shutdown => null,
             else => null,
         };
     }
@@ -183,15 +151,14 @@ pub const Failure = struct {
             .permission => |value| switch (value) {
                 .invalid_decision => |detail| detail.cause,
                 .handler_failed => |detail| detail.cause,
-                .delivery_failed => |detail| detail.cause,
                 else => null,
             },
             .tool => |value| switch (value) {
                 .invalid_result => |detail| detail.cause,
                 .handler_failed => |detail| detail.cause,
-                .delivery_failed => |detail| detail.cause,
                 else => null,
             },
+            .shutdown => null,
             else => null,
         };
     }
@@ -222,6 +189,19 @@ pub const FailureDetail = union(enum) {
     queue: QueueFailure,
     permission: PermissionFailure,
     tool: ToolFailure,
+    shutdown: ShutdownFailure,
+};
+
+pub const ShutdownFailure = struct {
+    sessions_attempted: usize,
+    child_termination_attempted: bool,
+    failure_storage: []Failure,
+    failure_count: usize,
+    diagnostics_dropped: usize,
+
+    pub fn failures(self: *const ShutdownFailure) []const Failure {
+        return self.failure_storage[0..self.failure_count];
+    }
 };
 
 pub const ProcessFailure = union(enum) {
@@ -293,6 +273,23 @@ pub const RpcFailure = struct {
     machine_code: ?[]u8,
     message: []u8,
     data_json: ?[]u8,
+    context: RpcOperationContext,
+};
+
+pub const RpcOperationContext = union(enum) {
+    generic,
+    session: struct { session_id: []u8 },
+    queue: struct { session_id: []u8 },
+    permission: struct {
+        session_id: []u8,
+        request_id: []u8,
+    },
+    tool: struct {
+        session_id: []u8,
+        request_id: []u8,
+        tool_call_id: ?[]u8,
+        tool_name: ?[]u8,
+    },
 };
 
 pub const SessionFailure = union(enum) {
@@ -331,11 +328,7 @@ pub const QueueFailure = union(enum) {
         length: usize,
         capacity: usize,
     },
-    rejected: struct {
-        session_id: []u8,
-        operation: []u8,
-        rpc: RpcFailure,
-    },
+    rejected: RpcFailure,
 };
 
 pub const PermissionFailure = union(enum) {
@@ -346,12 +339,7 @@ pub const PermissionFailure = union(enum) {
         cause: ?Cause,
     },
     handler_failed: struct { session_id: []u8, request_id: []u8, cause: Cause },
-    delivery_failed: struct {
-        session_id: []u8,
-        request_id: []u8,
-        rpc: ?RpcFailure,
-        cause: ?Cause,
-    },
+    delivery_failed: RpcFailure,
     not_accepted: struct { session_id: []u8, request_id: []u8, message: []u8 },
 };
 
@@ -371,15 +359,7 @@ pub const ToolFailure = union(enum) {
         tool_name: []u8,
         cause: Cause,
     },
-    delivery_failed: struct {
-        session_id: []u8,
-        request_id: []u8,
-        tool_call_id: ?[]u8,
-        tool_name: ?[]u8,
-        handler_cause: ?Cause,
-        rpc: ?RpcFailure,
-        cause: ?Cause,
-    },
+    delivery_failed: RpcFailure,
     not_accepted: struct {
         session_id: []u8,
         request_id: []u8,
@@ -401,6 +381,21 @@ fn deinitRpc(allocator: std.mem.Allocator, rpc: RpcFailure) void {
     freeOptional(allocator, rpc.machine_code);
     allocator.free(rpc.message);
     freeOptional(allocator, rpc.data_json);
+    switch (rpc.context) {
+        .generic => {},
+        .session => |context| allocator.free(context.session_id),
+        .queue => |context| allocator.free(context.session_id),
+        .permission => |context| {
+            allocator.free(context.session_id);
+            allocator.free(context.request_id);
+        },
+        .tool => |context| {
+            allocator.free(context.session_id);
+            allocator.free(context.request_id);
+            freeOptional(allocator, context.tool_call_id);
+            freeOptional(allocator, context.tool_name);
+        },
+    }
 }
 
 fn deinitAgent(allocator: std.mem.Allocator, agent: SessionAgentFailure) void {
@@ -497,11 +492,7 @@ fn deinitDetail(allocator: std.mem.Allocator, detail: *FailureDetail) void {
                 freeOptional(allocator, item.session_id);
                 freeOptional(allocator, item.event_type);
             },
-            .rejected => |item| {
-                allocator.free(item.session_id);
-                allocator.free(item.operation);
-                deinitRpc(allocator, item.rpc);
-            },
+            .rejected => |item| deinitRpc(allocator, item),
         },
         .permission => |value| switch (value) {
             .invalid_decision => |item| {
@@ -515,12 +506,7 @@ fn deinitDetail(allocator: std.mem.Allocator, detail: *FailureDetail) void {
                 allocator.free(item.request_id);
                 deinitCause(allocator, item.cause);
             },
-            .delivery_failed => |item| {
-                allocator.free(item.session_id);
-                allocator.free(item.request_id);
-                if (item.rpc) |rpc| deinitRpc(allocator, rpc);
-                if (item.cause) |cause| deinitCause(allocator, cause);
-            },
+            .delivery_failed => |item| deinitRpc(allocator, item),
             .not_accepted => |item| {
                 allocator.free(item.session_id);
                 allocator.free(item.request_id);
@@ -543,15 +529,7 @@ fn deinitDetail(allocator: std.mem.Allocator, detail: *FailureDetail) void {
                 allocator.free(item.tool_name);
                 deinitCause(allocator, item.cause);
             },
-            .delivery_failed => |item| {
-                allocator.free(item.session_id);
-                allocator.free(item.request_id);
-                freeOptional(allocator, item.tool_call_id);
-                freeOptional(allocator, item.tool_name);
-                if (item.handler_cause) |cause| deinitCause(allocator, cause);
-                if (item.rpc) |rpc| deinitRpc(allocator, rpc);
-                if (item.cause) |cause| deinitCause(allocator, cause);
-            },
+            .delivery_failed => |item| deinitRpc(allocator, item),
             .not_accepted => |item| {
                 allocator.free(item.session_id);
                 allocator.free(item.request_id);
@@ -559,41 +537,9 @@ fn deinitDetail(allocator: std.mem.Allocator, detail: *FailureDetail) void {
                 allocator.free(item.message);
             },
         },
+        .shutdown => |item| {
+            for (item.failure_storage[0..item.failure_count]) |*failure| failure.deinit();
+            if (item.failure_storage.len != 0) allocator.free(item.failure_storage);
+        },
     }
-}
-
-test "capture rejects stale state and take is self-contained" {
-    const allocator = std.testing.allocator;
-    var capture = ErrorCapture.init(allocator);
-    defer capture.deinit();
-
-    const failure = Failure{
-        .allocator = allocator,
-        .detail = .{ .rpc = .{
-            .method = try allocator.dupe(u8, "session.resume"),
-            .request_id = 7,
-            .code = -32000,
-            .machine_code = try allocator.dupe(u8, "missing_session"),
-            .message = try allocator.dupe(u8, "Session not found"),
-            .data_json = try allocator.dupe(u8, "{\"code\":\"missing_session\"}"),
-        } },
-    };
-    try std.testing.expectEqual(error.RpcRejected, capture.recordOwned(failure));
-    try std.testing.expectError(error.ErrorCaptureNotEmpty, capture.ensureEmpty());
-    try std.testing.expectEqual(
-        error.ErrorCaptureNotEmpty,
-        capture.recordOwned(.{
-            .allocator = allocator,
-            .detail = .{ .protocol = .{ .invalid_content_length = .{
-                .value = try allocator.dupe(u8, "rejected"),
-            } } },
-        }),
-    );
-    try std.testing.expectEqual(error.RpcRejected, capture.get().?.errorTag());
-
-    var taken = capture.take().?;
-    defer taken.deinit();
-    try capture.ensureEmpty();
-    try std.testing.expectEqualStrings("Session not found", taken.message().?);
-    try std.testing.expectEqualStrings("missing_session", taken.machineCode().?);
 }

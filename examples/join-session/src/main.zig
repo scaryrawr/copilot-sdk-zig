@@ -24,15 +24,19 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidArguments;
     }
 
-    var client = try copilot.Client.initParent(init.gpa, init.io, null);
+    var client = try copilot.Client.initParent(init.gpa, init.io);
     defer client.deinit();
     const session = try client.joinSession(args[2], .{
         .model = "gpt-5.6-luna",
         .tools = &.{extension_tool},
-    }, null);
+    });
 
     while (true) {
-        var event = session.nextEvent(null) catch break;
+        var event = session.nextEvent() catch |err| {
+            std.log.err("event stream failed: {s}", .{@errorName(err)});
+            return err;
+        };
         defer event.deinit(init.gpa);
+        if (event == .session_idle) break;
     }
 }

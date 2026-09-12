@@ -19,18 +19,20 @@ pub fn main(init: std.process.Init) !void {
         return printHelp(init.io);
     }
 
-    var client = try copilot.Client.init(init.gpa, init.io, .{}, null);
+    var client = try copilot.Client.init(init.gpa, init.io, .{});
     defer client.deinit();
     const session = try client.createSession(.{
         .model = "gpt-5.6-luna",
         .tools = &.{status_tool},
         .request_permission = true,
-    }, null);
-    defer session.disconnect(null) catch {};
+    });
+    defer session.disconnect() catch |err| {
+        std.log.err("session cleanup failed: {s}", .{@errorName(err)});
+    };
 
     const message_id = try session.send(.{
         .prompt = "Use external_deployment_status for staging and report the result.",
-    }, null);
+    });
     defer init.gpa.free(message_id);
 
     var stdout_buffer: [4096]u8 = undefined;
@@ -38,12 +40,12 @@ pub fn main(init: std.process.Init) !void {
     const stdout = &stdout_writer.interface;
 
     while (true) {
-        var event = try session.nextEvent(null);
+        var event = try session.nextEvent();
         defer event.deinit(init.gpa);
 
         switch (event) {
             .permission_requested => |request| {
-                try session.approvePermission(request.request_id, null);
+                try session.approvePermission(request.request_id);
             },
             .external_tool_requested => |request| {
                 const arguments = try request.parseArguments(StatusArguments, init.gpa);
@@ -54,7 +56,7 @@ pub fn main(init: std.process.Init) !void {
                     .{arguments.value.environment},
                 );
                 defer init.gpa.free(result);
-                try session.respondToTool(request.request_id, result, null);
+                try session.respondToTool(request.request_id, result);
             },
             .assistant_message => |message| try stdout.print("{s}\n", .{message.content}),
             .session_idle => break,

@@ -75,17 +75,19 @@ const std = @import("std");
 const copilot = @import("copilot_sdk");
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
-    var client = try copilot.Client.init(allocator, io, .{}, null);
+    var client = try copilot.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    const session = try client.createSession(.{ .streaming = true }, null);
-    defer session.disconnect(null) catch {};
+    const session = try client.createSession(.{ .streaming = true });
+    defer session.disconnect() catch |err| {
+        std.log.err("session cleanup failed: {s}", .{@errorName(err)});
+    };
 
-    const message_id = try session.send(.{ .prompt = "Explain this repository." }, null);
+    const message_id = try session.send(.{ .prompt = "Explain this repository." });
     defer allocator.free(message_id);
 
     while (true) {
-        var event = try session.nextEvent(null);
+        var event = try session.nextEvent();
         defer event.deinit(allocator);
 
         switch (event) {
@@ -108,33 +110,30 @@ in use. `SessionEvent` values and the message ID from `send` own memory from the
 client allocator. `Session.disconnect` releases the client-side session
 resources while preserving the session state so it can be resumed later.
 
-## Inspect SDK failures
+## Inspect detailed failures
 
-Boundary operations keep Zig error unions and accept a final optional
-`ErrorCapture`. Pass `null` when you only need the error tag. Pass a caller-owned
-capture when you need the remote code, JSON data, identifiers, message, process
-exit, or native cause.
+Methods such as `send` return native Zig errors directly. Use the corresponding
+method whose name ends in `Detailed` when you also need the remote code, JSON
+data, identifiers, or process exit.
 
 ```zig
-var capture = copilot.ErrorCapture.init(allocator);
-defer capture.deinit();
-
-const session = client.joinSession("missing-session", .{}, &capture) catch |err| {
-    if (err != error.SessionNotFound) return err;
-
-    var failure = capture.take().?;
-    defer failure.deinit();
-    std.log.err("{s}", .{failure.message().?});
-    return;
+const joined = try client.joinSessionDetailed("missing-session", .{});
+const session = switch (joined) {
+    .success => |value| value,
+    .failure => |failure_value| {
+        var failure = failure_value;
+        defer failure.deinit();
+        std.log.err("{s}", .{failure.message() orelse @errorName(failure.native_error)});
+        return;
+    },
 };
 _ = session;
 ```
 
-The capture owns its `Failure`. `take()` moves that failure, including its
-allocator, so the value remains valid after the client is deinitialized. Call
-`reset()`, `take()`, or `deinit()` before you reuse a nonempty capture. A
-boundary operation returns `error.ErrorCaptureNotEmpty` before it performs work
-when the capture still contains a failure.
+The `Failure` variant of `DetailedResult(T)` stores its allocator and owns every
+string in its detail. You can inspect the failure after the client has been
+deinitialized. Call `Failure.deinit()` when you finish. The `Success` variant
+follows the ownership contract of the underlying method.
 
 Use `SessionConfig.available_tools` and `SessionConfig.excluded_tools` to
 constrain the model-visible tool set for each created or resumed session. Tool
@@ -170,7 +169,7 @@ prices, reasoning and context tiers, picker categories, promotions, warnings,
 messages, and provider metadata.
 
 ```zig
-var result = try client.listModels(.{}, null);
+var result = try client.listModels(.{});
 defer result.deinit();
 
 for (result.value.models) |model| {
@@ -199,7 +198,7 @@ const session = try client.createSession(.{
         .max_prompt_tokens = 100_000,
         .max_output_tokens = 16_384,
     },
-}, null);
+});
 ```
 
 `ProviderConfig.Protocol` supports OpenAI Chat Completions, OpenAI Responses
@@ -224,7 +223,7 @@ const session = try client.createSession(.{
     .model_capabilities = .{
         .supports = .{ .vision = true },
     },
-}, null);
+});
 ```
 
 `Client.joinSession` accepts the same configuration for `session.resume`.
@@ -236,9 +235,8 @@ has `vision`, `reasoningEffort`, and `adaptive_thinking`; `ModelLimitsOverride`
 has `max_prompt_tokens`, `max_output_tokens`, `max_context_window_tokens`, and
 optional `vision`. `ModelVisionLimitsOverride` has optional
 `supported_media_types`, `max_prompt_images`, and `max_prompt_image_size`.
-When supplied, `max_prompt_images` must be at least 1. Both session APIs return
-`error.ClientFailure` for zero before sending an RPC. An `ErrorCapture` records
-`InvalidMaxPromptImages` as the message and `session` as the invalid field.
+When supplied, `max_prompt_images` must be at least 1. Both session APIs return `error.InvalidMaxPromptImages` for zero before sending
+an RPC. Their detailed counterparts return the same native error in `Failure`.
 Capability overrides require a runtime that supports `modelCapabilities`; they
 do not add image support to a text-only model.
 
@@ -273,7 +271,7 @@ const session = try client.createSession(.{
             };
         }
     }.handle,
-}, null);
+});
 ```
 
 The SDK sends `requestUserInput: true` for session creation and resumption
@@ -289,7 +287,7 @@ approve ordinary requests without manually responding from the event loop:
 ```zig
 const session = try client.createSession(.{
     .on_permission_request = copilot.approveAll,
-}, null);
+});
 ```
 
 `approveAll` matches the official SDK behavior. It returns an error instead of
@@ -310,7 +308,7 @@ const session = try client.createSession(.{
         },
     },
     .on_permission_request = customPermissionHandler,
-}, null);
+});
 ```
 
 Do not combine `approveAll` with either managed-settings source. Both
@@ -356,18 +354,15 @@ responding manually:
     .not_configured, .no_result, .handler_failed => {
         try handlePermissionManually(session, request);
     },
-    .delivery_failed => |delivery| {
-        std.log.err("permission response failed: {s}", .{
-            delivery.failure.message() orelse
-                @errorName(delivery.failure.errorTag()),
-        });
+    .delivery_failed => |err| {
+        std.log.err("permission response failed: {s}", .{@errorName(err)});
     },
 },
 ```
 
 `.no_result` preserves the request for manual handling.
 `.handler_failed` occurs before the SDK attempts a response and carries the
-native handler cause. `.delivery_failed` owns the typed delivery failure. Do
+native handler cause. `.delivery_failed` carries the native delivery error. Do
 not retry a delivery failure without reconciling the request state.
 
 ## Examples

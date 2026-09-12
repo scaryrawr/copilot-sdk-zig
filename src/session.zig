@@ -1,5 +1,4 @@
 const std = @import("std");
-const errors = @import("errors.zig");
 const ProviderConfig = @import("provider.zig").ProviderConfig;
 const ModelCapabilitiesOverride = @import("models.zig").CapabilitiesOverride;
 
@@ -210,27 +209,7 @@ pub const AssistantReasoningDelta = struct {
 };
 
 pub const SessionError = struct {
-    error_type: []u8,
-    error_code: ?[]u8 = null,
     message: []u8,
-    eligible_for_auto_switch: ?bool = null,
-    remediation_json: ?[]u8 = null,
-    stack: ?[]u8 = null,
-    status_code: ?u16 = null,
-    provider_call_id: ?[]u8 = null,
-    service_request_id: ?[]u8 = null,
-    url: ?[]u8 = null,
-
-    pub fn deinit(self: SessionError, allocator: std.mem.Allocator) void {
-        allocator.free(self.error_type);
-        if (self.error_code) |value| allocator.free(value);
-        allocator.free(self.message);
-        if (self.remediation_json) |value| allocator.free(value);
-        if (self.stack) |value| allocator.free(value);
-        if (self.provider_call_id) |value| allocator.free(value);
-        if (self.service_request_id) |value| allocator.free(value);
-        if (self.url) |value| allocator.free(value);
-    }
 };
 
 pub const SessionIdle = struct {
@@ -252,12 +231,10 @@ pub const AutomaticPermissionHandling = union(enum) {
     /// The handler deliberately left the request pending for manual handling.
     no_result,
     /// The handler failed before a response was attempted.
-    handler_failed: errors.Cause,
+    handler_failed: anyerror,
     /// Preparing or delivering the response failed. Callers must not blindly
     /// retry because the runtime may already have received the decision.
-    delivery_failed: struct {
-        failure: errors.Failure,
-    },
+    delivery_failed: anyerror,
 };
 
 pub const PermissionRequested = struct {
@@ -329,7 +306,6 @@ pub const ExternalToolRequested = struct {
     tool_call_id: []u8,
     tool_name: []u8,
     arguments_json: []u8,
-    automatic_handling: AutomaticToolHandling = .not_configured,
 
     pub fn parseArguments(
         self: ExternalToolRequested,
@@ -341,16 +317,6 @@ pub const ExternalToolRequested = struct {
             .ignore_unknown_fields = true,
         });
     }
-};
-
-pub const AutomaticToolHandling = union(enum) {
-    not_configured,
-    delivered,
-    handler_failed_delivered: errors.Cause,
-    delivery_failed: struct {
-        handler_cause: ?errors.Cause,
-        failure: errors.Failure,
-    },
 };
 
 pub const PermissionRequestKind = enum {
@@ -424,35 +390,16 @@ pub const SessionEvent = union(enum) {
                 allocator.free(value.delta_content);
             },
             .session_idle => |value| value.deinit(allocator),
-            .session_error => |value| value.deinit(allocator),
+            .session_error => |value| allocator.free(value.message),
             .permission_requested => |value| {
                 allocator.free(value.request_id);
                 allocator.free(value.permission_request_json);
-                switch (value.automatic_handling) {
-                    .handler_failed => |cause| if (cause.message) |message| allocator.free(message),
-                    .delivery_failed => |delivery| {
-                        var failure = delivery.failure;
-                        failure.deinit();
-                    },
-                    else => {},
-                }
             },
             .external_tool_requested => |value| {
                 allocator.free(value.request_id);
                 allocator.free(value.tool_call_id);
                 allocator.free(value.tool_name);
                 allocator.free(value.arguments_json);
-                switch (value.automatic_handling) {
-                    .handler_failed_delivered => |cause| if (cause.message) |message| allocator.free(message),
-                    .delivery_failed => |delivery| {
-                        if (delivery.handler_cause) |cause| {
-                            if (cause.message) |message| allocator.free(message);
-                        }
-                        var failure = delivery.failure;
-                        failure.deinit();
-                    },
-                    else => {},
-                }
             },
             .unknown => |value| {
                 allocator.free(value.event_type);
@@ -486,22 +433,6 @@ fn optionalBool(object: std.json.ObjectMap, name: []const u8) !?bool {
         .null => null,
         else => error.InvalidSessionEvent,
     };
-}
-
-fn optionalU16(object: std.json.ObjectMap, name: []const u8) !?u16 {
-    const value = object.get(name) orelse return null;
-    return switch (value) {
-        .integer => |integer| std.math.cast(u16, integer) orelse error.InvalidSessionEvent,
-        .null => null,
-        else => error.InvalidSessionEvent,
-    };
-}
-
-fn dupeOptional(
-    allocator: std.mem.Allocator,
-    value: ?[]const u8,
-) !?[]u8 {
-    return if (value) |slice| try allocator.dupe(u8, slice) else null;
 }
 
 pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionEvent {
@@ -558,43 +489,8 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
         } };
     }
     if (std.mem.eql(u8, event_type, "session.error")) {
-        const error_type = try allocator.dupe(
-            u8,
-            (try optionalString(data, "errorType")) orelse "unknown",
-        );
-        errdefer allocator.free(error_type);
-        const error_code = try dupeOptional(allocator, try optionalString(data, "errorCode"));
-        errdefer if (error_code) |owned| allocator.free(owned);
-        const message = try allocator.dupe(u8, try requiredString(data, "message"));
-        errdefer allocator.free(message);
-        const remediation_json = if (data.get("remediation")) |remediation|
-            try std.json.Stringify.valueAlloc(allocator, remediation, .{})
-        else
-            null;
-        errdefer if (remediation_json) |owned| allocator.free(owned);
-        const stack = try dupeOptional(allocator, try optionalString(data, "stack"));
-        errdefer if (stack) |owned| allocator.free(owned);
-        const provider_call_id = try dupeOptional(
-            allocator,
-            try optionalString(data, "providerCallId"),
-        );
-        errdefer if (provider_call_id) |owned| allocator.free(owned);
-        const service_request_id = try dupeOptional(
-            allocator,
-            try optionalString(data, "serviceRequestId"),
-        );
-        errdefer if (service_request_id) |owned| allocator.free(owned);
         return .{ .session_error = .{
-            .error_type = error_type,
-            .error_code = error_code,
-            .message = message,
-            .eligible_for_auto_switch = try optionalBool(data, "eligibleForAutoSwitch"),
-            .remediation_json = remediation_json,
-            .stack = stack,
-            .status_code = try optionalU16(data, "statusCode"),
-            .provider_call_id = provider_call_id,
-            .service_request_id = service_request_id,
-            .url = try dupeOptional(allocator, try optionalString(data, "url")),
+            .message = try allocator.dupe(u8, try requiredString(data, "message")),
         } };
     }
     if (std.mem.eql(u8, event_type, "permission.requested")) {
@@ -830,9 +726,11 @@ test "permission event rejects non-object request" {
 }
 
 test "approveAll matches official permission semantics" {
+    var request_id_1 = "p1".*;
+    var request_json_1 = "{}".*;
     const ordinary = PermissionRequested{
-        .request_id = @constCast("p1"),
-        .permission_request_json = @constCast("{}"),
+        .request_id = &request_id_1,
+        .permission_request_json = &request_json_1,
     };
     try std.testing.expectEqual(
         PermissionDecision.approve_once,
@@ -842,9 +740,11 @@ test "approveAll matches official permission semantics" {
         }, null),
     );
 
+    var request_id_2 = "p2".*;
+    var request_json_2 = "{\"kind\":\"future-kind\"}".*;
     const unknown_kind = PermissionRequested{
-        .request_id = @constCast("p2"),
-        .permission_request_json = @constCast("{\"kind\":\"future-kind\"}"),
+        .request_id = &request_id_2,
+        .permission_request_json = &request_json_2,
     };
     try std.testing.expectEqual(
         PermissionDecision.approve_once,
@@ -854,9 +754,11 @@ test "approveAll matches official permission semantics" {
         }, null),
     );
 
+    var request_id_3 = "p3".*;
+    var request_json_3 = "{}".*;
     const managed = PermissionRequested{
-        .request_id = @constCast("p3"),
-        .permission_request_json = @constCast("{}"),
+        .request_id = &request_id_3,
+        .permission_request_json = &request_json_3,
         .managed_approval_required = true,
     };
     try std.testing.expectEqual(

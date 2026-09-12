@@ -7,16 +7,18 @@ pub fn main(init: std.process.Init) !void {
         return printHelp(init.io);
     }
 
-    var client = try copilot.Client.init(init.gpa, init.io, .{}, null);
+    var client = try copilot.Client.init(init.gpa, init.io, .{});
     defer client.deinit();
     const session = try client.createSession(.{
         .model = "gpt-5.6-luna",
-    }, null);
-    defer session.disconnect(null) catch {};
+    });
+    defer session.disconnect() catch |err| {
+        std.log.err("session cleanup failed: {s}", .{@errorName(err)});
+    };
 
     const response = try session.sendAndWait(.{
         .prompt = "Explain Zig error unions in one sentence.",
-    }, null) orelse return error.MissingAssistantResponse;
+    }) orelse return error.MissingAssistantResponse;
     defer response.deinit(init.gpa);
 
     var stdout_buffer: [4096]u8 = undefined;
