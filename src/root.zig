@@ -23,6 +23,13 @@ pub const ModelSwitchResult = session.ModelSwitchResult;
 pub const ReasoningSummary = session.ReasoningSummary;
 pub const SessionConfig = session.SessionConfig;
 pub const ProviderConfig = provider.ProviderConfig;
+pub const Authentication = provider.Authentication;
+pub const Header = provider.Header;
+pub const BearerTokenCallback = provider.BearerTokenCallback;
+pub const BearerTokenProvider = provider.BearerTokenProvider;
+pub const ProviderTokenRequest = provider.ProviderTokenRequest;
+pub const NamedProviderConfig = provider.NamedProviderConfig;
+pub const ProviderModelConfig = provider.ProviderModelConfig;
 pub const MessageOptions = session.MessageOptions;
 pub const SessionEvent = session.SessionEvent;
 pub const AssistantMessage = session.AssistantMessage;
@@ -77,4 +84,11 @@ test {
     _ = session;
     _ = models;
     _ = provider;
+    _ = Authentication;
+    _ = Header;
+    _ = BearerTokenCallback;
+    _ = BearerTokenProvider;
+    _ = ProviderTokenRequest;
+    _ = NamedProviderConfig;
+    _ = ProviderModelConfig;
 }

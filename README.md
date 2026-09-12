@@ -155,20 +155,24 @@ Pass `selection_id` to use an account returned by the upstream account APIs, or
 
 ## Use a custom provider
 
-Set `SessionConfig.provider` for a static custom provider:
+Set `SessionConfig.provider` for one custom provider:
 
 ```zig
 const session = try client.createSession(.{
     .provider = .{
         .base_url = "https://api.openai.com/v1",
         .protocol = .{ .openai = .{ .responses = .http } },
-        .authentication = .{ .api_key = "provider-api-key" },
+        .authentication = .{ .api_key_and_bearer_token = .{
+            .api_key = "provider-api-key",
+            .bearer_token = "static-fallback",
+        } },
         .headers = &.{
             .{ .name = "X-Tenant", .value = "acme" },
         },
         .model_id = "gpt-4.1",
         .wire_model = "deployment-name",
         .max_prompt_tokens = 100_000,
+        .max_context_window_tokens = 128_000,
         .max_output_tokens = 16_384,
     },
 });
@@ -176,12 +180,73 @@ const session = try client.createSession(.{
 
 `ProviderConfig.Protocol` supports OpenAI Chat Completions, OpenAI Responses
 over HTTP or WebSocket, Azure with an optional API version, and Anthropic.
-`ProviderConfig.Authentication` supports no credentials, one API key, or one
-static bearer token. Credentials are optional so local providers work without
-authentication.
+`Authentication` supports no credentials, one API key, one static bearer
+token, or both through `api_key_and_bearer_token`. Credentials are optional for
+local providers. A static bearer token takes precedence over an API key.
 
 The SDK rejects empty header names and duplicate names without regard to ASCII
 case. It does not parse `base_url`.
+
+Set `bearer_token_provider` when credentials must refresh for each request:
+
+```zig
+fn getToken(
+    allocator: std.mem.Allocator,
+    request: copilot.ProviderTokenRequest,
+    context: ?*anyopaque,
+) ![]u8 {
+    _ = request;
+    _ = context;
+    return allocator.dupe(u8, "fresh-token");
+}
+
+const session = try client.createSession(.{
+    .provider = .{
+        .base_url = "https://api.example.test",
+        .bearer_token_provider = .{
+            .callback = getToken,
+            .context = null,
+        },
+    },
+});
+```
+
+The callback returns a token allocated with the supplied allocator. The SDK
+frees the token after it writes the JSON-RPC response. The caller owns the
+callback context and must keep it valid until the session disconnects or the
+client is deinitialized. A dynamic token takes precedence over a static bearer
+token and an API key. Singular providers always use the callback route
+`"default"`. `provider_name` only supplies provider attribution.
+
+Use `SessionConfig.providers` and `SessionConfig.models` to add named provider
+connections and selectable models:
+
+```zig
+const session = try client.createSession(.{
+    .model = "internal/reasoner",
+    .providers = &.{
+        .{
+            .name = "internal",
+            .base_url = "https://models.example.test",
+            .authentication = .{ .bearer_token = "token" },
+        },
+    },
+    .models = &.{
+        .{
+            .id = "reasoner",
+            .provider = "internal",
+            .wire_model = "deployment-name",
+            .model_id = "gpt-4.1",
+        },
+    },
+});
+```
+
+A named model's selectable ID is `provider/id`, such as
+`internal/reasoner`. Provider names cannot contain `/`.
+Each model must reference one provider in the same configuration. The SDK
+rejects duplicate provider names and duplicate qualified model IDs.
+`provider` cannot be combined with `providers` or `models`.
 
 Set `SessionConfig.model_capabilities` when a custom model needs capability
 overrides, for example to enable image input for a local vision model:
@@ -213,11 +278,9 @@ When supplied, `max_prompt_images` must be at least 1; both session APIs return
 Capability overrides require a runtime that supports `modelCapabilities`; they
 do not add image support to a text-only model.
 
-`bearerTokenProvider`, `hasBearerTokenProvider`, named providers and models,
-`providerName`, provider-level `ProviderConfig.modelCapabilities`,
-`maxContextWindowTokens`, alternate SDK transports, and remaining unsupported
-event variants are deferred. The provider-level field is separate from the
-supported top-level `SessionConfig.model_capabilities` override above.
+`hasBearerTokenProvider` is private wire state derived from
+`bearer_token_provider`. Alternate SDK transports and remaining unsupported
+event variants are deferred.
 
 ## Handle legacy ask_user requests
 
