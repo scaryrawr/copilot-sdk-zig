@@ -2845,7 +2845,10 @@ const ExtensionWireValues = struct {
 
     fn deinit(self: *ExtensionWireValues) void {
         self.mcp_object.deinit(self.allocator);
-        for (self.json_values.items) |value| value.deinit();
+        for (self.json_values.items) |value| {
+            wipeJsonStrings(value.value);
+            value.deinit();
+        }
         self.json_values.deinit(self.allocator);
         self.canvas_actions.deinit(self.allocator);
         self.canvases.deinit(self.allocator);
@@ -2856,7 +2859,10 @@ const ExtensionWireValues = struct {
         const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, source, .{
             .allocate = .alloc_always,
         });
-        errdefer parsed.deinit();
+        errdefer {
+            wipeJsonStrings(parsed.value);
+            parsed.deinit();
+        }
         const value = parsed.value;
         try self.json_values.append(self.allocator, parsed);
         return value;
@@ -2896,7 +2902,10 @@ const ExtensionWireValues = struct {
                 .stdio => |config| try lowerStdioMcp(self.allocator, config),
                 .http => |config| try lowerHttpMcp(self.allocator, config),
             };
-            defer self.allocator.free(json);
+            defer {
+                wipeSecret(json);
+                self.allocator.free(json);
+            }
             try self.mcp_object.put(self.allocator, server.name, try self.parseJson(json));
         }
         self.mcp_servers = .{ .object = self.mcp_object };
