@@ -22,3 +22,16 @@
 Run `zig fmt --check build.zig src examples`, `zig build test`, and `npm test`
 after SDK or synchronization changes. Build affected examples with
 `zig build --build-file examples/<name>/build.zig`.
+
+## Extensibility lifecycle safety
+
+- A successful `session.create` or `session.resume` mutates CLI state before
+  local response processing finishes. Detach newly attached sessions on
+  post-response failure; for resident resume, keep the previous local runtime
+  and session-ID allocation until the replacement is fully prepared.
+- Treat OAuth tokens and granted environment variables as secrets in every
+  representation. Wipe encoded requests, flushed writer buffers, raw responses,
+  intermediate JSON, owned copies, and partial-construction cleanup paths
+  before releasing their storage.
+- Derive wire field names from the pinned schemas, not upstream language SDK
+  public names; those layers may intentionally rename fields.
