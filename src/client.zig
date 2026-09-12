@@ -533,18 +533,13 @@ pub const Client = struct {
         id: std.json.Value,
         params: ?std.json.Value,
     ) !void {
-        const params_json = try stringifyRpcParams(self.allocator, params) orelse
+        const value = params orelse
             return self.writeServerRequestError(writer, id, -32602, "invalid provider token request");
-        defer self.allocator.free(params_json);
-
-        const parsed = std.json.parseFromSlice(
-            struct {
-                sessionId: []const u8,
-                providerName: []const u8,
-            },
+        const parsed = std.json.parseFromValue(
+            WireProviderTokenRequest,
             self.allocator,
-            params_json,
-            .{ .allocate = .alloc_always },
+            value,
+            .{},
         ) catch {
             return self.writeServerRequestError(writer, id, -32602, "invalid provider token request");
         };
@@ -570,15 +565,7 @@ pub const Client = struct {
         };
         defer self.allocator.free(token);
 
-        const result_json = try std.json.Stringify.valueAlloc(
-            self.allocator,
-            .{ .token = token },
-            .{},
-        );
-        defer self.allocator.free(result_json);
-        const result = try std.json.parseFromSlice(std.json.Value, self.allocator, result_json, .{});
-        defer result.deinit();
-        const response = try json_rpc.encodeSuccessResponse(self.allocator, id, result.value);
+        const response = try json_rpc.encodeSuccessResponse(self.allocator, id, .{ .token = token });
         defer self.allocator.free(response);
         try json_rpc.writeFrame(writer, response);
     }
@@ -596,15 +583,13 @@ pub const Client = struct {
         id: std.json.Value,
         params: ?std.json.Value,
     ) !void {
-        const params_json = try stringifyRpcParams(self.allocator, params) orelse
+        const value = params orelse
             return self.writeServerRequestError(writer, id, -32602, "invalid user input request");
-        defer self.allocator.free(params_json);
-
-        const parsed = std.json.parseFromSlice(
+        const parsed = std.json.parseFromValue(
             WireUserInputRequest,
             self.allocator,
-            params_json,
-            .{ .allocate = .alloc_always, .ignore_unknown_fields = true },
+            value,
+            .{ .ignore_unknown_fields = true },
         ) catch {
             return self.writeServerRequestError(writer, id, -32602, "invalid user input request");
         };
@@ -625,19 +610,14 @@ pub const Client = struct {
         };
         defer self.allocator.free(response.answer);
 
-        const result_json = try std.json.Stringify.valueAlloc(self.allocator, .{
-            .answer = response.answer,
-            .wasFreeform = response.was_freeform,
-        }, .{});
-        defer self.allocator.free(result_json);
-        const result = try std.json.parseFromSlice(
-            std.json.Value,
+        const frame = try json_rpc.encodeSuccessResponse(
             self.allocator,
-            result_json,
-            .{},
+            id,
+            .{
+                .answer = response.answer,
+                .wasFreeform = response.was_freeform,
+            },
         );
-        defer result.deinit();
-        const frame = try json_rpc.encodeSuccessResponse(self.allocator, id, result.value);
         defer self.allocator.free(frame);
         try json_rpc.writeFrame(writer, frame);
     }
@@ -1336,6 +1316,11 @@ const WireUserInputRequest = struct {
     allowFreeform: ?bool = null,
 };
 
+const WireProviderTokenRequest = struct {
+    sessionId: []const u8,
+    providerName: []const u8,
+};
+
 const WireManagedSettingsPermissions = struct {
     disableBypassPermissionsMode: ?[]const u8 = null,
     deny: ?[]const []const u8 = null,
@@ -1444,26 +1429,20 @@ fn lowerManagedSettings(
     };
 }
 
-fn lowerModelCapabilities(
-    capabilities: ?models.CapabilitiesOverride,
-) !?models.CapabilitiesOverride {
-    try provider.validateCapabilities(capabilities);
-    return capabilities;
-}
-
 fn buildPreparedCreateSessionRequest(
     session_id: ?[]const u8,
     config: session_types.SessionConfig,
     tools: []const WireTool,
     prepared_providers: provider.PreparedProviders,
 ) !CreateSessionRequest {
+    try provider.validateCapabilities(config.model_capabilities);
     return .{
         .sessionId = session_id,
         .model = config.model,
         .provider = prepared_providers.provider,
         .providers = prepared_providers.providers,
         .models = prepared_providers.models,
-        .modelCapabilities = try lowerModelCapabilities(config.model_capabilities),
+        .modelCapabilities = config.model_capabilities,
         .workingDirectory = config.working_directory,
         .streaming = config.streaming,
         .tools = tools,
@@ -1489,13 +1468,14 @@ fn buildPreparedResumeSessionRequest(
     tools: []const WireTool,
     prepared_providers: provider.PreparedProviders,
 ) !ResumeSessionRequest {
+    try provider.validateCapabilities(config.model_capabilities);
     return .{
         .sessionId = session_id,
         .model = config.model,
         .provider = prepared_providers.provider,
         .providers = prepared_providers.providers,
         .models = prepared_providers.models,
-        .modelCapabilities = try lowerModelCapabilities(config.model_capabilities),
+        .modelCapabilities = config.model_capabilities,
         .workingDirectory = config.working_directory,
         .streaming = config.streaming,
         .tools = tools,
@@ -1513,37 +1493,6 @@ fn buildPreparedResumeSessionRequest(
         .enableManagedSettings = config.enable_managed_settings,
         .managedSettings = lowerManagedSettings(config.managed_settings),
     };
-}
-
-fn buildCreateSessionRequest(
-    config: session_types.SessionConfig,
-    tools: []const WireTool,
-) !CreateSessionRequest {
-    if (config.providers.len != 0 or config.models.len != 0) {
-        return error.NamedProvidersRequirePreparation;
-    }
-    return buildPreparedCreateSessionRequest(
-        config.session_id,
-        config,
-        tools,
-        .{ .provider = if (config.provider) |value| try provider.lower(value) else null },
-    );
-}
-
-fn buildResumeSessionRequest(
-    session_id: []const u8,
-    config: session_types.SessionConfig,
-    tools: []const WireTool,
-) !ResumeSessionRequest {
-    if (config.providers.len != 0 or config.models.len != 0) {
-        return error.NamedProvidersRequirePreparation;
-    }
-    return buildPreparedResumeSessionRequest(
-        session_id,
-        config,
-        tools,
-        .{ .provider = if (config.provider) |value| try provider.lower(value) else null },
-    );
 }
 
 const RpcSuccess = struct {
@@ -1852,7 +1801,7 @@ test "user input handler receives requests and returns responses" {
     const parsed_params = try std.json.parseFromSlice(
         std.json.Value,
         allocator,
-        \\{"sessionId":"session-1","question":"Continue?","choices":["Yes","No"],"allowFreeform":true}
+        \\{"sessionId":"session-1","question":"Continue?","choices":["Yes","No"],"allowFreeform":true,"futureField":"accepted"}
     ,
         .{},
     );
@@ -1869,11 +1818,10 @@ test "user input handler receives requests and returns responses" {
     try std.testing.expect(called);
     const body = try framedBody(allocator, output.written());
     defer allocator.free(body);
-    const response = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
-    defer response.deinit();
-    const result = response.value.object.get("result").?.object;
-    try std.testing.expectEqualStrings("Yes", result.get("answer").?.string);
-    try std.testing.expect(!result.get("wasFreeform").?.bool);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"answer\":\"Yes\",\"wasFreeform\":false}}",
+        body,
+    );
 }
 
 test "permission handler receives events and can leave requests pending" {
@@ -2524,13 +2472,26 @@ test "session lifecycle requests map upstream wire fields" {
 
 test "create request places the lowered provider in params" {
     const allocator = std.testing.allocator;
-    const params = try buildCreateSessionRequest(.{
+    const config = session_types.SessionConfig{
         .provider = .{
             .base_url = "https://api.openai.com/v1",
             .protocol = .{ .openai = .{ .responses = .websockets } },
             .authentication = .{ .bearer_token = "token" },
         },
-    }, &.{});
+    };
+    var prepared = try provider.prepareSessionProviders(
+        allocator,
+        config.provider,
+        config.providers,
+        config.models,
+    );
+    defer prepared.deinit(allocator);
+    const params = try buildPreparedCreateSessionRequest(
+        config.session_id,
+        config,
+        &.{},
+        prepared,
+    );
     const encoded = try json_rpc.encodeRequest(allocator, 9, "session.create", params);
     defer allocator.free(encoded);
 
@@ -2547,13 +2508,26 @@ test "create request places the lowered provider in params" {
 
 test "resume request places provider in params and disables nested resume" {
     const allocator = std.testing.allocator;
-    const params = try buildResumeSessionRequest("session-1", .{
+    const config = session_types.SessionConfig{
         .provider = .{
             .base_url = "https://api.anthropic.com",
             .protocol = .anthropic,
             .authentication = .{ .api_key = "key" },
         },
-    }, &.{});
+    };
+    var prepared = try provider.prepareSessionProviders(
+        allocator,
+        config.provider,
+        config.providers,
+        config.models,
+    );
+    defer prepared.deinit(allocator);
+    const params = try buildPreparedResumeSessionRequest(
+        "session-1",
+        config,
+        &.{},
+        prepared,
+    );
     const encoded = try json_rpc.encodeRequest(allocator, 10, "session.resume", params);
     defer allocator.free(encoded);
 
@@ -2870,10 +2844,16 @@ test "session requests enable configured callbacks" {
         }
     }.handle;
 
-    const create_params = try buildCreateSessionRequest(.{
+    const create_config = session_types.SessionConfig{
         .on_permission_request = permission_handler,
         .on_user_input_request = user_input_handler,
-    }, &.{});
+    };
+    const create_params = try buildPreparedCreateSessionRequest(
+        create_config.session_id,
+        create_config,
+        &.{},
+        .{},
+    );
     const create_encoded = try json_rpc.encodeRequest(
         allocator,
         11,
@@ -2895,10 +2875,16 @@ test "session requests enable configured callbacks" {
         create_parsed.value.object.get("params").?.object.get("requestPermission").?.bool,
     );
 
-    const resume_params = try buildResumeSessionRequest("session-1", .{
+    const resume_config = session_types.SessionConfig{
         .on_permission_request = permission_handler,
         .on_user_input_request = user_input_handler,
-    }, &.{});
+    };
+    const resume_params = try buildPreparedResumeSessionRequest(
+        "session-1",
+        resume_config,
+        &.{},
+        .{},
+    );
     const resume_encoded = try json_rpc.encodeRequest(
         allocator,
         12,
@@ -2937,12 +2923,17 @@ test "session requests preserve discovery semantics" {
             allocator,
             13,
             "session.create",
-            try buildCreateSessionRequest(.{
-                .enable_config_discovery = case.value,
-                .enable_skills = case.value,
-                .skip_custom_instructions = case.value,
-                .enable_on_demand_instruction_discovery = case.value,
-            }, &.{}),
+            try buildPreparedCreateSessionRequest(
+                null,
+                .{
+                    .enable_config_discovery = case.value,
+                    .enable_skills = case.value,
+                    .skip_custom_instructions = case.value,
+                    .enable_on_demand_instruction_discovery = case.value,
+                },
+                &.{},
+                .{},
+            ),
         );
         defer allocator.free(create_encoded);
         const create_parsed = try std.json.parseFromSlice(
@@ -2958,12 +2949,17 @@ test "session requests preserve discovery semantics" {
             allocator,
             14,
             "session.resume",
-            try buildResumeSessionRequest("session-1", .{
-                .enable_config_discovery = case.value,
-                .enable_skills = case.value,
-                .skip_custom_instructions = case.value,
-                .enable_on_demand_instruction_discovery = case.value,
-            }, &.{}),
+            try buildPreparedResumeSessionRequest(
+                "session-1",
+                .{
+                    .enable_config_discovery = case.value,
+                    .enable_skills = case.value,
+                    .skip_custom_instructions = case.value,
+                    .enable_on_demand_instruction_discovery = case.value,
+                },
+                &.{},
+                .{},
+            ),
         );
         defer allocator.free(resume_encoded);
         const resume_parsed = try std.json.parseFromSlice(
@@ -3030,10 +3026,15 @@ test "session requests preserve tool filters with excluded precedence" {
         allocator,
         15,
         "session.create",
-        try buildCreateSessionRequest(.{
-            .available_tools = available_tools,
-            .excluded_tools = excluded_tools,
-        }, &.{}),
+        try buildPreparedCreateSessionRequest(
+            null,
+            .{
+                .available_tools = available_tools,
+                .excluded_tools = excluded_tools,
+            },
+            &.{},
+            .{},
+        ),
     );
     defer allocator.free(create_encoded);
     const create_parsed = try std.json.parseFromSlice(
@@ -3048,10 +3049,15 @@ test "session requests preserve tool filters with excluded precedence" {
         allocator,
         16,
         "session.resume",
-        try buildResumeSessionRequest("session-1", .{
-            .available_tools = available_tools,
-            .excluded_tools = excluded_tools,
-        }, &.{}),
+        try buildPreparedResumeSessionRequest(
+            "session-1",
+            .{
+                .available_tools = available_tools,
+                .excluded_tools = excluded_tools,
+            },
+            &.{},
+            .{},
+        ),
     );
     defer allocator.free(resume_encoded);
     const resume_parsed = try std.json.parseFromSlice(
@@ -3090,10 +3096,15 @@ test "session requests preserve explicit discovery directories" {
         allocator,
         15,
         "session.create",
-        try buildCreateSessionRequest(.{
-            .skill_directories = skill_directories,
-            .instruction_directories = instruction_directories,
-        }, &.{}),
+        try buildPreparedCreateSessionRequest(
+            null,
+            .{
+                .skill_directories = skill_directories,
+                .instruction_directories = instruction_directories,
+            },
+            &.{},
+            .{},
+        ),
     );
     defer allocator.free(create_encoded);
     const create_parsed = try std.json.parseFromSlice(
@@ -3109,10 +3120,15 @@ test "session requests preserve explicit discovery directories" {
         allocator,
         16,
         "session.resume",
-        try buildResumeSessionRequest("session-1", .{
-            .skill_directories = skill_directories,
-            .instruction_directories = instruction_directories,
-        }, &.{}),
+        try buildPreparedResumeSessionRequest(
+            "session-1",
+            .{
+                .skill_directories = skill_directories,
+                .instruction_directories = instruction_directories,
+            },
+            &.{},
+            .{},
+        ),
     );
     defer allocator.free(resume_encoded);
     const resume_parsed = try std.json.parseFromSlice(
@@ -3140,7 +3156,7 @@ test "session requests preserve explicit discovery directories" {
         allocator,
         17,
         "session.create",
-        try buildCreateSessionRequest(.{}, &.{}),
+        try buildPreparedCreateSessionRequest(null, .{}, &.{}, .{}),
     );
     defer allocator.free(omitted_create);
     const omitted_create_parsed = try std.json.parseFromSlice(
@@ -3156,7 +3172,7 @@ test "session requests preserve explicit discovery directories" {
         allocator,
         18,
         "session.resume",
-        try buildResumeSessionRequest("session-1", .{}, &.{}),
+        try buildPreparedResumeSessionRequest("session-1", .{}, &.{}, .{}),
     );
     defer allocator.free(omitted_resume);
     const omitted_resume_parsed = try std.json.parseFromSlice(
@@ -3204,7 +3220,7 @@ test "session requests lower both managed settings sources" {
         allocator,
         13,
         "session.create",
-        try buildCreateSessionRequest(config, &.{}),
+        try buildPreparedCreateSessionRequest(config.session_id, config, &.{}, .{}),
     );
     defer allocator.free(create_encoded);
     try std.testing.expectEqualStrings(
@@ -3216,7 +3232,7 @@ test "session requests lower both managed settings sources" {
         allocator,
         14,
         "session.resume",
-        try buildResumeSessionRequest("session-1", config, &.{}),
+        try buildPreparedResumeSessionRequest("session-1", config, &.{}, .{}),
     );
     defer allocator.free(resume_encoded);
     try std.testing.expectEqualStrings(
@@ -3234,7 +3250,12 @@ test "session requests lower both managed settings sources" {
         allocator,
         15,
         "session.create",
-        try buildCreateSessionRequest(fetched_config, &.{}),
+        try buildPreparedCreateSessionRequest(
+            fetched_config.session_id,
+            fetched_config,
+            &.{},
+            .{},
+        ),
     );
     defer allocator.free(fetched_create_encoded);
     try std.testing.expectEqualStrings(
@@ -3246,7 +3267,7 @@ test "session requests lower both managed settings sources" {
         allocator,
         16,
         "session.resume",
-        try buildResumeSessionRequest("session-1", fetched_config, &.{}),
+        try buildPreparedResumeSessionRequest("session-1", fetched_config, &.{}, .{}),
     );
     defer allocator.free(fetched_resume_encoded);
     try std.testing.expectEqualStrings(
@@ -3257,7 +3278,7 @@ test "session requests lower both managed settings sources" {
 
 test "session requests omit a null provider" {
     const allocator = std.testing.allocator;
-    const create_params = try buildCreateSessionRequest(.{}, &.{});
+    const create_params = try buildPreparedCreateSessionRequest(null, .{}, &.{}, .{});
     const create_encoded = try json_rpc.encodeRequest(
         allocator,
         11,
@@ -3283,7 +3304,7 @@ test "session requests omit a null provider" {
         !create_parsed.value.object.get("params").?.object.contains("models"),
     );
 
-    const resume_params = try buildResumeSessionRequest("session-1", .{}, &.{});
+    const resume_params = try buildPreparedResumeSessionRequest("session-1", .{}, &.{}, .{});
     const resume_encoded = try json_rpc.encodeRequest(
         allocator,
         12,
