@@ -8,9 +8,10 @@
   `scripts/sync.mjs`; do not edit them by hand.
 - Generate and verify compatibility ledgers from the same canonical expected
   structure; checking only their upstream commit allows manual drift to pass.
-- Scope upstream API checks to the TypeScript interface that owns each field,
-  including inherited lifecycle fields and explicit `Omit` exclusions; searching
-  concatenated source only proves that a name exists somewhere.
+- Scope upstream API checks to the TypeScript declaration that owns each field,
+  including inherited lifecycle fields, `Omit` exclusions, intersection
+  re-declarations, and response handling; searching concatenated source only
+  proves that a name exists somewhere.
 - `npm run sync` advances to the latest upstream `github/copilot-sdk` commit and
   Copilot CLI package. Do not use it when refreshing generated files for an
   existing branch unless advancing the pin is intentional.

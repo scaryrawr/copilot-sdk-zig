@@ -63,6 +63,9 @@
         "grantedEnvironmentVariables"
       ],
       "ownership": "owned-result",
+      "redeclared": [
+        "onPermissionRequest"
+      ],
       "omitted": [
         "extensionSdkPath"
       ]

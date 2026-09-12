@@ -142,6 +142,7 @@ function expectedExtensibilityContract(upstreamCommit) {
         fields: ["requestedEnvironmentVariables"],
         responseFields: ["grantedEnvironmentVariables"],
         ownership: "owned-result",
+        redeclared: ["onPermissionRequest"],
         omitted: ["extensionSdkPath"],
       },
     },
@@ -195,7 +196,7 @@ function requireSourceFragments(source, fragments, owner) {
   }
 }
 
-function verifyLifecycleContract(contract, typesSource, extensionSource) {
+function verifyLifecycleContract(contract, clientSource, typesSource, extensionSource) {
   const base = sourceSection(
     typesSource,
     "export interface SessionConfigBase {",
@@ -219,6 +220,12 @@ function verifyLifecycleContract(contract, typesSource, extensionSource) {
     "export type JoinSessionConfig = Omit<",
     "export async function joinSession",
     "JoinSessionConfig",
+  );
+  const extensionResume = sourceSection(
+    clientSource,
+    "    private async resumeSessionInternal(",
+    "    async ping(",
+    "resumeSessionInternal",
   );
 
   const commonDeclarations = {
@@ -271,6 +278,18 @@ function verifyLifecycleContract(contract, typesSource, extensionSource) {
     join,
     "JoinSessionConfig",
   );
+  assertFieldsOwnedBy(
+    contract.lifecycle.extensionJoin.responseFields,
+    { grantedEnvironmentVariables: "grantedEnvironmentVariables?: Record<string, string>" },
+    extensionResume,
+    "resumeSessionInternal response",
+  );
+  assertFieldsOwnedBy(
+    contract.lifecycle.extensionJoin.redeclared,
+    { onPermissionRequest: "onPermissionRequest?: PermissionHandler" },
+    join,
+    "JoinSessionConfig",
+  );
   for (const field of contract.lifecycle.extensionJoin.omitted) {
     assert(field === "extensionSdkPath", `no upstream JoinSessionConfig omission check for: ${field}`);
     assert(
@@ -287,7 +306,6 @@ function verifyLifecycleContract(contract, typesSource, extensionSource) {
 function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, extensionSource) {
   const requiredClientFragments = [
     'sendRequest("plugins.builtin.set"',
-    "grantedEnvironmentVariables?: Record<string, string>",
   ];
   const requiredTypeFragments = [
     "builtinPluginDirectories?: readonly string[]",
@@ -295,7 +313,7 @@ function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, e
   const contract = expectedExtensibilityContract(upstreamCommit);
   requireSourceFragments(clientSource, requiredClientFragments, "CopilotClient");
   requireSourceFragments(typesSource, requiredTypeFragments, "SDK types");
-  verifyLifecycleContract(contract, typesSource, extensionSource);
+  verifyLifecycleContract(contract, clientSource, typesSource, extensionSource);
   writeFileSync(extensibilityContractPath, `${JSON.stringify(contract, null, 2)}\n`);
 }
 
@@ -616,6 +634,27 @@ function verify() {
   const events = eventDiscriminators(schemas["session-events.schema.json"]);
   for (const event of ["mcp.oauth_required", "capabilities.changed", "session.canvas.opened", "session.canvas.closed"]) {
     assert(events.has(event), `extensibility event is missing: ${event}`);
+  }
+  assert(
+    extensibility.capabilities.path === "capabilities.ui",
+    "unsupported capabilities compatibility path",
+  );
+  const capabilitiesData = schemas["session-events.schema.json"].definitions?.CapabilitiesChangedData;
+  assert(
+    capabilitiesData?.properties?.ui?.$ref === "#/definitions/CapabilitiesChangedUI",
+    "CapabilitiesChangedData.ui contract changed",
+  );
+  const capabilitiesUi = schemas["session-events.schema.json"].definitions?.CapabilitiesChangedUI;
+  requireProperties(
+    capabilitiesUi,
+    extensibility.capabilities.fields,
+    "CapabilitiesChangedUI",
+  );
+  for (const field of extensibility.capabilities.fields) {
+    assert(
+      capabilitiesUi.properties[field].type === "boolean",
+      `CapabilitiesChangedUI.${field} is no longer boolean`,
+    );
   }
   for (const [feature, reason] of Object.entries(extensibility.deferred ?? {})) {
     assert(typeof reason === "string" && reason.length > 0, `deferred ${feature} needs a reason`);
