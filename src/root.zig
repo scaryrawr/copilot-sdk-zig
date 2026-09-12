@@ -24,6 +24,7 @@ pub const ReasoningSummary = session.ReasoningSummary;
 pub const SessionConfig = session.SessionConfig;
 pub const ProviderConfig = provider.ProviderConfig;
 pub const MessageOptions = session.MessageOptions;
+pub const Attachment = session.Attachment;
 pub const SessionEvent = session.SessionEvent;
 pub const AssistantMessage = session.AssistantMessage;
 pub const AssistantMessageDelta = session.AssistantMessageDelta;
@@ -77,4 +78,5 @@ test {
     _ = session;
     _ = models;
     _ = provider;
+    _ = Attachment;
 }
