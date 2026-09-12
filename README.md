@@ -155,6 +155,13 @@ host-owned OAuth token-store callbacks are not present in the pinned contract;
 see `sync/extensibility-contract.json` for the reproducible compatibility
 classification.
 
+Set `.enable_config_discovery = true` when creating or joining a session to
+discover MCP server configurations (`.mcp.json` and `.vscode/mcp.json`) and
+skill directories from the working directory. Treat enabling discovery as a
+trust decision because discovered MCP servers may be started by the session.
+An explicit `false` disables discovery; the default `null` leaves the field
+omitted so Copilot CLI applies its default behavior.
+
 ## List available models
 
 `Client.listModels` calls the authenticated `models.list` RPC. The result
