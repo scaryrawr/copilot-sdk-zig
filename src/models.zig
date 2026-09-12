@@ -56,6 +56,26 @@ pub const VisionLimits = struct {
     max_prompt_image_size: u64,
 };
 
+/// Per-property overrides deep-merged over runtime defaults.
+/// Null fields are omitted from session requests, not set to false or zero.
+pub const CapabilitiesOverride = struct {
+    supports: ?Supports = null,
+    limits: ?LimitsOverride = null,
+};
+
+pub const LimitsOverride = struct {
+    max_prompt_tokens: ?u64 = null,
+    max_output_tokens: ?u64 = null,
+    max_context_window_tokens: ?u64 = null,
+    vision: ?VisionLimitsOverride = null,
+};
+
+pub const VisionLimitsOverride = struct {
+    supported_media_types: ?[]const []const u8 = null,
+    max_prompt_images: ?u64 = null,
+    max_prompt_image_size: ?u64 = null,
+};
+
 pub const Policy = struct {
     state: PolicyState,
     terms: ?[]const u8 = null,

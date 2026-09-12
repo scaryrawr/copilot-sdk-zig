@@ -1150,6 +1150,7 @@ const CreateSessionRequest = struct {
     sessionId: ?[]const u8,
     model: ?[]const u8,
     provider: ?provider.WireProvider,
+    modelCapabilities: ?models.CapabilitiesOverride,
     workingDirectory: ?[]const u8,
     streaming: bool,
     tools: []const WireTool,
@@ -1164,6 +1165,7 @@ const ResumeSessionRequest = struct {
     sessionId: []const u8,
     model: ?[]const u8,
     provider: ?provider.WireProvider,
+    modelCapabilities: ?models.CapabilitiesOverride,
     workingDirectory: ?[]const u8,
     streaming: bool,
     tools: []const WireTool,
@@ -1193,6 +1195,16 @@ fn lowerManagedSettings(
     };
 }
 
+fn lowerModelCapabilities(
+    capabilities: ?models.CapabilitiesOverride,
+) !?models.CapabilitiesOverride {
+    const value = capabilities orelse return null;
+    const limits = value.limits orelse return value;
+    const vision = limits.vision orelse return value;
+    if (vision.max_prompt_images == 0) return error.InvalidMaxPromptImages;
+    return value;
+}
+
 fn buildCreateSessionRequest(
     config: session_types.SessionConfig,
     tools: []const WireTool,
@@ -1201,6 +1213,7 @@ fn buildCreateSessionRequest(
         .sessionId = config.session_id,
         .model = config.model,
         .provider = if (config.provider) |value| try provider.lower(value) else null,
+        .modelCapabilities = try lowerModelCapabilities(config.model_capabilities),
         .workingDirectory = config.working_directory,
         .streaming = config.streaming,
         .tools = tools,
@@ -1221,6 +1234,7 @@ fn buildResumeSessionRequest(
         .sessionId = session_id,
         .model = config.model,
         .provider = if (config.provider) |value| try provider.lower(value) else null,
+        .modelCapabilities = try lowerModelCapabilities(config.model_capabilities),
         .workingDirectory = config.working_directory,
         .streaming = config.streaming,
         .tools = tools,
@@ -2252,6 +2266,135 @@ test "resume request places provider in params and disables nested resume" {
     const provider_value = request_params.get("provider").?.object;
     try std.testing.expectEqualStrings("anthropic", provider_value.get("type").?.string);
     try std.testing.expectEqualStrings("key", provider_value.get("apiKey").?.string);
+}
+
+test "createSession and joinSession preserve deep partial model capability overrides" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        capabilities: ?models.CapabilitiesOverride,
+        wire: []const u8,
+    }{
+        .{ .capabilities = null, .wire = "" },
+        .{ .capabilities = .{}, .wire = ",\"modelCapabilities\":{}" },
+        .{
+            .capabilities = .{ .supports = .{} },
+            .wire = ",\"modelCapabilities\":{\"supports\":{}}",
+        },
+        .{
+            .capabilities = .{ .supports = .{ .vision = true } },
+            .wire = ",\"modelCapabilities\":{\"supports\":{\"vision\":true}}",
+        },
+        .{
+            .capabilities = .{ .supports = .{ .vision = false } },
+            .wire = ",\"modelCapabilities\":{\"supports\":{\"vision\":false}}",
+        },
+        .{
+            .capabilities = .{ .supports = .{ .reasoningEffort = false, .adaptive_thinking = .optional } },
+            .wire = ",\"modelCapabilities\":{\"supports\":{\"reasoningEffort\":false,\"adaptive_thinking\":\"optional\"}}",
+        },
+        .{
+            .capabilities = .{ .limits = .{ .vision = .{ .max_prompt_images = 1 } } },
+            .wire = ",\"modelCapabilities\":{\"limits\":{\"vision\":{\"max_prompt_images\":1}}}",
+        },
+        .{
+            .capabilities = .{ .limits = .{ .vision = .{ .supported_media_types = &.{} } } },
+            .wire = ",\"modelCapabilities\":{\"limits\":{\"vision\":{\"supported_media_types\":[]}}}",
+        },
+        .{
+            .capabilities = .{
+                .supports = .{ .vision = true, .reasoningEffort = true, .adaptive_thinking = .required },
+                .limits = .{
+                    .max_prompt_tokens = 0,
+                    .max_output_tokens = 4096,
+                    .max_context_window_tokens = 32768,
+                    .vision = .{
+                        .supported_media_types = &.{ "image/png", "image/jpeg" },
+                        .max_prompt_images = 8,
+                        .max_prompt_image_size = 10485760,
+                    },
+                },
+            },
+            .wire = ",\"modelCapabilities\":{\"supports\":{\"vision\":true,\"reasoningEffort\":true,\"adaptive_thinking\":\"required\"},\"limits\":{\"max_prompt_tokens\":0,\"max_output_tokens\":4096,\"max_context_window_tokens\":32768,\"vision\":{\"supported_media_types\":[\"image/png\",\"image/jpeg\"],\"max_prompt_images\":8,\"max_prompt_image_size\":10485760}}}",
+        },
+    };
+
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const create_response = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"sessionId\":\"created-session\"}}";
+        const resume_response = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}";
+        const responses = try std.fmt.allocPrint(
+            allocator,
+            "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+            .{ create_response.len, create_response, resume_response.len, resume_response },
+        );
+        defer allocator.free(responses);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = responses });
+        const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+        defer response_file.close(std.testing.io);
+        var reader_buffer: [1024]u8 = undefined;
+        var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+        const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+        defer request_file.close(std.testing.io);
+        var writer_buffer: [1024]u8 = undefined;
+        var writer = request_file.writer(std.testing.io, &writer_buffer);
+        var client = Client{
+            .allocator = allocator,
+            .io = std.testing.io,
+            .child = null,
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        };
+        defer {
+            for (client.session_ids.items) |id| allocator.free(id);
+            client.session_ids.deinit(allocator);
+        }
+        const config = session_types.SessionConfig{
+            .model = "local-vision-model",
+            .provider = .{
+                .base_url = "http://localhost:8000/v1",
+                .model_id = "local-vision-model",
+                .wire_model = "local-vision-model",
+            },
+            .model_capabilities = case.capabilities,
+        };
+        const created = try client.createSession(config);
+        try std.testing.expectEqualStrings("created-session", created.id);
+        const joined = try client.joinSession("existing-session", config);
+        try std.testing.expectEqualStrings("existing-session", joined.id);
+
+        var invalid_config = config;
+        invalid_config.model_capabilities = .{ .limits = .{ .vision = .{ .max_prompt_images = 0 } } };
+        try std.testing.expectError(error.InvalidMaxPromptImages, client.createSession(invalid_config));
+        try std.testing.expectError(error.InvalidMaxPromptImages, client.joinSession("existing-session", invalid_config));
+
+        const requests = try tmp.dir.readFileAlloc(std.testing.io, "requests", allocator, .limited(8192));
+        defer allocator.free(requests);
+        var frames = std.Io.Reader.fixed(requests);
+        const model_and_provider = "\"model\":\"local-vision-model\",\"provider\":{\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"http://localhost:8000/v1\",\"modelId\":\"local-vision-model\",\"wireModel\":\"local-vision-model\"}";
+        const defaults = ",\"streaming\":false,\"tools\":[],\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false";
+        const expected_create = try std.fmt.allocPrint(
+            allocator,
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.create\",\"params\":{{{s}{s}{s}}}}}",
+            .{ model_and_provider, case.wire, defaults },
+        );
+        defer allocator.free(expected_create);
+        const create_body = try json_rpc.readFrame(allocator, &frames);
+        defer allocator.free(create_body);
+        try std.testing.expectEqualStrings(expected_create, create_body);
+        const expected_resume = try std.fmt.allocPrint(
+            allocator,
+            "{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session.resume\",\"params\":{{\"sessionId\":\"existing-session\",{s}{s}{s},\"disableResume\":true}}}}",
+            .{ model_and_provider, case.wire, defaults },
+        );
+        defer allocator.free(expected_resume);
+        const resume_body = try json_rpc.readFrame(allocator, &frames);
+        defer allocator.free(resume_body);
+        try std.testing.expectEqualStrings(expected_resume, resume_body);
+        try std.testing.expectEqualStrings("", frames.buffered());
+    }
 }
 
 test "session requests enable configured callbacks" {
