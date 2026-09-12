@@ -364,6 +364,14 @@ pub fn approveAll(
     return .approve_once;
 }
 
+pub fn defaultJoinSessionPermissionHandler(
+    _: PermissionRequested,
+    _: PermissionInvocation,
+    _: ?*anyopaque,
+) anyerror!PermissionDecision {
+    return .no_result;
+}
+
 pub const ExternalToolRequested = struct {
     request_id: []u8,
     tool_call_id: []u8,
@@ -832,6 +840,20 @@ test "approveAll matches official permission semantics" {
         approveAll(ordinary, .{
             .session_id = "session-1",
             .managed_settings_enabled = true,
+        }, null),
+    );
+}
+
+test "default join permission handler leaves requests pending" {
+    const request = PermissionRequested{
+        .request_id = @constCast("p1"),
+        .permission_request_json = @constCast("{}"),
+    };
+    try std.testing.expectEqual(
+        PermissionDecision.no_result,
+        try defaultJoinSessionPermissionHandler(request, .{
+            .session_id = "session-1",
+            .managed_settings_enabled = false,
         }, null),
     );
 }

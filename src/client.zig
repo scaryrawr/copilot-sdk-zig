@@ -711,37 +711,7 @@ pub const Client = struct {
         session_id: []const u8,
         config: session_types.JoinSessionConfig,
     ) !JoinedSession {
-        const resume_config = session_types.ResumeSessionConfig{
-            .model = config.model,
-            .provider = config.provider,
-            .model_capabilities = config.model_capabilities,
-            .working_directory = config.working_directory,
-            .streaming = config.streaming,
-            .tools = config.tools,
-            .available_tools = config.available_tools,
-            .excluded_tools = config.excluded_tools,
-            .system_message = config.system_message,
-            .request_permission = config.request_permission,
-            .enable_config_discovery = config.enable_config_discovery,
-            .skill_directories = config.skill_directories,
-            .enable_skills = config.enable_skills,
-            .instruction_directories = config.instruction_directories,
-            .skip_custom_instructions = config.skip_custom_instructions,
-            .enable_on_demand_instruction_discovery = config.enable_on_demand_instruction_discovery,
-            .enable_managed_settings = config.enable_managed_settings,
-            .managed_settings = config.managed_settings,
-            .on_permission_request = config.on_permission_request,
-            .permission_context = config.permission_context,
-            .on_user_input_request = config.on_user_input_request,
-            .user_input_context = config.user_input_context,
-            .suppress_resume_event = config.suppress_resume_event,
-            .continue_pending_work = config.continue_pending_work,
-            .extensions = .{
-                .common = config.extensions.common,
-                .canvas_provider = config.extensions.canvas_provider,
-                .open_canvases = config.extensions.open_canvases,
-            },
-        };
+        const resume_config = resumeConfigFromJoin(config);
         // Extension SDK overrides are structurally impossible here.
         const session = try self.resumeSessionWithEnvironment(
             session_id,
@@ -3089,6 +3059,41 @@ fn resumeConfigFromCreate(config: session_types.CreateSessionConfig) session_typ
             .common = config.extensions.common,
             .extension_sdk_path = config.extensions.extension_sdk_path,
             .canvas_provider = config.extensions.canvas_provider,
+        },
+    };
+}
+
+fn resumeConfigFromJoin(config: session_types.JoinSessionConfig) session_types.ResumeSessionConfig {
+    return .{
+        .model = config.model,
+        .provider = config.provider,
+        .model_capabilities = config.model_capabilities,
+        .working_directory = config.working_directory,
+        .streaming = config.streaming,
+        .tools = config.tools,
+        .available_tools = config.available_tools,
+        .excluded_tools = config.excluded_tools,
+        .system_message = config.system_message,
+        .request_permission = config.request_permission,
+        .enable_config_discovery = config.enable_config_discovery,
+        .skill_directories = config.skill_directories,
+        .enable_skills = config.enable_skills,
+        .instruction_directories = config.instruction_directories,
+        .skip_custom_instructions = config.skip_custom_instructions,
+        .enable_on_demand_instruction_discovery = config.enable_on_demand_instruction_discovery,
+        .enable_managed_settings = config.enable_managed_settings,
+        .managed_settings = config.managed_settings,
+        .on_permission_request = config.on_permission_request orelse
+            session_types.defaultJoinSessionPermissionHandler,
+        .permission_context = config.permission_context,
+        .on_user_input_request = config.on_user_input_request,
+        .user_input_context = config.user_input_context,
+        .suppress_resume_event = config.suppress_resume_event,
+        .continue_pending_work = config.continue_pending_work,
+        .extensions = .{
+            .common = config.extensions.common,
+            .canvas_provider = config.extensions.canvas_provider,
+            .open_canvases = config.extensions.open_canvases,
         },
     };
 }
@@ -5808,6 +5813,18 @@ test "review regressions preserve protocol semantics" {
     try std.testing.expect(mapped.streaming);
     try std.testing.expect(mapped.suppress_resume_event);
     try std.testing.expectEqualStrings("/sdk", mapped.extensions.extension_sdk_path.?);
+
+    const joined = resumeConfigFromJoin(.{});
+    try std.testing.expect(
+        joined.on_permission_request.? ==
+            session_types.defaultJoinSessionPermissionHandler,
+    );
+    const overridden_join = resumeConfigFromJoin(.{
+        .on_permission_request = session_types.approveAll,
+    });
+    try std.testing.expect(
+        overridden_join.on_permission_request.? == session_types.approveAll,
+    );
 
     const stdio_json = try lowerStdioMcp(allocator, .{
         .command = "server",

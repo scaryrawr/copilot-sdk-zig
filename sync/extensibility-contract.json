@@ -74,7 +74,19 @@
   "callbacks": {
     "hooks": {
       "status": "typed",
-      "method": "hooks.invoke"
+      "method": "hooks.invoke",
+      "handlers": {
+        "onPreToolUse": "PreToolUseHandler",
+        "onPreMcpToolCall": "PreMcpToolCallHandler",
+        "onPostToolUse": "PostToolUseHandler",
+        "onPostToolUseFailure": "PostToolUseFailureHandler",
+        "onUserPromptSubmitted": "UserPromptSubmittedHandler",
+        "onUserPromptTransformed": "UserPromptTransformedHandler",
+        "onSessionStart": "SessionStartHandler",
+        "onSessionEnd": "SessionEndHandler",
+        "onErrorOccurred": "ErrorOccurredHandler",
+        "onAgentStop": "AgentStopHandler"
+      }
     },
     "canvasProvider": {
       "status": "typed",

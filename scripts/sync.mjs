@@ -147,7 +147,22 @@ function expectedExtensibilityContract(upstreamCommit) {
       },
     },
     callbacks: {
-      hooks: { status: "typed", method: "hooks.invoke" },
+      hooks: {
+        status: "typed",
+        method: "hooks.invoke",
+        handlers: {
+          onPreToolUse: "PreToolUseHandler",
+          onPreMcpToolCall: "PreMcpToolCallHandler",
+          onPostToolUse: "PostToolUseHandler",
+          onPostToolUseFailure: "PostToolUseFailureHandler",
+          onUserPromptSubmitted: "UserPromptSubmittedHandler",
+          onUserPromptTransformed: "UserPromptTransformedHandler",
+          onSessionStart: "SessionStartHandler",
+          onSessionEnd: "SessionEndHandler",
+          onErrorOccurred: "ErrorOccurredHandler",
+          onAgentStop: "AgentStopHandler",
+        },
+      },
       canvasProvider: {
         status: "typed",
         methods: ["canvas.open", "canvas.close", "canvas.action.invoke"],
@@ -303,6 +318,31 @@ function verifyLifecycleContract(contract, clientSource, typesSource, extensionS
   }
 }
 
+function verifyHookContract(contract, typesSource) {
+  const hooks = sourceSection(
+    typesSource,
+    "export interface SessionHooks {",
+    "// ============================================================================\n// MCP Server Configuration Types",
+    "SessionHooks",
+  );
+  const declarations = Object.fromEntries(
+    [...hooks.matchAll(/^\s+(\w+)\?:\s+(\w+);$/gm)]
+      .map((match) => [match[1], match[2]]),
+  );
+  const expected = contract.callbacks.hooks.handlers;
+  requireExactStrings(
+    Object.keys(declarations),
+    Object.keys(expected),
+    "SessionHooks callback inventory",
+  );
+  for (const [name, handler] of Object.entries(expected)) {
+    assert(
+      declarations[name] === handler,
+      `SessionHooks.${name} changed from ${handler}`,
+    );
+  }
+}
+
 function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, extensionSource) {
   const clientOptions = sourceSection(
     typesSource,
@@ -339,6 +379,7 @@ function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, e
     "CopilotClient startup",
   );
   verifyLifecycleContract(contract, clientSource, typesSource, extensionSource);
+  verifyHookContract(contract, typesSource);
   writeFileSync(extensibilityContractPath, `${JSON.stringify(contract, null, 2)}\n`);
 }
 
@@ -490,11 +531,9 @@ function verifyCompatibility(apiSchema, eventSchema) {
   for (const [name, expected] of Object.entries(compatibility.modelEnums)) {
     requireExactStrings(stringEnum(apiSchema, name), expected, `${name} model enum`);
   }
-  requireExactStrings(
-    stringEnum(eventSchema, "AutoTier"),
-    ["balance", "efficiency", "fast", "intelligence"],
-    "AutoTier enum",
-  );
+  const autoTiers = ["balance", "efficiency", "fast", "intelligence"];
+  requireExactStrings(stringEnum(apiSchema, "AutoTier"), autoTiers, "API AutoTier enum");
+  requireExactStrings(stringEnum(eventSchema, "AutoTier"), autoTiers, "event AutoTier enum");
   const modelDiscountPercent =
     apiSchema.definitions?.ModelBilling?.properties?.discountPercent;
   assert(
