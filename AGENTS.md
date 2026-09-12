@@ -10,8 +10,8 @@
   structure; checking only their upstream commit allows manual drift to pass.
 - Scope upstream API checks to the TypeScript declaration that owns each field,
   including inherited lifecycle fields, `Omit` exclusions, intersection
-  re-declarations, and response handling; searching concatenated source only
-  proves that a name exists somewhere.
+  re-declarations, startup initialization, and response handling; searching
+  concatenated source only proves that a name exists somewhere.
 - `npm run sync` advances to the latest upstream `github/copilot-sdk` commit and
   Copilot CLI package. Do not use it when refreshing generated files for an
   existing branch unless advancing the pin is intentional.

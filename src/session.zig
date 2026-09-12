@@ -77,6 +77,7 @@ pub const AutoTier = enum {
     efficiency,
     balance,
     intelligence,
+    fast,
 };
 
 pub const ReasoningSummary = enum {

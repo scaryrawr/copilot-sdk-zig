@@ -4123,7 +4123,7 @@ test "session lifecycle requests map upstream wire fields" {
         WireModelSwitchRequest{
             .sessionId = "session-1",
             .modelId = "auto",
-            .autoTier = .intelligence,
+            .autoTier = .fast,
             .reasoningEffort = "high",
             .reasoningSummary = .detailed,
             .contextTier = .long_context,
@@ -4142,7 +4142,7 @@ test "session lifecycle requests map upstream wire fields" {
     const model_params = model_parsed.value.object.get("params").?.object;
     try std.testing.expectEqualStrings("session-1", model_params.get("sessionId").?.string);
     try std.testing.expectEqualStrings("auto", model_params.get("modelId").?.string);
-    try std.testing.expectEqualStrings("intelligence", model_params.get("autoTier").?.string);
+    try std.testing.expectEqualStrings("fast", model_params.get("autoTier").?.string);
     try std.testing.expectEqualStrings("high", model_params.get("reasoningEffort").?.string);
     try std.testing.expectEqualStrings("detailed", model_params.get("reasoningSummary").?.string);
     try std.testing.expectEqualStrings("long_context", model_params.get("contextTier").?.string);

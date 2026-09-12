@@ -304,15 +304,40 @@ function verifyLifecycleContract(contract, clientSource, typesSource, extensionS
 }
 
 function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, extensionSource) {
-  const requiredClientFragments = [
-    'sendRequest("plugins.builtin.set"',
-  ];
-  const requiredTypeFragments = [
-    "builtinPluginDirectories?: readonly string[]",
-  ];
+  const clientOptions = sourceSection(
+    typesSource,
+    "export interface CopilotClientOptions {",
+    'export type ToolResultType = "success"',
+    "CopilotClientOptions",
+  );
+  const clientConstructor = sourceSection(
+    clientSource,
+    "    constructor(options: CopilotClientOptions = {}) {",
+    "    private connectionExtraArgs: string[] = [];",
+    "CopilotClient constructor",
+  );
+  const clientStartup = sourceSection(
+    clientSource,
+    "    private async doStart(): Promise<void> {",
+    "    async stop(): Promise<Error[]> {",
+    "CopilotClient startup",
+  );
   const contract = expectedExtensibilityContract(upstreamCommit);
-  requireSourceFragments(clientSource, requiredClientFragments, "CopilotClient");
-  requireSourceFragments(typesSource, requiredTypeFragments, "SDK types");
+  requireSourceFragments(
+    clientOptions,
+    ["builtinPluginDirectories?: readonly string[]"],
+    "CopilotClientOptions",
+  );
+  requireSourceFragments(
+    clientConstructor,
+    ["this.builtinPluginDirectories = [...options.builtinPluginDirectories]"],
+    "CopilotClient constructor",
+  );
+  requireSourceFragments(
+    clientStartup,
+    ['sendRequest("plugins.builtin.set"'],
+    "CopilotClient startup",
+  );
   verifyLifecycleContract(contract, clientSource, typesSource, extensionSource);
   writeFileSync(extensibilityContractPath, `${JSON.stringify(contract, null, 2)}\n`);
 }
@@ -465,6 +490,11 @@ function verifyCompatibility(apiSchema, eventSchema) {
   for (const [name, expected] of Object.entries(compatibility.modelEnums)) {
     requireExactStrings(stringEnum(apiSchema, name), expected, `${name} model enum`);
   }
+  requireExactStrings(
+    stringEnum(eventSchema, "AutoTier"),
+    ["balance", "efficiency", "fast", "intelligence"],
+    "AutoTier enum",
+  );
   const modelDiscountPercent =
     apiSchema.definitions?.ModelBilling?.properties?.discountPercent;
   assert(
