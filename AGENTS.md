@@ -36,9 +36,9 @@ after SDK or synchronization changes. Build affected examples with
   tools, callback registries, or extension runtimes because the release RPC can
   dispatch interleaved notifications and server requests.
 - Treat OAuth tokens and granted environment variables as secrets in every
-  representation. Wipe encoded requests, flushed writer buffers, raw responses,
-  intermediate JSON, owned copies, and partial-construction cleanup paths
-  before releasing their storage.
+  representation. Wipe encoded requests, raw responses, intermediate JSON,
+  owned copies, partial-construction cleanup paths, and both streaming transport
+  backing buffers before releasing their storage.
 - Validate handler-produced values against the wire schema before responding;
   invalid OAuth token results must securely deinitialize and cancel the pending
   request rather than sending a response the CLI will reject.
