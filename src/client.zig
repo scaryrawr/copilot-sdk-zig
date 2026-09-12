@@ -718,9 +718,16 @@ pub const Client = struct {
             .working_directory = config.working_directory,
             .streaming = config.streaming,
             .tools = config.tools,
+            .available_tools = config.available_tools,
+            .excluded_tools = config.excluded_tools,
             .system_message = config.system_message,
             .request_permission = config.request_permission,
             .enable_config_discovery = config.enable_config_discovery,
+            .skill_directories = config.skill_directories,
+            .enable_skills = config.enable_skills,
+            .instruction_directories = config.instruction_directories,
+            .skip_custom_instructions = config.skip_custom_instructions,
+            .enable_on_demand_instruction_discovery = config.enable_on_demand_instruction_discovery,
             .enable_managed_settings = config.enable_managed_settings,
             .managed_settings = config.managed_settings,
             .on_permission_request = config.on_permission_request,
@@ -2960,10 +2967,18 @@ const CreateSessionRequest = struct {
     workingDirectory: ?[]const u8,
     streaming: bool,
     tools: []const WireTool,
+    availableTools: ?[]const []const u8,
+    excludedTools: ?[]const []const u8,
+    toolFilterPrecedence: ToolFilterPrecedence = .excluded,
     systemMessage: ?session_types.SystemMessageConfig,
     requestPermission: bool,
     requestUserInput: bool,
     enableConfigDiscovery: ?bool,
+    skillDirectories: ?[]const []const u8,
+    enableSkills: ?bool,
+    instructionDirectories: ?[]const []const u8,
+    skipCustomInstructions: ?bool,
+    enableOnDemandInstructionDiscovery: ?bool,
     enableManagedSettings: bool,
     managedSettings: ?WireManagedSettings,
     canvases: ?[]const WireCanvas,
@@ -2977,8 +2992,6 @@ const CreateSessionRequest = struct {
     mcpServers: ?std.json.Value,
     mcpOAuthTokenStorage: ?[]const u8,
     authClientIdMetadataUrl: ?[]const u8,
-    enableSkills: ?bool,
-    skillDirectories: ?[]const []const u8,
     includedBuiltinSkills: ?[]const []const u8,
     pluginDirectories: ?[]const []const u8,
     disabledSkills: ?[]const []const u8,
@@ -2993,10 +3006,18 @@ const ResumeSessionRequest = struct {
     workingDirectory: ?[]const u8,
     streaming: bool,
     tools: []const WireTool,
+    availableTools: ?[]const []const u8,
+    excludedTools: ?[]const []const u8,
+    toolFilterPrecedence: ToolFilterPrecedence = .excluded,
     systemMessage: ?session_types.SystemMessageConfig,
     requestPermission: bool,
     requestUserInput: bool,
     enableConfigDiscovery: ?bool,
+    skillDirectories: ?[]const []const u8,
+    enableSkills: ?bool,
+    instructionDirectories: ?[]const []const u8,
+    skipCustomInstructions: ?bool,
+    enableOnDemandInstructionDiscovery: ?bool,
     enableManagedSettings: bool,
     managedSettings: ?WireManagedSettings,
     disableResume: ?bool,
@@ -3012,14 +3033,17 @@ const ResumeSessionRequest = struct {
     mcpServers: ?std.json.Value,
     mcpOAuthTokenStorage: ?[]const u8,
     authClientIdMetadataUrl: ?[]const u8,
-    enableSkills: ?bool,
-    skillDirectories: ?[]const []const u8,
     includedBuiltinSkills: ?[]const []const u8,
     pluginDirectories: ?[]const []const u8,
     disabledSkills: ?[]const []const u8,
     disabledMcpServers: ?[]const []const u8,
     openCanvases: ?[]const WireOpenCanvas,
     requestedEnvironmentVariables: ?[]const []const u8,
+};
+
+const ToolFilterPrecedence = enum {
+    available,
+    excluded,
 };
 
 fn managedSettingsEnabled(config: anytype) bool {
@@ -3044,9 +3068,16 @@ fn resumeConfigFromCreate(config: session_types.CreateSessionConfig) session_typ
         .working_directory = config.working_directory,
         .streaming = config.streaming,
         .tools = config.tools,
+        .available_tools = config.available_tools,
+        .excluded_tools = config.excluded_tools,
         .system_message = config.system_message,
         .request_permission = config.request_permission,
         .enable_config_discovery = config.enable_config_discovery,
+        .skill_directories = config.skill_directories,
+        .enable_skills = config.enable_skills,
+        .instruction_directories = config.instruction_directories,
+        .skip_custom_instructions = config.skip_custom_instructions,
+        .enable_on_demand_instruction_discovery = config.enable_on_demand_instruction_discovery,
         .enable_managed_settings = config.enable_managed_settings,
         .managed_settings = config.managed_settings,
         .on_permission_request = config.on_permission_request,
@@ -3103,10 +3134,18 @@ fn buildCreateSessionRequest(
         .workingDirectory = config.working_directory,
         .streaming = config.streaming,
         .tools = tools,
+        .availableTools = config.available_tools,
+        .excludedTools = config.excluded_tools,
         .systemMessage = config.system_message,
         .requestPermission = config.request_permission or config.on_permission_request != null,
         .requestUserInput = config.on_user_input_request != null,
         .enableConfigDiscovery = config.enable_config_discovery,
+        .skillDirectories = config.skill_directories orelse
+            optionalSlice(features.skills.directories),
+        .enableSkills = config.enable_skills orelse features.skills.enabled,
+        .instructionDirectories = config.instruction_directories,
+        .skipCustomInstructions = config.skip_custom_instructions,
+        .enableOnDemandInstructionDiscovery = config.enable_on_demand_instruction_discovery,
         .enableManagedSettings = config.enable_managed_settings,
         .managedSettings = lowerManagedSettings(config.managed_settings),
         .canvases = if (values.canvases.items.len > 0) values.canvases.items else null,
@@ -3129,8 +3168,6 @@ fn buildCreateSessionRequest(
         else
             null,
         .authClientIdMetadataUrl = features.mcp.auth_client_id_metadata_url,
-        .enableSkills = features.skills.enabled,
-        .skillDirectories = optionalSlice(features.skills.directories),
         .includedBuiltinSkills = features.skills.included_builtin,
         .pluginDirectories = optionalSlice(features.plugin_directories),
         .disabledSkills = optionalSlice(features.skills.disabled),
@@ -3175,10 +3212,18 @@ fn buildResumeSessionRequest(
         .workingDirectory = config.working_directory,
         .streaming = config.streaming,
         .tools = tools,
+        .availableTools = config.available_tools,
+        .excludedTools = config.excluded_tools,
         .systemMessage = config.system_message,
         .requestPermission = config.request_permission or config.on_permission_request != null,
         .requestUserInput = config.on_user_input_request != null,
         .enableConfigDiscovery = config.enable_config_discovery,
+        .skillDirectories = config.skill_directories orelse
+            optionalSlice(features.skills.directories),
+        .enableSkills = config.enable_skills orelse features.skills.enabled,
+        .instructionDirectories = config.instruction_directories,
+        .skipCustomInstructions = config.skip_custom_instructions,
+        .enableOnDemandInstructionDiscovery = config.enable_on_demand_instruction_discovery,
         .enableManagedSettings = config.enable_managed_settings,
         .managedSettings = lowerManagedSettings(config.managed_settings),
         .disableResume = if (config.suppress_resume_event) true else null,
@@ -3203,8 +3248,6 @@ fn buildResumeSessionRequest(
         else
             null,
         .authClientIdMetadataUrl = features.mcp.auth_client_id_metadata_url,
-        .enableSkills = features.skills.enabled,
-        .skillDirectories = optionalSlice(features.skills.directories),
         .includedBuiltinSkills = features.skills.included_builtin,
         .pluginDirectories = optionalSlice(features.plugin_directories),
         .disabledSkills = optionalSlice(features.skills.disabled),
@@ -4378,7 +4421,7 @@ test "createSession and resumeSession preserve deep partial model capability ove
         defer allocator.free(requests);
         var frames = std.Io.Reader.fixed(requests);
         const model_and_provider = "\"model\":\"local-vision-model\",\"provider\":{\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"http://localhost:8000/v1\",\"modelId\":\"local-vision-model\",\"wireModel\":\"local-vision-model\"}";
-        const defaults = ",\"streaming\":false,\"tools\":[],\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false";
+        const defaults = ",\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false";
         const expected_create = try std.fmt.allocPrint(
             allocator,
             "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.create\",\"params\":{{{s}{s}{s}}}}}",
@@ -4478,7 +4521,7 @@ test "session requests enable configured callbacks" {
     );
 }
 
-test "session requests preserve config discovery semantics" {
+test "session requests preserve discovery semantics" {
     const allocator = std.testing.allocator;
     var extension_values = ExtensionWireValues.init(allocator);
     defer extension_values.deinit();
@@ -4498,6 +4541,9 @@ test "session requests preserve config discovery semantics" {
             "session.create",
             try buildCreateSessionRequest(.{
                 .enable_config_discovery = case.value,
+                .enable_skills = case.value,
+                .skip_custom_instructions = case.value,
+                .enable_on_demand_instruction_discovery = case.value,
             }, &.{}, &extension_values),
         );
         defer allocator.free(create_encoded);
@@ -4516,6 +4562,9 @@ test "session requests preserve config discovery semantics" {
             "session.resume",
             try buildResumeSessionRequest("session-1", .{
                 .enable_config_discovery = case.value,
+                .enable_skills = case.value,
+                .skip_custom_instructions = case.value,
+                .enable_on_demand_instruction_discovery = case.value,
             }, &.{}, &extension_values, &.{}),
         );
         defer allocator.free(resume_encoded);
@@ -4537,10 +4586,197 @@ test "session requests preserve config discovery semantics" {
                 expected,
                 resume_params.get("enableConfigDiscovery").?.bool,
             );
+            try std.testing.expectEqual(
+                expected,
+                create_params.get("enableSkills").?.bool,
+            );
+            try std.testing.expectEqual(
+                expected,
+                resume_params.get("enableSkills").?.bool,
+            );
+            try std.testing.expectEqual(
+                expected,
+                create_params.get("skipCustomInstructions").?.bool,
+            );
+            try std.testing.expectEqual(
+                expected,
+                resume_params.get("skipCustomInstructions").?.bool,
+            );
+            try std.testing.expectEqual(
+                expected,
+                create_params.get("enableOnDemandInstructionDiscovery").?.bool,
+            );
+            try std.testing.expectEqual(
+                expected,
+                resume_params.get("enableOnDemandInstructionDiscovery").?.bool,
+            );
         } else {
             try std.testing.expect(!create_params.contains("enableConfigDiscovery"));
             try std.testing.expect(!resume_params.contains("enableConfigDiscovery"));
+            try std.testing.expect(!create_params.contains("enableSkills"));
+            try std.testing.expect(!resume_params.contains("enableSkills"));
+            try std.testing.expect(!create_params.contains("skipCustomInstructions"));
+            try std.testing.expect(!resume_params.contains("skipCustomInstructions"));
+            try std.testing.expect(!create_params.contains("enableOnDemandInstructionDiscovery"));
+            try std.testing.expect(!resume_params.contains("enableOnDemandInstructionDiscovery"));
         }
+    }
+}
+
+test "session requests preserve tool filters with excluded precedence" {
+    const allocator = std.testing.allocator;
+    var extension_values = ExtensionWireValues.init(allocator);
+    defer extension_values.deinit();
+    const available_tools = &.{ "custom:*", "builtin:ask_user" };
+    const excluded_tools = &.{"builtin:web_fetch"};
+
+    const create_encoded = try json_rpc.encodeRequest(
+        allocator,
+        15,
+        "session.create",
+        try buildCreateSessionRequest(.{
+            .available_tools = available_tools,
+            .excluded_tools = excluded_tools,
+        }, &.{}, &extension_values),
+    );
+    defer allocator.free(create_encoded);
+    const create_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        create_encoded,
+        .{},
+    );
+    defer create_parsed.deinit();
+
+    const resume_encoded = try json_rpc.encodeRequest(
+        allocator,
+        16,
+        "session.resume",
+        try buildResumeSessionRequest("session-1", .{
+            .available_tools = available_tools,
+            .excluded_tools = excluded_tools,
+        }, &.{}, &extension_values, &.{}),
+    );
+    defer allocator.free(resume_encoded);
+    const resume_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        resume_encoded,
+        .{},
+    );
+    defer resume_parsed.deinit();
+
+    for ([_]std.json.ObjectMap{
+        create_parsed.value.object.get("params").?.object,
+        resume_parsed.value.object.get("params").?.object,
+    }) |params| {
+        const available = params.get("availableTools").?.array.items;
+        try std.testing.expectEqual(@as(usize, 2), available.len);
+        try std.testing.expectEqualStrings("custom:*", available[0].string);
+        try std.testing.expectEqualStrings("builtin:ask_user", available[1].string);
+
+        const excluded = params.get("excludedTools").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), excluded.len);
+        try std.testing.expectEqualStrings("builtin:web_fetch", excluded[0].string);
+        try std.testing.expectEqualStrings(
+            "excluded",
+            params.get("toolFilterPrecedence").?.string,
+        );
+    }
+}
+
+test "session requests preserve explicit discovery directories" {
+    const allocator = std.testing.allocator;
+    var extension_values = ExtensionWireValues.init(allocator);
+    defer extension_values.deinit();
+    const skill_directories = &.{ ".agents/skills", ".github/skills" };
+    const instruction_directories = &.{ ".", ".github/instructions" };
+
+    const create_encoded = try json_rpc.encodeRequest(
+        allocator,
+        15,
+        "session.create",
+        try buildCreateSessionRequest(.{
+            .skill_directories = skill_directories,
+            .instruction_directories = instruction_directories,
+        }, &.{}, &extension_values),
+    );
+    defer allocator.free(create_encoded);
+    const create_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        create_encoded,
+        .{},
+    );
+    defer create_parsed.deinit();
+    const create_params = create_parsed.value.object.get("params").?.object;
+
+    const resume_encoded = try json_rpc.encodeRequest(
+        allocator,
+        16,
+        "session.resume",
+        try buildResumeSessionRequest("session-1", .{
+            .skill_directories = skill_directories,
+            .instruction_directories = instruction_directories,
+        }, &.{}, &extension_values, &.{}),
+    );
+    defer allocator.free(resume_encoded);
+    const resume_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        resume_encoded,
+        .{},
+    );
+    defer resume_parsed.deinit();
+    const resume_params = resume_parsed.value.object.get("params").?.object;
+
+    for ([_]std.json.ObjectMap{ create_params, resume_params }) |params| {
+        const skills = params.get("skillDirectories").?.array.items;
+        try std.testing.expectEqual(@as(usize, 2), skills.len);
+        try std.testing.expectEqualStrings(".agents/skills", skills[0].string);
+        try std.testing.expectEqualStrings(".github/skills", skills[1].string);
+
+        const instructions = params.get("instructionDirectories").?.array.items;
+        try std.testing.expectEqual(@as(usize, 2), instructions.len);
+        try std.testing.expectEqualStrings(".", instructions[0].string);
+        try std.testing.expectEqualStrings(".github/instructions", instructions[1].string);
+    }
+
+    const omitted_create = try json_rpc.encodeRequest(
+        allocator,
+        17,
+        "session.create",
+        try buildCreateSessionRequest(.{}, &.{}, &extension_values),
+    );
+    defer allocator.free(omitted_create);
+    const omitted_create_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        omitted_create,
+        .{},
+    );
+    defer omitted_create_parsed.deinit();
+    const omitted_create_params = omitted_create_parsed.value.object.get("params").?.object;
+
+    const omitted_resume = try json_rpc.encodeRequest(
+        allocator,
+        18,
+        "session.resume",
+        try buildResumeSessionRequest("session-1", .{}, &.{}, &extension_values, &.{}),
+    );
+    defer allocator.free(omitted_resume);
+    const omitted_resume_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        omitted_resume,
+        .{},
+    );
+    defer omitted_resume_parsed.deinit();
+    const omitted_resume_params = omitted_resume_parsed.value.object.get("params").?.object;
+
+    for ([_]std.json.ObjectMap{ omitted_create_params, omitted_resume_params }) |params| {
+        try std.testing.expect(!params.contains("skillDirectories"));
+        try std.testing.expect(!params.contains("instructionDirectories"));
     }
 }
 
@@ -4585,7 +4821,7 @@ test "session requests lower both managed settings sources" {
     );
     defer allocator.free(create_encoded);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"session.create\",\"params\":{\"streaming\":false,\"tools\":[],\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":false,\"managedSettings\":{\"permissions\":{\"disableBypassPermissionsMode\":\"allow-auto-only\",\"deny\":[\"Shell(git push *)\"],\"ask\":[\"Read(**)\"],\"allow\":[\"Read(src/**)\"]}}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"session.create\",\"params\":{\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":false,\"managedSettings\":{\"permissions\":{\"disableBypassPermissionsMode\":\"allow-auto-only\",\"deny\":[\"Shell(git push *)\"],\"ask\":[\"Read(**)\"],\"allow\":[\"Read(src/**)\"]}}}}",
         create_encoded,
     );
 
@@ -4603,7 +4839,7 @@ test "session requests lower both managed settings sources" {
     );
     defer allocator.free(resume_encoded);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"session-1\",\"streaming\":false,\"tools\":[],\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":false,\"managedSettings\":{\"permissions\":{\"disableBypassPermissionsMode\":\"allow-auto-only\",\"deny\":[\"Shell(git push *)\"],\"ask\":[\"Read(**)\"],\"allow\":[\"Read(src/**)\"]}}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"session-1\",\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":false,\"managedSettings\":{\"permissions\":{\"disableBypassPermissionsMode\":\"allow-auto-only\",\"deny\":[\"Shell(git push *)\"],\"ask\":[\"Read(**)\"],\"allow\":[\"Read(src/**)\"]}}}}",
         resume_encoded,
     );
 
@@ -4625,7 +4861,7 @@ test "session requests lower both managed settings sources" {
     );
     defer allocator.free(fetched_create_encoded);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"session.create\",\"params\":{\"streaming\":false,\"tools\":[],\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"session.create\",\"params\":{\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":true}}",
         fetched_create_encoded,
     );
 
@@ -4643,7 +4879,7 @@ test "session requests lower both managed settings sources" {
     );
     defer allocator.free(fetched_resume_encoded);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"session-1\",\"streaming\":false,\"tools\":[],\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"session-1\",\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":true}}",
         fetched_resume_encoded,
     );
 }

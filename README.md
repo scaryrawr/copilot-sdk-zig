@@ -157,12 +157,31 @@ host-owned OAuth token-store callbacks are not present in the pinned contract;
 see `sync/extensibility-contract.json` for the reproducible compatibility
 classification.
 
+Use `SessionConfig.available_tools` and `SessionConfig.excluded_tools` to
+constrain the model-visible tool set for each created or resumed session. Tool
+filters use source-qualified names such as `builtin:ask_user`, `custom:*`, and
+`mcp:server-tool`; a bare `*` does not match all sources. The SDK sends
+`toolFilterPrecedence: "excluded"` so an exclusion still applies when both
+lists are present. Process-level CLI arguments do not replace these
+session-level fields in headless SDK mode.
+
 Set `.enable_config_discovery = true` when creating or joining a session to
 discover MCP server configurations (`.mcp.json` and `.vscode/mcp.json`) and
 skill directories from the working directory. Treat enabling discovery as a
 trust decision because discovered MCP servers may be started by the session.
 An explicit `false` disables discovery; the default `null` leaves the field
 omitted so Copilot CLI applies its default behavior.
+
+Set `.skip_custom_instructions = false` to load filesystem custom instructions.
+Set `.enable_on_demand_instruction_discovery = true` to discover `AGENTS.md`,
+`CLAUDE.md`, and `.github/copilot-instructions.md` after successful file views.
+Both options default to `null`, which leaves their runtime defaults unchanged.
+
+To load skills and custom instructions only from explicit trusted locations,
+set `.skill_directories` and `.instruction_directories` instead of enabling
+ambient config discovery. Set `.enable_skills = true` to activate skill loading
+from the explicit directories. All three fields are omitted when left as
+`null`.
 
 ## List available models
 
