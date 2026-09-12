@@ -115,6 +115,11 @@ trust decision because discovered MCP servers may be started by the session.
 An explicit `false` disables discovery; the default `null` leaves the field
 omitted so Copilot CLI applies its default behavior.
 
+Set `.skip_custom_instructions = false` to load filesystem custom instructions.
+Set `.enable_on_demand_instruction_discovery = true` to discover `AGENTS.md`,
+`CLAUDE.md`, and `.github/copilot-instructions.md` after successful file views.
+Both options default to `null`, which leaves their runtime defaults unchanged.
+
 ## List available models
 
 `Client.listModels` calls the authenticated `models.list` RPC. The result

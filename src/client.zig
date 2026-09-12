@@ -1158,6 +1158,8 @@ const CreateSessionRequest = struct {
     requestPermission: bool,
     requestUserInput: bool,
     enableConfigDiscovery: ?bool,
+    skipCustomInstructions: ?bool,
+    enableOnDemandInstructionDiscovery: ?bool,
     enableManagedSettings: bool,
     managedSettings: ?WireManagedSettings,
 };
@@ -1174,6 +1176,8 @@ const ResumeSessionRequest = struct {
     requestPermission: bool,
     requestUserInput: bool,
     enableConfigDiscovery: ?bool,
+    skipCustomInstructions: ?bool,
+    enableOnDemandInstructionDiscovery: ?bool,
     enableManagedSettings: bool,
     managedSettings: ?WireManagedSettings,
     disableResume: bool = true,
@@ -1223,6 +1227,8 @@ fn buildCreateSessionRequest(
         .requestPermission = config.request_permission or config.on_permission_request != null,
         .requestUserInput = config.on_user_input_request != null,
         .enableConfigDiscovery = config.enable_config_discovery,
+        .skipCustomInstructions = config.skip_custom_instructions,
+        .enableOnDemandInstructionDiscovery = config.enable_on_demand_instruction_discovery,
         .enableManagedSettings = config.enable_managed_settings,
         .managedSettings = lowerManagedSettings(config.managed_settings),
     };
@@ -1245,6 +1251,8 @@ fn buildResumeSessionRequest(
         .requestPermission = config.request_permission or config.on_permission_request != null,
         .requestUserInput = config.on_user_input_request != null,
         .enableConfigDiscovery = config.enable_config_discovery,
+        .skipCustomInstructions = config.skip_custom_instructions,
+        .enableOnDemandInstructionDiscovery = config.enable_on_demand_instruction_discovery,
         .enableManagedSettings = config.enable_managed_settings,
         .managedSettings = lowerManagedSettings(config.managed_settings),
     };
@@ -2476,7 +2484,7 @@ test "session requests enable configured callbacks" {
     );
 }
 
-test "session requests preserve config discovery semantics" {
+test "session requests preserve discovery semantics" {
     const allocator = std.testing.allocator;
     const cases = [_]struct {
         value: ?bool,
@@ -2494,6 +2502,8 @@ test "session requests preserve config discovery semantics" {
             "session.create",
             try buildCreateSessionRequest(.{
                 .enable_config_discovery = case.value,
+                .skip_custom_instructions = case.value,
+                .enable_on_demand_instruction_discovery = case.value,
             }, &.{}),
         );
         defer allocator.free(create_encoded);
@@ -2512,6 +2522,8 @@ test "session requests preserve config discovery semantics" {
             "session.resume",
             try buildResumeSessionRequest("session-1", .{
                 .enable_config_discovery = case.value,
+                .skip_custom_instructions = case.value,
+                .enable_on_demand_instruction_discovery = case.value,
             }, &.{}),
         );
         defer allocator.free(resume_encoded);
@@ -2533,9 +2545,29 @@ test "session requests preserve config discovery semantics" {
                 expected,
                 resume_params.get("enableConfigDiscovery").?.bool,
             );
+            try std.testing.expectEqual(
+                expected,
+                create_params.get("skipCustomInstructions").?.bool,
+            );
+            try std.testing.expectEqual(
+                expected,
+                resume_params.get("skipCustomInstructions").?.bool,
+            );
+            try std.testing.expectEqual(
+                expected,
+                create_params.get("enableOnDemandInstructionDiscovery").?.bool,
+            );
+            try std.testing.expectEqual(
+                expected,
+                resume_params.get("enableOnDemandInstructionDiscovery").?.bool,
+            );
         } else {
             try std.testing.expect(!create_params.contains("enableConfigDiscovery"));
             try std.testing.expect(!resume_params.contains("enableConfigDiscovery"));
+            try std.testing.expect(!create_params.contains("skipCustomInstructions"));
+            try std.testing.expect(!resume_params.contains("skipCustomInstructions"));
+            try std.testing.expect(!create_params.contains("enableOnDemandInstructionDiscovery"));
+            try std.testing.expect(!resume_params.contains("enableOnDemandInstructionDiscovery"));
         }
     }
 }
