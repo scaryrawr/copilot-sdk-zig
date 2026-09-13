@@ -44,8 +44,12 @@
   "sessionEventDiscriminators": [
     "assistant.message",
     "assistant.message_delta",
+    "capabilities.changed",
     "external_tool.requested",
+    "mcp.oauth_required",
     "permission.requested",
+    "session.canvas.closed",
+    "session.canvas.opened",
     "session.error",
     "session.idle"
   ],
@@ -54,12 +58,12 @@
     "llmInference.setProvider": "generic",
     "models.list": "typed",
     "ping": "generic",
-    "plugins.builtin.set": "generic",
+    "plugins.builtin.set": "typed",
     "session.abort": "generic",
     "session.create": "typed",
     "session.delete": "generic",
     "session.detach": "typed",
-    "session.eventLog.registerInterest": "generic",
+    "session.eventLog.registerInterest": "typed",
     "session.getForeground": "generic",
     "session.getLastId": "generic",
     "session.getMessages": "generic",
@@ -290,8 +294,7 @@
         }
       },
       "hasBearerTokenProvider": {
-        "status": "deferred",
-        "reason": "Requires inbound providerToken.getToken callback dispatch.",
+        "status": "supported",
         "contract": {
           "type": "boolean"
         }
@@ -306,8 +309,7 @@
         }
       },
       "maxContextWindowTokens": {
-        "status": "deferred",
-        "reason": "Absent from the pinned official singular Node and Go provider APIs.",
+        "status": "supported",
         "contract": {
           "type": "number"
         }
@@ -325,8 +327,7 @@
         }
       },
       "modelCapabilities": {
-        "status": "deferred",
-        "reason": "Absent from the pinned official singular Node and Go provider APIs.",
+        "status": "supported",
         "contract": {
           "ref": "ModelCapabilitiesOverride"
         }
@@ -338,8 +339,7 @@
         }
       },
       "providerName": {
-        "status": "deferred",
-        "reason": "Absent from the pinned official singular Node and Go provider APIs.",
+        "status": "supported",
         "contract": {
           "type": "string"
         }

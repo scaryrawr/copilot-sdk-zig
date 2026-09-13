@@ -65,25 +65,44 @@ function enumValues(schema, name) {
   return [...values].sort();
 }
 
-function sessionEventDiscriminators(schema) {
+export function sessionEventRegistry(schema) {
   const sessionEvent = definition(schema, "SessionEvent");
   if (!Array.isArray(sessionEvent.anyOf)) {
     throw new Error("SessionEvent has no anyOf variants");
   }
 
-  return sortedStrings(
-    sessionEvent.anyOf.map((variant) => {
+  return sessionEvent.anyOf
+    .map((variant) => {
       if (typeof variant.$ref !== "string") {
         throw new Error("SessionEvent variant has no reference");
       }
-      const eventName = variant.$ref.split("/").at(-1);
-      const discriminator = definition(schema, eventName)?.properties?.type?.const;
+      const definitionName = variant.$ref.split("/").at(-1);
+      const event = definition(schema, definitionName);
+      const discriminator = event.properties?.type?.const;
       if (typeof discriminator !== "string") {
-        throw new Error(`${eventName} has no string type discriminator`);
+        throw new Error(`${definitionName} has no string type discriminator`);
       }
-      return discriminator;
-    }),
-  );
+      const dataRef = event.properties?.data?.$ref;
+      if (typeof dataRef !== "string") {
+        throw new Error(`${definitionName} has no data reference`);
+      }
+      return {
+        definitionName,
+        discriminator,
+        dataDefinitionName: dataRef.split("/").at(-1),
+      };
+    })
+    .sort((left, right) => {
+      if (left.discriminator < right.discriminator) return -1;
+      if (left.discriminator > right.discriminator) return 1;
+      if (left.definitionName < right.definitionName) return -1;
+      if (left.definitionName > right.definitionName) return 1;
+      return 0;
+    });
+}
+
+function sessionEventDiscriminators(schema) {
+  return sessionEventRegistry(schema).map(({ discriminator }) => discriminator);
 }
 
 function rpcMethodsForScope(schema, scope) {

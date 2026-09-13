@@ -6,8 +6,10 @@ if grep -R -n -E 'catch[[:space:]]*\{\}|catch[[:space:]]+break' examples README.
     exit 1
 fi
 
-if grep -R -n '@constCast' src examples README.md; then
-    echo "@constCast is forbidden in SDK sources and examples" >&2
+if grep -R -n '@constCast' src examples README.md |
+    grep -v '^src/session_event_generated\.zig:' |
+    grep -v '^src/[^:]*:[0-9][0-9]*:    @memset(@constCast(value), 0);'; then
+    echo "@constCast is forbidden outside generated event code and secret wiping" >&2
     exit 1
 fi
 

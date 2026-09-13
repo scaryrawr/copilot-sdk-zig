@@ -1,0 +1,129 @@
+{
+  "upstreamCommit": "39c777fe7bf893ba5a4f8b710feeb2172d1d40f9",
+  "startup": {
+    "builtinPluginDirectories": {
+      "status": "typed",
+      "wireMethod": "plugins.builtin.set"
+    }
+  },
+  "lifecycle": {
+    "create": {
+      "wireMethod": "session.create",
+      "fields": [
+        "pluginDirectories",
+        "skillDirectories",
+        "disabledSkills",
+        "includedBuiltinSkills",
+        "enableSkills",
+        "hooks",
+        "mcpServers",
+        "mcpOAuthTokenStorage",
+        "authClientIdMetadataUrl",
+        "disabledMcpServers",
+        "canvases",
+        "requestCanvasRenderer",
+        "requestExtensions",
+        "extensionSdkPath",
+        "extensionInfo",
+        "canvasProvider",
+        "requestMcpApps"
+      ]
+    },
+    "resume": {
+      "wireMethod": "session.resume",
+      "fields": [
+        "pluginDirectories",
+        "skillDirectories",
+        "disabledSkills",
+        "includedBuiltinSkills",
+        "enableSkills",
+        "hooks",
+        "mcpServers",
+        "mcpOAuthTokenStorage",
+        "authClientIdMetadataUrl",
+        "disabledMcpServers",
+        "canvases",
+        "requestCanvasRenderer",
+        "requestExtensions",
+        "extensionSdkPath",
+        "extensionInfo",
+        "canvasProvider",
+        "requestMcpApps",
+        "openCanvases",
+        "disableResume",
+        "continuePendingWork"
+      ]
+    },
+    "extensionJoin": {
+      "wireMethod": "session.resume",
+      "fields": [
+        "requestedEnvironmentVariables"
+      ],
+      "responseFields": [
+        "grantedEnvironmentVariables"
+      ],
+      "ownership": "owned-result",
+      "redeclared": [
+        "onPermissionRequest"
+      ],
+      "omitted": [
+        "extensionSdkPath"
+      ]
+    }
+  },
+  "callbacks": {
+    "hooks": {
+      "status": "typed",
+      "method": "hooks.invoke",
+      "handlers": {
+        "onPreToolUse": "PreToolUseHandler",
+        "onPreMcpToolCall": "PreMcpToolCallHandler",
+        "onPostToolUse": "PostToolUseHandler",
+        "onPostToolUseFailure": "PostToolUseFailureHandler",
+        "onUserPromptSubmitted": "UserPromptSubmittedHandler",
+        "onUserPromptTransformed": "UserPromptTransformedHandler",
+        "onSessionStart": "SessionStartHandler",
+        "onSessionEnd": "SessionEndHandler",
+        "onErrorOccurred": "ErrorOccurredHandler",
+        "onAgentStop": "AgentStopHandler"
+      }
+    },
+    "canvasProvider": {
+      "status": "typed",
+      "methods": [
+        "canvas.open",
+        "canvas.close",
+        "canvas.action.invoke"
+      ]
+    },
+    "mcpOAuth": {
+      "status": "typed",
+      "event": "mcp.oauth_required",
+      "responseMethod": "session.mcp.oauth.handlePendingRequest",
+      "tokenStorage": "runtime-owned"
+    }
+  },
+  "capabilities": {
+    "path": "capabilities.ui",
+    "fields": [
+      "canvases",
+      "mcpApps"
+    ],
+    "status": "typed-tristate",
+    "liveEvent": "capabilities.changed"
+  },
+  "experimentalMcpApps": {
+    "status": "typed-opaque-results",
+    "reason": "The pinned schemas mark MCP Apps experimental; request arguments are typed and evolving result JSON is owned.",
+    "methods": [
+      "session.mcp.apps.listTools",
+      "session.mcp.apps.callTool",
+      "session.mcp.apps.readResource"
+    ]
+  },
+  "deferred": {
+    "extensionsCapability": "The pinned lifecycle response has no extension-management acknowledgement bit.",
+    "hostTokenStoreCallback": "The pinned contract exposes runtime-owned persistent or in-memory token storage, not an SDK token-store callback.",
+    "mcpAppsHostContextAndDiagnose": "Not required for the verified list/call/read parity slice; schemas remain experimental."
+  }
+}

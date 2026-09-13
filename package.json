@@ -3,6 +3,6 @@
   "private": true,
   "scripts": {
     "sync": "node scripts/sync.mjs",
-    "test": "node scripts/sync.mjs --check"
+    "test": "node --test scripts/*.test.mjs && node scripts/sync.mjs --check"
   }
 }

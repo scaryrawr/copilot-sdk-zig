@@ -15,6 +15,7 @@ import {
   schemaContract,
   writeSchemaSnapshot,
 } from "./schema-snapshot.mjs";
+import { generateSessionEvents } from "./generate-session-events.mjs";
 
 const repository = "github/copilot-sdk";
 const ref = "main";
@@ -24,8 +25,10 @@ const vendorDirectory = join(root, "vendor", "copilot");
 const schemaDirectory = join(vendorDirectory, "schemas");
 const metadataPath = join(vendorDirectory, "upstream.json");
 const generatedPath = join(root, "src", "protocol_version.zig");
+const zigSessionSource = readFileSync(join(root, "src", "session.zig"), "utf8");
 const compatibilityPath = join(root, "sync", "compatibility.json");
 const publicRpcSurfacePath = join(root, "sync", "public-rpc-surface.json");
+const extensibilityContractPath = join(root, "sync", "extensibility-contract.json");
 const workDirectory = join(root, ".sync-work");
 const cliReleaseRepository = "github/copilot-cli";
 const cliReleasePlatform = "linux-x64";
@@ -91,6 +94,522 @@ function writePublicRpcSurface(upstreamCommit, ...sources) {
       directMethods: directRpcMethods(...sources),
     }, null, 2)}\n`,
   );
+}
+
+const extensibilityMethods = [
+  "plugins.builtin.set",
+  "hooks.invoke",
+  "session.canvas.open",
+  "session.canvas.close",
+  "session.canvas.action.invoke",
+  "canvas.open",
+  "canvas.close",
+  "canvas.action.invoke",
+  "session.mcp.oauth.handlePendingRequest",
+  "session.mcp.apps.listTools",
+  "session.mcp.apps.callTool",
+  "session.mcp.apps.readResource",
+];
+
+function expectedExtensibilityContract(upstreamCommit) {
+  return {
+    upstreamCommit,
+    startup: {
+      builtinPluginDirectories: { status: "typed", wireMethod: "plugins.builtin.set" },
+    },
+    lifecycle: {
+      create: {
+        wireMethod: "session.create",
+        fields: [
+          "pluginDirectories", "skillDirectories", "disabledSkills", "includedBuiltinSkills",
+          "enableSkills", "hooks", "mcpServers", "mcpOAuthTokenStorage",
+          "authClientIdMetadataUrl", "disabledMcpServers", "canvases",
+          "requestCanvasRenderer", "requestExtensions", "extensionSdkPath",
+          "extensionInfo", "canvasProvider", "requestMcpApps",
+        ],
+      },
+      resume: {
+        wireMethod: "session.resume",
+        fields: [
+          "pluginDirectories", "skillDirectories", "disabledSkills", "includedBuiltinSkills",
+          "enableSkills", "hooks", "mcpServers", "mcpOAuthTokenStorage",
+          "authClientIdMetadataUrl", "disabledMcpServers", "canvases",
+          "requestCanvasRenderer", "requestExtensions", "extensionSdkPath",
+          "extensionInfo", "canvasProvider", "requestMcpApps", "openCanvases",
+          "disableResume", "continuePendingWork",
+        ],
+      },
+      extensionJoin: {
+        wireMethod: "session.resume",
+        fields: ["requestedEnvironmentVariables"],
+        responseFields: ["grantedEnvironmentVariables"],
+        ownership: "owned-result",
+        redeclared: ["onPermissionRequest"],
+        omitted: ["extensionSdkPath"],
+      },
+    },
+    callbacks: {
+      hooks: {
+        status: "typed",
+        method: "hooks.invoke",
+        handlers: {
+          onPreToolUse: "PreToolUseHandler",
+          onPreMcpToolCall: "PreMcpToolCallHandler",
+          onPostToolUse: "PostToolUseHandler",
+          onPostToolUseFailure: "PostToolUseFailureHandler",
+          onUserPromptSubmitted: "UserPromptSubmittedHandler",
+          onUserPromptTransformed: "UserPromptTransformedHandler",
+          onSessionStart: "SessionStartHandler",
+          onSessionEnd: "SessionEndHandler",
+          onErrorOccurred: "ErrorOccurredHandler",
+          onAgentStop: "AgentStopHandler",
+        },
+      },
+      canvasProvider: {
+        status: "typed",
+        methods: ["canvas.open", "canvas.close", "canvas.action.invoke"],
+      },
+      mcpOAuth: {
+        status: "typed",
+        event: "mcp.oauth_required",
+        responseMethod: "session.mcp.oauth.handlePendingRequest",
+        tokenStorage: "runtime-owned",
+      },
+    },
+    capabilities: {
+      path: "capabilities.ui",
+      fields: ["canvases", "mcpApps"],
+      status: "typed-tristate",
+      liveEvent: "capabilities.changed",
+    },
+    experimentalMcpApps: {
+      status: "typed-opaque-results",
+      reason: "The pinned schemas mark MCP Apps experimental; request arguments are typed and evolving result JSON is owned.",
+      methods: [
+        "session.mcp.apps.listTools",
+        "session.mcp.apps.callTool",
+        "session.mcp.apps.readResource",
+      ],
+    },
+    deferred: {
+      extensionsCapability: "The pinned lifecycle response has no extension-management acknowledgement bit.",
+      hostTokenStoreCallback: "The pinned contract exposes runtime-owned persistent or in-memory token storage, not an SDK token-store callback.",
+      mcpAppsHostContextAndDiagnose: "Not required for the verified list/call/read parity slice; schemas remain experimental.",
+    },
+  };
+}
+
+function sourceSection(source, startMarker, endMarker, owner) {
+  const start = source.indexOf(startMarker);
+  assert(start >= 0, `upstream ${owner} declaration is missing: ${startMarker}`);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  assert(end >= 0, `upstream ${owner} declaration has no boundary: ${endMarker}`);
+  return source.slice(start, end);
+}
+
+function requireSourceFragments(source, fragments, owner) {
+  for (const fragment of fragments) {
+    assert(source.includes(fragment), `upstream ${owner} declaration is missing: ${fragment}`);
+  }
+}
+
+function normalizedPropertySignatures(source) {
+  const declarations = source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "");
+  return Object.fromEntries(
+    [...declarations.matchAll(/^\s*(?:readonly\s+)?(\w+)(\?)?\s*:\s*([^;]+);/gm)]
+      .map((match) => [
+        match[1],
+        `${match[2] === "?" ? "optional" : "required"}:${match[3].replace(/\s+/g, "")}`,
+      ]),
+  );
+}
+
+function requireExactPropertySignatures(actual, expected, label) {
+  requireExactStrings(Object.keys(actual), Object.keys(expected), `${label} fields`);
+  for (const [name, signature] of Object.entries(expected)) {
+    assert(actual[name] === signature, `${label}.${name} changed`);
+  }
+}
+
+const expectedCustomAgentSourceContract = {
+  customAgent: {
+    name: "required:string",
+    displayName: "optional:string",
+    description: "optional:string",
+    tools: "optional:string[]|null",
+    prompt: "required:string",
+    mcpServers: "optional:Record<string,MCPServerConfig>",
+    infer: "optional:boolean",
+    skills: "optional:string[]",
+    model: "optional:string",
+    reasoningEffort: "optional:ReasoningEffort",
+  },
+  defaultAgent: {
+    excludedTools: "optional:string[]",
+  },
+  reasoningEffort: ["low", "medium", "high", "xhigh", "max"],
+  lifecycle: {
+    base: {
+      customAgents: "optional:CustomAgentConfig[]",
+      defaultAgent: "optional:DefaultAgentConfig",
+      agent: "optional:string",
+      customAgentsLocalOnly: "optional:boolean",
+      excludedBuiltinAgents: "optional:string[]",
+    },
+    createExtends: "SessionConfigBase",
+    resumeExtends: "SessionConfigBase",
+    lowering: {
+      customAgents: "toWireCustomAgents(config.customAgents)",
+      defaultAgent: "config.defaultAgent",
+      agent: "config.agent",
+      customAgentsLocalOnly: "config.customAgentsLocalOnly",
+      excludedBuiltinAgents: "config.excludedBuiltinAgents",
+    },
+    join: {
+      base: "ResumeSessionConfig",
+      excluded: ["onPermissionRequest", "extensionSdkPath"],
+      properties: {
+        onPermissionRequest: "optional:PermissionHandler",
+        requestedEnvironmentVariables: "optional:string[]",
+        factories: "optional:FactoryHandle[]",
+      },
+    },
+  },
+};
+
+function interfaceBase(source, name) {
+  const match = source.match(new RegExp(`export interface ${name} extends (\\w+) \\{`));
+  assert(match, `upstream ${name} inheritance changed`);
+  return match[1];
+}
+
+function omitIntersection(source, name) {
+  const match = source.match(
+    new RegExp(`export type ${name} = Omit<\\s*(\\w+)\\s*,([\\s\\S]*?)>\\s*&\\s*\\{([\\s\\S]*?)\\n\\};`),
+  );
+  assert(match, `upstream ${name} shape changed`);
+  return {
+    base: match[1],
+    excluded: [...match[2].matchAll(/"([^"]+)"/g)].map((item) => item[1]),
+    properties: normalizedPropertySignatures(match[3]),
+  };
+}
+
+function stringUnionValues(source, name) {
+  const match = source.match(new RegExp(`export type ${name}\\s*=\\s*([^;]+);`));
+  assert(match, `upstream ${name} declaration changed`);
+  return [...match[1].matchAll(/"([^"]+)"/g)].map((item) => item[1]);
+}
+
+function zigEnumValues(source, name) {
+  const declaration = sourceSection(
+    source,
+    `pub const ${name} = enum {`,
+    "};",
+    `Zig ${name}`,
+  );
+  return [...declaration.matchAll(/^\s*(\w+),\s*$/gm)].map((match) => match[1]);
+}
+
+function verifyCustomAgentSourceContract(
+  clientSource,
+  typesSource,
+  extensionSource,
+  zigSessionSource,
+) {
+  const expected = expectedCustomAgentSourceContract;
+  const customAgent = sourceSection(
+    typesSource,
+    "export interface CustomAgentConfig {",
+    "export interface DefaultAgentConfig {",
+    "CustomAgentConfig",
+  );
+  requireExactPropertySignatures(
+    normalizedPropertySignatures(customAgent),
+    expected.customAgent,
+    "CustomAgentConfig",
+  );
+
+  const defaultAgent = sourceSection(
+    typesSource,
+    "export interface DefaultAgentConfig {",
+    "export interface InfiniteSessionConfig {",
+    "DefaultAgentConfig",
+  );
+  requireExactPropertySignatures(
+    normalizedPropertySignatures(defaultAgent),
+    expected.defaultAgent,
+    "DefaultAgentConfig",
+  );
+  requireExactStrings(
+    stringUnionValues(typesSource, "ReasoningEffort"),
+    expected.reasoningEffort,
+    "upstream ReasoningEffort values",
+  );
+  requireExactStrings(
+    zigEnumValues(zigSessionSource, "ReasoningEffort"),
+    expected.reasoningEffort,
+    "Zig ReasoningEffort values",
+  );
+
+  const base = sourceSection(
+    typesSource,
+    "export interface SessionConfigBase {",
+    "export interface SessionConfig extends SessionConfigBase {",
+    "SessionConfigBase",
+  );
+  const baseProperties = normalizedPropertySignatures(base);
+  for (const [name, signature] of Object.entries(expected.lifecycle.base)) {
+    assert(baseProperties[name] === signature, `SessionConfigBase.${name} changed`);
+  }
+  assert(
+    interfaceBase(typesSource, "SessionConfig") === expected.lifecycle.createExtends,
+    "upstream SessionConfig inheritance changed",
+  );
+  assert(
+    interfaceBase(typesSource, "ResumeSessionConfig") === expected.lifecycle.resumeExtends,
+    "upstream ResumeSessionConfig inheritance changed",
+  );
+  const join = sourceSection(
+    extensionSource,
+    "export type JoinSessionConfig = Omit<",
+    "export async function joinSession",
+    "JoinSessionConfig",
+  );
+  const joinShape = omitIntersection(join, "JoinSessionConfig");
+  assert(joinShape.base === expected.lifecycle.join.base, "JoinSessionConfig base changed");
+  requireExactStrings(
+    joinShape.excluded,
+    expected.lifecycle.join.excluded,
+    "JoinSessionConfig exclusions",
+  );
+  requireExactPropertySignatures(
+    joinShape.properties,
+    expected.lifecycle.join.properties,
+    "JoinSessionConfig",
+  );
+
+  const customAgentLowering = sourceSection(
+    clientSource,
+    "function toWireCustomAgents(",
+    "function clientInfoToWire(",
+    "toWireCustomAgents",
+  );
+  requireSourceFragments(
+    customAgentLowering,
+    [
+      "if (!agents) return undefined",
+      "if (!agent.mcpServers) return agent",
+      "return { ...rest, mcpServers: toWireMcpServers(mcpServers) }",
+    ],
+    "toWireCustomAgents",
+  );
+  const create = sourceSection(
+    clientSource,
+    "    async createSession(",
+    "    async resumeSession(",
+    "createSession",
+  );
+  const resume = sourceSection(
+    clientSource,
+    "    private async resumeSessionInternal(",
+    "    async ping(",
+    "resumeSessionInternal",
+  );
+  for (const [owner, source] of [
+    ["createSession", create],
+    ["resumeSessionInternal", resume],
+  ]) {
+    requireSourceFragments(
+      source,
+      Object.entries(expected.lifecycle.lowering)
+        .map(([name, value]) => `${name}: ${value}`),
+      owner,
+    );
+  }
+}
+
+function verifyLifecycleContract(contract, clientSource, typesSource, extensionSource) {
+  const base = sourceSection(
+    typesSource,
+    "export interface SessionConfigBase {",
+    "export interface SessionConfig extends SessionConfigBase {",
+    "SessionConfigBase",
+  );
+  const create = sourceSection(
+    typesSource,
+    "export interface SessionConfig extends SessionConfigBase {",
+    "export interface ResumeSessionConfig extends SessionConfigBase {",
+    "SessionConfig",
+  );
+  const resume = sourceSection(
+    typesSource,
+    "export interface ResumeSessionConfig extends SessionConfigBase {",
+    "export interface ExtensionJoinOptions {",
+    "ResumeSessionConfig",
+  );
+  const join = sourceSection(
+    extensionSource,
+    "export type JoinSessionConfig = Omit<",
+    "export async function joinSession",
+    "JoinSessionConfig",
+  );
+  const extensionResume = sourceSection(
+    clientSource,
+    "    private async resumeSessionInternal(",
+    "    async ping(",
+    "resumeSessionInternal",
+  );
+
+  const commonDeclarations = {
+    pluginDirectories: "pluginDirectories?: string[]",
+    skillDirectories: "skillDirectories?: string[]",
+    disabledSkills: "disabledSkills?: string[]",
+    includedBuiltinSkills: "includedBuiltinSkills?: string[]",
+    enableSkills: "enableSkills?: boolean",
+    hooks: "hooks?: SessionHooks",
+    mcpServers: "mcpServers?: Record<string, MCPServerConfig>",
+    mcpOAuthTokenStorage: 'mcpOAuthTokenStorage?: "persistent" | "in-memory"',
+    authClientIdMetadataUrl: "authClientIdMetadataUrl?: string",
+    disabledMcpServers: "disabledMcpServers?: string[]",
+    canvases: "canvases?: Canvas[]",
+    requestCanvasRenderer: "requestCanvasRenderer?: boolean",
+    requestExtensions: "requestExtensions?: boolean",
+    extensionSdkPath: "extensionSdkPath?: string",
+    extensionInfo: "extensionInfo?: ExtensionInfo",
+    canvasProvider: "canvasProvider?: CanvasProviderIdentity",
+    requestMcpApps: "enableMcpApps?: boolean",
+  };
+  const resumeDeclarations = {
+    openCanvases: "openCanvases?: OpenCanvasInstance[]",
+    disableResume: "suppressResumeEvent?: boolean",
+    continuePendingWork: "continuePendingWork?: boolean",
+  };
+  const assertFieldsOwnedBy = (fields, declarations, source, owner) => {
+    for (const field of fields) {
+      const declaration = declarations[field];
+      assert(declaration, `no upstream ${owner} declaration mapping for lifecycle field: ${field}`);
+      requireSourceFragments(source, [declaration], owner);
+    }
+  };
+
+  requireSourceFragments(base, ["onMcpAuthRequest?: McpAuthHandler"], "SessionConfigBase");
+  assertFieldsOwnedBy(contract.lifecycle.create.fields, commonDeclarations, base, "SessionConfigBase");
+  assert(create.startsWith("export interface SessionConfig extends SessionConfigBase {"), "upstream SessionConfig no longer extends SessionConfigBase");
+  for (const field of contract.lifecycle.resume.fields) {
+    if (commonDeclarations[field]) {
+      requireSourceFragments(base, [commonDeclarations[field]], "SessionConfigBase");
+    } else {
+      assertFieldsOwnedBy([field], resumeDeclarations, resume, "ResumeSessionConfig");
+    }
+  }
+  assert(resume.startsWith("export interface ResumeSessionConfig extends SessionConfigBase {"), "upstream ResumeSessionConfig no longer extends SessionConfigBase");
+
+  assertFieldsOwnedBy(
+    contract.lifecycle.extensionJoin.fields,
+    { requestedEnvironmentVariables: "requestedEnvironmentVariables?: string[]" },
+    join,
+    "JoinSessionConfig",
+  );
+  assertFieldsOwnedBy(
+    contract.lifecycle.extensionJoin.responseFields,
+    { grantedEnvironmentVariables: "grantedEnvironmentVariables?: Record<string, string>" },
+    extensionResume,
+    "resumeSessionInternal response",
+  );
+  assertFieldsOwnedBy(
+    contract.lifecycle.extensionJoin.redeclared,
+    { onPermissionRequest: "onPermissionRequest?: PermissionHandler" },
+    join,
+    "JoinSessionConfig",
+  );
+  for (const field of contract.lifecycle.extensionJoin.omitted) {
+    assert(field === "extensionSdkPath", `no upstream JoinSessionConfig omission check for: ${field}`);
+    assert(
+      /Omit<\s*ResumeSessionConfig,\s*"onPermissionRequest"\s*\|\s*"extensionSdkPath"\s*>/.test(join),
+      "upstream JoinSessionConfig no longer omits extensionSdkPath",
+    );
+    assert(
+      !/extensionSdkPath\s*\?:/.test(join),
+      "upstream JoinSessionConfig directly declares extensionSdkPath",
+    );
+  }
+}
+
+function verifyHookContract(contract, typesSource) {
+  const hooks = sourceSection(
+    typesSource,
+    "export interface SessionHooks {",
+    "// ============================================================================\n// MCP Server Configuration Types",
+    "SessionHooks",
+  );
+  const declarations = Object.fromEntries(
+    [...hooks.matchAll(/^\s+(\w+)\?:\s+(\w+);$/gm)]
+      .map((match) => [match[1], match[2]]),
+  );
+  const expected = contract.callbacks.hooks.handlers;
+  requireExactStrings(
+    Object.keys(declarations),
+    Object.keys(expected),
+    "SessionHooks callback inventory",
+  );
+  for (const [name, handler] of Object.entries(expected)) {
+    assert(
+      declarations[name] === handler,
+      `SessionHooks.${name} changed from ${handler}`,
+    );
+  }
+}
+
+function verifyExtensibilitySourceContract(
+  contract,
+  clientSource,
+  typesSource,
+  extensionSource,
+) {
+  const clientOptions = sourceSection(
+    typesSource,
+    "export interface CopilotClientOptions {",
+    'export type ToolResultType = "success"',
+    "CopilotClientOptions",
+  );
+  const clientConstructor = sourceSection(
+    clientSource,
+    "    constructor(options: CopilotClientOptions = {}) {",
+    "    private connectionExtraArgs: string[] = [];",
+    "CopilotClient constructor",
+  );
+  const clientStartup = sourceSection(
+    clientSource,
+    "    private async doStart(): Promise<void> {",
+    "    async stop(): Promise<Error[]> {",
+    "CopilotClient startup",
+  );
+  requireSourceFragments(
+    clientOptions,
+    ["builtinPluginDirectories?: readonly string[]"],
+    "CopilotClientOptions",
+  );
+  requireSourceFragments(
+    clientConstructor,
+    ["this.builtinPluginDirectories = [...options.builtinPluginDirectories]"],
+    "CopilotClient constructor",
+  );
+  requireSourceFragments(
+    clientStartup,
+    ['sendRequest("plugins.builtin.set"'],
+    "CopilotClient startup",
+  );
+  verifyLifecycleContract(contract, clientSource, typesSource, extensionSource);
+  verifyHookContract(contract, typesSource);
+}
+
+function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, extensionSource) {
+  const contract = expectedExtensibilityContract(upstreamCommit);
+  verifyExtensibilitySourceContract(contract, clientSource, typesSource, extensionSource);
+  writeFileSync(extensibilityContractPath, `${JSON.stringify(contract, null, 2)}\n`);
 }
 
 function collectPropertyValues(value, property, output = new Set()) {
@@ -241,6 +760,9 @@ function verifyCompatibility(apiSchema, eventSchema) {
   for (const [name, expected] of Object.entries(compatibility.modelEnums)) {
     requireExactStrings(stringEnum(apiSchema, name), expected, `${name} model enum`);
   }
+  const autoTiers = ["balance", "efficiency", "fast", "intelligence"];
+  requireExactStrings(stringEnum(apiSchema, "AutoTier"), autoTiers, "API AutoTier enum");
+  requireExactStrings(stringEnum(eventSchema, "AutoTier"), autoTiers, "event AutoTier enum");
   const modelDiscountPercent =
     apiSchema.definitions?.ModelBilling?.properties?.discountPercent;
   assert(
@@ -397,7 +919,45 @@ function verify() {
   const expectedGenerated = `pub const sdk_protocol_version: u64 = ${metadata.sdkProtocolVersion};\n`;
   assert(readFileSync(generatedPath, "utf8") === expectedGenerated, "generated Zig protocol version is stale");
   checkSchemaSnapshot();
+  generateSessionEvents({ check: true });
   verifyCompatibility(schemas["api.schema.json"], schemas["session-events.schema.json"]);
+  const extensibility = parseJson(extensibilityContractPath);
+  assert(
+    JSON.stringify(extensibility) === JSON.stringify(expectedExtensibilityContract(metadata.upstreamCommit)),
+    "extensibility contract is stale",
+  );
+  const methods = collectPropertyValues(schemas["api.schema.json"], "rpcMethod");
+  for (const method of extensibilityMethods) {
+    assert(methods.has(method), `extensibility RPC method is missing: ${method}`);
+  }
+  const events = eventDiscriminators(schemas["session-events.schema.json"]);
+  for (const event of ["mcp.oauth_required", "capabilities.changed", "session.canvas.opened", "session.canvas.closed"]) {
+    assert(events.has(event), `extensibility event is missing: ${event}`);
+  }
+  assert(
+    extensibility.capabilities.path === "capabilities.ui",
+    "unsupported capabilities compatibility path",
+  );
+  const capabilitiesData = schemas["session-events.schema.json"].definitions?.CapabilitiesChangedData;
+  assert(
+    capabilitiesData?.properties?.ui?.$ref === "#/definitions/CapabilitiesChangedUI",
+    "CapabilitiesChangedData.ui contract changed",
+  );
+  const capabilitiesUi = schemas["session-events.schema.json"].definitions?.CapabilitiesChangedUI;
+  requireProperties(
+    capabilitiesUi,
+    extensibility.capabilities.fields,
+    "CapabilitiesChangedUI",
+  );
+  for (const field of extensibility.capabilities.fields) {
+    assert(
+      capabilitiesUi.properties[field].type === "boolean",
+      `CapabilitiesChangedUI.${field} is no longer boolean`,
+    );
+  }
+  for (const [feature, reason] of Object.entries(extensibility.deferred ?? {})) {
+    assert(typeof reason === "string" && reason.length > 0, `deferred ${feature} needs a reason`);
+  }
   console.log(
     `Verified ${metadata.upstreamCommit} with Copilot CLI ${metadata.cliPackageVersion} (${metadata.cliReleaseAsset})`,
   );
@@ -491,12 +1051,14 @@ async function installSchemaPackage(version, ifPublished) {
 
 async function synchronize(explicitCommit, ifPublished = false) {
   const commit = await resolveCommit(explicitCommit);
-  const [protocol, packageManifest, lock, nodeClient, nodeSession] = await Promise.all([
+  const [protocol, packageManifest, lock, nodeClient, nodeSession, nodeTypes, nodeExtension] = await Promise.all([
     fetchJson(rawUrl(commit, "sdk-protocol-version.json")),
     fetchJson(rawUrl(commit, "nodejs/package.json")),
     fetchJson(rawUrl(commit, "nodejs/package-lock.json")),
     fetchText(rawUrl(commit, "nodejs/src/client.ts")),
     fetchText(rawUrl(commit, "nodejs/src/session.ts")),
+    fetchText(rawUrl(commit, "nodejs/src/types.ts")),
+    fetchText(rawUrl(commit, "nodejs/src/extension.ts")),
   ]);
   const cliPackageVersion =
     packageManifest.copilotCliVersion ??
@@ -506,6 +1068,7 @@ async function synchronize(explicitCommit, ifPublished = false) {
     /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(cliPackageVersion),
     "upstream package manifest has no exact Copilot CLI version",
   );
+  verifyCustomAgentSourceContract(nodeClient, nodeTypes, nodeExtension, zigSessionSource);
 
   try {
     const schemaPackage = await installSchemaPackage(cliPackageVersion, ifPublished);
@@ -532,7 +1095,9 @@ async function synchronize(explicitCommit, ifPublished = false) {
     writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
     writeFileSync(generatedPath, `pub const sdk_protocol_version: u64 = ${protocol.version};\n`);
     writePublicRpcSurface(commit, nodeClient, nodeSession);
+    writeExtensibilityContract(commit, nodeClient, nodeTypes, nodeExtension);
     writeSchemaSnapshot();
+    generateSessionEvents();
   } finally {
     rmSync(workDirectory, { force: true, recursive: true });
   }
@@ -543,6 +1108,20 @@ async function synchronize(explicitCommit, ifPublished = false) {
 const args = process.argv.slice(2);
 if (args.includes("--check")) {
   assert(args.length === 1, "--check does not accept other arguments");
+  const metadata = parseJson(metadataPath);
+  validateMetadata(metadata);
+  const [nodeClient, nodeTypes, nodeExtension] = await Promise.all([
+    fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/client.ts")),
+    fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/types.ts")),
+    fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/extension.ts")),
+  ]);
+  verifyCustomAgentSourceContract(nodeClient, nodeTypes, nodeExtension, zigSessionSource);
+  verifyExtensibilitySourceContract(
+    expectedExtensibilityContract(metadata.upstreamCommit),
+    nodeClient,
+    nodeTypes,
+    nodeExtension,
+  );
   verify();
 } else {
   const commitIndex = args.indexOf("--commit");
