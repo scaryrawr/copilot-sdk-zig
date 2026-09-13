@@ -72,6 +72,33 @@ const richOverrides = new Map([
     ],
     methods: [],
   }],
+  ["command.execute", {
+    payload: "CommandExecute",
+    parser: "parseCommandExecute",
+    fields: [
+      "    automatic_handling: payloads.AutomaticInteractionHandling = .not_configured,",
+      "    raw: payloads.RawEvent = .{},",
+    ],
+    methods: [],
+  }],
+  ["elicitation.requested", {
+    payload: "ElicitationRequested",
+    parser: "parseElicitationRequested",
+    fields: [
+      "    automatic_handling: payloads.AutomaticInteractionHandling = .not_configured,",
+      "    raw: payloads.RawEvent = .{},",
+    ],
+    methods: [],
+  }],
+  ["mcp.oauth_required", {
+    payload: "McpOauthRequired",
+    parser: "parseMcpOauthRequired",
+    fields: [
+      "    automatic_handling: payloads.AutomaticInteractionHandling = .not_configured,",
+      "    raw: payloads.RawEvent = .{},",
+    ],
+    methods: [],
+  }],
   ["permission.requested", {
     payload: "PermissionRequested",
     parser: "parsePermissionRequested",

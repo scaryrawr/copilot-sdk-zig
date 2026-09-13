@@ -60,7 +60,7 @@ test("the pinned schema renders 140 explicit event tags", () => {
   assert.equal(entries.length, 140);
   assert.doesNotMatch(rendered, /Schema sha256|Discriminators:|Regenerate with:|Source:/);
   assert.match(rendered, /pub const SessionEvent = union\(enum\)/);
-  assert.match(rendered, /mcp_oauth_required: McpOauthRequiredEventPayload/);
+  assert.match(rendered, /mcp_oauth_required: McpOauthRequired/);
   assert.match(rendered, /assistant_message: AssistantMessage/);
   assert.match(rendered, /unknown: payloads\.UnknownEvent/);
   assert.doesNotMatch(rendered, /: payloads\.RawEvent,/);

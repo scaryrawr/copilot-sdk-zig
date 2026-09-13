@@ -1,5 +1,26 @@
 import assert from "node:assert/strict";
 
+export function schemaValidationShape(value, key = null) {
+  if (Array.isArray(value)) {
+    const items = value.map((item) => schemaValidationShape(item));
+    if (key === "required" || key === "enum" || key === "anyOf") {
+      return items.sort((left, right) =>
+        JSON.stringify(left).localeCompare(JSON.stringify(right))
+      );
+    }
+    return items;
+  }
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([name]) =>
+        !["description", "stability", "title", "x-enumDescriptions"].includes(name)
+      )
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, child]) => [name, schemaValidationShape(child, name)]),
+  );
+}
+
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

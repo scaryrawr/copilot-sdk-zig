@@ -224,6 +224,21 @@ pub const EventLog = struct {
     }
 
     pub fn append(self: *EventLog, event: session.SessionEvent) !void {
+        return self.appendImpl(event, false);
+    }
+
+    pub fn appendCompatibilityConsumed(
+        self: *EventLog,
+        event: session.SessionEvent,
+    ) !void {
+        return self.appendImpl(event, true);
+    }
+
+    fn appendImpl(
+        self: *EventLog,
+        event: session.SessionEvent,
+        compatibility_consumed: bool,
+    ) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         if (self.is_closed) return error.SessionDisconnected;
@@ -239,11 +254,15 @@ pub const EventLog = struct {
         };
         const appended_sequence = self.next_sequence;
         self.next_sequence += 1;
+        if (compatibility_consumed) {
+            self.subscribers[0].next_sequence = self.next_sequence;
+        }
         for (self.subscribers) |*subscriber| {
             if (subscriber.active and subscriber.next_sequence <= appended_sequence) {
                 subscriber.ready.set(self.io);
             }
         }
+        self.reclaimConsumed();
     }
 
     pub fn inspect(self: *EventLog, token: SubscriberToken) !ReadAction {
