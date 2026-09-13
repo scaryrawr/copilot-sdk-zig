@@ -14,6 +14,7 @@ const retained_log_limit: usize = 128;
 const event_ingress_limit: usize = 256;
 const detached_send_limit: usize = 64;
 const pending_remote_cleanup_limit: usize = 64;
+const retained_test_response_limit: usize = 256;
 
 fn wipeSecret(value: []const u8) void {
     @memset(@constCast(value), 0);
@@ -65,6 +66,11 @@ const PendingCall = struct {
     completed: std.Io.Event = .unset,
     response: ?[]u8 = null,
     failure: ?anyerror = null,
+};
+
+const RetainedTestResponse = struct {
+    id: u64,
+    body: []u8,
 };
 
 const QueuedSessionEvent = struct {
@@ -584,6 +590,7 @@ pub const Client = struct {
     event_logs: std.ArrayList(*event_log.EventLog) = .empty,
     next_event_log_generation: u64 = 1,
     pending_calls: std.ArrayList(*PendingCall) = .empty,
+    retained_test_responses: std.ArrayList(RetainedTestResponse) = .empty,
     pending_mutex: std.Io.Mutex = .init,
     writer_mutex: std.Io.Mutex = .init,
     event_logs_mutex: std.Io.Mutex = .init,
@@ -730,6 +737,11 @@ pub const Client = struct {
             }
         }
         self.pending_calls.deinit(self.allocator);
+        for (self.retained_test_responses.items) |response| {
+            wipeSecret(response.body);
+            self.allocator.free(response.body);
+        }
+        self.retained_test_responses.deinit(self.allocator);
         self.event_queue.deinit(self.allocator);
         for (self.event_logs.items) |log| {
             log.deinit();
@@ -2129,6 +2141,13 @@ pub const Client = struct {
             self.pending_mutex.unlock(self.io);
             return err;
         };
+        for (self.retained_test_responses.items, 0..) |retained, index| {
+            if (retained.id != id) continue;
+            pending.response = retained.body;
+            _ = self.retained_test_responses.orderedRemove(index);
+            pending.completed.set(self.io);
+            break;
+        }
         self.pending_mutex.unlock(self.io);
         errdefer if (pending.response) |response| {
             wipeSecret(response);
@@ -2618,55 +2637,10 @@ pub const Client = struct {
                 wipeSecret(body);
                 self.allocator.free(body);
             }
-            if (self.ignore_eof and self.synchronize_test_responses) {
-                self.waitForTestResponseRegistration(body) catch |err| {
-                    self.finishPump(err);
-                    return;
-                };
-            }
             self.routeFrame(body) catch |err| {
                 self.finishPump(err);
                 return;
             };
-        }
-    }
-
-    fn waitForTestResponseRegistration(self: *Client, body: []const u8) !void {
-        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, body, .{});
-        defer parsed.deinit();
-        const object = switch (parsed.value) {
-            .object => |value| value,
-            else => return,
-        };
-        if (object.get("method") != null) return;
-        const id_value = object.get("id") orelse return;
-        const id = switch (id_value) {
-            .integer => |value| std.math.cast(u64, value) orelse return,
-            else => return,
-        };
-        const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
-            .raw = std.Io.Duration.fromMilliseconds(5000),
-            .clock = .awake,
-        });
-        while (true) {
-            self.pending_mutex.lockUncancelable(self.io);
-            var registered = false;
-            for (self.pending_calls.items) |pending| {
-                if (pending.id == id) {
-                    registered = true;
-                    break;
-                }
-            }
-            self.pending_mutex.unlock(self.io);
-            if (registered) return;
-            const now = std.Io.Clock.Timestamp.now(self.io, .awake);
-            if (now.raw.nanoseconds >= deadline.raw.nanoseconds)
-                return error.UnregisteredTestResponse;
-            try std.Io.sleep(
-                self.io,
-                std.Io.Duration.fromMilliseconds(1),
-                .awake,
-            );
         }
     }
 
@@ -2725,6 +2699,25 @@ pub const Client = struct {
             }
             pending.response = owned_response;
             pending.completed.set(self.io);
+            self.pending_mutex.unlock(self.io);
+            return;
+        }
+        if (self.ignore_eof and self.synchronize_test_responses) {
+            if (self.retained_test_responses.items.len >= retained_test_response_limit) {
+                self.pending_mutex.unlock(self.io);
+                wipeSecret(owned_response);
+                self.allocator.free(owned_response);
+                return error.TooManyRetainedTestResponses;
+            }
+            self.retained_test_responses.append(
+                self.allocator,
+                .{ .id = response_number, .body = owned_response },
+            ) catch |err| {
+                self.pending_mutex.unlock(self.io);
+                wipeSecret(owned_response);
+                self.allocator.free(owned_response);
+                return err;
+            };
             self.pending_mutex.unlock(self.io);
             return;
         }
@@ -7658,6 +7651,10 @@ fn deinitTestMessaging(client: *Client) void {
         if (pending.response) |response| client.allocator.free(response);
     }
     client.pending_calls.deinit(client.allocator);
+    for (client.retained_test_responses.items) |response| {
+        client.allocator.free(response.body);
+    }
+    client.retained_test_responses.deinit(client.allocator);
     client.event_queue.deinit(client.allocator);
     for (client.event_logs.items) |session_log| {
         session_log.deinit();
