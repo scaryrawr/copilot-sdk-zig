@@ -3376,11 +3376,9 @@ pub const AutoModeSwitchCompletedEventPayload = OwnedPayload(AutoModeSwitchCompl
 pub const AutoModeSwitchRequestedEventPayload = OwnedPayload(AutoModeSwitchRequestedData, wipeAutoModeSwitchRequestedData);
 pub const CapabilitiesChangedEventPayload = OwnedPayload(CapabilitiesChangedData, wipeCapabilitiesChangedData);
 pub const CommandCompletedEventPayload = OwnedPayload(CommandCompletedData, wipeCommandCompletedData);
-pub const CommandExecuteEventPayload = OwnedPayload(CommandExecuteData, wipeCommandExecuteData);
 pub const CommandQueuedEventPayload = OwnedPayload(CommandQueuedData, wipeCommandQueuedData);
 pub const CommandsChangedEventPayload = OwnedPayload(CommandsChangedData, wipeCommandsChangedData);
 pub const ElicitationCompletedEventPayload = OwnedPayload(ElicitationCompletedData, wipeElicitationCompletedData);
-pub const ElicitationRequestedEventPayload = OwnedPayload(ElicitationRequestedData, wipeElicitationRequestedData);
 pub const ExitPlanModeCompletedEventPayload = OwnedPayload(ExitPlanModeCompletedData, wipeExitPlanModeCompletedData);
 pub const ExitPlanModeRequestedEventPayload = OwnedPayload(ExitPlanModeRequestedData, wipeExitPlanModeRequestedData);
 pub const ExternalToolCompletedEventPayload = OwnedPayload(ExternalToolCompletedData, wipeExternalToolCompletedData);
@@ -3589,6 +3587,53 @@ pub const AssistantReasoningDelta = struct {
     }
 };
 
+pub const CommandExecute = struct {
+    request_id: []const u8,
+    command: []const u8,
+    command_name: []const u8,
+    args: []const u8,
+    automatic_handling: payloads.AutomaticInteractionHandling = .not_configured,
+    raw: payloads.RawEvent = .{},
+    arena: ?std.heap.ArenaAllocator = null,
+
+    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        var owned = self;
+        if (owned.arena) |*arena| {
+            wipeCommandExecuteDataFields(&owned);
+            arena.deinit();
+        } else {
+            freeCommandExecuteDataFields(&owned, allocator);
+        }
+
+        owned.raw.deinit(allocator);
+    }
+};
+
+pub const ElicitationRequested = struct {
+    request_id: []const u8,
+    tool_call_id: ?[]const u8 = null,
+    elicitation_source: ?[]const u8 = null,
+    message: []const u8,
+    mode: ?ElicitationRequestedMode = null,
+    requested_schema: ?ElicitationRequestedSchema = null,
+    url: ?[]const u8 = null,
+    automatic_handling: payloads.AutomaticInteractionHandling = .not_configured,
+    raw: payloads.RawEvent = .{},
+    arena: ?std.heap.ArenaAllocator = null,
+
+    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        var owned = self;
+        if (owned.arena) |*arena| {
+            wipeElicitationRequestedDataFields(&owned);
+            arena.deinit();
+        } else {
+            freeElicitationRequestedDataFields(&owned, allocator);
+        }
+
+        owned.raw.deinit(allocator);
+    }
+};
+
 pub const ExternalToolRequested = struct {
     request_id: []const u8,
     session_id: []const u8,
@@ -3748,11 +3793,11 @@ pub const SessionEvent = union(enum) {
     auto_mode_switch_requested: AutoModeSwitchRequestedEventPayload,
     capabilities_changed: CapabilitiesChangedEventPayload,
     command_completed: CommandCompletedEventPayload,
-    command_execute: CommandExecuteEventPayload,
+    command_execute: CommandExecute,
     command_queued: CommandQueuedEventPayload,
     commands_changed: CommandsChangedEventPayload,
     elicitation_completed: ElicitationCompletedEventPayload,
-    elicitation_requested: ElicitationRequestedEventPayload,
+    elicitation_requested: ElicitationRequested,
     exit_plan_mode_completed: ExitPlanModeCompletedEventPayload,
     exit_plan_mode_requested: ExitPlanModeRequestedEventPayload,
     external_tool_completed: ExternalToolCompletedEventPayload,
@@ -4038,11 +4083,11 @@ pub const SessionEvent = union(enum) {
             .auto_mode_switch_requested => |value| value.data_json,
             .capabilities_changed => |value| value.data_json,
             .command_completed => |value| value.data_json,
-            .command_execute => |value| value.data_json,
+            .command_execute => |value| value.raw.data_json,
             .command_queued => |value| value.data_json,
             .commands_changed => |value| value.data_json,
             .elicitation_completed => |value| value.data_json,
-            .elicitation_requested => |value| value.data_json,
+            .elicitation_requested => |value| value.raw.data_json,
             .exit_plan_mode_completed => |value| value.data_json,
             .exit_plan_mode_requested => |value| value.data_json,
             .external_tool_completed => |value| value.data_json,
@@ -29347,6 +29392,33 @@ fn wipeAssistantReasoningDeltaDataFields(value: *AssistantReasoningDelta) void {
     wipeString(value.delta_content);
 }
 
+fn wipeCommandExecuteDataFields(value: *CommandExecute) void {
+    wipeString(value.request_id);
+    wipeString(value.command);
+    wipeString(value.command_name);
+    wipeString(value.args);
+}
+
+fn wipeElicitationRequestedDataFields(value: *ElicitationRequested) void {
+    wipeString(value.request_id);
+    if (value.tool_call_id) |*present| {
+        wipeString(present.*);
+    }
+    if (value.elicitation_source) |*present| {
+        wipeString(present.*);
+    }
+    wipeString(value.message);
+    if (value.mode) |*present| {
+        wipeElicitationRequestedMode(&present.*);
+    }
+    if (value.requested_schema) |*present| {
+        wipeElicitationRequestedSchema(&present.*);
+    }
+    if (value.url) |*present| {
+        wipeString(present.*);
+    }
+}
+
 fn wipeExternalToolRequestedDataFields(value: *ExternalToolRequested) void {
     wipeString(value.request_id);
     wipeString(value.session_id);
@@ -29528,6 +29600,48 @@ fn freeAssistantReasoningDeltaDataFields(
     allocator.free(@constCast(value.reasoning_id));
     wipeString(value.delta_content);
     allocator.free(@constCast(value.delta_content));
+}
+
+fn freeCommandExecuteDataFields(
+    value: *CommandExecute,
+    allocator: std.mem.Allocator,
+) void {
+    wipeString(value.request_id);
+    allocator.free(@constCast(value.request_id));
+    wipeString(value.command);
+    allocator.free(@constCast(value.command));
+    wipeString(value.command_name);
+    allocator.free(@constCast(value.command_name));
+    wipeString(value.args);
+    allocator.free(@constCast(value.args));
+}
+
+fn freeElicitationRequestedDataFields(
+    value: *ElicitationRequested,
+    allocator: std.mem.Allocator,
+) void {
+    wipeString(value.request_id);
+    allocator.free(@constCast(value.request_id));
+    if (value.tool_call_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.elicitation_source) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    wipeString(value.message);
+    allocator.free(@constCast(value.message));
+    if (value.mode) |*present| {
+        freeElicitationRequestedMode(&present.*, allocator);
+    }
+    if (value.requested_schema) |*present| {
+        freeElicitationRequestedSchema(&present.*, allocator);
+    }
+    if (value.url) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
 }
 
 fn freeExternalToolRequestedDataFields(
@@ -29746,6 +29860,51 @@ fn parseAssistantReasoningDelta(
     return .{
         .reasoning_id = parsed.reasoning_id,
         .delta_content = parsed.delta_content,
+
+        .raw = raw.take(),
+        .arena = arena,
+    };
+}
+
+fn parseCommandExecute(
+    allocator: std.mem.Allocator,
+    data: std.json.ObjectMap,
+    raw: *payloads.RawEvent,
+) !CommandExecute {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    var parsed = try parseCommandExecuteData(arena.allocator(), .{ .object = data });
+    errdefer wipeCommandExecuteData(&parsed);
+
+    return .{
+        .request_id = parsed.request_id,
+        .command = parsed.command,
+        .command_name = parsed.command_name,
+        .args = parsed.args,
+
+        .raw = raw.take(),
+        .arena = arena,
+    };
+}
+
+fn parseElicitationRequested(
+    allocator: std.mem.Allocator,
+    data: std.json.ObjectMap,
+    raw: *payloads.RawEvent,
+) !ElicitationRequested {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    var parsed = try parseElicitationRequestedData(arena.allocator(), .{ .object = data });
+    errdefer wipeElicitationRequestedData(&parsed);
+
+    return .{
+        .request_id = parsed.request_id,
+        .tool_call_id = parsed.tool_call_id,
+        .elicitation_source = parsed.elicitation_source,
+        .message = parsed.message,
+        .mode = parsed.mode,
+        .requested_schema = parsed.requested_schema,
+        .url = parsed.url,
 
         .raw = raw.take(),
         .arena = arena,
@@ -30264,16 +30423,7 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
                 .arena = arena,
             } };
         },
-        .command_execute => {
-            var arena = std.heap.ArenaAllocator.init(allocator);
-            errdefer arena.deinit();
-            const typed = try parseCommandExecuteData(arena.allocator(), data_value);
-            return .{ .command_execute = .{
-                .data = typed,
-                .data_json = raw.takeData(),
-                .arena = arena,
-            } };
-        },
+        .command_execute => return .{ .command_execute = try parseCommandExecute(allocator, data, &raw) },
         .command_queued => {
             var arena = std.heap.ArenaAllocator.init(allocator);
             errdefer arena.deinit();
@@ -30304,16 +30454,7 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
                 .arena = arena,
             } };
         },
-        .elicitation_requested => {
-            var arena = std.heap.ArenaAllocator.init(allocator);
-            errdefer arena.deinit();
-            const typed = try parseElicitationRequestedData(arena.allocator(), data_value);
-            return .{ .elicitation_requested = .{
-                .data = typed,
-                .data_json = raw.takeData(),
-                .arena = arena,
-            } };
-        },
+        .elicitation_requested => return .{ .elicitation_requested = try parseElicitationRequested(allocator, data, &raw) },
         .exit_plan_mode_completed => {
             var arena = std.heap.ArenaAllocator.init(allocator);
             errdefer arena.deinit();

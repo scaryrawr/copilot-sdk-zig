@@ -430,8 +430,9 @@ when this handler is configured, then synchronously dispatches inbound
 ## Commands, elicitation, and session UI
 
 Register slash commands with `commands`. Command handlers run when
-`command.execute` is read through `Session.nextEvent`, and the SDK resolves the
-pending command automatically:
+`command.execute` arrives, and the SDK resolves the pending command immediately.
+The event remains queued for `Session.nextEvent`. Its `automatic_handling` field
+reports whether the handler or response delivery failed.
 
 ```zig
 const session = try client.createSession(.{
@@ -446,7 +447,9 @@ const session = try client.createSession(.{
 
 Set `ask_user_variant` to `.legacy` or `.elicitation`. The structured
 elicitation handler receives the requested schema as JSON and must return owned
-`content_json` when it accepts:
+`content_json` when it accepts. Handler failures and invalid JSON remain visible
+in the event's `automatic_handling` field. The SDK sends `cancel` only when the
+handler returns `.cancel`.
 
 ```zig
 const session = try client.createSession(.{
@@ -460,6 +463,8 @@ const session = try client.createSession(.{
 When `session.capabilities().supports(.elicitation)` is true, `session.ui()`
 provides `elicitation`, `confirm`, `select`, and `input`. `select` and `input`
 return caller-owned strings that must be freed with the client allocator.
+`input` validates defaults and accepted values against the configured character
+limits and the `email`, `uri`, `date`, or `date-time` format.
 
 ## GitHub authentication and remote sessions
 
@@ -479,7 +484,7 @@ const session = try client.createSession(.{
 });
 ```
 
-Cloud creation is create-only and uses a server-assigned session ID:
+Cloud creation is create-only. Omit `session_id` to use a server-assigned ID:
 
 ```zig
 const session = try client.createSession(.{
@@ -490,6 +495,9 @@ const session = try client.createSession(.{
     } },
 });
 ```
+
+Set `session_id` to reserve and send an exact caller-assigned cloud ID. The
+create response must return the same ID.
 
 Session creation, resumption, and extension join also support
 `enable_session_telemetry`, `enable_file_change_tracking`,

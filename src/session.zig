@@ -820,6 +820,7 @@ pub const SessionIdle = session_events.SessionIdle;
 /// Result of automatic permission handling before `Session.nextEvent` returns
 /// the permission event.
 pub const AutomaticPermissionHandling = event_payloads.AutomaticPermissionHandling;
+pub const AutomaticInteractionHandling = event_payloads.AutomaticInteractionHandling;
 pub const PermissionRequested = session_events.PermissionRequested;
 
 pub const PermissionDecision = union(enum) {

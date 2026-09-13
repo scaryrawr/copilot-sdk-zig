@@ -126,6 +126,7 @@ pub const AssistantReasoning = session.AssistantReasoning;
 pub const AssistantReasoningDelta = session.AssistantReasoningDelta;
 pub const ExternalToolRequested = session.ExternalToolRequested;
 pub const AutomaticPermissionHandling = session.AutomaticPermissionHandling;
+pub const AutomaticInteractionHandling = session.AutomaticInteractionHandling;
 pub const PermissionRequested = session.PermissionRequested;
 pub const PermissionDecision = session.PermissionDecision;
 pub const PermissionInvocation = session.PermissionInvocation;
