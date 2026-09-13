@@ -158,7 +158,11 @@ data until `send` or `sendAndWait` returns. These inputs require no `deinit`.
 `Session` borrows its `Client`. Keep the client alive while a session handle is
 in use. `SessionEvent` values and the message ID from `send` own memory from the
 client allocator. `Session.disconnect` releases the client-side session
-resources while preserving the session state so it can be resumed later.
+resources while preserving the remote session state so it can be resumed later.
+The session ID and other borrowed session data remain valid only until
+disconnect, client deinitialization, or a successful resident resume. Handles
+are generation checked, so a disconnected or replaced handle remains inactive
+even when its internal record slot or session ID is reused.
 
 ## Configure the runtime
 
@@ -258,6 +262,50 @@ installed plugins. Existing `skip_custom_instructions`,
 empty-mode defaults. `available_tools` remains required. Coauthoring and
 schedule-management opt-ins remain outside this API.
 
+## Configure session runtime options
+
+`CreateSessionConfig`, `ResumeSessionConfig`, and `JoinSessionConfig` expose the
+same stable runtime fields. `SessionConfig` remains an alias for
+`CreateSessionConfig`.
+
+```zig
+const session = try client.createSession(.{
+    .client_name = "acme-editor",
+    .reasoning_effort = .high,
+    .reasoning_summary = .concise,
+    .enable_experimental_mode = false,
+    .context_tier = .long_context,
+    .large_output = .{
+        .enabled = true,
+        .max_size_bytes = 64 * 1024,
+        .output_directory = "/var/lib/acme/copilot-output",
+    },
+    .config_directory = "/var/lib/acme/copilot",
+    .capi = .{
+        .auto_tier = .balance,
+        .enable_websocket_responses = false,
+    },
+    .additional_directories = &.{"/work/shared"},
+    .infinite_sessions = .{
+        .enabled = true,
+        .background_compaction_threshold = 0.80,
+        .buffer_exhaustion_threshold = 0.95,
+    },
+    .memory = .{ .enabled = false },
+    .skip_embedding_retrieval = true,
+    .embedding_cache_storage = .in_memory,
+    .organization_custom_instructions = "Use the release checklist.",
+    .enable_file_hooks = false,
+    .enable_host_git_operations = true,
+    .enable_session_store = false,
+});
+```
+
+Optional values preserve presence. `null` omits a field. Explicit `false`, an
+empty string, an empty slice, or an empty nested struct remains present in the
+request. In particular, `.additional_directories = &.{}` sends
+`"additionalDirectories":[]`.
+
 Configure runtime telemetry on a child connection:
 
 ```zig
@@ -327,6 +375,19 @@ with the allocator supplied by the SDK. Non-SQLite provider failures map
 failures remain JSON-RPC errors, matching the upstream adapter. Malformed
 callback requests and structurally invalid SQLite results receive a correlated
 JSON-RPC error.
+
+### Read the workspace path
+
+`Session.workspacePath()` returns the response-derived workspace path or
+`null`. The returned slice is borrowed from the client. It remains valid until
+disconnect, client deinitialization, or a successful resident resume replaces
+the session record. Inactive handles return `error.SessionNotActive`.
+
+```zig
+if (try session.workspacePath()) |workspace_path| {
+    std.debug.print("workspace: {s}\n", .{workspace_path});
+}
+```
 
 ## Read session history and lifecycle events
 

@@ -38,6 +38,32 @@ pub const InitialAgent = union(enum) {
     custom_agent: []const u8,
 };
 
+pub const LargeOutputConfig = struct {
+    enabled: ?bool = null,
+    max_size_bytes: ?u64 = null,
+    output_directory: ?[]const u8 = null,
+};
+
+pub const InfiniteSessionConfig = struct {
+    enabled: ?bool = null,
+    background_compaction_threshold: ?f64 = null,
+    buffer_exhaustion_threshold: ?f64 = null,
+};
+
+pub const MemoryConfiguration = struct {
+    enabled: bool,
+};
+
+pub const EmbeddingCacheStorage = enum {
+    persistent,
+    in_memory,
+};
+
+pub const CapiSessionOptions = struct {
+    auto_tier: ?AutoTier = null,
+    enable_websocket_responses: ?bool = null,
+};
+
 pub const RemoteSessionMode = enum {
     off,
     @"export",
@@ -86,6 +112,23 @@ pub const CreateSessionConfig = struct {
     remote_session: ?RemoteSessionMode = null,
     create_session_filesystem_provider: ?runtime.SessionFilesystemProviderFactory = null,
     extensions: extensibility.CreateExtensions = .{},
+    client_name: ?[]const u8 = null,
+    reasoning_effort: ?ReasoningEffort = null,
+    reasoning_summary: ?ReasoningSummary = null,
+    enable_experimental_mode: ?bool = null,
+    context_tier: ?ContextTier = null,
+    large_output: ?LargeOutputConfig = null,
+    config_directory: ?[]const u8 = null,
+    capi: ?CapiSessionOptions = null,
+    additional_directories: ?[]const []const u8 = null,
+    infinite_sessions: ?InfiniteSessionConfig = null,
+    memory: ?MemoryConfiguration = null,
+    skip_embedding_retrieval: ?bool = null,
+    embedding_cache_storage: ?EmbeddingCacheStorage = null,
+    organization_custom_instructions: ?[]const u8 = null,
+    enable_file_hooks: ?bool = null,
+    enable_host_git_operations: ?bool = null,
+    enable_session_store: ?bool = null,
 };
 
 pub const ResumeSessionConfig = struct {
@@ -123,6 +166,23 @@ pub const ResumeSessionConfig = struct {
     remote_session: ?RemoteSessionMode = null,
     create_session_filesystem_provider: ?runtime.SessionFilesystemProviderFactory = null,
     extensions: extensibility.ResumeExtensions = .{},
+    client_name: ?[]const u8 = null,
+    reasoning_effort: ?ReasoningEffort = null,
+    reasoning_summary: ?ReasoningSummary = null,
+    enable_experimental_mode: ?bool = null,
+    context_tier: ?ContextTier = null,
+    large_output: ?LargeOutputConfig = null,
+    config_directory: ?[]const u8 = null,
+    capi: ?CapiSessionOptions = null,
+    additional_directories: ?[]const []const u8 = null,
+    infinite_sessions: ?InfiniteSessionConfig = null,
+    memory: ?MemoryConfiguration = null,
+    skip_embedding_retrieval: ?bool = null,
+    embedding_cache_storage: ?EmbeddingCacheStorage = null,
+    organization_custom_instructions: ?[]const u8 = null,
+    enable_file_hooks: ?bool = null,
+    enable_host_git_operations: ?bool = null,
+    enable_session_store: ?bool = null,
 };
 
 pub const JoinSessionConfig = struct {
@@ -160,6 +220,23 @@ pub const JoinSessionConfig = struct {
     remote_session: ?RemoteSessionMode = null,
     create_session_filesystem_provider: ?runtime.SessionFilesystemProviderFactory = null,
     extensions: extensibility.JoinExtensions = .{},
+    client_name: ?[]const u8 = null,
+    reasoning_effort: ?ReasoningEffort = null,
+    reasoning_summary: ?ReasoningSummary = null,
+    enable_experimental_mode: ?bool = null,
+    context_tier: ?ContextTier = null,
+    large_output: ?LargeOutputConfig = null,
+    config_directory: ?[]const u8 = null,
+    capi: ?CapiSessionOptions = null,
+    additional_directories: ?[]const []const u8 = null,
+    infinite_sessions: ?InfiniteSessionConfig = null,
+    memory: ?MemoryConfiguration = null,
+    skip_embedding_retrieval: ?bool = null,
+    embedding_cache_storage: ?EmbeddingCacheStorage = null,
+    organization_custom_instructions: ?[]const u8 = null,
+    enable_file_hooks: ?bool = null,
+    enable_host_git_operations: ?bool = null,
+    enable_session_store: ?bool = null,
 };
 
 /// Compatibility alias for callers constructing create-session options.

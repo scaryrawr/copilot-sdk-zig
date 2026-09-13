@@ -2502,6 +2502,47 @@ fn connectToHost(io: std.Io, host: []const u8, port: u16) !std.Io.net.Stream {
     return last_error;
 }
 
+const SessionRecord = struct {
+    id: ?[]u8 = null,
+    generation: u64 = 1,
+    workspace_path: ?[]u8 = null,
+
+    fn isActive(self: SessionRecord) bool {
+        return self.id != null;
+    }
+
+    fn deactivate(self: *SessionRecord, allocator: std.mem.Allocator) void {
+        const id = self.id orelse return;
+        allocator.free(id);
+        if (self.workspace_path) |path| allocator.free(path);
+        self.id = null;
+        self.workspace_path = null;
+    }
+
+    fn deinit(self: *SessionRecord, allocator: std.mem.Allocator) void {
+        self.deactivate(allocator);
+        self.* = undefined;
+    }
+};
+
+const PendingSessionRecord = struct {
+    id: []u8,
+    record_index: usize,
+    generation: u64,
+    workspace_path: ?[]u8 = null,
+
+    fn deinit(self: *PendingSessionRecord, allocator: std.mem.Allocator) void {
+        if (self.workspace_path) |path| allocator.free(path);
+        allocator.free(self.id);
+        self.* = undefined;
+    }
+};
+
+fn nextSessionGeneration(generation: u64) !u64 {
+    return std.math.add(u64, generation, 1) catch
+        error.SessionGenerationExhausted;
+}
+
 const ShutdownOps = struct {
     context: ?*anyopaque,
     disconnect_session_once: *const fn (?*anyopaque, *Client, []const u8) anyerror!void,
@@ -2523,10 +2564,10 @@ fn runLegacyShutdown(
     ops: ShutdownOps,
 ) ?anyerror {
     var first_error: ?anyerror = null;
-    var index = client.session_ids.items.len;
+    var index = client.sessions.items.len;
     while (index > 0) {
         index -= 1;
-        const session_id = client.session_ids.items[index];
+        const session_id = client.sessions.items[index].id orelse continue;
         ops.disconnect_session_once(ops.context, client, session_id) catch |err| {
             if (first_error == null) first_error = err;
         };
@@ -2538,9 +2579,10 @@ fn runLegacyShutdown(
 }
 
 fn disconnectForShutdown(_: ?*anyopaque, client: *Client, session_id: []const u8) !void {
+    const session = try client.sessionForId(session_id);
     return legacyResult(
         void,
-        (Session{ .client = client, .id = session_id }).disconnectImpl(.legacy),
+        session.disconnectImpl(.legacy),
     );
 }
 
@@ -2549,7 +2591,13 @@ fn disconnectDetailedForShutdown(
     client: *Client,
     session_id: []const u8,
 ) errors.DetailedError!errors.DetailedResult(void) {
-    return (Session{ .client = client, .id = session_id }).disconnectImpl(.detailed);
+    const session = client.sessionForId(session_id) catch |err|
+        return .{ .failure = try recordInvalidConfig(
+            client.allocator,
+            "session_id",
+            err,
+        ) };
+    return session.disconnectImpl(.detailed);
 }
 
 fn terminateForShutdown(_: ?*anyopaque, client: *Client) !void {
@@ -2637,10 +2685,10 @@ fn runDetailedShutdown(
     collector: *ShutdownCollector,
 ) ?anyerror {
     var first_error: ?anyerror = null;
-    var index = client.session_ids.items.len;
+    var index = client.sessions.items.len;
     while (index > 0) {
         index -= 1;
-        const session_id = client.session_ids.items[index];
+        const session_id = client.sessions.items[index].id orelse continue;
         const result = ops.disconnect_session_once(
             ops.context,
             client,
@@ -2683,7 +2731,8 @@ pub const Client = struct {
     reader_buffer: []u8 = &.{},
     writer_buffer: []u8 = &.{},
     next_request_id: u64 = 1,
-    session_ids: std.ArrayList([]u8) = .empty,
+    sessions: std.ArrayList(SessionRecord) = .empty,
+    pending_session: ?PendingSessionRecord = null,
     events: std.ArrayList(EventDelivery) = .empty,
     lifecycle_events: admin.LifecycleQueue = .{},
     tools: std.ArrayList(RegisteredTool) = .empty,
@@ -2928,8 +2977,9 @@ pub const Client = struct {
         self.provider_tokens.deinit(self.allocator);
         for (self.rpc_handlers.items) |handler| handler.deinit(self.allocator);
         self.rpc_handlers.deinit(self.allocator);
-        for (self.session_ids.items) |id| self.allocator.free(id);
-        self.session_ids.deinit(self.allocator);
+        if (self.pending_session) |*pending| pending.deinit(self.allocator);
+        for (self.sessions.items) |*session| session.deinit(self.allocator);
+        self.sessions.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -2961,7 +3011,7 @@ pub const Client = struct {
     }
 
     fn releaseInterestsAndDetachSessionsBounded(self: *Client) void {
-        if (!self.hasMcpOAuthInterests() and self.session_ids.items.len == 0) return;
+        if (!self.hasMcpOAuthInterests() and !self.hasActiveSessions()) return;
         const Result = union(enum) {
             released: void,
             timeout: anyerror!void,
@@ -2991,6 +3041,13 @@ pub const Client = struct {
         return false;
     }
 
+    fn hasActiveSessions(self: *const Client) bool {
+        for (self.sessions.items) |session| {
+            if (session.isActive()) return true;
+        }
+        return false;
+    }
+
     fn releaseInterestsAndDetachSessions(self: *Client) void {
         if (self.pending_extension_runtime) |*runtime| {
             self.releaseMcpOAuthInterest(runtime) catch {};
@@ -2998,8 +3055,8 @@ pub const Client = struct {
         for (self.extension_runtimes.items) |*runtime| {
             self.releaseMcpOAuthInterest(runtime) catch {};
         }
-        for (self.session_ids.items) |session_id| {
-            self.detachSessionBestEffort(session_id);
+        for (self.sessions.items) |session| {
+            if (session.id) |id| self.detachSessionBestEffort(id);
         }
     }
 
@@ -3021,7 +3078,10 @@ pub const Client = struct {
         ops: DetailedShutdownOps,
         child_attempted: bool,
     ) errors.DetailedResult(void) {
-        const session_count = self.session_ids.items.len;
+        var session_count: usize = 0;
+        for (self.sessions.items) |record| {
+            session_count += @intFromBool(record.isActive());
+        }
         const storage: []errors.Failure = self.allocator.alloc(
             errors.Failure,
             session_count + @intFromBool(child_attempted),
@@ -3348,15 +3408,20 @@ pub const Client = struct {
                 .{ self.allocator, "session_id", error.SessionAlreadyActive },
             ) };
         }
-        self.session_ids.append(self.allocator, owned_session_id) catch |err| {
-            self.allocator.free(owned_session_id);
-            return err;
+        self.beginSessionRecord(owned_session_id, null) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordInvalidConfig,
+                .{ self.allocator, "session_id", err },
+            ) };
         };
         var lifecycle_committed = false;
         defer if (!lifecycle_committed) {
             self.rollbackProviderTokens();
             self.rollbackExtensionRuntime();
-            self.removeSession(owned_session_id);
+            self.rollbackSessionRecord();
         };
 
         var extension_values = ExtensionWireValues.init(self.allocator);
@@ -3468,6 +3533,15 @@ pub const Client = struct {
             ) };
         }
         defer if (!lifecycle_committed) self.detachSessionBestEffort(returned_id);
+        self.prepareSessionCommit(returned_id, parsed.value.workspacePath) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordInvalidConfig,
+                .{ self.allocator, "workspacePath", err },
+            ) };
+        };
         switch (try self.updateSessionOptionsForMode(
             failure_policy,
             returned_id,
@@ -3485,8 +3559,9 @@ pub const Client = struct {
             ) };
         self.session_filesystems.commitReplacement(self.allocator, returned_id);
         self.commitProviderTokens();
+        const session_index = self.commitSessionRecord();
         lifecycle_committed = true;
-        return .{ .success = .{ .client = self, .id = owned_session_id } };
+        return .{ .success = self.sessionHandle(session_index) };
     }
 
     pub fn resumeSession(
@@ -3599,20 +3674,23 @@ pub const Client = struct {
         };
         defer prepared_providers.deinit(self.allocator);
 
-        const existing_session_id = self.findSessionId(session_id);
-        const runtime_session_id = existing_session_id orelse id: {
-            const copy = try self.allocator.dupe(u8, session_id);
-            self.session_ids.append(self.allocator, copy) catch |err| {
-                self.allocator.free(copy);
-                return err;
-            };
-            break :id copy;
+        const existing_session_index = self.findSessionIndex(session_id);
+        const candidate_session_id = try self.allocator.dupe(u8, session_id);
+        self.beginSessionRecord(candidate_session_id, existing_session_index) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordInvalidConfig,
+                .{ self.allocator, "session_id", err },
+            ) };
         };
+        const runtime_session_id = self.pending_session.?.id;
         var lifecycle_committed = false;
         defer if (!lifecycle_committed) {
             self.rollbackProviderTokens();
             self.rollbackExtensionRuntime();
-            if (existing_session_id == null) self.removeSession(runtime_session_id);
+            self.rollbackSessionRecord();
         };
 
         var extension_values = ExtensionWireValues.init(self.allocator);
@@ -3726,8 +3804,17 @@ pub const Client = struct {
                 .{ self.allocator, "sessionId", error.SessionIdMismatch },
             ) };
         }
-        defer if (!lifecycle_committed and existing_session_id == null)
+        defer if (!lifecycle_committed and existing_session_index == null)
             self.detachSessionBestEffort(returned_id);
+        self.prepareSessionCommit(runtime_session_id, parsed.value.workspacePath) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordInvalidConfig,
+                .{ self.allocator, "workspacePath", err },
+            ) };
+        };
         switch (try self.updateSessionOptionsForMode(
             failure_policy,
             runtime_session_id,
@@ -3748,8 +3835,9 @@ pub const Client = struct {
         ) };
         self.session_filesystems.commitReplacement(self.allocator, runtime_session_id);
         self.commitProviderTokens();
+        const session_index = self.commitSessionRecord();
         lifecycle_committed = true;
-        return .{ .success = .{ .client = self, .id = runtime_session_id } };
+        return .{ .success = self.sessionHandle(session_index) };
     }
 
     fn updateSessionOptionsForMode(
@@ -6085,7 +6173,114 @@ pub const Client = struct {
         }
     }
 
-    fn removeSession(self: *Client, session_id: []const u8) void {
+    fn beginSessionRecord(
+        self: *Client,
+        session_id: []u8,
+        prior_record_index: ?usize,
+    ) !void {
+        errdefer self.allocator.free(session_id);
+        if (self.pending_session != null) {
+            return error.SessionLifecycleAlreadyInProgress;
+        }
+        if (prior_record_index) |index| {
+            if (index >= self.sessions.items.len or
+                !self.sessions.items[index].isActive() or
+                !std.mem.eql(u8, self.sessions.items[index].id.?, session_id))
+            {
+                return error.SessionNotActive;
+            }
+        }
+        const record_index = prior_record_index orelse index: {
+            for (self.sessions.items, 0..) |record, index| {
+                if (!record.isActive()) break :index index;
+            }
+            try self.sessions.ensureUnusedCapacity(self.allocator, 1);
+            break :index self.sessions.items.len;
+        };
+        const generation = if (record_index < self.sessions.items.len)
+            try nextSessionGeneration(self.sessions.items[record_index].generation)
+        else
+            1;
+        self.pending_session = .{
+            .id = session_id,
+            .record_index = record_index,
+            .generation = generation,
+        };
+    }
+
+    fn rollbackSessionRecord(self: *Client) void {
+        if (self.pending_session) |*pending| pending.deinit(self.allocator);
+        self.pending_session = null;
+    }
+
+    fn prepareSessionCommit(
+        self: *Client,
+        session_id: []const u8,
+        workspace_path: ?[]const u8,
+    ) !void {
+        const pending = if (self.pending_session) |*value|
+            value
+        else
+            return error.MissingPendingSession;
+        if (!std.mem.eql(u8, pending.id, session_id))
+            return error.UnexpectedSessionId;
+        const replacement_path = if (workspace_path) |path|
+            try self.allocator.dupe(u8, path)
+        else
+            null;
+        errdefer if (replacement_path) |path| self.allocator.free(path);
+        if (pending.workspace_path) |path| self.allocator.free(path);
+        pending.workspace_path = replacement_path;
+    }
+
+    fn commitSessionRecord(self: *Client) usize {
+        const pending = self.pending_session.?;
+        self.pending_session = null;
+        const record = SessionRecord{
+            .id = pending.id,
+            .generation = pending.generation,
+            .workspace_path = pending.workspace_path,
+        };
+        if (pending.record_index == self.sessions.items.len) {
+            self.sessions.appendAssumeCapacity(record);
+        } else {
+            self.sessions.items[pending.record_index].deactivate(self.allocator);
+            self.sessions.items[pending.record_index] = record;
+        }
+        return pending.record_index;
+    }
+
+    fn sessionHandle(self: *Client, record_index: usize) Session {
+        const record = self.sessions.items[record_index];
+        std.debug.assert(record.isActive());
+        return .{
+            .client = self,
+            .id = record.id.?,
+            .record_index = record_index,
+            .generation = record.generation,
+        };
+    }
+
+    fn sessionForId(self: *Client, session_id: []const u8) !Session {
+        return self.sessionHandle(self.findSessionIndex(session_id) orelse
+            return error.SessionNotActive);
+    }
+
+    fn findSessionIndex(self: *Client, session_id: []const u8) ?usize {
+        for (self.sessions.items, 0..) |session, index| {
+            if (session.id) |id| {
+                if (std.mem.eql(u8, id, session_id)) return index;
+            }
+        }
+        return null;
+    }
+
+    fn findSession(self: *Client, session_id: []const u8) ?*SessionRecord {
+        const index = self.findSessionIndex(session_id) orelse return null;
+        return &self.sessions.items[index];
+    }
+
+    fn removeSessionState(self: *Client, session_id: []const u8) void {
         for (self.extension_runtimes.items, 0..) |runtime, runtime_index| {
             if (runtime.session_id != null and
                 std.mem.eql(u8, runtime.session_id.?, session_id))
@@ -6135,17 +6330,6 @@ pub const Client = struct {
 
         self.session_filesystems.remove(self.allocator, session_id);
 
-        self.removeSessionId(session_id);
-    }
-
-    fn findSessionId(self: *Client, session_id: []const u8) ?[]u8 {
-        for (self.session_ids.items) |id| {
-            if (std.mem.eql(u8, id, session_id)) return id;
-        }
-        return null;
-    }
-
-    fn removeSessionId(self: *Client, session_id: []const u8) void {
         var provider_token_index: usize = 0;
         while (provider_token_index < self.provider_tokens.items.len) {
             if (std.mem.eql(
@@ -6159,18 +6343,19 @@ pub const Client = struct {
                 provider_token_index += 1;
             }
         }
+    }
 
-        for (self.session_ids.items, 0..) |id, session_index| {
-            if (std.mem.eql(u8, id, session_id)) {
-                self.allocator.free(id);
-                _ = self.session_ids.orderedRemove(session_index);
-                if (self.session_ids.items.len == 0) {
-                    self.session_ids.deinit(self.allocator);
-                    self.session_ids = .empty;
-                }
-                return;
-            }
-        }
+    fn removeSessionAt(self: *Client, record_index: usize) void {
+        if (record_index >= self.sessions.items.len) return;
+        const record = &self.sessions.items[record_index];
+        const id = record.id orelse return;
+        self.removeSessionState(id);
+        record.deactivate(self.allocator);
+    }
+
+    fn removeSession(self: *Client, session_id: []const u8) void {
+        const record_index = self.findSessionIndex(session_id) orelse return;
+        self.removeSessionAt(record_index);
     }
 
     fn registerOwnedSession(
@@ -6184,27 +6369,23 @@ pub const Client = struct {
             return error.SessionAlreadyActive;
         }
 
-        self.session_ids.append(self.allocator, owned_session_id) catch |err| {
-            self.allocator.free(owned_session_id);
-            return err;
-        };
-        errdefer self.removeSession(owned_session_id);
+        try self.beginSessionRecord(owned_session_id, null);
+        const record_index = self.commitSessionRecord();
+        errdefer self.removeSessionAt(record_index);
 
-        try self.registerToolHandlers(owned_session_id, config.tools);
-        try self.registerPermissionHandler(owned_session_id, config);
+        const session_id = self.sessions.items[record_index].id.?;
+        try self.registerToolHandlers(session_id, config.tools);
+        try self.registerPermissionHandler(session_id, config);
         try self.registerUserInputHandler(
-            owned_session_id,
+            session_id,
             config.on_user_input_request,
             config.user_input_context,
         );
-        try self.registerProviderTokens(owned_session_id, token_bindings);
+        try self.registerProviderTokens(session_id, token_bindings);
     }
 
     fn hasSession(self: *Client, session_id: []const u8) bool {
-        for (self.session_ids.items) |registered| {
-            if (std.mem.eql(u8, registered, session_id)) return true;
-        }
-        return false;
+        return self.findSessionIndex(session_id) != null;
     }
 
     fn registerProviderTokens(
@@ -6560,7 +6741,6 @@ pub const Client = struct {
             }
         }
     }
-
     fn nextEventImpl(
         self: *Client,
         comptime failure_policy: FailurePolicy,
@@ -6650,9 +6830,39 @@ pub const Client = struct {
     }
 };
 
+const ResolvedSession = struct {
+    record_index: usize,
+    id: []const u8,
+};
+
 pub const Session = struct {
     client: *Client,
     id: []const u8,
+    record_index: usize = std.math.maxInt(usize),
+    generation: u64 = 0,
+
+    fn resolve(self: Session) !ResolvedSession {
+        if (self.record_index >= self.client.sessions.items.len)
+            return error.SessionNotActive;
+        const record = &self.client.sessions.items[self.record_index];
+        if (!record.isActive() or record.generation != self.generation)
+            return error.SessionNotActive;
+        return .{ .record_index = self.record_index, .id = record.id.? };
+    }
+
+    fn resolveForPolicy(
+        self: Session,
+        comptime failure_policy: FailurePolicy,
+    ) errors.DetailedError!PolicyResult(failure_policy, ResolvedSession) {
+        const resolved = self.resolve() catch |err|
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordInvalidConfig,
+                .{ self.client.allocator, "session_id", err },
+            ) };
+        return .{ .success = resolved };
+    }
 
     pub fn send(
         self: Session,
@@ -6673,13 +6883,17 @@ pub const Session = struct {
         comptime failure_policy: FailurePolicy,
         options: session_types.MessageOptions,
     ) errors.DetailedError!PolicyResult(failure_policy, []u8) {
+        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
         const trace_context = self.client.traceContext();
         const parsed = switch (try self.client.callImpl(
             failure_policy,
             struct { messageId: []const u8 },
             "session.send",
-            lowerMessage(self.id, options, trace_context),
-            .{ .session = .{ .session_id = self.id } },
+            lowerMessage(resolved.id, options, trace_context),
+            .{ .session = .{ .session_id = resolved.id } },
         )) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
@@ -6705,12 +6919,16 @@ pub const Session = struct {
         self: Session,
         comptime failure_policy: FailurePolicy,
     ) errors.DetailedError!PolicyResult(failure_policy, session_types.SessionEventHistory) {
+        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
         const parsed = switch (try self.client.callImpl(
             failure_policy,
             admin.SessionGetMessagesResult,
             "session.getMessages",
-            admin.SessionIdParams{ .sessionId = self.id },
-            .{ .session = .{ .session_id = self.id } },
+            admin.SessionIdParams{ .sessionId = resolved.id },
+            .{ .session = .{ .session_id = resolved.id } },
         )) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
@@ -6856,14 +7074,25 @@ pub const Session = struct {
         self: Session,
         comptime failure_policy: FailurePolicy,
     ) errors.DetailedError!PolicyResult(failure_policy, EventDelivery) {
-        var delivery = switch (try self.client.nextEventImpl(failure_policy, self.id)) {
+        const initial = switch (try self.resolveForPolicy(failure_policy)) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
+        var delivery = switch (try self.client.nextEventImpl(failure_policy, initial.id)) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
         };
         var delivery_owned = true;
         defer if (delivery_owned) delivery.deinit(self.client.allocator);
+        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
         if (delivery.event == .mcp_oauth_required) {
-            self.handleMcpAuthEvent(delivery.event.mcp_oauth_required.data_json) catch |err| {
+            self.handleMcpAuthEvent(
+                resolved.id,
+                delivery.event.mcp_oauth_required.data_json,
+            ) catch |err| {
                 if (err == error.OutOfMemory) return error.OutOfMemory;
                 return .{ .failure = try policyFailure(
                     failure_policy,
@@ -6875,7 +7104,7 @@ pub const Session = struct {
         }
         if (delivery.event == .external_tool_requested) {
             const request = delivery.event.external_tool_requested;
-            if (self.client.findToolHandler(self.id, request.tool_name)) |tool| {
+            if (self.client.findToolHandler(resolved.id, request.tool_name)) |tool| {
                 const result = tool.handler(
                     self.client.allocator,
                     request.arguments_json,
@@ -6894,7 +7123,7 @@ pub const Session = struct {
                             if (comptime failure_policy == .detailed) {
                                 return .{ .failure = try recordToolHandlerFailure(
                                     self.client.allocator,
-                                    self.id,
+                                    resolved.id,
                                     request.request_id,
                                     request.tool_call_id,
                                     request.tool_name,
@@ -6921,11 +7150,11 @@ pub const Session = struct {
         }
         if (delivery.event == .permission_requested) {
             const request = delivery.event.permission_requested;
-            if (self.client.findPermissionHandler(self.id)) |handler| {
+            if (self.client.findPermissionHandler(resolved.id)) |handler| {
                 const decision = handler.handler(
                     request,
                     .{
-                        .session_id = self.id,
+                        .session_id = resolved.id,
                         .managed_settings_enabled = handler.managed_settings_enabled,
                     },
                     handler.context,
@@ -6938,7 +7167,7 @@ pub const Session = struct {
                     }
                     return .{ .failure = try recordPermissionHandlerFailure(
                         self.client.allocator,
-                        self.id,
+                        resolved.id,
                         request.request_id,
                         err,
                     ) };
@@ -7006,8 +7235,14 @@ pub const Session = struct {
     }
 
     pub fn capabilities(self: Session) ext.CapabilitySet {
-        const runtime = self.client.findExtensionRuntime(self.id) orelse return .{};
+        const resolved = self.resolve() catch return .{};
+        const runtime = self.client.findExtensionRuntime(resolved.id) orelse return .{};
         return runtime.capabilities;
+    }
+
+    pub fn workspacePath(self: Session) !?[]const u8 {
+        const resolved = try self.resolve();
+        return self.client.sessions.items[resolved.record_index].workspace_path;
     }
 
     pub fn experimental(
@@ -7016,9 +7251,10 @@ pub const Session = struct {
     ) !switch (feature) {
         .mcp_apps => McpApps,
     } {
+        const resolved = try self.resolve();
         return switch (feature) {
             .mcp_apps => blk: {
-                const runtime = self.client.findExtensionRuntime(self.id) orelse
+                const runtime = self.client.findExtensionRuntime(resolved.id) orelse
                     return error.UnsupportedCapability;
                 if (!runtime.mcp_apps_requested)
                     return error.ExperimentalFeatureNotRequested;
@@ -7034,7 +7270,8 @@ pub const Session = struct {
         allocator: std.mem.Allocator,
         request: ext.OpenCanvasRequest,
     ) !ext.OpenCanvasResult {
-        const runtime = self.client.findExtensionRuntime(self.id) orelse
+        const resolved = try self.resolve();
+        const runtime = self.client.findExtensionRuntime(resolved.id) orelse
             return error.UnsupportedCapability;
         if (!runtime.capabilities.supports(.canvases))
             return error.UnsupportedCapability;
@@ -7044,7 +7281,7 @@ pub const Session = struct {
             null;
         defer if (input) |value| value.deinit();
         const parsed = try self.client.call(WireOpenCanvas, "session.canvas.open", .{
-            .sessionId = self.id,
+            .sessionId = resolved.id,
             .extensionId = request.extension_id,
             .canvasId = request.canvas_id,
             .instanceId = request.instance_id,
@@ -7063,12 +7300,13 @@ pub const Session = struct {
     }
 
     pub fn closeCanvas(self: Session, instance_id: []const u8) !void {
-        const runtime = self.client.findExtensionRuntime(self.id) orelse
+        const resolved = try self.resolve();
+        const runtime = self.client.findExtensionRuntime(resolved.id) orelse
             return error.UnsupportedCapability;
         if (!runtime.capabilities.supports(.canvases))
             return error.UnsupportedCapability;
         const parsed = try self.client.call(std.json.Value, "session.canvas.close", .{
-            .sessionId = self.id,
+            .sessionId = resolved.id,
             .instanceId = instance_id,
         });
         parsed.deinit();
@@ -7080,7 +7318,8 @@ pub const Session = struct {
         allocator: std.mem.Allocator,
         request: ext.InvokeCanvasActionRequest,
     ) !ext.OwnedJson {
-        const runtime = self.client.findExtensionRuntime(self.id) orelse
+        const resolved = try self.resolve();
+        const runtime = self.client.findExtensionRuntime(resolved.id) orelse
             return error.UnsupportedCapability;
         if (!runtime.capabilities.supports(.canvases))
             return error.UnsupportedCapability;
@@ -7090,7 +7329,7 @@ pub const Session = struct {
             null;
         defer if (input) |value| value.deinit();
         const parsed = try self.client.call(std.json.Value, "session.canvas.action.invoke", .{
-            .sessionId = self.id,
+            .sessionId = resolved.id,
             .instanceId = request.instance_id,
             .actionName = request.action_name,
             .input = if (input) |value| value.value else null,
@@ -7106,7 +7345,8 @@ pub const Session = struct {
         self: Session,
         allocator: std.mem.Allocator,
     ) !ext.OpenCanvasSnapshot {
-        const runtime = self.client.findExtensionRuntime(self.id) orelse
+        const resolved = try self.resolve();
+        const runtime = self.client.findExtensionRuntime(resolved.id) orelse
             return .{ .allocator = allocator, .items = try allocator.alloc(ext.OpenCanvas, 0) };
         const items = try allocator.alloc(ext.OpenCanvas, runtime.open_canvases.items.len);
         var initialized: usize = 0;
@@ -7125,7 +7365,8 @@ pub const Session = struct {
         self: Session,
         allocator: std.mem.Allocator,
     ) !ext.EnvironmentGrants {
-        const runtime = self.client.findExtensionRuntime(self.id) orelse return .{
+        const resolved = try self.resolve();
+        const runtime = self.client.findExtensionRuntime(resolved.id) orelse return .{
             .allocator = allocator,
             .items = try allocator.alloc(ext.EnvironmentGrant, 0),
         };
@@ -7154,8 +7395,13 @@ pub const Session = struct {
         return .{ .allocator = allocator, .items = items };
     }
 
-    fn handleMcpAuthEvent(self: Session, data_json: []const u8) !void {
-        const runtime = self.client.findExtensionRuntime(self.id) orelse return;
+    fn handleMcpAuthEvent(
+        self: Session,
+        session_id: []const u8,
+        data_json: []const u8,
+    ) !void {
+        _ = try self.resolve();
+        const runtime = self.client.findExtensionRuntime(session_id) orelse return;
         const handler = runtime.mcp_auth_handler orelse return;
         const parsed = try std.json.parseFromSlice(
             WireMcpAuthRequest,
@@ -7212,7 +7458,7 @@ pub const Session = struct {
                 RpcSuccess,
                 "session.mcp.oauth.handlePendingRequest",
                 .{
-                    .sessionId = self.id,
+                    .sessionId = session_id,
                     .requestId = parsed.value.requestId,
                     .result = .{ .kind = "cancelled" },
                 },
@@ -7226,7 +7472,7 @@ pub const Session = struct {
                             RpcSuccess,
                             "session.mcp.oauth.handlePendingRequest",
                             .{
-                                .sessionId = self.id,
+                                .sessionId = session_id,
                                 .requestId = parsed.value.requestId,
                                 .result = .{ .kind = "cancelled" },
                             },
@@ -7237,7 +7483,7 @@ pub const Session = struct {
                     RpcSuccess,
                     "session.mcp.oauth.handlePendingRequest",
                     .{
-                        .sessionId = self.id,
+                        .sessionId = session_id,
                         .requestId = parsed.value.requestId,
                         .result = .{
                             .kind = "token",
@@ -7269,8 +7515,12 @@ pub const Session = struct {
         self: Session,
         comptime failure_policy: FailurePolicy,
     ) errors.DetailedError!PolicyResult(failure_policy, void) {
+        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
         var released_oauth_interest = false;
-        if (self.client.findExtensionRuntime(self.id)) |runtime| {
+        if (self.client.findExtensionRuntime(resolved.id)) |runtime| {
             released_oauth_interest = runtime.mcp_oauth_interest_handle != null;
             self.client.releaseMcpOAuthInterest(runtime) catch |err| {
                 if (err == error.OutOfMemory) return error.OutOfMemory;
@@ -7283,7 +7533,7 @@ pub const Session = struct {
             };
         }
         errdefer if (released_oauth_interest) {
-            if (self.client.findExtensionRuntime(self.id)) |runtime| {
+            if (self.client.findExtensionRuntime(resolved.id)) |runtime| {
                 if (runtime.mcp_auth_handler != null) {
                     self.client.registerMcpOAuthInterest(runtime) catch |err|
                         std.log.warn("failed to restore MCP OAuth interest after disconnect failure: {s}", .{@errorName(err)});
@@ -7295,14 +7545,14 @@ pub const Session = struct {
                 success: bool,
                 @"error": ?[]const u8 = null,
             }, "session.detach", .{
-                .sessionId = self.id,
-            }, .{ .session = .{ .session_id = self.id } })) {
+                .sessionId = resolved.id,
+            }, .{ .session = .{ .session_id = resolved.id } })) {
                 .success => |value| value,
                 .failure => |failure| return .{ .failure = failure },
             };
             defer parsed.deinit();
             if (parsed.value.success) {
-                self.client.removeSession(self.id);
+                self.client.removeSessionAt(resolved.record_index);
                 return .{ .success = {} };
             }
         }
@@ -7310,7 +7560,7 @@ pub const Session = struct {
             failure_policy,
             error.SessionDetachFailed,
             recordDetachFailure,
-            .{ self.client.allocator, self.id, 2 },
+            .{ self.client.allocator, resolved.id, 2 },
         ) };
     }
 
@@ -7336,18 +7586,22 @@ pub const Session = struct {
         comptime failure_policy: FailurePolicy,
         auto_tier: ?session_types.AutoTier,
     ) errors.DetailedError!PolicyResult(failure_policy, session_types.AutoTierSwitchResult) {
+        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
         const parsed = switch (try self.client.callImpl(
             failure_policy,
             session_types.AutoTierSwitchResult,
             "session.model.switchAutoTier",
             .{
-                .sessionId = self.id,
+                .sessionId = resolved.id,
                 .autoTier = if (auto_tier) |tier|
                     std.json.Value{ .string = @tagName(tier) }
                 else
                     std.json.Value.null,
             },
-            .{ .session = .{ .session_id = self.id } },
+            .{ .session = .{ .session_id = resolved.id } },
         )) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
@@ -7360,18 +7614,34 @@ pub const Session = struct {
     pub fn abort(self: Session) !std.json.Parsed(session_types.AbortResult) {
         return legacyResult(
             std.json.Parsed(session_types.AbortResult),
-            self.client.callImpl(.legacy, session_types.AbortResult, "session.abort", .{
-                .sessionId = self.id,
-            }, .{ .session = .{ .session_id = self.id } }),
+            self.abortImpl(.legacy),
         );
     }
 
     pub fn abortDetailed(
         self: Session,
     ) errors.DetailedError!errors.DetailedResult(std.json.Parsed(session_types.AbortResult)) {
-        return self.client.callImpl(.detailed, session_types.AbortResult, "session.abort", .{
-            .sessionId = self.id,
-        }, .{ .session = .{ .session_id = self.id } });
+        return self.abortImpl(.detailed);
+    }
+
+    fn abortImpl(
+        self: Session,
+        comptime failure_policy: FailurePolicy,
+    ) errors.DetailedError!PolicyResult(
+        failure_policy,
+        std.json.Parsed(session_types.AbortResult),
+    ) {
+        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
+        return self.client.callImpl(
+            failure_policy,
+            session_types.AbortResult,
+            "session.abort",
+            .{ .sessionId = resolved.id },
+            .{ .session = .{ .session_id = resolved.id } },
+        );
     }
 
     /// Changes the selected model for subsequent turns. The caller owns the
@@ -7405,12 +7675,16 @@ pub const Session = struct {
         failure_policy,
         std.json.Parsed(session_types.ModelSwitchResult),
     ) {
+        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
         return self.client.callImpl(
             failure_policy,
             session_types.ModelSwitchResult,
             "session.model.switchTo",
             WireModelSwitchRequest{
-                .sessionId = self.id,
+                .sessionId = resolved.id,
                 .modelId = model_id,
                 .autoTier = options.auto_tier,
                 .reasoningEffort = options.reasoning_effort,
@@ -7419,7 +7693,7 @@ pub const Session = struct {
                 .compactionDecision = options.compaction_decision,
                 .runCompactionPreflight = options.run_compaction_preflight,
             },
-            .{ .session = .{ .session_id = self.id } },
+            .{ .session = .{ .session_id = resolved.id } },
         );
     }
 
@@ -7446,15 +7720,19 @@ pub const Session = struct {
         message: []const u8,
         options: session_types.LogOptions,
     ) errors.DetailedError!PolicyResult(failure_policy, []u8) {
+        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
         const parsed = switch (try self.client.callImpl(failure_policy, struct { eventId: []const u8 }, "session.log", WireLogRequest{
-            .sessionId = self.id,
+            .sessionId = resolved.id,
             .message = message,
             .level = options.level,
             .type = options.log_type,
             .ephemeral = options.ephemeral,
             .url = options.url,
             .tip = options.tip,
-        }, .{ .session = .{ .session_id = self.id } })) {
+        }, .{ .session = .{ .session_id = resolved.id } })) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
         };
@@ -7481,12 +7759,16 @@ pub const Session = struct {
         comptime failure_policy: FailurePolicy,
         request_id: []const u8,
     ) errors.DetailedError!PolicyResult(failure_policy, void) {
+        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
         const parsed = switch (try self.client.callImpl(failure_policy, RpcSuccess, "session.permissions.handlePendingPermissionRequest", .{
-            .sessionId = self.id,
+            .sessionId = resolved.id,
             .requestId = request_id,
             .result = .{ .kind = "approve-once" },
         }, .{ .permission = .{
-            .session_id = self.id,
+            .session_id = resolved.id,
             .request_id = request_id,
         } })) {
             .success => |value| value,
@@ -7498,7 +7780,7 @@ pub const Session = struct {
                 failure_policy,
                 error.PermissionDecisionNotAccepted,
                 recordPermissionNotAccepted,
-                .{ self.client.allocator, self.id, request_id },
+                .{ self.client.allocator, resolved.id, request_id },
             ) };
         return .{ .success = {} };
     }
@@ -7525,12 +7807,16 @@ pub const Session = struct {
         request_id: []const u8,
         feedback: ?[]const u8,
     ) errors.DetailedError!PolicyResult(failure_policy, void) {
+        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
         const parsed = switch (try self.client.callImpl(failure_policy, RpcSuccess, "session.permissions.handlePendingPermissionRequest", .{
-            .sessionId = self.id,
+            .sessionId = resolved.id,
             .requestId = request_id,
             .result = .{ .kind = "reject", .feedback = feedback },
         }, .{ .permission = .{
-            .session_id = self.id,
+            .session_id = resolved.id,
             .request_id = request_id,
         } })) {
             .success => |value| value,
@@ -7542,7 +7828,7 @@ pub const Session = struct {
                 failure_policy,
                 error.PermissionDecisionNotAccepted,
                 recordPermissionNotAccepted,
-                .{ self.client.allocator, self.id, request_id },
+                .{ self.client.allocator, resolved.id, request_id },
             ) };
         return .{ .success = {} };
     }
@@ -7582,6 +7868,10 @@ pub const Session = struct {
         decision_json: []const u8,
         decision_context_json: ?[]const u8,
     ) errors.DetailedError!PolicyResult(failure_policy, void) {
+        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
         const decision = std.json.parseFromSlice(
             std.json.Value,
             self.client.allocator,
@@ -7593,7 +7883,7 @@ pub const Session = struct {
                 failure_policy,
                 err,
                 recordInvalidPermission,
-                .{ self.client.allocator, self.id, request_id, err },
+                .{ self.client.allocator, resolved.id, request_id, err },
             ) };
         };
         defer decision.deinit();
@@ -7602,7 +7892,7 @@ pub const Session = struct {
                 failure_policy,
                 error.InvalidPermissionDecision,
                 recordInvalidPermission,
-                .{ self.client.allocator, self.id, request_id, error.InvalidPermissionDecision },
+                .{ self.client.allocator, resolved.id, request_id, error.InvalidPermissionDecision },
             ) };
 
         const decision_context = if (decision_context_json) |context_json|
@@ -7617,7 +7907,7 @@ pub const Session = struct {
                     failure_policy,
                     err,
                     recordInvalidPermission,
-                    .{ self.client.allocator, self.id, request_id, err },
+                    .{ self.client.allocator, resolved.id, request_id, err },
                 ) };
             }
         else
@@ -7629,7 +7919,7 @@ pub const Session = struct {
                     failure_policy,
                     error.InvalidPermissionDecisionContext,
                     recordInvalidPermission,
-                    .{ self.client.allocator, self.id, request_id, error.InvalidPermissionDecisionContext },
+                    .{ self.client.allocator, resolved.id, request_id, error.InvalidPermissionDecisionContext },
                 ) };
         }
 
@@ -7639,13 +7929,13 @@ pub const Session = struct {
                 RpcSuccess,
                 "session.permissions.handlePendingPermissionRequest",
                 .{
-                    .sessionId = self.id,
+                    .sessionId = resolved.id,
                     .requestId = request_id,
                     .result = decision.value,
                     .decisionContext = context.value,
                 },
                 .{ .permission = .{
-                    .session_id = self.id,
+                    .session_id = resolved.id,
                     .request_id = request_id,
                 } },
             )
@@ -7655,12 +7945,12 @@ pub const Session = struct {
                 RpcSuccess,
                 "session.permissions.handlePendingPermissionRequest",
                 .{
-                    .sessionId = self.id,
+                    .sessionId = resolved.id,
                     .requestId = request_id,
                     .result = decision.value,
                 },
                 .{ .permission = .{
-                    .session_id = self.id,
+                    .session_id = resolved.id,
                     .request_id = request_id,
                 } },
             );
@@ -7674,7 +7964,7 @@ pub const Session = struct {
                 failure_policy,
                 error.PermissionDecisionNotAccepted,
                 recordPermissionNotAccepted,
-                .{ self.client.allocator, self.id, request_id },
+                .{ self.client.allocator, resolved.id, request_id },
             ) };
         return .{ .success = {} };
     }
@@ -7709,12 +7999,16 @@ pub const Session = struct {
         tool_call_id: ?[]const u8,
         tool_name: ?[]const u8,
     ) errors.DetailedError!PolicyResult(failure_policy, void) {
+        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
         const parsed = switch (try self.client.callImpl(failure_policy, struct { success: bool }, "session.tools.handlePendingToolCall", .{
-            .sessionId = self.id,
+            .sessionId = resolved.id,
             .requestId = request_id,
             .result = result,
         }, .{ .tool = .{
-            .session_id = self.id,
+            .session_id = resolved.id,
             .request_id = request_id,
             .tool_call_id = tool_call_id,
             .tool_name = tool_name,
@@ -7728,7 +8022,7 @@ pub const Session = struct {
                 failure_policy,
                 error.ToolResultNotAccepted,
                 recordToolNotAccepted,
-                .{ self.client.allocator, self.id, request_id },
+                .{ self.client.allocator, resolved.id, request_id },
             ) };
         return .{ .success = {} };
     }
@@ -7759,6 +8053,10 @@ pub const Session = struct {
         request_id: []const u8,
         result_json: []const u8,
     ) errors.DetailedError!PolicyResult(failure_policy, void) {
+        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
         const result = std.json.parseFromSlice(
             std.json.Value,
             self.client.allocator,
@@ -7770,7 +8068,7 @@ pub const Session = struct {
                 failure_policy,
                 err,
                 recordInvalidToolResult,
-                .{ self.client.allocator, self.id, request_id, err },
+                .{ self.client.allocator, resolved.id, request_id, err },
             ) };
         };
         defer result.deinit();
@@ -7780,7 +8078,7 @@ pub const Session = struct {
                 failure_policy,
                 error.InvalidToolResult,
                 recordInvalidToolResult,
-                .{ self.client.allocator, self.id, request_id, error.InvalidToolResult },
+                .{ self.client.allocator, resolved.id, request_id, error.InvalidToolResult },
             ) },
         };
         const text = object.get("textResultForLlm") orelse
@@ -7788,14 +8086,14 @@ pub const Session = struct {
                 failure_policy,
                 error.InvalidToolResult,
                 recordInvalidToolResult,
-                .{ self.client.allocator, self.id, request_id, error.InvalidToolResult },
+                .{ self.client.allocator, resolved.id, request_id, error.InvalidToolResult },
             ) };
         if (text != .string)
             return .{ .failure = try policyFailure(
                 failure_policy,
                 error.InvalidToolResult,
                 recordInvalidToolResult,
-                .{ self.client.allocator, self.id, request_id, error.InvalidToolResult },
+                .{ self.client.allocator, resolved.id, request_id, error.InvalidToolResult },
             ) };
 
         const parsed = switch (try self.client.callImpl(
@@ -7803,12 +8101,12 @@ pub const Session = struct {
             struct { success: bool },
             "session.tools.handlePendingToolCall",
             .{
-                .sessionId = self.id,
+                .sessionId = resolved.id,
                 .requestId = request_id,
                 .result = result.value,
             },
             .{ .tool = .{
-                .session_id = self.id,
+                .session_id = resolved.id,
                 .request_id = request_id,
             } },
         )) {
@@ -7821,7 +8119,7 @@ pub const Session = struct {
                 failure_policy,
                 error.ToolResultNotAccepted,
                 recordToolNotAccepted,
-                .{ self.client.allocator, self.id, request_id },
+                .{ self.client.allocator, resolved.id, request_id },
             ) };
         return .{ .success = {} };
     }
@@ -7856,12 +8154,16 @@ pub const Session = struct {
         tool_call_id: ?[]const u8,
         tool_name: ?[]const u8,
     ) errors.DetailedError!PolicyResult(failure_policy, void) {
+        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
         const parsed = switch (try self.client.callImpl(failure_policy, struct { success: bool }, "session.tools.handlePendingToolCall", .{
-            .sessionId = self.id,
+            .sessionId = resolved.id,
             .requestId = request_id,
             .@"error" = message,
         }, .{ .tool = .{
-            .session_id = self.id,
+            .session_id = resolved.id,
             .request_id = request_id,
             .tool_call_id = tool_call_id,
             .tool_name = tool_name,
@@ -7875,7 +8177,7 @@ pub const Session = struct {
                 failure_policy,
                 error.ToolResultNotAccepted,
                 recordToolNotAccepted,
-                .{ self.client.allocator, self.id, request_id },
+                .{ self.client.allocator, resolved.id, request_id },
             ) };
         return .{ .success = {} };
     }
@@ -7894,13 +8196,15 @@ pub const JoinedSession = struct {
 pub const McpApps = struct {
     session: Session,
 
-    fn ensureSupported(self: McpApps) !void {
-        const runtime = self.session.client.findExtensionRuntime(self.session.id) orelse
+    fn ensureSupported(self: McpApps) !ResolvedSession {
+        const resolved = try self.session.resolve();
+        const runtime = self.session.client.findExtensionRuntime(resolved.id) orelse
             return error.UnsupportedCapability;
         if (!runtime.mcp_apps_requested)
             return error.ExperimentalFeatureNotRequested;
         if (!runtime.capabilities.supports(.mcp_apps))
             return error.UnsupportedCapability;
+        return resolved;
     }
 
     pub fn listTools(
@@ -7909,12 +8213,12 @@ pub const McpApps = struct {
         server_name: []const u8,
         origin_server_name: []const u8,
     ) !ext.OwnedJson {
-        try self.ensureSupported();
+        const resolved = try self.ensureSupported();
         const parsed = try self.session.client.call(
             std.json.Value,
             "session.mcp.apps.listTools",
             .{
-                .sessionId = self.session.id,
+                .sessionId = resolved.id,
                 .serverName = server_name,
                 .originServerName = origin_server_name,
             },
@@ -7931,7 +8235,7 @@ pub const McpApps = struct {
         allocator: std.mem.Allocator,
         request: ext.McpAppToolCall,
     ) !ext.OwnedJson {
-        try self.ensureSupported();
+        const resolved = try self.ensureSupported();
         const arguments = try std.json.parseFromSlice(
             std.json.Value,
             self.session.client.allocator,
@@ -7944,7 +8248,7 @@ pub const McpApps = struct {
             std.json.Value,
             "session.mcp.apps.callTool",
             .{
-                .sessionId = self.session.id,
+                .sessionId = resolved.id,
                 .serverName = request.server_name,
                 .toolName = request.tool_name,
                 .arguments = arguments.value,
@@ -7964,12 +8268,12 @@ pub const McpApps = struct {
         server_name: []const u8,
         uri: []const u8,
     ) !ext.OwnedJson {
-        try self.ensureSupported();
+        const resolved = try self.ensureSupported();
         const parsed = try self.session.client.call(
             std.json.Value,
             "session.mcp.apps.readResource",
             .{
-                .sessionId = self.session.id,
+                .sessionId = resolved.id,
                 .serverName = server_name,
                 .uri = uri,
             },
@@ -8715,6 +9019,7 @@ const WireCapabilities = struct {
 
 const WireSessionLifecycleResponse = struct {
     sessionId: ?[]const u8 = null,
+    workspacePath: ?[]const u8 = null,
     capabilities: ?WireCapabilities = null,
     openCanvases: ?[]const WireOpenCanvas = null,
     grantedEnvironmentVariables: ?std.json.Value = null,
@@ -9093,7 +9398,11 @@ fn lowerHttpMcp(allocator: std.mem.Allocator, config: ext.McpServerConfig.Http) 
 
 const CreateSessionRequest = struct {
     sessionId: ?[]const u8,
+    clientName: ?[]const u8,
     model: ?[]const u8,
+    reasoningEffort: ?session_types.ReasoningEffort,
+    reasoningSummary: ?session_types.ReasoningSummary,
+    contextTier: ?session_types.ContextTier,
     provider: ?provider.WireProvider,
     providers: ?[]const provider.WireNamedProvider,
     models: ?[]const provider.WireProviderModel,
@@ -9110,10 +9419,16 @@ const CreateSessionRequest = struct {
     excludedBuiltinAgents: ?[]const []const u8,
     toolFilterPrecedence: ToolFilterPrecedence = .excluded,
     systemMessage: ?WireSystemMessage,
+    largeOutput: ?WireLargeOutputConfig,
+    configDir: ?[]const u8,
+    capi: ?WireCapiSessionOptions,
+    additionalDirectories: ?[]const []const u8,
+    infiniteSessions: ?WireInfiniteSessionConfig,
+    organizationCustomInstructions: ?[]const u8,
     isExperimentalMode: ?bool,
     enableSessionTelemetry: ?bool,
     skipEmbeddingRetrieval: ?bool,
-    embeddingCacheStorage: ?[]const u8,
+    embeddingCacheStorage: ?WireEmbeddingCacheStorage,
     enableFileHooks: ?bool,
     enableHostGitOperations: ?bool,
     enableSessionStore: ?bool,
@@ -9150,7 +9465,11 @@ const CreateSessionRequest = struct {
 
 const ResumeSessionRequest = struct {
     sessionId: []const u8,
+    clientName: ?[]const u8,
     model: ?[]const u8,
+    reasoningEffort: ?session_types.ReasoningEffort,
+    reasoningSummary: ?session_types.ReasoningSummary,
+    contextTier: ?session_types.ContextTier,
     provider: ?provider.WireProvider,
     providers: ?[]const provider.WireNamedProvider,
     models: ?[]const provider.WireProviderModel,
@@ -9167,10 +9486,16 @@ const ResumeSessionRequest = struct {
     excludedBuiltinAgents: ?[]const []const u8,
     toolFilterPrecedence: ToolFilterPrecedence = .excluded,
     systemMessage: ?WireSystemMessage,
+    largeOutput: ?WireLargeOutputConfig,
+    configDir: ?[]const u8,
+    capi: ?WireCapiSessionOptions,
+    additionalDirectories: ?[]const []const u8,
+    infiniteSessions: ?WireInfiniteSessionConfig,
+    organizationCustomInstructions: ?[]const u8,
     isExperimentalMode: ?bool,
     enableSessionTelemetry: ?bool,
     skipEmbeddingRetrieval: ?bool,
-    embeddingCacheStorage: ?[]const u8,
+    embeddingCacheStorage: ?WireEmbeddingCacheStorage,
     enableFileHooks: ?bool,
     enableHostGitOperations: ?bool,
     enableSessionStore: ?bool,
@@ -9216,6 +9541,28 @@ const ToolFilterPrecedence = enum {
 
 const WireMemoryConfiguration = struct {
     enabled: bool,
+};
+
+const WireLargeOutputConfig = struct {
+    enabled: ?bool = null,
+    maxSizeBytes: ?u64 = null,
+    outputDir: ?[]const u8 = null,
+};
+
+const WireCapiSessionOptions = struct {
+    autoTier: ?session_types.AutoTier = null,
+    enableWebSocketResponses: ?bool = null,
+};
+
+const WireInfiniteSessionConfig = struct {
+    enabled: ?bool = null,
+    backgroundCompactionThreshold: ?f64 = null,
+    bufferExhaustionThreshold: ?f64 = null,
+};
+
+const WireEmbeddingCacheStorage = enum {
+    persistent,
+    @"in-memory",
 };
 
 const WireSystemMessageSection = struct {
@@ -9287,6 +9634,23 @@ fn resumeConfigFromCreate(config: session_types.CreateSessionConfig) session_typ
         .permission_context = config.permission_context,
         .on_user_input_request = config.on_user_input_request,
         .user_input_context = config.user_input_context,
+        .client_name = config.client_name,
+        .reasoning_effort = config.reasoning_effort,
+        .reasoning_summary = config.reasoning_summary,
+        .enable_experimental_mode = config.enable_experimental_mode,
+        .context_tier = config.context_tier,
+        .large_output = config.large_output,
+        .config_directory = config.config_directory,
+        .capi = config.capi,
+        .additional_directories = config.additional_directories,
+        .infinite_sessions = config.infinite_sessions,
+        .memory = config.memory,
+        .skip_embedding_retrieval = config.skip_embedding_retrieval,
+        .embedding_cache_storage = config.embedding_cache_storage,
+        .organization_custom_instructions = config.organization_custom_instructions,
+        .enable_file_hooks = config.enable_file_hooks,
+        .enable_host_git_operations = config.enable_host_git_operations,
+        .enable_session_store = config.enable_session_store,
         .remote_session = config.remote_session,
         .create_session_filesystem_provider = config.create_session_filesystem_provider,
         .suppress_resume_event = true,
@@ -9330,6 +9694,23 @@ fn resumeConfigFromJoin(config: session_types.JoinSessionConfig) session_types.R
         .permission_context = config.permission_context,
         .on_user_input_request = config.on_user_input_request,
         .user_input_context = config.user_input_context,
+        .client_name = config.client_name,
+        .reasoning_effort = config.reasoning_effort,
+        .reasoning_summary = config.reasoning_summary,
+        .enable_experimental_mode = config.enable_experimental_mode,
+        .context_tier = config.context_tier,
+        .large_output = config.large_output,
+        .config_directory = config.config_directory,
+        .capi = config.capi,
+        .additional_directories = config.additional_directories,
+        .infinite_sessions = config.infinite_sessions,
+        .memory = config.memory,
+        .skip_embedding_retrieval = config.skip_embedding_retrieval,
+        .embedding_cache_storage = config.embedding_cache_storage,
+        .organization_custom_instructions = config.organization_custom_instructions,
+        .enable_file_hooks = config.enable_file_hooks,
+        .enable_host_git_operations = config.enable_host_git_operations,
+        .enable_session_store = config.enable_session_store,
         .remote_session = config.remote_session,
         .create_session_filesystem_provider = config.create_session_filesystem_provider,
         .suppress_resume_event = config.suppress_resume_event,
@@ -9468,7 +9849,11 @@ fn buildPreparedCreateSessionRequest(
     try provider.validateCapabilities(config.model_capabilities);
     return .{
         .sessionId = session_id,
+        .clientName = config.client_name,
         .model = config.model,
+        .reasoningEffort = config.reasoning_effort,
+        .reasoningSummary = config.reasoning_summary,
+        .contextTier = config.context_tier,
         .provider = prepared_providers.provider,
         .providers = prepared_providers.providers,
         .models = prepared_providers.models,
@@ -9485,14 +9870,49 @@ fn buildPreparedCreateSessionRequest(
             if (mode == .empty) true else null,
         .excludedBuiltinAgents = config.excluded_builtin_agents,
         .systemMessage = lowerSystemMessage(mode, config.system_message),
-        .isExperimentalMode = if (mode == .empty) false else null,
+        .largeOutput = if (config.large_output) |value| .{
+            .enabled = value.enabled,
+            .maxSizeBytes = value.max_size_bytes,
+            .outputDir = value.output_directory,
+        } else null,
+        .configDir = config.config_directory,
+        .capi = if (config.capi) |value| .{
+            .autoTier = value.auto_tier,
+            .enableWebSocketResponses = value.enable_websocket_responses,
+        } else null,
+        .additionalDirectories = config.additional_directories,
+        .infiniteSessions = if (config.infinite_sessions) |value| .{
+            .enabled = value.enabled,
+            .backgroundCompactionThreshold = value.background_compaction_threshold,
+            .bufferExhaustionThreshold = value.buffer_exhaustion_threshold,
+        } else null,
+        .organizationCustomInstructions = config.organization_custom_instructions,
+        .isExperimentalMode = config.enable_experimental_mode orelse
+            if (mode == .empty) false else null,
         .enableSessionTelemetry = if (mode == .empty) false else null,
-        .skipEmbeddingRetrieval = if (mode == .empty) true else null,
-        .embeddingCacheStorage = if (mode == .empty) "in-memory" else null,
-        .enableFileHooks = if (mode == .empty) false else null,
-        .enableHostGitOperations = if (mode == .empty) false else null,
-        .enableSessionStore = if (mode == .empty) false else null,
-        .memory = if (mode == .empty) .{ .enabled = false } else null,
+        .skipEmbeddingRetrieval = config.skip_embedding_retrieval orelse
+            if (mode == .empty) true else null,
+        .embeddingCacheStorage = if (config.embedding_cache_storage) |value|
+            switch (value) {
+                .persistent => .persistent,
+                .in_memory => .@"in-memory",
+            }
+        else if (mode == .empty)
+            .@"in-memory"
+        else
+            null,
+        .enableFileHooks = config.enable_file_hooks orelse
+            if (mode == .empty) false else null,
+        .enableHostGitOperations = config.enable_host_git_operations orelse
+            if (mode == .empty) false else null,
+        .enableSessionStore = config.enable_session_store orelse
+            if (mode == .empty) false else null,
+        .memory = if (config.memory) |value|
+            .{ .enabled = value.enabled }
+        else if (mode == .empty)
+            .{ .enabled = false }
+        else
+            null,
         .requestPermission = config.request_permission or config.on_permission_request != null,
         .requestUserInput = config.on_user_input_request != null,
         .enableConfigDiscovery = config.enable_config_discovery,
@@ -9589,7 +10009,11 @@ fn buildPreparedResumeSessionRequest(
     try provider.validateCapabilities(config.model_capabilities);
     return .{
         .sessionId = session_id,
+        .clientName = config.client_name,
         .model = config.model,
+        .reasoningEffort = config.reasoning_effort,
+        .reasoningSummary = config.reasoning_summary,
+        .contextTier = config.context_tier,
         .provider = prepared_providers.provider,
         .providers = prepared_providers.providers,
         .models = prepared_providers.models,
@@ -9606,14 +10030,49 @@ fn buildPreparedResumeSessionRequest(
             if (mode == .empty) true else null,
         .excludedBuiltinAgents = config.excluded_builtin_agents,
         .systemMessage = lowerSystemMessage(mode, config.system_message),
-        .isExperimentalMode = if (mode == .empty) false else null,
+        .largeOutput = if (config.large_output) |value| .{
+            .enabled = value.enabled,
+            .maxSizeBytes = value.max_size_bytes,
+            .outputDir = value.output_directory,
+        } else null,
+        .configDir = config.config_directory,
+        .capi = if (config.capi) |value| .{
+            .autoTier = value.auto_tier,
+            .enableWebSocketResponses = value.enable_websocket_responses,
+        } else null,
+        .additionalDirectories = config.additional_directories,
+        .infiniteSessions = if (config.infinite_sessions) |value| .{
+            .enabled = value.enabled,
+            .backgroundCompactionThreshold = value.background_compaction_threshold,
+            .bufferExhaustionThreshold = value.buffer_exhaustion_threshold,
+        } else null,
+        .organizationCustomInstructions = config.organization_custom_instructions,
+        .isExperimentalMode = config.enable_experimental_mode orelse
+            if (mode == .empty) false else null,
         .enableSessionTelemetry = if (mode == .empty) false else null,
-        .skipEmbeddingRetrieval = if (mode == .empty) true else null,
-        .embeddingCacheStorage = if (mode == .empty) "in-memory" else null,
-        .enableFileHooks = if (mode == .empty) false else null,
-        .enableHostGitOperations = if (mode == .empty) false else null,
-        .enableSessionStore = if (mode == .empty) false else null,
-        .memory = if (mode == .empty) .{ .enabled = false } else null,
+        .skipEmbeddingRetrieval = config.skip_embedding_retrieval orelse
+            if (mode == .empty) true else null,
+        .embeddingCacheStorage = if (config.embedding_cache_storage) |value|
+            switch (value) {
+                .persistent => .persistent,
+                .in_memory => .@"in-memory",
+            }
+        else if (mode == .empty)
+            .@"in-memory"
+        else
+            null,
+        .enableFileHooks = config.enable_file_hooks orelse
+            if (mode == .empty) false else null,
+        .enableHostGitOperations = config.enable_host_git_operations orelse
+            if (mode == .empty) false else null,
+        .enableSessionStore = config.enable_session_store orelse
+            if (mode == .empty) false else null,
+        .memory = if (config.memory) |value|
+            .{ .enabled = value.enabled }
+        else if (mode == .empty)
+            .{ .enabled = false }
+        else
+            null,
         .requestPermission = config.request_permission or config.on_permission_request != null,
         .requestUserInput = config.on_user_input_request != null,
         .enableConfigDiscovery = config.enable_config_discovery,
@@ -9666,6 +10125,207 @@ fn buildPreparedResumeSessionRequest(
 
 fn optionalSlice(value: anytype) ?@TypeOf(value) {
     return if (value.len == 0) null else value;
+}
+
+test "stable runtime options lower identically for create resume and join" {
+    const allocator = std.testing.allocator;
+    var values = ExtensionWireValues.init(allocator);
+    defer values.deinit();
+
+    const config = session_types.CreateSessionConfig{
+        .client_name = "client",
+        .reasoning_effort = .high,
+        .reasoning_summary = .concise,
+        .enable_experimental_mode = false,
+        .context_tier = .long_context,
+        .large_output = .{
+            .enabled = true,
+            .max_size_bytes = 4096,
+            .output_directory = "/output",
+        },
+        .config_directory = "",
+        .capi = .{
+            .auto_tier = .balance,
+            .enable_websocket_responses = false,
+        },
+        .additional_directories = &.{},
+        .infinite_sessions = .{
+            .enabled = true,
+            .background_compaction_threshold = 0.75,
+            .buffer_exhaustion_threshold = 0.9,
+        },
+        .memory = .{ .enabled = false },
+        .skip_embedding_retrieval = false,
+        .embedding_cache_storage = .in_memory,
+        .organization_custom_instructions = "",
+        .enable_file_hooks = false,
+        .enable_host_git_operations = true,
+        .enable_session_store = false,
+    };
+    const create = try buildCreateSessionRequest(config, &.{}, &values);
+    const resumed_request = try buildResumeSessionRequest(
+        "session",
+        resumeConfigFromCreate(config),
+        &.{},
+        &values,
+        &.{},
+    );
+    const create_json = try std.json.Stringify.valueAlloc(
+        allocator,
+        create,
+        .{ .emit_null_optional_fields = false },
+    );
+    defer allocator.free(create_json);
+    const resume_json = try std.json.Stringify.valueAlloc(
+        allocator,
+        resumed_request,
+        .{ .emit_null_optional_fields = false },
+    );
+    defer allocator.free(resume_json);
+
+    for ([_][]const u8{
+        "\"clientName\":\"client\"",
+        "\"reasoningEffort\":\"high\"",
+        "\"reasoningSummary\":\"concise\"",
+        "\"isExperimentalMode\":false",
+        "\"contextTier\":\"long_context\"",
+        "\"largeOutput\":{\"enabled\":true,\"maxSizeBytes\":4096,\"outputDir\":\"/output\"}",
+        "\"configDir\":\"\"",
+        "\"capi\":{\"autoTier\":\"balance\",\"enableWebSocketResponses\":false}",
+        "\"additionalDirectories\":[]",
+        "\"infiniteSessions\":{\"enabled\":true,\"backgroundCompactionThreshold\":0.75,\"bufferExhaustionThreshold\":0.9}",
+        "\"memory\":{\"enabled\":false}",
+        "\"skipEmbeddingRetrieval\":false",
+        "\"embeddingCacheStorage\":\"in-memory\"",
+        "\"organizationCustomInstructions\":\"\"",
+        "\"enableFileHooks\":false",
+        "\"enableHostGitOperations\":true",
+        "\"enableSessionStore\":false",
+    }) |fragment| {
+        try std.testing.expect(std.mem.indexOf(u8, create_json, fragment) != null);
+        try std.testing.expect(std.mem.indexOf(u8, resume_json, fragment) != null);
+    }
+
+    const joined = resumeConfigFromJoin(.{
+        .client_name = "join",
+        .additional_directories = &.{},
+        .enable_session_store = true,
+    });
+    try std.testing.expectEqualStrings("join", joined.client_name.?);
+    try std.testing.expectEqual(@as(usize, 0), joined.additional_directories.?.len);
+    try std.testing.expectEqual(true, joined.enable_session_store.?);
+}
+
+test "workspace paths are copied and session handles are generation safe" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+    };
+    defer {
+        if (client.pending_session) |*pending| pending.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+
+    const first_id = try allocator.dupe(u8, "session");
+    try client.beginSessionRecord(first_id, null);
+    var first_path = [_]u8{ '/', 'o', 'l', 'd' };
+    try client.prepareSessionCommit("session", &first_path);
+    const first_index = client.commitSessionRecord();
+    const first = client.sessionHandle(first_index);
+    const first_mcp_apps = McpApps{ .session = first };
+    first_path[1] = 'X';
+    try std.testing.expectEqualStrings("/old", (try first.workspacePath()).?);
+
+    try client.beginSessionRecord(
+        try allocator.dupe(u8, client.sessions.items[first_index].id.?),
+        first_index,
+    );
+    try client.prepareSessionCommit("session", "/replacement");
+    const replacement_index = client.commitSessionRecord();
+    const replacement = client.sessionHandle(replacement_index);
+
+    try std.testing.expectEqual(first_index, replacement_index);
+    try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
+    try std.testing.expect(first.generation != replacement.generation);
+    try std.testing.expectError(error.SessionNotActive, first.workspacePath());
+    try std.testing.expectError(
+        error.SessionNotActive,
+        first_mcp_apps.listTools(allocator, "server", "origin"),
+    );
+    try std.testing.expectEqualStrings(
+        "/replacement",
+        (try replacement.workspacePath()).?,
+    );
+}
+
+test "inactive session record slots are reused without stale id access" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+    };
+    defer {
+        if (client.pending_session) |*pending| pending.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+
+    try client.beginSessionRecord(try allocator.dupe(u8, "first"), null);
+    try client.prepareSessionCommit("first", "/first");
+    const first = client.sessionHandle(client.commitSessionRecord());
+    const first_mcp_apps = McpApps{ .session = first };
+    client.removeSessionAt(first.record_index);
+
+    try client.beginSessionRecord(try allocator.dupe(u8, "second"), null);
+    try client.prepareSessionCommit("second", "/second");
+    const second = client.sessionHandle(client.commitSessionRecord());
+
+    try std.testing.expectEqual(first.record_index, second.record_index);
+    try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
+    try std.testing.expect(first.generation != second.generation);
+    try std.testing.expectError(error.SessionNotActive, first.workspacePath());
+    try std.testing.expectError(
+        error.SessionNotActive,
+        first_mcp_apps.callTool(allocator, .{
+            .server_name = "server",
+            .tool_name = "tool",
+            .origin_server_name = "origin",
+        }),
+    );
+    try std.testing.expectError(
+        error.SessionNotActive,
+        first_mcp_apps.readResource(allocator, "server", "resource"),
+    );
+    try std.testing.expectEqualStrings("/second", (try second.workspacePath()).?);
+
+    client.removeSessionAt(second.record_index);
+    for (0..8) |index| {
+        const id = try std.fmt.allocPrint(allocator, "reuse-{d}", .{index});
+        try client.beginSessionRecord(id, null);
+        const current = client.sessionHandle(client.commitSessionRecord());
+        try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
+        client.removeSessionAt(current.record_index);
+    }
+}
+
+test "inactive session slots skip bounded shutdown work" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+    };
+    defer {
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    try client.sessions.append(allocator, .{
+        .generation = 7,
+    });
+
+    try std.testing.expect(!client.hasActiveSessions());
+    client.releaseInterestsAndDetachSessionsBounded();
 }
 
 test "remote session mode lowers for create and resume and omits null" {
@@ -10082,11 +10742,11 @@ test "shutdown attempts every initial session and child after all injected failu
         .writer_buffer = &.{},
     };
     defer {
-        for (client.session_ids.items) |id| allocator.free(id);
-        client.session_ids.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
     for ([_][]const u8{ "s1", "s2", "s3" }) |id| {
-        try client.session_ids.append(allocator, try allocator.dupe(u8, id));
+        try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, id) });
     }
 
     var operations = ShutdownProbe{
@@ -10119,11 +10779,11 @@ test "stopDetailed retains detach RPC failure details and completes cleanup" {
         .writer_buffer = &.{},
     };
     defer {
-        for (client.session_ids.items) |id| allocator.free(id);
-        client.session_ids.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
     for ([_][]const u8{ "s1", "s2", "s3" }) |id| {
-        try client.session_ids.append(allocator, try allocator.dupe(u8, id));
+        try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, id) });
     }
 
     var operations = DetailedRpcShutdownProbe{ .failure_allocator = allocator };
@@ -10182,11 +10842,11 @@ test "stopDetailed aggregates owned failures and attempt counts" {
         .writer_buffer = &.{},
     };
     defer {
-        for (client.session_ids.items) |id| allocator.free(id);
-        client.session_ids.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
     for ([_][]const u8{ "s1", "s2", "s3" }) |id| {
-        try client.session_ids.append(allocator, try allocator.dupe(u8, id));
+        try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, id) });
     }
 
     var operations = DetailedShutdownProbe{
@@ -10250,11 +10910,11 @@ test "stopDetailed reports allocation-free dropped diagnostics" {
         .writer_buffer = &.{},
     };
     defer {
-        for (client.session_ids.items) |id| allocator.free(id);
-        client.session_ids.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
     for ([_][]const u8{ "s1", "s2", "s3" }) |id| {
-        try client.session_ids.append(allocator, try allocator.dupe(u8, id));
+        try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, id) });
     }
 
     var operations = DetailedShutdownProbe{
@@ -12978,12 +13638,13 @@ test "permission handler receives events and can leave requests pending" {
         .allocator = allocator,
         .io = undefined,
     };
-    try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
+    try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "session-1") });
     defer {
         client.removeSession("session-1");
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
-        client.session_ids.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
 
     var called = false;
@@ -13026,7 +13687,7 @@ test "permission handler receives events and can leave requests pending" {
         ),
     });
 
-    const session = Session{ .client = &client, .id = "session-1" };
+    const session = try client.sessionForId("session-1");
     var event = try session.nextEvent();
     defer event.deinit(allocator);
     try std.testing.expect(called);
@@ -13049,12 +13710,13 @@ test "permission handler receives injected managed settings metadata" {
         .allocator = allocator,
         .io = undefined,
     };
-    try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
+    try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "session-1") });
     defer {
         client.removeSession("session-1");
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
-        client.session_ids.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
 
     var called = false;
@@ -13093,7 +13755,7 @@ test "permission handler receives injected managed settings metadata" {
         ),
     });
 
-    const session = Session{ .client = &client, .id = "session-1" };
+    const session = try client.sessionForId("session-1");
     var event = try session.nextEvent();
     defer event.deinit(allocator);
     try std.testing.expect(called);
@@ -13108,12 +13770,13 @@ test "permission handler failures leave requests available for manual handling" 
         .allocator = allocator,
         .io = undefined,
     };
-    try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
+    try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "session-1") });
     defer {
         client.removeSession("session-1");
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
-        client.session_ids.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
 
     const handler = struct {
@@ -13145,7 +13808,7 @@ test "permission handler failures leave requests available for manual handling" 
         ),
     });
 
-    const session = Session{ .client = &client, .id = "session-1" };
+    const session = try client.sessionForId("session-1");
     var event = try session.nextEvent();
     defer event.deinit(allocator);
     try std.testing.expect(event == .permission_requested);
@@ -13161,14 +13824,15 @@ test "approveAll leaves managed permission events observable" {
         .allocator = allocator,
         .io = undefined,
     };
-    try client.session_ids.append(allocator, try allocator.dupe(u8, "managed-session"));
-    try client.session_ids.append(allocator, try allocator.dupe(u8, "managed-request"));
+    try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "managed-session") });
+    try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "managed-request") });
     defer {
         client.removeSession("managed-session");
         client.removeSession("managed-request");
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
-        client.session_ids.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
     try client.registerPermissionHandler("managed-session", .{
         .enable_managed_settings = true,
@@ -13210,7 +13874,7 @@ test "approveAll leaves managed permission events observable" {
         ),
     });
 
-    const managed_session = Session{ .client = &client, .id = "managed-session" };
+    const managed_session = try client.sessionForId("managed-session");
     var first = try managed_session.nextEvent();
     defer first.deinit(allocator);
     try std.testing.expectEqual(
@@ -13218,7 +13882,7 @@ test "approveAll leaves managed permission events observable" {
         first.permission_requested.automatic_handling.handler_failed,
     );
 
-    const managed_request = Session{ .client = &client, .id = "managed-request" };
+    const managed_request = try client.sessionForId("managed-request");
     var second = try managed_request.nextEvent();
     defer second.deinit(allocator);
     try std.testing.expectEqualStrings("permission-2", second.permission_requested.request_id);
@@ -13275,12 +13939,13 @@ fn runAutomaticPermissionRpc(
             .writer_buffer = &writer_buffer,
         } },
     };
-    try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
+    try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "session-1") });
     defer {
         client.removeSession("session-1");
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
-        client.session_ids.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
 
     const handler = struct {
@@ -13312,7 +13977,7 @@ fn runAutomaticPermissionRpc(
         ),
     });
 
-    const session = Session{ .client = &client, .id = "session-1" };
+    const session = try client.sessionForId("session-1");
     var handling: ?session_types.AutomaticPermissionHandling = null;
     var native_failure: ?anyerror = null;
     switch (try session.nextEventDetailed()) {
@@ -13407,12 +14072,13 @@ test "permission response delivery failures are explicit" {
             .writer_buffer = &.{},
         } },
     };
-    try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
+    try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "session-1") });
     defer {
         client.removeSession("session-1");
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
-        client.session_ids.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
 
     const handler = struct {
@@ -13444,7 +14110,7 @@ test "permission response delivery failures are explicit" {
         ),
     });
 
-    const session = Session{ .client = &client, .id = "session-1" };
+    const session = try client.sessionForId("session-1");
     var event = try session.nextEvent();
     defer event.deinit(allocator);
     try std.testing.expect(event == .permission_requested);
@@ -13509,10 +14175,14 @@ fn runSendRpc(
     };
     defer {
         client.events.deinit(allocator);
-        client.session_ids.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
+    try client.sessions.append(allocator, .{
+        .id = try allocator.dupe(u8, "session-1"),
+    });
 
-    const message_id = try (Session{ .client = &client, .id = "session-1" }).send(options);
+    const message_id = try (try client.sessionForId("session-1")).send(options);
     errdefer allocator.free(message_id);
     const request_frame = try tmp.dir.readFileAlloc(
         std.testing.io,
@@ -13858,7 +14528,8 @@ test "session.sendAndWait cleans its message id and returns an owned assistant m
     defer {
         for (client.events.items) |*event| event.deinit(allocator);
         client.events.deinit(allocator);
-        client.session_ids.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "session-1"),
@@ -13871,14 +14542,14 @@ test "session.sendAndWait cleans its message id and returns an owned assistant m
         .session_id = try allocator.dupe(u8, "session-1"),
         .event = .{ .session_idle = .{} },
     });
+    try client.sessions.append(allocator, .{
+        .id = try allocator.dupe(u8, "session-1"),
+    });
 
     const attachments = [_]session_types.Attachment{
         .{ .file = .{ .path = "/tmp/a.zig" } },
     };
-    const message = (try (Session{
-        .client = &client,
-        .id = "session-1",
-    }).sendAndWait(.{
+    const message = (try (try client.sessionForId("session-1")).sendAndWait(.{
         .prompt = "inspect",
         .attachments = &attachments,
     })).?;
@@ -14289,8 +14960,8 @@ test "createSession and resumeSession preserve deep partial model capability ove
             } },
         };
         defer {
-            for (client.session_ids.items) |id| allocator.free(id);
-            client.session_ids.deinit(allocator);
+            for (client.sessions.items) |*record| record.deinit(allocator);
+            client.sessions.deinit(allocator);
             for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
             client.extension_runtimes.deinit(allocator);
         }
@@ -15005,7 +15676,12 @@ test "capability updates are tri-state and canvas state is defensive" {
     defer {
         for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
         client.extension_runtimes.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
+    try client.sessions.append(allocator, .{
+        .id = try allocator.dupe(u8, "s1"),
+    });
 
     try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
         .extensions = .{ .common = .{
@@ -15021,7 +15697,7 @@ test "capability updates are tri-state and canvas state is defensive" {
             .canvasId = "c1",
         }},
     }, &.{});
-    const session = Session{ .client = &client, .id = "s1" };
+    const session = try client.sessionForId("s1");
     try std.testing.expect(session.capabilities().supports(.canvases));
     try std.testing.expectEqual(ext.CapabilityState.unknown, session.capabilities().mcp_apps);
     try std.testing.expectError(error.UnsupportedCapability, session.experimental(.mcp_apps));
@@ -15183,7 +15859,12 @@ test "provisional create runtime does not shadow existing sessions" {
         client.rollbackExtensionRuntime();
         for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
         client.extension_runtimes.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
+    try client.sessions.append(allocator, .{
+        .id = try allocator.dupe(u8, "s1"),
+    });
     var existing_context: u8 = 1;
     var create_context: u8 = 2;
     try client.beginExtensionRuntime("existing", session_types.ResumeSessionConfig{
@@ -15404,18 +16085,21 @@ test "failed resident resume preserves committed runtime and session id" {
         if (client.pending_extension_runtime) |*runtime| runtime.deinit(allocator);
         for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
         client.extension_runtimes.deinit(allocator);
-        for (client.session_ids.items) |id| allocator.free(id);
-        client.session_ids.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
     var old_context: u8 = 1;
     var new_context: u8 = 2;
     const session_id = try allocator.dupe(u8, "s1");
-    try client.session_ids.append(allocator, session_id);
+    try client.sessions.append(allocator, .{ .id = session_id });
+    const old_session = try client.sessionForId("s1");
     try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
         .extensions = .{ .common = .{ .hooks = .{
             .context = &old_context,
         } } },
     }, &.{});
+    try client.beginSessionRecord(try allocator.dupe(u8, "s1"), old_session.record_index);
+    try client.prepareSessionCommit("s1", "/replacement");
     try client.commitExtensionRuntime("s1", .{}, &.{});
     try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
         .extensions = .{ .common = .{ .hooks = .{
@@ -15435,13 +16119,16 @@ test "failed resident resume preserves committed runtime and session id" {
         client.commitExtensionRuntime("s1", response.value, &.{"TOKEN"}),
     );
     client.rollbackExtensionRuntime();
+    client.rollbackSessionRecord();
     try std.testing.expectEqual(@as(usize, 1), client.extension_runtimes.items.len);
-    try std.testing.expectEqual(@as(usize, 1), client.session_ids.items.len);
+    try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
     try std.testing.expectEqual(
         @as(?*anyopaque, &old_context),
         client.findExtensionRuntime("s1").?.hooks.context,
     );
-    try std.testing.expect(client.findSessionId("s1").?.ptr == session_id.ptr);
+    try std.testing.expect(client.findSession("s1").?.id.?.ptr == session_id.ptr);
+    try std.testing.expectEqual(old_session.generation, client.findSession("s1").?.generation);
+    try std.testing.expect((try old_session.workspacePath()) == null);
 }
 
 test "failed frame writes wipe the transport buffer" {
@@ -15513,7 +16200,12 @@ test "MCP OAuth event interest is retained and released" {
     defer {
         for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
         client.extension_runtimes.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
+    try client.sessions.append(allocator, .{
+        .id = try allocator.dupe(u8, "s1"),
+    });
     const handler = struct {
         fn handle(
             _: std.mem.Allocator,
@@ -15624,8 +16316,8 @@ test "disconnect releases OAuth interest before detaching" {
     defer {
         for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
         client.extension_runtimes.deinit(allocator);
-        for (client.session_ids.items) |id| allocator.free(id);
-        client.session_ids.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
     const handler = struct {
         fn handle(
@@ -15643,11 +16335,11 @@ test "disconnect releases OAuth interest before detaching" {
     }, &.{});
     try client.commitExtensionRuntime("s1", .{}, &.{});
     const session_id = try allocator.dupe(u8, "s1");
-    try client.session_ids.append(allocator, session_id);
+    try client.sessions.append(allocator, .{ .id = session_id });
 
-    try (Session{ .client = &client, .id = session_id }).disconnect();
+    try (try client.sessionForId(session_id)).disconnect();
     try std.testing.expect(client.findExtensionRuntime("s1") == null);
-    try std.testing.expect(client.findSessionId("s1") == null);
+    try std.testing.expect(client.findSession("s1") == null);
 
     const requests = try tmp.dir.readFileAlloc(
         std.testing.io,
@@ -15881,7 +16573,12 @@ test "zero OAuth token lifetime cancels the pending request" {
         client.events.deinit(allocator);
         for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
         client.extension_runtimes.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
+    try client.sessions.append(allocator, .{
+        .id = try allocator.dupe(u8, "s1"),
+    });
     const handler = struct {
         fn handle(
             callback_allocator: std.mem.Allocator,
@@ -15901,7 +16598,7 @@ test "zero OAuth token lifetime cancels the pending request" {
     }, &.{});
     try client.commitExtensionRuntime("s1", .{}, &.{});
 
-    const session = Session{ .client = &client, .id = "s1" };
+    const session = try client.sessionForId("s1");
     try std.testing.expectError(
         error.InvalidMcpAuthTokenExpiration,
         session.nextEvent(),
@@ -15931,7 +16628,12 @@ test "review regressions preserve protocol semantics" {
     defer {
         for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
         client.extension_runtimes.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
+    try client.sessions.append(allocator, .{
+        .id = try allocator.dupe(u8, "s1"),
+    });
     try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
         .extensions = .{ .common = .{ .experimental = .{ .mcp_apps = true } } },
     }, &.{});
@@ -15944,7 +16646,7 @@ test "review regressions preserve protocol semantics" {
     );
     defer response.deinit();
     try client.commitExtensionRuntime("s1", response.value, &.{"TOKEN"});
-    const session = Session{ .client = &client, .id = "s1" };
+    const session = try client.sessionForId("s1");
     var grants = try session.snapshotEnvironmentGrants(allocator);
     defer grants.deinit();
     try std.testing.expectEqualStrings("secret", grants.get("TOKEN").?);
@@ -16137,6 +16839,35 @@ fn exerciseFailureConstructors(allocator: std.mem.Allocator) !void {
         var contextual = try recordRpcFailure(allocator, contextual_view);
         contextual.deinit();
     }
+}
+
+test "disconnect removes session-owned allocations" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+    };
+    defer {
+        for (client.events.items) |*event| event.deinit(allocator);
+        client.events.deinit(allocator);
+        for (client.tools.items) |tool| tool.deinit(allocator);
+        client.tools.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+
+    const session_id = try allocator.dupe(u8, "s1");
+    try client.sessions.append(allocator, .{ .id = session_id });
+    try client.events.append(allocator, .{
+        .session_id = try allocator.dupe(u8, "s1"),
+        .event = .{ .session_idle = .{} },
+    });
+
+    client.removeSession("s1");
+
+    try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
+    try std.testing.expect(!client.sessions.items[0].isActive());
+    try std.testing.expectEqual(@as(usize, 0), client.events.items.len);
 }
 
 const CensusConstructorCase = enum {
@@ -16550,6 +17281,13 @@ fn deliveryEventForTest(
     return event;
 }
 
+fn addTestSession(client: *Client, session_id: []const u8) !Session {
+    try client.sessions.append(client.allocator, .{
+        .id = try client.allocator.dupe(u8, session_id),
+    });
+    return client.sessionForId(session_id);
+}
+
 test "session failure conversion rolls back every allocation failure" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
@@ -16723,34 +17461,6 @@ test "session.event notifications queue by session" {
     );
 }
 
-test "disconnect removes session-owned allocations" {
-    const allocator = std.testing.allocator;
-    var client = Client{
-        .allocator = allocator,
-        .io = undefined,
-    };
-    defer {
-        for (client.events.items) |*event| event.deinit(allocator);
-        client.events.deinit(allocator);
-        for (client.tools.items) |tool| tool.deinit(allocator);
-        client.tools.deinit(allocator);
-        for (client.session_ids.items) |id| allocator.free(id);
-        client.session_ids.deinit(allocator);
-    }
-
-    const session_id = try allocator.dupe(u8, "s1");
-    try client.session_ids.append(allocator, session_id);
-    try client.events.append(allocator, .{
-        .session_id = try allocator.dupe(u8, "s1"),
-        .event = .{ .session_idle = .{} },
-    });
-
-    client.removeSession("s1");
-
-    try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
-    try std.testing.expectEqual(@as(usize, 0), client.events.items.len);
-}
-
 test "session event queue has a fixed bound" {
     const allocator = std.testing.allocator;
     var client = Client{
@@ -16837,6 +17547,8 @@ test "legacy nextEvent preserves EventQueueFull" {
     defer {
         for (client.events.items) |*event| event.deinit(allocator);
         client.events.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
 
     try client.events.ensureTotalCapacity(allocator, max_queued_events);
@@ -16849,7 +17561,7 @@ test "legacy nextEvent preserves EventQueueFull" {
 
     try std.testing.expectError(
         error.EventQueueFull,
-        (Session{ .client = &client, .id = "session-1" }).nextEvent(),
+        (try addTestSession(&client, "session-1")).nextEvent(),
     );
 }
 
@@ -17127,6 +17839,7 @@ test "joinSessionDetailed retains the missing session id" {
         .reader_buffer = &.{},
         .writer_buffer = &.{},
     };
+    defer client.sessions.deinit(allocator);
 
     var failure = switch (try client.joinSessionDetailed("missing-session", .{})) {
         .success => return error.TestExpectedFailure,
@@ -17159,7 +17872,11 @@ fn invalidPermissionDetailedFailure(allocator: std.mem.Allocator) !errors.Failur
         .reader_buffer = &.{},
         .writer_buffer = &.{},
     };
-    const session = Session{ .client = &client, .id = "owned-session" };
+    defer {
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    const session = try addTestSession(&client, "owned-session");
     return switch (try session.respondToPermissionJsonDetailed(
         "owned-request",
         "[]",
@@ -17203,7 +17920,11 @@ fn detailedDeliveryFailure(
         .reader_buffer = &.{},
         .writer_buffer = &.{},
     };
-    const session = Session{ .client = &client, .id = "session-owned" };
+    defer {
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    const session = try addTestSession(&client, "session-owned");
     const result = switch (kind) {
         .permission => try session.respondToPermissionJsonDetailed(
             "request-owned",
@@ -17300,7 +18021,11 @@ test "direct permission and tool validation failures retain request context" {
         .reader_buffer = &.{},
         .writer_buffer = &.{},
     };
-    const session = Session{ .client = &client, .id = "session-1" };
+    defer {
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    const session = try addTestSession(&client, "session-1");
 
     var permission_failure = switch (try session.respondToPermissionJsonDetailed(
         "permission-1",
@@ -17817,8 +18542,12 @@ test "nextEventDetailed owns complete session diagnostics after frame teardown" 
         .reader_buffer = &.{},
         .writer_buffer = &.{},
     };
-    defer client.events.deinit(allocator);
-    const session = Session{ .client = &client, .id = "session-1" };
+    defer {
+        client.events.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    const session = try addTestSession(&client, "session-1");
     var failure = switch (try session.nextEventDetailed()) {
         .success => |event_value| {
             var event = event_value;
@@ -17890,16 +18619,17 @@ test "cross-session errors retain diagnostics without eager failure construction
     defer {
         for (client.events.items) |*queued| queued.deinit(allocator);
         client.events.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
 
-    var idle = try (Session{ .client = &client, .id = "session-1" }).nextEvent();
+    const session_one = try addTestSession(&client, "session-1");
+    const session_two = try addTestSession(&client, "session-2");
+    var idle = try session_one.nextEvent();
     defer idle.deinit(allocator);
     try std.testing.expect(idle == .session_idle);
 
-    var failure = switch (try (Session{
-        .client = &client,
-        .id = "session-2",
-    }).nextEventDetailed()) {
+    var failure = switch (try session_two.nextEventDetailed()) {
         .success => |event_value| {
             var event = event_value;
             event.deinit(allocator);
@@ -17946,8 +18676,12 @@ test "nextEventDetailed retains framing diagnostics" {
         .reader_buffer = &.{},
         .writer_buffer = &.{},
     };
-    defer client.events.deinit(allocator);
-    const session = Session{ .client = &client, .id = "session-1" };
+    defer {
+        client.events.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    const session = try addTestSession(&client, "session-1");
     var failure = switch (try session.nextEventDetailed()) {
         .success => return error.TestExpectedProtocolFailure,
         .failure => |failure| failure,
@@ -17979,7 +18713,7 @@ test "nextEvent preserves native framing error when diagnostics cannot allocate"
     var writer_buffer: [1]u8 = undefined;
     var writer = request_file.writer(std.testing.io, &writer_buffer);
     var client = Client{
-        .allocator = failing.allocator(),
+        .allocator = allocator,
         .io = std.testing.io,
         .child = null,
         .reader = &reader,
@@ -17987,11 +18721,18 @@ test "nextEvent preserves native framing error when diagnostics cannot allocate"
         .reader_buffer = &.{},
         .writer_buffer = &.{},
     };
-    defer client.events.deinit(failing.allocator());
+    const session = try addTestSession(&client, "session-1");
+    client.allocator = failing.allocator();
+    defer {
+        client.events.deinit(failing.allocator());
+        client.allocator = allocator;
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
 
     try std.testing.expectError(
         error.ReadFailed,
-        (Session{ .client = &client, .id = "session-1" }).nextEvent(),
+        session.nextEvent(),
     );
 }
 
@@ -18038,12 +18779,14 @@ test "high-level clean EOF preserves legacy framing and detailed process exit" {
         .writer_buffer = &.{},
     };
     defer {
-        for (client.session_ids.items) |id| allocator.free(id);
-        client.session_ids.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
         client.events.deinit(allocator);
     }
-    try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
-    const session = Session{ .client = &client, .id = "session-1" };
+    try client.sessions.append(allocator, .{
+        .id = try allocator.dupe(u8, "session-1"),
+    });
+    const session = try client.sessionForId("session-1");
     try std.testing.expectError(error.MissingContentLength, session.nextEvent());
     try std.testing.expect(client.transport_closed);
     try std.testing.expectEqual(@as(usize, 1), wait_probe.calls);
@@ -18143,8 +18886,12 @@ test "child wait error still closes transport and blocks later writes" {
         .reader_buffer = &.{},
         .writer_buffer = &.{},
     };
-    defer client.events.deinit(allocator);
-    const session = Session{ .client = &client, .id = "session-1" };
+    defer {
+        client.events.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    const session = try addTestSession(&client, "session-1");
 
     var failure = switch (try session.nextEventDetailed()) {
         .success => return error.TestExpectedClientFailure,
@@ -18258,6 +19005,8 @@ fn runAutomaticToolFailure(
         client.events.deinit(allocator);
         for (client.tools.items) |tool| tool.deinit(allocator);
         client.tools.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
     try client.tools.append(allocator, .{
         .session_id = "session-1",
@@ -18288,7 +19037,7 @@ fn runAutomaticToolFailure(
             try session_types.parseEvent(allocator, event_json.value),
         ),
     });
-    return (Session{ .client = &client, .id = "session-1" }).nextEventDetailed();
+    return (try addTestSession(&client, "session-1")).nextEventDetailed();
 }
 
 test "nextEventDetailed reports automatic tool handler failure" {
@@ -18775,8 +19524,8 @@ test "create resume and parent join lower custom agents to literal lifecycle JSO
         } },
     };
     defer {
-        for (client.session_ids.items) |id| allocator.free(id);
-        client.session_ids.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
         for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
         client.extension_runtimes.deinit(allocator);
     }
@@ -19042,7 +19791,7 @@ test "custom agent validation precedes lifecycle state and RPC writes" {
         }),
     );
     try std.testing.expectEqual(@as(u64, 1), client.next_request_id);
-    try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.sessions.items.len);
     try std.testing.expectEqual(@as(usize, 0), client.extension_runtimes.items.len);
     try std.testing.expect(client.pending_extension_runtime == null);
 }
@@ -19471,8 +20220,8 @@ fn deinitTestClientRegistries(client: *Client) void {
     client.provider_tokens.deinit(client.allocator);
     for (client.rpc_handlers.items) |handler| handler.deinit(client.allocator);
     client.rpc_handlers.deinit(client.allocator);
-    for (client.session_ids.items) |id| client.allocator.free(id);
-    client.session_ids.deinit(client.allocator);
+    for (client.sessions.items) |*record| record.deinit(client.allocator);
+    client.sessions.deinit(client.allocator);
 }
 
 test "provider token callback is routable before create response" {
@@ -19817,7 +20566,7 @@ test "provider token dispatch routes by session and provider and rejects invalid
             &.{},
         ),
     );
-    try std.testing.expectEqual(@as(usize, 2), client.session_ids.items.len);
+    try std.testing.expectEqual(@as(usize, 2), client.sessions.items.len);
 }
 
 test "failed create and resume roll back provider token routes" {
@@ -19871,7 +20620,7 @@ test "failed create and resume roll back provider token routes" {
         } else {
             try std.testing.expectError(error.JsonRpcError, client.createSession(config));
         }
-        try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
+        try std.testing.expectEqual(@as(usize, 0), client.sessions.items.len);
         try std.testing.expectEqual(@as(usize, 0), client.provider_tokens.items.len);
     }
 }
@@ -19917,7 +20666,7 @@ test "create rejects a mismatched runtime session id and rolls back" {
             .bearer_token_provider = .{ .callback = failingProviderTokenCallback },
         },
     }));
-    try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.sessions.items.len);
     try std.testing.expectEqual(@as(usize, 0), client.provider_tokens.items.len);
 }
 
@@ -19963,8 +20712,9 @@ test "disconnect removes provider token registrations" {
         }},
     );
 
-    try (Session{ .client = &client, .id = "disconnect-session" }).disconnect();
-    try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
+    try (try client.sessionForId("disconnect-session")).disconnect();
+    try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
+    try std.testing.expect(!client.sessions.items[0].isActive());
     try std.testing.expectEqual(@as(usize, 0), client.provider_tokens.items.len);
 
     const request = try tmp.dir.readFileAlloc(std.testing.io, "request", allocator, .limited(1024));
@@ -20088,7 +20838,9 @@ fn attachDeleteTestState(client: *Client, session_id: []const u8) !void {
 
 fn expectDeleteTestState(client: *Client, session_id: []const u8, present: bool) !void {
     const expected: usize = @intFromBool(present);
-    try std.testing.expectEqual(expected, client.session_ids.items.len);
+    var active_sessions: usize = 0;
+    for (client.sessions.items) |record| active_sessions += @intFromBool(record.isActive());
+    try std.testing.expectEqual(expected, active_sessions);
     try std.testing.expectEqual(expected, client.extension_runtimes.items.len);
     try std.testing.expectEqual(expected, client.events.items.len);
     try std.testing.expectEqual(expected, client.tools.items.len);
@@ -20098,7 +20850,10 @@ fn expectDeleteTestState(client: *Client, session_id: []const u8, present: bool)
     try std.testing.expectEqual(present, client.findExtensionRuntime(session_id) != null);
     if (!present) return;
 
-    try std.testing.expectEqualStrings(session_id, client.session_ids.items[0]);
+    try std.testing.expectEqualStrings(
+        session_id,
+        client.findSession(session_id).?.id.?,
+    );
     try std.testing.expectEqualStrings(session_id, client.events.items[0].session_id);
     try std.testing.expectEqualStrings("delete-test-tool", client.tools.items[0].name);
     try std.testing.expectEqualStrings(
@@ -20490,7 +21245,7 @@ test "client administration and history use exact wire requests and owned result
 
     try client.setForegroundSessionId("new-foreground");
 
-    var history = try (Session{ .client = &client, .id = "history-session" }).getEvents();
+    var history = try (try addTestSession(&client, "history-session")).getEvents();
     defer history.deinit();
     try std.testing.expectEqual(@as(usize, 2), history.events.len);
     try std.testing.expectEqualStrings("history", history.events[0].assistant_message.content);
@@ -20570,10 +21325,10 @@ test "client administration and history use exact wire requests and owned result
             return error.TestUnexpectedFailure;
         },
     }
-    var detailed_history = switch (try (Session{
-        .client = &client,
-        .id = "history-detailed",
-    }).getEventsDetailed()) {
+    var detailed_history = switch (try (try addTestSession(
+        &client,
+        "history-detailed",
+    )).getEventsDetailed()) {
         .success => |value| value,
         .failure => |failure_value| {
             var failure = failure_value;
@@ -20744,7 +21499,7 @@ test "all three read loops share lifecycle and session event routing" {
     try std.testing.expect(from_call.event.event_type == .created);
     try std.testing.expectEqualStrings("created-session", from_call.event.session_id);
 
-    const session = Session{ .client = &client, .id = "event-session" };
+    const session = try addTestSession(&client, "event-session");
     var idle = try session.nextEvent();
     defer idle.deinit(allocator);
     try std.testing.expect(idle == .session_idle);
@@ -20782,6 +21537,7 @@ test "all three read loops share lifecycle and session event routing" {
         queued.assistant_message.content,
         history.events[0].assistant_message.content,
     );
+    try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
 }
 
 test "lifecycle overflow through an RPC preserves prefix marker and next epoch" {
@@ -20950,11 +21706,10 @@ test "getEvents cleans a parsed prefix and classifies malformed history" {
         .writer_buffer = &.{},
     };
     defer deinitTestClientRegistries(&client);
-
-    var failure = switch (try (Session{
-        .client = &client,
-        .id = "history-session",
-    }).getEventsDetailed()) {
+    var failure = switch (try (try addTestSession(
+        &client,
+        "history-session",
+    )).getEventsDetailed()) {
         .success => |history_value| {
             var history = history_value;
             history.deinit();
