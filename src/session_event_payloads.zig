@@ -50,6 +50,14 @@ pub const AutomaticPermissionHandling = union(enum) {
     delivery_failed: anyerror,
 };
 
+pub const AutomaticInteractionHandling = union(enum) {
+    not_configured,
+    handled,
+    handler_failed: anyerror,
+    invalid_result,
+    delivery_failed: anyerror,
+};
+
 pub const PermissionRequestKind = enum {
     shell,
     write,

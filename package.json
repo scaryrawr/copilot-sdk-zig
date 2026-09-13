@@ -4,5 +4,8 @@
   "scripts": {
     "sync": "node scripts/sync.mjs",
     "test": "node --test scripts/*.test.mjs && node scripts/sync.mjs --check"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
   }
 }

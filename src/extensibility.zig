@@ -7,16 +7,19 @@ pub const CapabilityState = enum {
 };
 
 pub const Capability = enum {
+    elicitation,
     canvases,
     mcp_apps,
 };
 
 pub const CapabilitySet = struct {
+    elicitation: CapabilityState = .unknown,
     canvases: CapabilityState = .unknown,
     mcp_apps: CapabilityState = .unknown,
 
     pub fn state(self: CapabilitySet, capability: Capability) CapabilityState {
         return switch (capability) {
+            .elicitation => self.elicitation,
             .canvases => self.canvases,
             .mcp_apps => self.mcp_apps,
         };
