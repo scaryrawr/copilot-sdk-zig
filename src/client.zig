@@ -9501,13 +9501,16 @@ pub const Client = struct {
                     };
                     var results: [3]WaitResult = undefined;
                     var select = std.Io.Select(WaitResult).init(self.io, &results);
-                    defer select.cancelDiscard();
                     select.async(.ready, waitForEvent, .{ ready, self.io });
                     if (cancellation) |value|
                         select.async(.canceled, waitForEvent, .{ &value.event, self.io });
                     if (deadline) |value|
                         select.async(.timeout, waitForDeadline, .{ value, self.io });
-                    const result = try select.await();
+                    const result = select.await() catch |err| {
+                        select.cancelDiscard();
+                        return err;
+                    };
+                    select.cancelDiscard();
                     switch (try log.inspect(token)) {
                         .event => |event| return event,
                         .overflow => return error.EventLogOverflow,
@@ -10052,19 +10055,21 @@ pub const Session = struct {
                     };
                     var results: [3]WaitResult = undefined;
                     var select = std.Io.Select(WaitResult).init(self.client.io, &results);
-                    defer select.cancelDiscard();
                     select.async(.ready, waitForEvent, .{ ready, self.client.io });
                     if (wait_options.cancellation) |cancellation|
                         select.async(.canceled, waitForEvent, .{ &cancellation.event, self.client.io });
                     if (deadline) |value|
                         select.async(.timeout, waitForDeadline, .{ value, self.client.io });
-                    const selected = select.await() catch |err|
+                    const selected = select.await() catch |err| {
+                        select.cancelDiscard();
                         return .{ .failure = try policyFailure(
                             failure_policy,
                             err,
                             recordClientIo,
                             .{ self.client.allocator, .read, err },
                         ) };
+                    };
+                    select.cancelDiscard();
                     var latest = self.inspectTurnForPolicy(
                         failure_policy,
                         session_log,
