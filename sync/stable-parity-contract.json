@@ -1,0 +1,94 @@
+{
+  "publicSdkCommit": "f45c46fd1812f8bed5b4cbc250f47177c83068f0",
+  "protocolCommit": "39c777fe7bf893ba5a4f8b710feeb2172d1d40f9",
+  "lifecycle": {
+    "createOnly": [
+      "cloud"
+    ],
+    "createResumeJoin": [
+      "commands",
+      "toolSearch",
+      "askUserVariant",
+      "onElicitationRequest",
+      "githubMcpToolConfig",
+      "onExitPlanModeRequest",
+      "onAutoModeSwitchRequest",
+      "gitHubToken",
+      "gitHubTokenProvider",
+      "remoteSession",
+      "enableSessionTelemetry",
+      "enableFileChangeTracking",
+      "coauthorEnabled",
+      "manageScheduleEnabled",
+      "includeSubAgentStreamingEvents",
+      "featureFlags",
+      "expAssignments"
+    ],
+    "postLifecycleUpdate": [
+      "coauthorEnabled",
+      "manageScheduleEnabled"
+    ],
+    "joinOmissions": [
+      "extensionSdkPath"
+    ]
+  },
+  "callbacks": {
+    "commands": {
+      "event": "command.execute",
+      "responseMethod": "session.commands.handlePendingCommand"
+    },
+    "elicitation": {
+      "event": "elicitation.requested",
+      "responseMethod": "session.ui.handlePendingElicitation"
+    },
+    "exitPlanMode": {
+      "method": "exitPlanMode.request"
+    },
+    "autoModeSwitch": {
+      "method": "autoModeSwitch.request"
+    },
+    "gitHubToken": {
+      "method": "gitHubToken.getToken",
+      "reasons": [
+        "initial",
+        "refresh"
+      ],
+      "results": [
+        "token",
+        "cancelled"
+      ],
+      "minimumExpiresIn": 3601
+    }
+  },
+  "ui": {
+    "method": "session.ui.elicitation",
+    "capability": "capabilities.ui.elicitation",
+    "helpers": [
+      "confirm",
+      "select",
+      "input"
+    ]
+  },
+  "enums": {
+    "askUserVariant": [
+      "legacy",
+      "elicitation"
+    ],
+    "remoteSession": [
+      "off",
+      "export",
+      "on"
+    ],
+    "autoModeSwitch": [
+      "yes",
+      "yes_always",
+      "no"
+    ],
+    "exitPlanMode": [
+      "exit_only",
+      "interactive",
+      "autopilot",
+      "autopilot_fleet"
+    ]
+  }
+}

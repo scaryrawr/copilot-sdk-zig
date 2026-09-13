@@ -427,6 +427,76 @@ The SDK sends `requestUserInput: true` for session creation and resumption
 when this handler is configured, then synchronously dispatches inbound
 `userInput.request` RPCs to it.
 
+## Commands, elicitation, and session UI
+
+Register slash commands with `commands`. Command handlers run when
+`command.execute` is read through `Session.nextEvent`, and the SDK resolves the
+pending command automatically:
+
+```zig
+const session = try client.createSession(.{
+    .commands = &.{.{
+        .name = "deploy",
+        .description = "Deploy the current project",
+        .handler = deployCommand,
+    }},
+    .tool_search = .{ .enabled = true, .defer_threshold = 20 },
+});
+```
+
+Set `ask_user_variant` to `.legacy` or `.elicitation`. The structured
+elicitation handler receives the requested schema as JSON and must return owned
+`content_json` when it accepts:
+
+```zig
+const session = try client.createSession(.{
+    .ask_user_variant = .elicitation,
+    .on_elicitation_request = handleElicitation,
+    .on_exit_plan_mode_request = handleExitPlanMode,
+    .on_auto_mode_switch_request = handleAutoModeSwitch,
+});
+```
+
+When `session.capabilities().supports(.elicitation)` is true, `session.ui()`
+provides `elicitation`, `confirm`, `select`, and `input`. `select` and `input`
+return caller-owned strings that must be freed with the client allocator.
+
+## GitHub authentication and remote sessions
+
+Use either `git_hub_token` or `git_hub_token_provider`, never both. A token
+provider receives a typed `.initial` or `.refresh` reason and returns either
+`.cancelled` or an owned token. Token bytes and an optional token type must be
+allocated with the callback allocator; the SDK wipes and frees both after every
+outcome. `expires_in_seconds` must be at least 3601.
+
+```zig
+const session = try client.createSession(.{
+    .git_hub_token_provider = .{ .callback = acquireGitHubToken },
+    .github_mcp_tool_config = .{
+        .additional_toolsets = &.{"repos"},
+    },
+    .remote_session = .on,
+});
+```
+
+Cloud creation is create-only and uses a server-assigned session ID:
+
+```zig
+const session = try client.createSession(.{
+    .cloud = .{ .repository = .{
+        .owner = "octo-org",
+        .name = "project",
+        .branch = "main",
+    } },
+});
+```
+
+Session creation, resumption, and extension join also support
+`enable_session_telemetry`, `enable_file_change_tracking`,
+`include_subagent_streaming_events`, `feature_flags`, and `exp_assignments`.
+`coauthor_enabled` and `manage_schedule_enabled` are applied through the
+post-lifecycle session options update.
+
 ## Handle permission requests automatically
 
 Set `CreateSessionConfig.on_permission_request` to handle `permission.requested`

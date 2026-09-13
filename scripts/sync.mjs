@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import {
   checkSchemaSnapshot,
   schemaContract,
@@ -29,9 +30,11 @@ const zigSessionSource = readFileSync(join(root, "src", "session.zig"), "utf8");
 const compatibilityPath = join(root, "sync", "compatibility.json");
 const publicRpcSurfacePath = join(root, "sync", "public-rpc-surface.json");
 const extensibilityContractPath = join(root, "sync", "extensibility-contract.json");
+const stableParityContractPath = join(root, "sync", "stable-parity-contract.json");
 const workDirectory = join(root, ".sync-work");
 const cliReleaseRepository = "github/copilot-cli";
 const cliReleasePlatform = "linux-x64";
+const publicSdkCommit = "f45c46fd1812f8bed5b4cbc250f47177c83068f0";
 
 function parseJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
@@ -207,23 +210,213 @@ function sourceSection(source, startMarker, endMarker, owner) {
   return source.slice(start, end);
 }
 
-function requireSourceFragments(source, fragments, owner) {
+function parseTypeScript(source, owner) {
+  const parsed = ts.createSourceFile(
+    `${owner}.ts`,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  assert(parsed.parseDiagnostics.length === 0, `upstream ${owner} has TypeScript parse errors`);
+  return parsed;
+}
+
+function nodeName(node, sourceFile) {
+  if (!node.name) return null;
+  if (ts.isIdentifier(node.name) || ts.isStringLiteralLike(node.name)) return node.name.text;
+  return node.name.getText(sourceFile);
+}
+
+function findNamedNode(source, name, predicate, owner) {
+  const sourceFile = parseTypeScript(source, owner);
+  let found = null;
+  function visit(node) {
+    if (found === null && predicate(node) && nodeName(node, sourceFile) === name) found = node;
+    if (found === null) ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  assert(found !== null, `upstream ${owner} declaration is missing: ${name}`);
+  return { node: found, sourceFile };
+}
+
+function findInterface(source, name, owner = name) {
+  return findNamedNode(source, name, ts.isInterfaceDeclaration, owner);
+}
+
+function findTypeAlias(source, name, owner = name) {
+  return findNamedNode(source, name, ts.isTypeAliasDeclaration, owner);
+}
+
+function findFunctionLike(source, name, owner = name) {
+  return findNamedNode(
+    source,
+    name,
+    (node) => ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node),
+    owner,
+  );
+}
+
+function findConstructor(source, owner) {
+  const sourceFile = parseTypeScript(source, owner);
+  let found = null;
+  function visit(node) {
+    if (found === null && ts.isConstructorDeclaration(node)) found = node;
+    if (found === null) ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  assert(found !== null, `upstream ${owner} constructor is missing`);
+  return { node: found, sourceFile };
+}
+
+function compactNode(node, sourceFile) {
+  return node.getText(sourceFile).replace(/\s+/g, "").replace(/;$/, "");
+}
+
+function requireAstNodes(root, sourceFile, fragments, owner) {
+  const available = new Set();
+  function visit(node) {
+    available.add(compactNode(node, sourceFile));
+    ts.forEachChild(node, visit);
+  }
+  visit(root);
   for (const fragment of fragments) {
-    assert(source.includes(fragment), `upstream ${owner} declaration is missing: ${fragment}`);
+    assert(
+      available.has(fragment.replace(/\s+/g, "").replace(/;$/, "")),
+      `upstream ${owner} AST is missing: ${fragment}`,
+    );
   }
 }
 
-function normalizedPropertySignatures(source) {
-  const declarations = source
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/\/\/.*$/gm, "");
-  return Object.fromEntries(
-    [...declarations.matchAll(/^\s*(?:readonly\s+)?(\w+)(\?)?\s*:\s*([^;]+);/gm)]
-      .map((match) => [
-        match[1],
-        `${match[2] === "?" ? "optional" : "required"}:${match[3].replace(/\s+/g, "")}`,
-      ]),
-  );
+function requireStringLiterals(root, values, owner) {
+  const literals = new Set();
+  function visit(node) {
+    if (ts.isStringLiteralLike(node)) literals.add(node.text);
+    ts.forEachChild(node, visit);
+  }
+  visit(root);
+  for (const value of values) {
+    assert(literals.has(value), `upstream ${owner} string literal is missing: ${value}`);
+  }
+}
+
+function requireRegisteredStringArguments(root, sourceFile, values, owner) {
+  const registered = new Set();
+  function visit(node) {
+    if (ts.isCallExpression(node) && node.arguments.length > 0) {
+      const first = node.arguments[0];
+      if (ts.isStringLiteralLike(first)) registered.add(first.text);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(root);
+  for (const value of values) {
+    assert(registered.has(value), `upstream ${owner} registration is missing: ${value}`);
+  }
+}
+
+function requireCalls(root, sourceFile, callees, owner) {
+  const called = new Set();
+  function visit(node) {
+    if (ts.isCallExpression(node)) called.add(compactNode(node.expression, sourceFile));
+    ts.forEachChild(node, visit);
+  }
+  visit(root);
+  for (const callee of callees) {
+    assert(called.has(callee), `upstream ${owner} call is missing: ${callee}`);
+  }
+}
+
+function requireObjectAssignment(root, sourceFile, target, propertyName, callee, owner) {
+  let matched = false;
+  function visit(node) {
+    if (
+      !matched &&
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      compactNode(node.left, sourceFile) === target &&
+      ts.isObjectLiteralExpression(node.right)
+    ) {
+      const property = node.right.properties.find(
+        (candidate) =>
+          ts.isPropertyAssignment(candidate) &&
+          nodeName(candidate, sourceFile) === propertyName,
+      );
+      if (property && ts.isPropertyAssignment(property)) {
+        requireCalls(property.initializer, sourceFile, [callee], owner);
+        matched = true;
+      }
+    }
+    if (!matched) ts.forEachChild(node, visit);
+  }
+  visit(root);
+  assert(matched, `upstream ${owner} object assignment changed: ${target}.${propertyName}`);
+}
+
+function findSendRequestObject(root, sourceFile, method, owner) {
+  let found = null;
+  function visit(node) {
+    if (found === null && ts.isCallExpression(node) && node.arguments.length >= 2) {
+      const expression = node.expression;
+      const calledSendRequest =
+        (ts.isIdentifier(expression) && expression.text === "sendRequest") ||
+        (ts.isPropertyAccessExpression(expression) && expression.name.text === "sendRequest");
+      const methodArgument = node.arguments[0];
+      const paramsArgument = node.arguments[1];
+      if (
+        calledSendRequest &&
+        ts.isStringLiteralLike(methodArgument) &&
+        methodArgument.text === method &&
+        ts.isObjectLiteralExpression(paramsArgument)
+      ) {
+        found = paramsArgument;
+      }
+    }
+    if (found === null) ts.forEachChild(node, visit);
+  }
+  visit(root);
+  assert(found !== null, `upstream ${owner} does not call ${method} with an object request`);
+  return found;
+}
+
+function requestProperties(source, functionName, method, owner) {
+  const { node, sourceFile } = findFunctionLike(source, functionName, owner);
+  const object = findSendRequestObject(node, sourceFile, method, owner);
+  const properties = {};
+  const spreads = [];
+  for (const property of object.properties) {
+    if (ts.isSpreadAssignment(property)) {
+      spreads.push(`...${compactNode(property.expression, sourceFile)}`);
+      continue;
+    }
+    if (ts.isPropertyAssignment(property)) {
+      properties[nodeName(property, sourceFile)] = compactNode(property.initializer, sourceFile);
+      continue;
+    }
+    if (ts.isShorthandPropertyAssignment(property)) {
+      properties[property.name.text] = property.name.text;
+      continue;
+    }
+    throw new Error(`upstream ${owner} has an unsupported request property: ${property.getText(sourceFile)}`);
+  }
+  return { properties, spreads };
+}
+
+function propertySignatures(members, sourceFile, owner) {
+  const result = {};
+  for (const member of members) {
+    assert(ts.isPropertySignature(member), `upstream ${owner} has a non-property member`);
+    const name = nodeName(member, sourceFile);
+    assert(name !== null && member.type, `upstream ${owner} has an unsupported property`);
+    result[name] =
+      `${member.questionToken ? "optional" : "required"}:${compactNode(member.type, sourceFile)}`;
+  }
+  return result;
+}
+
+function interfaceProperties(source, name, owner = name) {
+  const { node, sourceFile } = findInterface(source, name, owner);
+  return propertySignatures(node.members, sourceFile, owner);
 }
 
 function requireExactPropertySignatures(actual, expected, label) {
@@ -280,27 +473,47 @@ const expectedCustomAgentSourceContract = {
 };
 
 function interfaceBase(source, name) {
-  const match = source.match(new RegExp(`export interface ${name} extends (\\w+) \\{`));
-  assert(match, `upstream ${name} inheritance changed`);
-  return match[1];
+  const { node, sourceFile } = findInterface(source, name);
+  const clauses = node.heritageClauses ?? [];
+  const bases = clauses
+    .filter((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword)
+    .flatMap((clause) => clause.types.map((type) => compactNode(type.expression, sourceFile)));
+  assert(bases.length === 1, `upstream ${name} inheritance changed`);
+  return bases[0];
 }
 
 function omitIntersection(source, name) {
-  const match = source.match(
-    new RegExp(`export type ${name} = Omit<\\s*(\\w+)\\s*,([\\s\\S]*?)>\\s*&\\s*\\{([\\s\\S]*?)\\n\\};`),
+  const { node, sourceFile } = findTypeAlias(source, name);
+  assert(ts.isIntersectionTypeNode(node.type), `upstream ${name} shape changed`);
+  const omit = node.type.types.find(
+    (type) =>
+      ts.isTypeReferenceNode(type) &&
+      ts.isIdentifier(type.typeName) &&
+      type.typeName.text === "Omit",
   );
-  assert(match, `upstream ${name} shape changed`);
+  const additions = node.type.types.find(ts.isTypeLiteralNode);
+  assert(omit?.typeArguments?.length === 2 && additions, `upstream ${name} shape changed`);
+  const base = omit.typeArguments[0];
+  const excluded = omit.typeArguments[1];
+  assert(ts.isTypeReferenceNode(base), `upstream ${name} Omit base changed`);
+  const excludedTypes = ts.isUnionTypeNode(excluded) ? excluded.types : [excluded];
   return {
-    base: match[1],
-    excluded: [...match[2].matchAll(/"([^"]+)"/g)].map((item) => item[1]),
-    properties: normalizedPropertySignatures(match[3]),
+    base: compactNode(base.typeName, sourceFile),
+    excluded: excludedTypes.map((type) => {
+      assert(ts.isLiteralTypeNode(type) && ts.isStringLiteralLike(type.literal), `upstream ${name} Omit exclusions changed`);
+      return type.literal.text;
+    }),
+    properties: propertySignatures(additions.members, sourceFile, name),
   };
 }
 
 function stringUnionValues(source, name) {
-  const match = source.match(new RegExp(`export type ${name}\\s*=\\s*([^;]+);`));
-  assert(match, `upstream ${name} declaration changed`);
-  return [...match[1].matchAll(/"([^"]+)"/g)].map((item) => item[1]);
+  const { node } = findTypeAlias(source, name);
+  const types = ts.isUnionTypeNode(node.type) ? node.type.types : [node.type];
+  return types.map((type) => {
+    assert(ts.isLiteralTypeNode(type) && ts.isStringLiteralLike(type.literal), `upstream ${name} values changed`);
+    return type.literal.text;
+  });
 }
 
 function zigEnumValues(source, name) {
@@ -320,26 +533,14 @@ function verifyCustomAgentSourceContract(
   zigSessionSource,
 ) {
   const expected = expectedCustomAgentSourceContract;
-  const customAgent = sourceSection(
-    typesSource,
-    "export interface CustomAgentConfig {",
-    "export interface DefaultAgentConfig {",
-    "CustomAgentConfig",
-  );
   requireExactPropertySignatures(
-    normalizedPropertySignatures(customAgent),
+    interfaceProperties(typesSource, "CustomAgentConfig"),
     expected.customAgent,
     "CustomAgentConfig",
   );
 
-  const defaultAgent = sourceSection(
-    typesSource,
-    "export interface DefaultAgentConfig {",
-    "export interface InfiniteSessionConfig {",
-    "DefaultAgentConfig",
-  );
   requireExactPropertySignatures(
-    normalizedPropertySignatures(defaultAgent),
+    interfaceProperties(typesSource, "DefaultAgentConfig"),
     expected.defaultAgent,
     "DefaultAgentConfig",
   );
@@ -354,13 +555,7 @@ function verifyCustomAgentSourceContract(
     "Zig ReasoningEffort values",
   );
 
-  const base = sourceSection(
-    typesSource,
-    "export interface SessionConfigBase {",
-    "export interface SessionConfig extends SessionConfigBase {",
-    "SessionConfigBase",
-  );
-  const baseProperties = normalizedPropertySignatures(base);
+  const baseProperties = interfaceProperties(typesSource, "SessionConfigBase");
   for (const [name, signature] of Object.entries(expected.lifecycle.base)) {
     assert(baseProperties[name] === signature, `SessionConfigBase.${name} changed`);
   }
@@ -372,13 +567,7 @@ function verifyCustomAgentSourceContract(
     interfaceBase(typesSource, "ResumeSessionConfig") === expected.lifecycle.resumeExtends,
     "upstream ResumeSessionConfig inheritance changed",
   );
-  const join = sourceSection(
-    extensionSource,
-    "export type JoinSessionConfig = Omit<",
-    "export async function joinSession",
-    "JoinSessionConfig",
-  );
-  const joinShape = omitIntersection(join, "JoinSessionConfig");
+  const joinShape = omitIntersection(extensionSource, "JoinSessionConfig");
   assert(joinShape.base === expected.lifecycle.join.base, "JoinSessionConfig base changed");
   requireExactStrings(
     joinShape.excluded,
@@ -391,14 +580,13 @@ function verifyCustomAgentSourceContract(
     "JoinSessionConfig",
   );
 
-  const customAgentLowering = sourceSection(
+  const customAgentLowering = findFunctionLike(
     clientSource,
-    "function toWireCustomAgents(",
-    "function clientInfoToWire(",
     "toWireCustomAgents",
   );
-  requireSourceFragments(
-    customAgentLowering,
+  requireAstNodes(
+    customAgentLowering.node,
+    customAgentLowering.sourceFile,
     [
       "if (!agents) return undefined",
       "if (!agent.mcpServers) return agent",
@@ -406,60 +594,29 @@ function verifyCustomAgentSourceContract(
     ],
     "toWireCustomAgents",
   );
-  const create = sourceSection(
-    clientSource,
-    "    async createSession(",
-    "    async resumeSession(",
-    "createSession",
-  );
-  const resume = sourceSection(
-    clientSource,
-    "    private async resumeSessionInternal(",
-    "    async ping(",
-    "resumeSessionInternal",
-  );
-  for (const [owner, source] of [
-    ["createSession", create],
-    ["resumeSessionInternal", resume],
+  for (const [owner, method] of [
+    ["createSession", "session.create"],
+    ["resumeSessionInternal", "session.resume"],
   ]) {
-    requireSourceFragments(
-      source,
-      Object.entries(expected.lifecycle.lowering)
-        .map(([name, value]) => `${name}: ${value}`),
-      owner,
-    );
+    const request = requestProperties(clientSource, owner, method, owner);
+    for (const [name, value] of Object.entries(expected.lifecycle.lowering)) {
+      assert(
+        request.properties[name] === value.replace(/\s+/g, ""),
+        `upstream ${owner} ${name} lowering changed`,
+      );
+    }
   }
 }
 
 function verifyLifecycleContract(contract, clientSource, typesSource, extensionSource) {
-  const base = sourceSection(
-    typesSource,
-    "export interface SessionConfigBase {",
-    "export interface SessionConfig extends SessionConfigBase {",
-    "SessionConfigBase",
-  );
-  const create = sourceSection(
-    typesSource,
-    "export interface SessionConfig extends SessionConfigBase {",
-    "export interface ResumeSessionConfig extends SessionConfigBase {",
-    "SessionConfig",
-  );
-  const resume = sourceSection(
-    typesSource,
-    "export interface ResumeSessionConfig extends SessionConfigBase {",
-    "export interface ExtensionJoinOptions {",
-    "ResumeSessionConfig",
-  );
-  const join = sourceSection(
-    extensionSource,
-    "export type JoinSessionConfig = Omit<",
-    "export async function joinSession",
-    "JoinSessionConfig",
-  );
-  const extensionResume = sourceSection(
+  const baseProperties = interfaceProperties(typesSource, "SessionConfigBase");
+  const createProperties = interfaceProperties(typesSource, "SessionConfig");
+  const resumeProperties = interfaceProperties(typesSource, "ResumeSessionConfig");
+  const joinShape = omitIntersection(extensionSource, "JoinSessionConfig");
+  const extensionResume = requestProperties(
     clientSource,
-    "    private async resumeSessionInternal(",
-    "    async ping(",
+    "resumeSessionInternal",
+    "session.resume",
     "resumeSessionInternal",
   );
 
@@ -487,67 +644,82 @@ function verifyLifecycleContract(contract, clientSource, typesSource, extensionS
     disableResume: "suppressResumeEvent?: boolean",
     continuePendingWork: "continuePendingWork?: boolean",
   };
-  const assertFieldsOwnedBy = (fields, declarations, source, owner) => {
+  const assertFieldsOwnedBy = (fields, declarations, properties, owner) => {
     for (const field of fields) {
       const declaration = declarations[field];
       assert(declaration, `no upstream ${owner} declaration mapping for lifecycle field: ${field}`);
-      requireSourceFragments(source, [declaration], owner);
+      const [name, type] = declaration.split("?: ");
+      assert(
+        properties[name] === `optional:${type.replace(/\s+/g, "")}`,
+        `upstream ${owner}.${name} changed or moved`,
+      );
     }
   };
 
-  requireSourceFragments(base, ["onMcpAuthRequest?: McpAuthHandler"], "SessionConfigBase");
-  assertFieldsOwnedBy(contract.lifecycle.create.fields, commonDeclarations, base, "SessionConfigBase");
-  assert(create.startsWith("export interface SessionConfig extends SessionConfigBase {"), "upstream SessionConfig no longer extends SessionConfigBase");
+  assert(
+    baseProperties.onMcpAuthRequest === "optional:McpAuthHandler",
+    "upstream SessionConfigBase.onMcpAuthRequest changed or moved",
+  );
+  assertFieldsOwnedBy(
+    contract.lifecycle.create.fields,
+    commonDeclarations,
+    baseProperties,
+    "SessionConfigBase",
+  );
+  assert(interfaceBase(typesSource, "SessionConfig") === "SessionConfigBase", "upstream SessionConfig no longer extends SessionConfigBase");
   for (const field of contract.lifecycle.resume.fields) {
     if (commonDeclarations[field]) {
-      requireSourceFragments(base, [commonDeclarations[field]], "SessionConfigBase");
+      assertFieldsOwnedBy([field], commonDeclarations, baseProperties, "SessionConfigBase");
     } else {
-      assertFieldsOwnedBy([field], resumeDeclarations, resume, "ResumeSessionConfig");
+      assertFieldsOwnedBy([field], resumeDeclarations, resumeProperties, "ResumeSessionConfig");
     }
   }
-  assert(resume.startsWith("export interface ResumeSessionConfig extends SessionConfigBase {"), "upstream ResumeSessionConfig no longer extends SessionConfigBase");
+  assert(interfaceBase(typesSource, "ResumeSessionConfig") === "SessionConfigBase", "upstream ResumeSessionConfig no longer extends SessionConfigBase");
 
   assertFieldsOwnedBy(
     contract.lifecycle.extensionJoin.fields,
     { requestedEnvironmentVariables: "requestedEnvironmentVariables?: string[]" },
-    join,
+    joinShape.properties,
     "JoinSessionConfig",
   );
-  assertFieldsOwnedBy(
-    contract.lifecycle.extensionJoin.responseFields,
-    { grantedEnvironmentVariables: "grantedEnvironmentVariables?: Record<string, string>" },
-    extensionResume,
+  assert(
+    extensionResume.spreads.includes(
+      "...(extensionOptions?.requestedEnvironmentVariables?{requestedEnvironmentVariables:extensionOptions.requestedEnvironmentVariables,}:{})",
+    ),
+    "upstream resumeSessionInternal requestedEnvironmentVariables lowering changed",
+  );
+  const resumeFunction = findFunctionLike(
+    clientSource,
+    "resumeSessionInternal",
+    "resumeSessionInternal response",
+  );
+  requireAstNodes(
+    resumeFunction.node,
+    resumeFunction.sourceFile,
+    ["grantedEnvironmentVariables?: Record<string, string>"],
     "resumeSessionInternal response",
   );
   assertFieldsOwnedBy(
     contract.lifecycle.extensionJoin.redeclared,
     { onPermissionRequest: "onPermissionRequest?: PermissionHandler" },
-    join,
+    joinShape.properties,
     "JoinSessionConfig",
   );
   for (const field of contract.lifecycle.extensionJoin.omitted) {
     assert(field === "extensionSdkPath", `no upstream JoinSessionConfig omission check for: ${field}`);
-    assert(
-      /Omit<\s*ResumeSessionConfig,\s*"onPermissionRequest"\s*\|\s*"extensionSdkPath"\s*>/.test(join),
-      "upstream JoinSessionConfig no longer omits extensionSdkPath",
+    requireExactStrings(
+      joinShape.excluded,
+      ["onPermissionRequest", "extensionSdkPath"],
+      "upstream JoinSessionConfig omissions",
     );
-    assert(
-      !/extensionSdkPath\s*\?:/.test(join),
-      "upstream JoinSessionConfig directly declares extensionSdkPath",
-    );
+    assert(joinShape.properties.extensionSdkPath === undefined, "upstream JoinSessionConfig directly declares extensionSdkPath");
   }
 }
 
 function verifyHookContract(contract, typesSource) {
-  const hooks = sourceSection(
-    typesSource,
-    "export interface SessionHooks {",
-    "// ============================================================================\n// MCP Server Configuration Types",
-    "SessionHooks",
-  );
   const declarations = Object.fromEntries(
-    [...hooks.matchAll(/^\s+(\w+)\?:\s+(\w+);$/gm)]
-      .map((match) => [match[1], match[2]]),
+    Object.entries(interfaceProperties(typesSource, "SessionHooks"))
+      .map(([name, signature]) => [name, signature.replace("optional:", "")]),
   );
   const expected = contract.callbacks.hooks.handlers;
   requireExactStrings(
@@ -569,37 +741,23 @@ function verifyExtensibilitySourceContract(
   typesSource,
   extensionSource,
 ) {
-  const clientOptions = sourceSection(
-    typesSource,
-    "export interface CopilotClientOptions {",
-    'export type ToolResultType = "success"',
-    "CopilotClientOptions",
+  assert(
+    interfaceProperties(typesSource, "CopilotClientOptions").builtinPluginDirectories ===
+      "optional:readonlystring[]",
+    "upstream CopilotClientOptions.builtinPluginDirectories changed",
   );
-  const clientConstructor = sourceSection(
-    clientSource,
-    "    constructor(options: CopilotClientOptions = {}) {",
-    "    private connectionExtraArgs: string[] = [];",
-    "CopilotClient constructor",
-  );
-  const clientStartup = sourceSection(
-    clientSource,
-    "    private async doStart(): Promise<void> {",
-    "    async stop(): Promise<Error[]> {",
-    "CopilotClient startup",
-  );
-  requireSourceFragments(
-    clientOptions,
-    ["builtinPluginDirectories?: readonly string[]"],
-    "CopilotClientOptions",
-  );
-  requireSourceFragments(
-    clientConstructor,
+  const clientConstructor = findConstructor(clientSource, "CopilotClient");
+  requireAstNodes(
+    clientConstructor.node,
+    clientConstructor.sourceFile,
     ["this.builtinPluginDirectories = [...options.builtinPluginDirectories]"],
     "CopilotClient constructor",
   );
-  requireSourceFragments(
-    clientStartup,
-    ['sendRequest("plugins.builtin.set"'],
+  const clientStartup = findFunctionLike(clientSource, "doStart", "CopilotClient startup");
+  findSendRequestObject(
+    clientStartup.node,
+    clientStartup.sourceFile,
+    "plugins.builtin.set",
     "CopilotClient startup",
   );
   verifyLifecycleContract(contract, clientSource, typesSource, extensionSource);
@@ -610,6 +768,488 @@ function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, e
   const contract = expectedExtensibilityContract(upstreamCommit);
   verifyExtensibilitySourceContract(contract, clientSource, typesSource, extensionSource);
   writeFileSync(extensibilityContractPath, `${JSON.stringify(contract, null, 2)}\n`);
+}
+
+function expectedStableParityContract(protocolCommit) {
+  return {
+    publicSdkCommit,
+    protocolCommit,
+    lifecycle: {
+      createOnly: ["cloud"],
+      createResumeJoin: [
+        "commands",
+        "toolSearch",
+        "askUserVariant",
+        "onElicitationRequest",
+        "githubMcpToolConfig",
+        "onExitPlanModeRequest",
+        "onAutoModeSwitchRequest",
+        "gitHubToken",
+        "gitHubTokenProvider",
+        "remoteSession",
+        "enableSessionTelemetry",
+        "enableFileChangeTracking",
+        "coauthorEnabled",
+        "manageScheduleEnabled",
+        "includeSubAgentStreamingEvents",
+        "featureFlags",
+        "expAssignments",
+      ],
+      postLifecycleUpdate: ["coauthorEnabled", "manageScheduleEnabled"],
+      joinOmissions: ["extensionSdkPath"],
+    },
+    callbacks: {
+      commands: {
+        event: "command.execute",
+        responseMethod: "session.commands.handlePendingCommand",
+      },
+      elicitation: {
+        event: "elicitation.requested",
+        responseMethod: "session.ui.handlePendingElicitation",
+      },
+      exitPlanMode: { method: "exitPlanMode.request" },
+      autoModeSwitch: { method: "autoModeSwitch.request" },
+      gitHubToken: {
+        method: "gitHubToken.getToken",
+        reasons: ["initial", "refresh"],
+        results: ["token", "cancelled"],
+        minimumExpiresIn: 3601,
+      },
+    },
+    ui: {
+      method: "session.ui.elicitation",
+      capability: "capabilities.ui.elicitation",
+      helpers: ["confirm", "select", "input"],
+    },
+    enums: {
+      askUserVariant: ["legacy", "elicitation"],
+      remoteSession: ["off", "export", "on"],
+      autoModeSwitch: ["yes", "yes_always", "no"],
+      exitPlanMode: ["exit_only", "interactive", "autopilot", "autopilot_fleet"],
+    },
+  };
+}
+
+function verifyStableParitySourceContract(
+  authority,
+  clientSource,
+  sessionSource,
+  typesSource,
+  extensionSource,
+) {
+  const contract = expectedStableParityContract(authority.commit);
+  const baseProperties = interfaceProperties(
+    typesSource,
+    "SessionConfigBase",
+    `${authority.name} SessionConfigBase`,
+  );
+  const createProperties = interfaceProperties(
+    typesSource,
+    "SessionConfig",
+    `${authority.name} SessionConfig`,
+  );
+  const resumeProperties = interfaceProperties(
+    typesSource,
+    "ResumeSessionConfig",
+    `${authority.name} ResumeSessionConfig`,
+  );
+  const stableBaseProperties = {
+    commands: "optional:CommandDefinition[]",
+    toolSearch: "optional:ToolSearchConfig",
+    askUserVariant: "optional:AskUserVariant",
+    onElicitationRequest: "optional:ElicitationHandler",
+    githubMcpToolConfig: "optional:GitHubMcpToolConfig",
+    onExitPlanModeRequest: "optional:ExitPlanModeHandler",
+    onAutoModeSwitchRequest: "optional:AutoModeSwitchHandler",
+    gitHubToken: "optional:string",
+    gitHubTokenProvider: "optional:GitHubTokenProvider",
+    remoteSession: "optional:RemoteSessionMode",
+    enableSessionTelemetry: "optional:boolean",
+    enableFileChangeTracking: "optional:boolean",
+    coauthorEnabled: "optional:boolean",
+    manageScheduleEnabled: "optional:boolean",
+    includeSubAgentStreamingEvents: "optional:boolean",
+    featureFlags: "optional:Record<string,boolean>",
+    expAssignments: "optional:CopilotExpAssignmentResponse",
+  };
+  requireExactStrings(
+    contract.lifecycle.createResumeJoin,
+    Object.keys(stableBaseProperties),
+    `${authority.name} stable SessionConfigBase inventory`,
+  );
+  for (const [field, signature] of Object.entries(stableBaseProperties)) {
+    assert(
+      baseProperties[field] === signature,
+      `${authority.name} SessionConfigBase.${field} changed or moved`,
+    );
+    assert(
+      createProperties[field] === undefined,
+      `${authority.name} SessionConfig.${field} must be inherited, not redeclared`,
+    );
+    assert(
+      resumeProperties[field] === undefined,
+      `${authority.name} ResumeSessionConfig.${field} must be inherited, not redeclared`,
+    );
+  }
+  requireExactStrings(
+    contract.lifecycle.createOnly,
+    ["cloud"],
+    `${authority.name} create-only stable inventory`,
+  );
+  assert(
+    createProperties.cloud === "optional:CloudSessionOptions",
+    `${authority.name} SessionConfig.cloud changed or moved`,
+  );
+  assert(
+    baseProperties.cloud === undefined && resumeProperties.cloud === undefined,
+    `${authority.name} cloud must be owned only by SessionConfig`,
+  );
+  assert(
+    interfaceBase(typesSource, "SessionConfig") === "SessionConfigBase",
+    `${authority.name} SessionConfig inheritance changed`,
+  );
+  assert(
+    interfaceBase(typesSource, "ResumeSessionConfig") === "SessionConfigBase",
+    `${authority.name} ResumeSessionConfig inheritance changed`,
+  );
+  requireExactStrings(
+    stringUnionValues(typesSource, "AskUserVariant"),
+    contract.enums.askUserVariant,
+    `${authority.name} AskUserVariant values`,
+  );
+  const expFlagValueDeclaration = findTypeAlias(
+    typesSource,
+    "ExpFlagValue",
+    `${authority.name} ExpFlagValue`,
+  );
+  const expFlagValue = compactNode(
+    expFlagValueDeclaration.node.type,
+    expFlagValueDeclaration.sourceFile,
+  );
+  assert(
+    expFlagValue === "string|number|boolean|null",
+    `${authority.name} ExpFlagValue changed`,
+  );
+  requireExactPropertySignatures(
+    interfaceProperties(
+      typesSource,
+      "ExpConfigEntry",
+      `${authority.name} ExpConfigEntry`,
+    ),
+    {
+      Id: "required:string",
+      Parameters: "required:Record<string,ExpFlagValue>",
+    },
+    `${authority.name} ExpConfigEntry`,
+  );
+  requireExactPropertySignatures(
+    interfaceProperties(
+      typesSource,
+      "CopilotExpAssignmentResponse",
+      `${authority.name} CopilotExpAssignmentResponse`,
+    ),
+    {
+      Features: "required:string[]",
+      Flights: "required:Record<string,string>",
+      Configs: "required:ExpConfigEntry[]",
+      ParameterGroups: "optional:unknown",
+      FlightingVersion: "optional:number",
+      ImpressionId: "optional:string",
+      AssignmentContext: "required:string",
+    },
+    `${authority.name} CopilotExpAssignmentResponse`,
+  );
+
+  const joinShape = omitIntersection(extensionSource, "JoinSessionConfig");
+  assert(
+    joinShape.base === "ResumeSessionConfig",
+    `${authority.name} JoinSessionConfig base changed`,
+  );
+  requireExactStrings(
+    joinShape.excluded,
+    ["onPermissionRequest", "extensionSdkPath"],
+    `${authority.name} JoinSessionConfig exclusions`,
+  );
+  for (const field of Object.keys(stableBaseProperties)) {
+    assert(
+      joinShape.properties[field] === undefined,
+      `${authority.name} JoinSessionConfig.${field} must be inherited through ResumeSessionConfig`,
+    );
+  }
+  assert(
+    joinShape.properties.cloud === undefined,
+    `${authority.name} JoinSessionConfig must not acquire create-only cloud`,
+  );
+  const joinLowering = findFunctionLike(
+    extensionSource,
+    "joinSession",
+    `${authority.name} joinSession`,
+  );
+  requireAstNodes(joinLowering.node, joinLowering.sourceFile, [
+    "extensionSdkPath: _stripped",
+    "...rest",
+    "suppressResumeEvent: config.suppressResumeEvent ?? true",
+  ], `${authority.name} joinSession`);
+  requireCalls(
+    joinLowering.node,
+    joinLowering.sourceFile,
+    ["client.resumeSessionForExtension"],
+    `${authority.name} joinSession`,
+  );
+
+  const create = findFunctionLike(
+    clientSource,
+    "createSession",
+    `${authority.name} createSession`,
+  );
+  const resume = findFunctionLike(
+    clientSource,
+    "resumeSessionInternal",
+    `${authority.name} resumeSessionInternal`,
+  );
+  const commonLowering = {
+    toolSearch: "config.toolSearch",
+    commands:
+      'config.commands?.map((cmd)=>({name:cmd.name,description:cmd.description??"",}))',
+    enableSessionTelemetry: "config.enableSessionTelemetry",
+    enableFileChangeTracking: "config.enableFileChangeTracking",
+    requestElicitation: "!!config.onElicitationRequest",
+    askUserVariant: "config.askUserVariant",
+    requestExitPlanMode: "!!config.onExitPlanModeRequest",
+    requestAutoModeSwitch: "!!config.onAutoModeSwitchRequest",
+    includeSubAgentStreamingEvents: "config.includeSubAgentStreamingEvents??true",
+    gitHubToken: "config.gitHubToken",
+    gitHubTokenProviderRegistrationId: "gitHubTokenProviderRegistrationId",
+    remoteSession: "config.remoteSession",
+    featureFlags: "config.featureFlags",
+    expAssignments: "config.expAssignments",
+  };
+  const createRequest = requestProperties(
+    clientSource,
+    "createSession",
+    "session.create",
+    `${authority.name} createSession`,
+  );
+  const resumeRequest = requestProperties(
+    clientSource,
+    "resumeSessionInternal",
+    "session.resume",
+    `${authority.name} resumeSessionInternal`,
+  );
+  for (const [owner, request] of [
+    ["createSession", createRequest],
+    ["resumeSessionInternal", resumeRequest],
+  ]) {
+    for (const [field, expression] of Object.entries(commonLowering)) {
+      assert(
+        request.properties[field] === expression.replace(/\s+/g, ""),
+        `${authority.name} ${owner} ${field} lowering changed`,
+      );
+    }
+    assert(
+      request.spreads.includes(
+        "...(config.githubMcpToolConfig!=null?{githubMcpToolConfig:config.githubMcpToolConfig}:{})",
+      ),
+      `${authority.name} ${owner} githubMcpToolConfig lowering changed`,
+    );
+    const functionNode = owner === "createSession" ? create : resume;
+    const sessionVariable = owner === "createSession" ? "s" : "session";
+    requireAstNodes(functionNode.node, functionNode.sourceFile, [
+      `${sessionVariable}.registerCommands(config.commands)`,
+      `${sessionVariable}.registerElicitationHandler(config.onElicitationRequest)`,
+      `${sessionVariable}.registerExitPlanModeHandler(config.onExitPlanModeRequest)`,
+      `${sessionVariable}.registerAutoModeSwitchHandler(config.onAutoModeSwitchRequest)`,
+      "config.gitHubTokenProvider",
+      "await this.updateSessionOptionsForMode(session, config)",
+    ], `${authority.name} ${owner} callback setup`);
+  }
+  assert(
+    createRequest.properties.cloud === "config.cloud",
+    `${authority.name} createSession cloud lowering changed`,
+  );
+  requireAstNodes(create.node, create.sourceFile, [
+    "const gitHubTokenProviderRegistrationId = this.registerGitHubTokenProvider(config.gitHubTokenProvider, localSessionId);",
+    "this.commitGitHubTokenProvider(returnedSessionId, gitHubTokenProviderRegistrationId);",
+  ], `${authority.name} createSession GitHub token lifecycle`);
+  assert(
+    resumeRequest.properties.cloud === undefined,
+    `${authority.name} resumeSessionInternal must not lower create-only cloud`,
+  );
+  requireAstNodes(resume.node, resume.sourceFile, [
+    "const gitHubTokenProviderRegistrationId = this.registerGitHubTokenProvider(config.gitHubTokenProvider, sessionId);",
+    "this.commitGitHubTokenProvider(sessionId, gitHubTokenProviderRegistrationId);",
+  ], `${authority.name} resumeSessionInternal GitHub token lifecycle`);
+
+  const optionsUpdate = findFunctionLike(
+    clientSource,
+    "updateSessionOptionsForMode",
+    `${authority.name} updateSessionOptionsForMode`,
+  );
+  requireExactStrings(
+    contract.lifecycle.postLifecycleUpdate,
+    ["coauthorEnabled", "manageScheduleEnabled"],
+    `${authority.name} post-lifecycle option inventory`,
+  );
+  requireAstNodes(optionsUpdate.node, optionsUpdate.sourceFile, [
+    "patch.coauthorEnabled = config.coauthorEnabled ?? false",
+    "patch.manageScheduleEnabled = config.manageScheduleEnabled ?? false",
+    "patch.coauthorEnabled = config.coauthorEnabled",
+    "patch.manageScheduleEnabled = config.manageScheduleEnabled",
+    "await session.rpc.options.update(patch)",
+  ], `${authority.name} post-lifecycle option lowering`);
+  for (const field of contract.lifecycle.postLifecycleUpdate) {
+    assert(
+      createRequest.properties[field] === undefined &&
+        resumeRequest.properties[field] === undefined,
+      `${authority.name} ${field} must remain post-lifecycle only`,
+    );
+  }
+
+  const globalHandlers = findFunctionLike(
+    clientSource,
+    "setupClientGlobalHandlers",
+    `${authority.name} client-global callback setup`,
+  );
+  requireObjectAssignment(
+    globalHandlers.node,
+    globalHandlers.sourceFile,
+    "handlers.gitHubToken",
+    "getToken",
+    "this.acquireGitHubToken",
+    `${authority.name} client-global callback setup`,
+  );
+  const directCallbacks = findFunctionLike(
+    clientSource,
+    "attachConnectionHandlers",
+    `${authority.name} direct callback setup`,
+  );
+  requireAstNodes(directCallbacks.node, directCallbacks.sourceFile, [
+    "this.handleExitPlanModeRequest(params)",
+    "this.handleAutoModeSwitchRequest(params)",
+  ], `${authority.name} direct callback setup`);
+  requireRegisteredStringArguments(
+    directCallbacks.node,
+    directCallbacks.sourceFile,
+    ["exitPlanMode.request", "autoModeSwitch.request"],
+    `${authority.name} direct callback setup`,
+  );
+  const broadcastCallbacks = findFunctionLike(
+    sessionSource,
+    "_handleBroadcastEvent",
+    `${authority.name} session event callback setup`,
+  );
+  requireAstNodes(broadcastCallbacks.node, broadcastCallbacks.sourceFile, [
+    "this._executeCommandAndRespond(requestId, commandName, command, args)",
+  ], `${authority.name} session event callback setup`);
+  requireStringLiterals(
+    broadcastCallbacks.node,
+    ["command.execute", "elicitation.requested"],
+    `${authority.name} session event callback setup`,
+  );
+  const commandResponder = findFunctionLike(
+    sessionSource,
+    "_executeCommandAndRespond",
+    `${authority.name} command response`,
+  );
+  requireCalls(
+    commandResponder.node,
+    commandResponder.sourceFile,
+    ["this.rpc.commands.handlePendingCommand"],
+    `${authority.name} command response`,
+  );
+  const interactionCallbacks = findFunctionLike(
+    sessionSource,
+    "registerCommands",
+    `${authority.name} session interaction callbacks`,
+  );
+  const elicitationHandler = findFunctionLike(
+    sessionSource,
+    "registerElicitationHandler",
+    `${authority.name} elicitation callback`,
+  );
+  const exitPlanHandler = findFunctionLike(
+    sessionSource,
+    "registerExitPlanModeHandler",
+    `${authority.name} exit-plan callback`,
+  );
+  const autoModeHandler = findFunctionLike(
+    sessionSource,
+    "registerAutoModeSwitchHandler",
+    `${authority.name} auto-mode callback`,
+  );
+  requireAstNodes(interactionCallbacks.node, interactionCallbacks.sourceFile, [
+    "this.commandHandlers.set(cmd.name, cmd.handler)",
+  ], `${authority.name} command callbacks`);
+  requireAstNodes(elicitationHandler.node, elicitationHandler.sourceFile, [
+    "this.elicitationHandler = handler",
+  ], `${authority.name} elicitation callback`);
+  const elicitationResponder = findFunctionLike(
+    sessionSource,
+    "_handleElicitationRequest",
+    `${authority.name} elicitation response`,
+  );
+  requireCalls(
+    elicitationResponder.node,
+    elicitationResponder.sourceFile,
+    ["this.rpc.ui.handlePendingElicitation"],
+    `${authority.name} elicitation response`,
+  );
+  requireAstNodes(exitPlanHandler.node, exitPlanHandler.sourceFile, [
+    "this.exitPlanModeHandler = handler",
+  ], `${authority.name} exit-plan callback`);
+  requireAstNodes(autoModeHandler.node, autoModeHandler.sourceFile, [
+    "this.autoModeSwitchHandler = handler",
+  ], `${authority.name} auto-mode callback`);
+  const assertElicitation = findFunctionLike(
+    sessionSource,
+    "assertElicitation",
+    `${authority.name} session UI helpers`,
+  );
+  requireAstNodes(assertElicitation.node, assertElicitation.sourceFile, [
+    "this._capabilities.ui?.elicitation",
+  ], `${authority.name} session UI capability`);
+  for (const helper of ["_elicitation", "_confirm", "_select", "_input"]) {
+    const method = findFunctionLike(sessionSource, helper, `${authority.name} ${helper}`);
+    requireAstNodes(method.node, method.sourceFile, [
+      "this.rpc.ui.elicitation",
+    ], `${authority.name} ${helper}`);
+  }
+}
+
+function verifyStableParitySchema(schema, eventsSchema) {
+  const methods = collectPropertyValues(schema, "rpcMethod");
+  for (const method of [
+    "gitHubToken.getToken",
+    "session.commands.handlePendingCommand",
+    "session.ui.elicitation",
+    "session.ui.handlePendingElicitation",
+    "session.options.update",
+  ]) {
+    assert(methods.has(method), `stable parity RPC method is missing: ${method}`);
+  }
+  requireExactStrings(
+    stringEnum(schema, "GitHubTokenAcquireReason"),
+    ["initial", "refresh"],
+    "GitHubTokenAcquireReason",
+  );
+  const tokenResult = schema.definitions?.GitHubTokenAcquireResult;
+  const tokenVariant = tokenResult?.anyOf?.find(
+    (variant) => variant.properties?.kind?.const === "token",
+  );
+  assert(tokenVariant?.properties?.expiresIn?.minimum === 3601, "GitHub token minimum lifetime changed");
+  const events = eventDiscriminators(eventsSchema);
+  for (const event of [
+    "command.execute",
+    "elicitation.requested",
+    "exit_plan_mode.requested",
+    "auto_mode_switch.requested",
+    "session.workspace_file_changed",
+    "session.schedule_created",
+    "session.schedule_rearmed",
+    "session.schedule_cancelled",
+  ]) {
+    assert(events.has(event), `stable parity event is missing: ${event}`);
+  }
 }
 
 function collectPropertyValues(value, property, output = new Set()) {
@@ -958,6 +1598,12 @@ function verify() {
   for (const [feature, reason] of Object.entries(extensibility.deferred ?? {})) {
     assert(typeof reason === "string" && reason.length > 0, `deferred ${feature} needs a reason`);
   }
+  const stableParity = parseJson(stableParityContractPath);
+  assert(
+    JSON.stringify(stableParity) === JSON.stringify(expectedStableParityContract(metadata.upstreamCommit)),
+    "stable parity contract is stale",
+  );
+  verifyStableParitySchema(schemas["api.schema.json"], schemas["session-events.schema.json"]);
   console.log(
     `Verified ${metadata.upstreamCommit} with Copilot CLI ${metadata.cliPackageVersion} (${metadata.cliReleaseAsset})`,
   );
@@ -1051,7 +1697,19 @@ async function installSchemaPackage(version, ifPublished) {
 
 async function synchronize(explicitCommit, ifPublished = false) {
   const commit = await resolveCommit(explicitCommit);
-  const [protocol, packageManifest, lock, nodeClient, nodeSession, nodeTypes, nodeExtension] = await Promise.all([
+  const [
+    protocol,
+    packageManifest,
+    lock,
+    nodeClient,
+    nodeSession,
+    nodeTypes,
+    nodeExtension,
+    publicClient,
+    publicSession,
+    publicTypes,
+    publicExtension,
+  ] = await Promise.all([
     fetchJson(rawUrl(commit, "sdk-protocol-version.json")),
     fetchJson(rawUrl(commit, "nodejs/package.json")),
     fetchJson(rawUrl(commit, "nodejs/package-lock.json")),
@@ -1059,6 +1717,10 @@ async function synchronize(explicitCommit, ifPublished = false) {
     fetchText(rawUrl(commit, "nodejs/src/session.ts")),
     fetchText(rawUrl(commit, "nodejs/src/types.ts")),
     fetchText(rawUrl(commit, "nodejs/src/extension.ts")),
+    fetchText(rawUrl(publicSdkCommit, "nodejs/src/client.ts")),
+    fetchText(rawUrl(publicSdkCommit, "nodejs/src/session.ts")),
+    fetchText(rawUrl(publicSdkCommit, "nodejs/src/types.ts")),
+    fetchText(rawUrl(publicSdkCommit, "nodejs/src/extension.ts")),
   ]);
   const cliPackageVersion =
     packageManifest.copilotCliVersion ??
@@ -1069,6 +1731,20 @@ async function synchronize(explicitCommit, ifPublished = false) {
     "upstream package manifest has no exact Copilot CLI version",
   );
   verifyCustomAgentSourceContract(nodeClient, nodeTypes, nodeExtension, zigSessionSource);
+  verifyStableParitySourceContract(
+    { name: "protocol commit", commit },
+    nodeClient,
+    nodeSession,
+    nodeTypes,
+    nodeExtension,
+  );
+  verifyStableParitySourceContract(
+    { name: "public SDK commit", commit: publicSdkCommit },
+    publicClient,
+    publicSession,
+    publicTypes,
+    publicExtension,
+  );
 
   try {
     const schemaPackage = await installSchemaPackage(cliPackageVersion, ifPublished);
@@ -1096,6 +1772,10 @@ async function synchronize(explicitCommit, ifPublished = false) {
     writeFileSync(generatedPath, `pub const sdk_protocol_version: u64 = ${protocol.version};\n`);
     writePublicRpcSurface(commit, nodeClient, nodeSession);
     writeExtensibilityContract(commit, nodeClient, nodeTypes, nodeExtension);
+    writeFileSync(
+      stableParityContractPath,
+      `${JSON.stringify(expectedStableParityContract(commit), null, 2)}\n`,
+    );
     writeSchemaSnapshot();
     generateSessionEvents();
   } finally {
@@ -1110,12 +1790,40 @@ if (args.includes("--check")) {
   assert(args.length === 1, "--check does not accept other arguments");
   const metadata = parseJson(metadataPath);
   validateMetadata(metadata);
-  const [nodeClient, nodeTypes, nodeExtension] = await Promise.all([
+  const [
+    nodeClient,
+    nodeSession,
+    nodeTypes,
+    nodeExtension,
+    publicClient,
+    publicSession,
+    publicTypes,
+    publicExtension,
+  ] = await Promise.all([
     fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/client.ts")),
+    fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/session.ts")),
     fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/types.ts")),
     fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/extension.ts")),
+    fetchText(rawUrl(publicSdkCommit, "nodejs/src/client.ts")),
+    fetchText(rawUrl(publicSdkCommit, "nodejs/src/session.ts")),
+    fetchText(rawUrl(publicSdkCommit, "nodejs/src/types.ts")),
+    fetchText(rawUrl(publicSdkCommit, "nodejs/src/extension.ts")),
   ]);
   verifyCustomAgentSourceContract(nodeClient, nodeTypes, nodeExtension, zigSessionSource);
+  verifyStableParitySourceContract(
+    { name: "protocol commit", commit: metadata.upstreamCommit },
+    nodeClient,
+    nodeSession,
+    nodeTypes,
+    nodeExtension,
+  );
+  verifyStableParitySourceContract(
+    { name: "public SDK commit", commit: publicSdkCommit },
+    publicClient,
+    publicSession,
+    publicTypes,
+    publicExtension,
+  );
   verifyExtensibilitySourceContract(
     expectedExtensibilityContract(metadata.upstreamCommit),
     nodeClient,

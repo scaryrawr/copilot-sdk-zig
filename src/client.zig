@@ -112,6 +112,12 @@ const RuntimeTool = struct {
     context: ?*anyopaque,
 };
 
+const RuntimeCommand = struct {
+    name: []u8,
+    handler: session_types.CommandHandler,
+    context: ?*anyopaque,
+};
+
 const SessionExtensionRuntime = struct {
     session_id: ?[]u8 = null,
     hooks: ext.SessionHooks,
@@ -122,11 +128,22 @@ const SessionExtensionRuntime = struct {
     capabilities: ext.CapabilitySet = .{},
     mcp_apps_requested: bool,
     tools: []RuntimeTool,
+    commands: []RuntimeCommand,
     permission_handler: ?session_types.PermissionHandler,
     permission_context: ?*anyopaque,
     managed_settings_enabled: bool,
     user_input_handler: ?session_types.UserInputHandler,
     user_input_context: ?*anyopaque,
+    elicitation_handler: ?session_types.ElicitationHandler,
+    elicitation_context: ?*anyopaque,
+    exit_plan_mode_handler: ?session_types.ExitPlanModeHandler,
+    exit_plan_mode_context: ?*anyopaque,
+    auto_mode_switch_handler: ?session_types.AutoModeSwitchHandler,
+    auto_mode_switch_context: ?*anyopaque,
+    git_hub_token_provider: ?session_types.GitHubTokenProvider,
+    git_hub_token_registration_id: ?[]u8 = null,
+    provider_tokens: ?[]RegisteredProviderToken = null,
+    credentials_quarantined: bool = false,
     granted_environment_variables: std.ArrayList(ext.EnvironmentGrant) = .empty,
     mcp_oauth_interest_handle: ?[]u8 = null,
 
@@ -142,7 +159,12 @@ const SessionExtensionRuntime = struct {
             tool_count += 1;
         };
         const tools = try allocator.alloc(RuntimeTool, tool_count);
+        const commands = allocator.alloc(RuntimeCommand, config.commands.len) catch |err| {
+            allocator.free(tools);
+            return err;
+        };
         const canvases = allocator.alloc(OwnedCanvas, features.canvases.len) catch |err| {
+            allocator.free(commands);
             allocator.free(tools);
             return err;
         };
@@ -153,19 +175,30 @@ const SessionExtensionRuntime = struct {
             .canvases = canvases,
             .mcp_apps_requested = features.experimental.mcp_apps,
             .tools = tools,
+            .commands = commands,
             .permission_handler = config.on_permission_request,
             .permission_context = config.permission_context,
             .managed_settings_enabled = managedSettingsEnabled(config),
             .user_input_handler = config.on_user_input_request,
             .user_input_context = config.user_input_context,
+            .elicitation_handler = config.on_elicitation_request,
+            .elicitation_context = config.elicitation_context,
+            .exit_plan_mode_handler = config.on_exit_plan_mode_request,
+            .exit_plan_mode_context = config.exit_plan_mode_context,
+            .auto_mode_switch_handler = config.on_auto_mode_switch_request,
+            .auto_mode_switch_context = config.auto_mode_switch_context,
+            .git_hub_token_provider = config.git_hub_token_provider,
         };
         var initialized_tools: usize = 0;
+        var initialized_commands: usize = 0;
         var initialized_canvases: usize = 0;
         errdefer {
             for (result.canvases[0..initialized_canvases]) |*canvas| canvas.deinit(allocator);
             allocator.free(result.canvases);
             for (result.tools[0..initialized_tools]) |tool| allocator.free(tool.name);
             allocator.free(result.tools);
+            for (result.commands[0..initialized_commands]) |command| allocator.free(command.name);
+            allocator.free(result.commands);
             if (result.session_id) |id| allocator.free(id);
             for (result.open_canvases.items) |canvas| ext.freeOpenCanvas(allocator, canvas);
             result.open_canvases.deinit(allocator);
@@ -179,6 +212,14 @@ const SessionExtensionRuntime = struct {
                 .context = tool.context,
             };
             initialized_tools += 1;
+        }
+        for (config.commands, 0..) |command, index| {
+            result.commands[index] = .{
+                .name = try allocator.dupe(u8, command.name),
+                .handler = command.handler,
+                .context = command.context,
+            };
+            initialized_commands += 1;
         }
         for (features.canvases, 0..) |canvas, index| {
             const actions = try allocator.alloc(OwnedCanvasAction, canvas.actions.len);
@@ -217,6 +258,13 @@ const SessionExtensionRuntime = struct {
         allocator.free(self.canvases);
         for (self.tools) |tool| allocator.free(tool.name);
         allocator.free(self.tools);
+        for (self.commands) |command| allocator.free(command.name);
+        allocator.free(self.commands);
+        if (self.provider_tokens) |provider_tokens| {
+            for (provider_tokens) |registered| registered.deinit(allocator);
+            allocator.free(provider_tokens);
+        }
+        if (self.git_hub_token_registration_id) |registration_id| allocator.free(registration_id);
         for (self.open_canvases.items) |canvas| ext.freeOpenCanvas(allocator, canvas);
         self.open_canvases.deinit(allocator);
         for (self.granted_environment_variables.items) |grant| {
@@ -226,6 +274,20 @@ const SessionExtensionRuntime = struct {
         }
         self.granted_environment_variables.deinit(allocator);
         if (self.mcp_oauth_interest_handle) |handle| allocator.free(handle);
+    }
+
+    fn quarantineCredentials(self: *SessionExtensionRuntime, allocator: std.mem.Allocator) void {
+        if (self.provider_tokens) |provider_tokens| {
+            for (provider_tokens) |registered| registered.deinit(allocator);
+            allocator.free(provider_tokens);
+            self.provider_tokens = null;
+        }
+        if (self.git_hub_token_registration_id) |registration_id| {
+            allocator.free(registration_id);
+            self.git_hub_token_registration_id = null;
+        }
+        self.git_hub_token_provider = null;
+        self.credentials_quarantined = true;
     }
 };
 
@@ -659,6 +721,7 @@ pub const Client = struct {
         self: *Client,
         config: session_types.CreateSessionConfig,
     ) !Session {
+        try validateLifecycleConfig(config);
         try validateCustomAgents(config.custom_agents, config.agent);
         try ext.validate(config.extensions.common);
         try validateCustomAgentMcpServers(config.custom_agents);
@@ -672,19 +735,24 @@ pub const Client = struct {
         );
         defer prepared_providers.deinit(self.allocator);
 
-        const owned_session_id = if (config.session_id) |requested|
+        const server_assigned = config.cloud != null;
+        const owned_session_id = if (server_assigned)
+            null
+        else if (config.session_id) |requested|
             try self.allocator.dupe(u8, requested)
         else
             try generateSessionId(self.allocator, self.io);
-        if (self.hasSession(owned_session_id)) {
-            self.allocator.free(owned_session_id);
-            return error.SessionAlreadyActive;
+        if (owned_session_id) |session_id| {
+            if (self.hasSession(session_id)) {
+                self.allocator.free(session_id);
+                return error.SessionAlreadyActive;
+            }
+            self.session_ids.append(self.allocator, session_id) catch |err| {
+                self.allocator.free(session_id);
+                return err;
+            };
         }
-        self.session_ids.append(self.allocator, owned_session_id) catch |err| {
-            self.allocator.free(owned_session_id);
-            return err;
-        };
-        errdefer self.removeSession(owned_session_id);
+        errdefer if (owned_session_id) |session_id| self.removeSession(session_id);
 
         var extension_values = ExtensionWireValues.init(self.allocator);
         defer extension_values.deinit();
@@ -698,10 +766,14 @@ pub const Client = struct {
         defer tools.deinit(self.allocator);
         try appendWireTools(self.allocator, config.tools, &parsed_parameters, &tools);
         try extension_values.lower(config.extensions.common);
-        try self.beginProviderTokens(owned_session_id, prepared_providers.token_bindings);
-        errdefer self.rollbackProviderTokens();
+        try extension_values.lowerHostInjection(
+            config.feature_flags,
+            config.exp_assignments,
+        );
         try self.beginExtensionRuntime(owned_session_id, config, &.{});
         errdefer self.rollbackExtensionRuntime();
+        try self.installRuntimeProviderTokens(prepared_providers.token_bindings);
+        try self.installGitHubTokenProvider(&extension_values);
 
         const request = try buildPreparedCreateSessionRequest(
             owned_session_id,
@@ -719,18 +791,40 @@ pub const Client = struct {
             wipeLifecycleResponseSecrets(parsed.value);
             parsed.deinit();
         }
+        var detach_on_error: ?[]const u8 = null;
+        errdefer {
+            self.quarantinePendingCredentials();
+            if (detach_on_error) |session_id| self.detachSessionBestEffort(session_id);
+        }
         const returned_id = parsed.value.sessionId orelse return error.MissingSessionId;
-        if (!std.mem.eql(u8, owned_session_id, returned_id)) {
+        if (owned_session_id) |session_id| if (!std.mem.eql(u8, session_id, returned_id)) {
             if (!self.hasSession(returned_id)) {
-                self.detachSessionBestEffort(returned_id);
+                detach_on_error = returned_id;
             }
             return error.SessionIdMismatch;
-        }
-        errdefer self.detachSessionBestEffort(returned_id);
+        };
 
+        var adopted_session_id: ?[]u8 = null;
+        if (server_assigned) {
+            if (returned_id.len == 0 or self.hasSession(returned_id))
+                return error.InvalidServerAssignedSessionId;
+            detach_on_error = returned_id;
+            const copy = try self.allocator.dupe(u8, returned_id);
+            self.session_ids.append(self.allocator, copy) catch |err| {
+                self.allocator.free(copy);
+                return err;
+            };
+            adopted_session_id = copy;
+        } else {
+            detach_on_error = returned_id;
+        }
+        errdefer if (adopted_session_id) |session_id| self.removeSession(session_id);
+        try self.updateStableSessionOptions(returned_id, config);
         try self.commitExtensionRuntime(returned_id, parsed.value, &.{});
-        self.commitProviderTokens();
-        return .{ .client = self, .id = owned_session_id };
+        return .{
+            .client = self,
+            .id = adopted_session_id orelse owned_session_id.?,
+        };
     }
 
     pub fn resumeSession(
@@ -756,6 +850,7 @@ pub const Client = struct {
         config: session_types.ResumeSessionConfig,
         requested_environment_variables: []const []const u8,
     ) !Session {
+        try validateLifecycleConfig(config);
         try validateCustomAgents(config.custom_agents, config.agent);
         try ext.validate(config.extensions.common);
         try validateCustomAgentMcpServers(config.custom_agents);
@@ -792,15 +887,19 @@ pub const Client = struct {
         defer tools.deinit(self.allocator);
         try appendWireTools(self.allocator, config.tools, &parsed_parameters, &tools);
         try extension_values.lower(config.extensions.common);
+        try extension_values.lowerHostInjection(
+            config.feature_flags,
+            config.exp_assignments,
+        );
 
-        try self.beginProviderTokens(runtime_session_id, prepared_providers.token_bindings);
-        errdefer self.rollbackProviderTokens();
         try self.beginExtensionRuntime(
             runtime_session_id,
             config,
             config.extensions.open_canvases orelse &.{},
         );
         errdefer self.rollbackExtensionRuntime();
+        try self.installRuntimeProviderTokens(prepared_providers.token_bindings);
+        try self.installGitHubTokenProvider(&extension_values);
 
         const request = try buildPreparedResumeSessionRequest(
             runtime_session_id,
@@ -810,27 +909,85 @@ pub const Client = struct {
             requested_environment_variables,
             prepared_providers,
         );
+        try self.prepareResumeRuntimeCommit(runtime_session_id);
         const parsed = try self.call(WireSessionLifecycleResponse, "session.resume", request);
         defer {
             wipeLifecycleResponseSecrets(parsed.value);
             parsed.deinit();
         }
+        var detach_on_error: ?[]const u8 = null;
+        errdefer {
+            self.quarantineSessionCredentials(runtime_session_id);
+            if (detach_on_error) |detached_session_id|
+                self.detachSessionBestEffort(detached_session_id);
+        }
         const returned_id = parsed.value.sessionId orelse return error.MissingSessionId;
         if (!std.mem.eql(u8, runtime_session_id, returned_id)) {
             if (!self.hasSession(returned_id)) {
-                self.detachSessionBestEffort(returned_id);
+                detach_on_error = returned_id;
             }
             return error.SessionIdMismatch;
         }
-        errdefer if (existing_session_id == null) self.detachSessionBestEffort(returned_id);
+        if (existing_session_id == null) detach_on_error = returned_id;
 
-        try self.commitExtensionRuntime(
-            runtime_session_id,
-            parsed.value,
-            requested_environment_variables,
-        );
-        self.commitProviderTokens();
+        try self.applyExtensionRuntimeResponse(parsed.value, requested_environment_variables);
+        try self.updateStableSessionOptions(returned_id, config);
+        self.commitPreparedExtensionRuntime(runtime_session_id);
         return .{ .client = self, .id = runtime_session_id };
+    }
+
+    fn installRuntimeProviderTokens(
+        self: *Client,
+        bindings: []const provider.TokenBinding,
+    ) !void {
+        const runtime = if (self.pending_extension_runtime) |*value|
+            value
+        else
+            return error.MissingExtensionRuntime;
+        const registered = try self.allocator.alloc(RegisteredProviderToken, bindings.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (registered[0..initialized]) |value| value.deinit(self.allocator);
+            self.allocator.free(registered);
+        }
+        for (bindings, 0..) |binding, index| {
+            registered[index] = .{
+                .provider_name = try self.allocator.dupe(u8, binding.provider_name),
+                .token_provider = binding.token_provider,
+            };
+            initialized += 1;
+        }
+        runtime.provider_tokens = registered;
+    }
+
+    fn installGitHubTokenProvider(
+        self: *Client,
+        values: *ExtensionWireValues,
+    ) !void {
+        const runtime = if (self.pending_extension_runtime) |*value|
+            value
+        else
+            return error.MissingExtensionRuntime;
+        if (runtime.git_hub_token_provider == null) return;
+        const registration_id = try generateSessionId(self.allocator, self.io);
+        runtime.git_hub_token_registration_id = registration_id;
+        values.git_hub_token_registration_id = registration_id;
+    }
+
+    fn updateStableSessionOptions(
+        self: *Client,
+        session_id: []const u8,
+        config: anytype,
+    ) !void {
+        if (config.coauthor_enabled == null and config.manage_schedule_enabled == null)
+            return;
+        const parsed = try self.call(RpcSuccess, "session.options.update", .{
+            .sessionId = session_id,
+            .coauthorEnabled = config.coauthor_enabled,
+            .manageScheduleEnabled = config.manage_schedule_enabled,
+        });
+        defer parsed.deinit();
+        if (!parsed.value.success) return error.SessionOptionsNotAccepted;
     }
 
     fn detachSessionBestEffort(self: *Client, session_id: []const u8) void {
@@ -860,11 +1017,69 @@ pub const Client = struct {
     }
 
     fn rollbackExtensionRuntime(self: *Client) void {
+        self.quarantinePendingCredentials();
         if (self.pending_extension_runtime) |*runtime| {
             self.releaseMcpOAuthInterest(runtime) catch {};
             runtime.deinit(self.allocator);
         }
         self.pending_extension_runtime = null;
+    }
+
+    fn quarantinePendingCredentials(self: *Client) void {
+        if (self.pending_extension_runtime) |*runtime| {
+            runtime.quarantineCredentials(self.allocator);
+        }
+        if (self.pending_provider_tokens) |pending| {
+            self.pending_provider_tokens = null;
+            pending.deinit(self.allocator);
+        }
+    }
+
+    fn quarantineSessionCredentials(self: *Client, session_id: []const u8) void {
+        for (self.extension_runtimes.items) |*runtime| {
+            if (runtime.session_id != null and
+                std.mem.eql(u8, runtime.session_id.?, session_id))
+            {
+                runtime.quarantineCredentials(self.allocator);
+                break;
+            }
+        }
+        var index: usize = 0;
+        while (index < self.provider_tokens.items.len) {
+            if (std.mem.eql(u8, self.provider_tokens.items[index].session_id, session_id)) {
+                const registered = self.provider_tokens.orderedRemove(index);
+                registered.deinit(self.allocator);
+            } else {
+                index += 1;
+            }
+        }
+        self.quarantinePendingCredentials();
+    }
+
+    fn prepareResumeRuntimeCommit(self: *Client, session_id: []const u8) !void {
+        const runtime = if (self.pending_extension_runtime) |*value|
+            value
+        else
+            return error.MissingExtensionRuntime;
+        const runtime_session_id = runtime.session_id orelse return error.MissingSessionId;
+        if (!std.mem.eql(u8, runtime_session_id, session_id))
+            return error.UnexpectedSessionId;
+
+        for (self.extension_runtimes.items) |*existing| {
+            if (existing.session_id != null and
+                std.mem.eql(u8, existing.session_id.?, session_id))
+            {
+                if (runtime.mcp_auth_handler != null and
+                    existing.mcp_oauth_interest_handle == null)
+                {
+                    try self.registerMcpOAuthInterest(runtime);
+                }
+                return;
+            }
+        }
+        try self.extension_runtimes.ensureUnusedCapacity(self.allocator, 1);
+        if (runtime.mcp_auth_handler != null)
+            try self.registerMcpOAuthInterest(runtime);
     }
 
     fn commitExtensionRuntime(
@@ -879,6 +1094,16 @@ pub const Client = struct {
         } else {
             runtime.session_id = try self.allocator.dupe(u8, session_id);
         }
+        try self.applyExtensionRuntimeResponse(response, requested_environment_variables);
+        try self.finishExtensionRuntimeCommit(session_id);
+    }
+
+    fn applyExtensionRuntimeResponse(
+        self: *Client,
+        response: WireSessionLifecycleResponse,
+        requested_environment_variables: []const []const u8,
+    ) !void {
+        const runtime = if (self.pending_extension_runtime) |*value| value else return error.MissingExtensionRuntime;
         runtime.capabilities = parseCapabilities(response.capabilities);
         if (response.openCanvases) |canvases| {
             for (runtime.open_canvases.items) |canvas| ext.freeOpenCanvas(self.allocator, canvas);
@@ -921,31 +1146,59 @@ pub const Client = struct {
                 });
             }
         }
-        for (self.extension_runtimes.items, 0..) |*existing, index| {
+    }
+
+    fn finishExtensionRuntimeCommit(
+        self: *Client,
+        session_id: []const u8,
+    ) !void {
+        const runtime = if (self.pending_extension_runtime) |*value| value else return error.MissingExtensionRuntime;
+        const runtime_session_id = runtime.session_id orelse return error.MissingSessionId;
+        if (!std.mem.eql(u8, runtime_session_id, session_id))
+            return error.UnexpectedSessionId;
+        for (self.extension_runtimes.items) |*existing| {
             if (existing.session_id != null and
                 std.mem.eql(u8, existing.session_id.?, session_id))
             {
-                if (existing.mcp_oauth_interest_handle != null and
-                    runtime.mcp_auth_handler != null)
+                if (runtime.mcp_auth_handler != null and
+                    existing.mcp_oauth_interest_handle == null)
                 {
-                    runtime.mcp_oauth_interest_handle =
-                        existing.mcp_oauth_interest_handle;
-                    existing.mcp_oauth_interest_handle = null;
-                } else if (runtime.mcp_auth_handler != null) {
                     try self.registerMcpOAuthInterest(runtime);
-                } else {
-                    try self.releaseMcpOAuthInterest(existing);
                 }
-                const replacement = self.pending_extension_runtime.?;
-                self.pending_extension_runtime = null;
-                existing.deinit(self.allocator);
-                self.extension_runtimes.items[index] = replacement;
+                self.commitPreparedExtensionRuntime(session_id);
                 return;
             }
         }
         try self.extension_runtimes.ensureUnusedCapacity(self.allocator, 1);
         if (runtime.mcp_auth_handler != null) {
             try self.registerMcpOAuthInterest(runtime);
+        }
+        self.commitPreparedExtensionRuntime(session_id);
+    }
+
+    fn commitPreparedExtensionRuntime(self: *Client, session_id: []const u8) void {
+        const runtime = &self.pending_extension_runtime.?;
+        for (self.extension_runtimes.items, 0..) |*existing, index| {
+            if (existing.session_id != null and
+                std.mem.eql(u8, existing.session_id.?, session_id))
+            {
+                var release_unused_interest = false;
+                if (existing.mcp_oauth_interest_handle != null and
+                    runtime.mcp_oauth_interest_handle == null)
+                {
+                    runtime.mcp_oauth_interest_handle =
+                        existing.mcp_oauth_interest_handle;
+                    existing.mcp_oauth_interest_handle = null;
+                    release_unused_interest = runtime.mcp_auth_handler == null;
+                }
+                const replacement = self.pending_extension_runtime.?;
+                self.pending_extension_runtime = null;
+                existing.deinit(self.allocator);
+                self.extension_runtimes.items[index] = replacement;
+                if (release_unused_interest)
+                    self.releaseMcpOAuthInterest(&self.extension_runtimes.items[index]) catch {};
+                return;
+            }
         }
         const committed = self.pending_extension_runtime.?;
         self.pending_extension_runtime = null;
@@ -1190,15 +1443,20 @@ pub const Client = struct {
         {
             return self.dispatchCanvasRequest(writer, id, method, params);
         }
-        if (std.mem.eql(u8, method, "providerToken.getToken") and
-            self.findProviderTokenFromParams(params) != null)
-        {
+        if (std.mem.eql(u8, method, "providerToken.getToken")) {
             return self.dispatchProviderTokenRequest(writer, id, params);
         }
-        if (std.mem.eql(u8, method, "userInput.request") and
-            self.findUserInputHandlerFromParams(params) != null)
-        {
+        if (std.mem.eql(u8, method, "gitHubToken.getToken")) {
+            return self.dispatchGitHubTokenRequest(writer, id, params);
+        }
+        if (std.mem.eql(u8, method, "userInput.request")) {
             return self.dispatchUserInputRequest(writer, id, params);
+        }
+        if (std.mem.eql(u8, method, "exitPlanMode.request")) {
+            return self.dispatchExitPlanModeRequest(writer, id, params);
+        }
+        if (std.mem.eql(u8, method, "autoModeSwitch.request")) {
+            return self.dispatchAutoModeSwitchRequest(writer, id, params);
         }
         const registered = self.findRpcHandler(method) orelse {
             try self.rejectServerRequest(writer, id);
@@ -1257,12 +1515,21 @@ pub const Client = struct {
         const result_json = try std.json.Stringify.valueAlloc(self.allocator, result, .{
             .emit_null_optional_fields = false,
         });
-        defer self.allocator.free(result_json);
+        defer {
+            wipeSecret(result_json);
+            self.allocator.free(result_json);
+        }
         const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, result_json, .{});
-        defer parsed.deinit();
+        defer {
+            wipeJsonStrings(parsed.value);
+            parsed.deinit();
+        }
         const response = try json_rpc.encodeSuccessResponse(self.allocator, id, parsed.value);
-        defer self.allocator.free(response);
-        try json_rpc.writeFrame(writer, response);
+        defer {
+            wipeSecret(response);
+            self.allocator.free(response);
+        }
+        try self.writeServerFrame(writer, response);
     }
 
     fn writeNullSuccess(
@@ -1273,7 +1540,7 @@ pub const Client = struct {
         const result: std.json.Value = .null;
         const response = try json_rpc.encodeSuccessResponse(self.allocator, id, result);
         defer self.allocator.free(response);
-        try json_rpc.writeFrame(writer, response);
+        try self.writeServerFrame(writer, response);
     }
 
     fn dispatchHookRequest(
@@ -1516,15 +1783,11 @@ pub const Client = struct {
             const reason_string = jsonRequiredString(input, "reason") catch
                 return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
             const reason: @TypeOf(@as(ext.SessionEndInput, undefined).reason) =
-                if (std.mem.eql(u8, reason_string, "complete")) .complete else if (std.mem.eql(
-                    u8,
+                std.meta.stringToEnum(
+                    @TypeOf(@as(ext.SessionEndInput, undefined).reason),
                     reason_string,
-                    "error",
-                )) .@"error" else if (std.mem.eql(u8, reason_string, "abort")) .abort else if (std.mem.eql(
-                    u8,
-                    reason_string,
-                    "timeout",
-                )) .timeout else if (std.mem.eql(u8, reason_string, "user_exit")) .user_exit else return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
+                ) orelse
+                return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
             const output = handler(self.allocator, .{
                 .base = base,
                 .reason = reason,
@@ -1546,15 +1809,11 @@ pub const Client = struct {
             const context_string = jsonRequiredString(input, "errorContext") catch
                 return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
             const context: @TypeOf(@as(ext.ErrorOccurredInput, undefined).context) =
-                if (std.mem.eql(u8, context_string, "model_call")) .model_call else if (std.mem.eql(
-                    u8,
+                std.meta.stringToEnum(
+                    @TypeOf(@as(ext.ErrorOccurredInput, undefined).context),
                     context_string,
-                    "tool_execution",
-                )) .tool_execution else if (std.mem.eql(u8, context_string, "system")) .system else if (std.mem.eql(
-                    u8,
-                    context_string,
-                    "user_input",
-                )) .user_input else return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
+                ) orelse
+                return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
             const output = handler(self.allocator, .{
                 .base = base,
                 .message = jsonRequiredString(input, "error") catch
@@ -1745,7 +2004,183 @@ pub const Client = struct {
 
         const response = try json_rpc.encodeSuccessResponse(self.allocator, id, .{ .token = token });
         defer self.allocator.free(response);
-        try json_rpc.writeFrame(writer, response);
+        try self.writeServerFrame(writer, response);
+    }
+
+    fn writeServerFrame(
+        self: *Client,
+        writer: *std.Io.Writer,
+        response: []const u8,
+    ) !void {
+        if (self.writer_buffer.len != 0 and writer == &self.writer.interface) {
+            return writeFrameAndWipe(writer, self.writer_buffer, response);
+        }
+        return json_rpc.writeFrame(writer, response);
+    }
+
+    fn findGitHubTokenRuntime(
+        self: *Client,
+        registration_id: []const u8,
+    ) ?*SessionExtensionRuntime {
+        if (self.pending_extension_runtime) |*runtime| {
+            if (runtime.git_hub_token_registration_id) |candidate| {
+                if (std.mem.eql(u8, candidate, registration_id)) return runtime;
+            }
+        }
+        for (self.extension_runtimes.items) |*runtime| {
+            if (runtime.git_hub_token_registration_id) |candidate| {
+                if (std.mem.eql(u8, candidate, registration_id)) return runtime;
+            }
+        }
+        return null;
+    }
+
+    fn dispatchGitHubTokenRequest(
+        self: *Client,
+        writer: *std.Io.Writer,
+        id: std.json.Value,
+        params: ?std.json.Value,
+    ) !void {
+        const value = params orelse
+            return self.writeServerRequestError(writer, id, -32602, "invalid GitHub token request");
+        const parsed = std.json.parseFromValue(
+            WireGitHubTokenRequest,
+            self.allocator,
+            value,
+            .{ .ignore_unknown_fields = false },
+        ) catch
+            return self.writeServerRequestError(writer, id, -32602, "invalid GitHub token request");
+        defer parsed.deinit();
+        if (value.object.get("sessionId")) |session_id| {
+            if (session_id != .string)
+                return self.writeServerRequestError(writer, id, -32602, "invalid GitHub token request");
+        }
+
+        const runtime = self.findGitHubTokenRuntime(parsed.value.registrationId) orelse
+            return self.writeServerRequestError(writer, id, -32602, "unknown GitHub token registration");
+        if (parsed.value.sessionId) |requested_session_id| {
+            const registered_session_id = runtime.session_id orelse
+                return self.writeServerRequestError(writer, id, -32602, "GitHub token registration mismatch");
+            if (!std.mem.eql(u8, registered_session_id, requested_session_id))
+                return self.writeServerRequestError(writer, id, -32602, "GitHub token registration mismatch");
+        }
+        const provider_config = runtime.git_hub_token_provider orelse
+            return self.writeServerRequestError(writer, id, -32602, "unknown GitHub token registration");
+
+        self.dispatching_rpc_handler = true;
+        defer self.dispatching_rpc_handler = false;
+        var result = provider_config.callback(self.allocator, .{
+            .host = parsed.value.host,
+            .session_id = parsed.value.sessionId orelse runtime.session_id,
+            .reason = parsed.value.reason,
+        }, provider_config.context) catch |err|
+            return self.writeServerRequestError(writer, id, -32000, @errorName(err));
+        defer switch (result) {
+            .token => |*token| token.deinitSecure(self.allocator),
+            .cancelled => {},
+        };
+
+        switch (result) {
+            .cancelled => return self.writeTypedSuccess(writer, id, .{ .kind = "cancelled" }),
+            .token => |token| {
+                if (token.expires_in_seconds < 3601)
+                    return self.writeServerRequestError(writer, id, -32603, "invalid GitHub token result");
+                return self.writeTypedSuccess(writer, id, .{
+                    .kind = "token",
+                    .accessToken = token.access_token,
+                    .tokenType = token.token_type,
+                    .expiresIn = token.expires_in_seconds,
+                });
+            },
+        }
+    }
+
+    fn dispatchExitPlanModeRequest(
+        self: *Client,
+        writer: *std.Io.Writer,
+        id: std.json.Value,
+        params: ?std.json.Value,
+    ) !void {
+        const value = params orelse
+            return self.writeServerRequestError(writer, id, -32602, "invalid exit plan mode request");
+        const parsed = std.json.parseFromValue(
+            WireExitPlanModeRequest,
+            self.allocator,
+            value,
+            .{},
+        ) catch return self.writeServerRequestError(
+            writer,
+            id,
+            -32602,
+            "invalid exit plan mode request",
+        );
+        defer parsed.deinit();
+        const runtime = self.findExtensionRuntime(parsed.value.sessionId) orelse
+            return self.writeServerRequestError(writer, id, -32602, "unknown exit plan mode session");
+        const handler = runtime.exit_plan_mode_handler orelse
+            return self.writeTypedSuccess(writer, id, .{ .approved = true });
+        self.dispatching_rpc_handler = true;
+        defer self.dispatching_rpc_handler = false;
+        const result = handler(.{
+            .session_id = parsed.value.sessionId,
+            .summary = parsed.value.summary,
+            .plan_content = parsed.value.planContent,
+            .actions = parsed.value.actions,
+            .recommended_action = parsed.value.recommendedAction,
+        }, runtime.exit_plan_mode_context) catch |err|
+            return self.writeServerRequestError(writer, id, -32000, @errorName(err));
+        if (result.selected_action) |selected| {
+            var found = false;
+            for (parsed.value.actions) |action| {
+                if (action == selected) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                return self.writeServerRequestError(writer, id, -32603, "invalid exit plan mode result");
+        }
+        return self.writeTypedSuccess(writer, id, .{
+            .approved = result.approved,
+            .selectedAction = result.selected_action,
+            .feedback = result.feedback,
+        });
+    }
+
+    fn dispatchAutoModeSwitchRequest(
+        self: *Client,
+        writer: *std.Io.Writer,
+        id: std.json.Value,
+        params: ?std.json.Value,
+    ) !void {
+        const value = params orelse
+            return self.writeServerRequestError(writer, id, -32602, "invalid auto mode switch request");
+        const parsed = std.json.parseFromValue(
+            WireAutoModeSwitchRequest,
+            self.allocator,
+            value,
+            .{},
+        ) catch return self.writeServerRequestError(
+            writer,
+            id,
+            -32602,
+            "invalid auto mode switch request",
+        );
+        defer parsed.deinit();
+        const runtime = self.findExtensionRuntime(parsed.value.sessionId) orelse
+            return self.writeServerRequestError(writer, id, -32602, "unknown auto mode switch session");
+        const handler = runtime.auto_mode_switch_handler orelse
+            return self.writeTypedSuccess(writer, id, .{ .response = session_types.AutoModeSwitchResponse.no });
+
+        self.dispatching_rpc_handler = true;
+        defer self.dispatching_rpc_handler = false;
+        const response = handler(.{
+            .session_id = parsed.value.sessionId,
+            .error_code = parsed.value.errorCode,
+            .retry_after_seconds = parsed.value.retryAfterSeconds,
+        }, runtime.auto_mode_switch_context) catch |err|
+            return self.writeServerRequestError(writer, id, -32000, @errorName(err));
+        return self.writeTypedSuccess(writer, id, .{ .response = response });
     }
 
     fn findRpcHandler(self: *Client, method: []const u8) ?RegisteredRpcHandler {
@@ -1843,7 +2278,7 @@ pub const Client = struct {
         try self.events.append(self.allocator, queued);
     }
 
-    fn findExtensionRuntime(self: *Client, session_id: []const u8) ?*SessionExtensionRuntime {
+    fn findExtensionRuntimeExact(self: *Client, session_id: []const u8) ?*SessionExtensionRuntime {
         if (self.pending_extension_runtime) |*runtime| {
             if (runtime.session_id) |id| {
                 if (std.mem.eql(u8, id, session_id)) return runtime;
@@ -1854,6 +2289,11 @@ pub const Client = struct {
                 if (std.mem.eql(u8, id, session_id)) return runtime;
             }
         }
+        return null;
+    }
+
+    fn findExtensionRuntime(self: *Client, session_id: []const u8) ?*SessionExtensionRuntime {
+        if (self.findExtensionRuntimeExact(session_id)) |runtime| return runtime;
         if (self.pending_extension_runtime) |*runtime| {
             if (runtime.session_id == null) return runtime;
         }
@@ -1865,23 +2305,8 @@ pub const Client = struct {
         session_id: []const u8,
         event: *const session_types.SessionEvent,
     ) !void {
-        if (self.pending_extension_runtime) |*runtime| {
-            if (runtime.session_id) |id| {
-                if (std.mem.eql(u8, id, session_id)) {
-                    try applyExtensionEventToRuntime(self.allocator, runtime, event);
-                }
-            } else {
-                try applyExtensionEventToRuntime(self.allocator, runtime, event);
-            }
-        }
-        for (self.extension_runtimes.items) |*runtime| {
-            if (runtime.session_id) |id| {
-                if (std.mem.eql(u8, id, session_id)) {
-                    try applyExtensionEventToRuntime(self.allocator, runtime, event);
-                    return;
-                }
-            }
-        }
+        const runtime = self.findExtensionRuntime(session_id) orelse return;
+        try applyExtensionEventToRuntime(self.allocator, runtime, event);
     }
 
     fn applyExtensionEventToRuntime(
@@ -1897,6 +2322,9 @@ pub const Client = struct {
                     }
                     if (ui.mcp_apps) |mcp_apps| {
                         runtime.capabilities.mcp_apps = capabilityState(mcp_apps);
+                    }
+                    if (ui.elicitation) |elicitation| {
+                        runtime.capabilities.elicitation = capabilityState(elicitation);
                     }
                 }
             },
@@ -2118,6 +2546,14 @@ pub const Client = struct {
         session_id: []const u8,
         provider_name: []const u8,
     ) ?provider.BearerTokenProvider {
+        if (self.findExtensionRuntime(session_id)) |runtime| {
+            if (runtime.credentials_quarantined) return null;
+            for (runtime.provider_tokens orelse &.{}) |registered| {
+                if (std.mem.eql(u8, registered.provider_name, provider_name)) {
+                    return registered.token_provider;
+                }
+            }
+        }
         if (self.pending_provider_tokens) |pending| {
             if (std.mem.eql(u8, pending.session_id, session_id)) {
                 for (pending.providers) |registered| {
@@ -2328,6 +2764,14 @@ pub const Client = struct {
     }
 };
 
+const ElicitationResponse = union(enum) {
+    cancelled,
+    result: struct {
+        action: session_types.ElicitationAction,
+        content: ?std.json.Value,
+    },
+};
+
 pub const Session = struct {
     client: *Client,
     id: []const u8,
@@ -2392,6 +2836,119 @@ pub const Session = struct {
                 try self.respondToTool(request.request_id, result);
             }
         }
+        if (event == .command_execute) {
+            const request = event.command_execute.data;
+            if (self.client.findExtensionRuntime(self.id)) |runtime| {
+                var matched = false;
+                for (runtime.commands) |command| {
+                    if (!std.mem.eql(u8, command.name, request.command_name)) continue;
+                    matched = true;
+                    command.handler(.{
+                        .session_id = self.id,
+                        .command = request.command,
+                        .command_name = request.command_name,
+                        .args = request.args,
+                    }, command.context) catch |err| {
+                        const parsed = try self.client.call(
+                            struct { success: bool },
+                            "session.commands.handlePendingCommand",
+                            .{
+                                .sessionId = self.id,
+                                .requestId = request.request_id,
+                                .@"error" = @errorName(err),
+                            },
+                        );
+                        parsed.deinit();
+                        return event;
+                    };
+                    const parsed = try self.client.call(
+                        struct { success: bool },
+                        "session.commands.handlePendingCommand",
+                        .{
+                            .sessionId = self.id,
+                            .requestId = request.request_id,
+                        },
+                    );
+                    parsed.deinit();
+                    break;
+                }
+                if (!matched) {
+                    const message = try std.fmt.allocPrint(
+                        self.client.allocator,
+                        "Unknown command: {s}",
+                        .{request.command_name},
+                    );
+                    defer self.client.allocator.free(message);
+                    const parsed = try self.client.call(
+                        struct { success: bool },
+                        "session.commands.handlePendingCommand",
+                        .{
+                            .sessionId = self.id,
+                            .requestId = request.request_id,
+                            .@"error" = message,
+                        },
+                    );
+                    parsed.deinit();
+                }
+            }
+        }
+        if (event == .elicitation_requested) {
+            const payload = event.elicitation_requested;
+            if (self.client.findExtensionRuntime(self.id)) |runtime| {
+                if (runtime.elicitation_handler) |handler| {
+                    var requested_schema_json: ?[]u8 = null;
+                    defer if (requested_schema_json) |json| self.client.allocator.free(json);
+                    if (payload.data.requested_schema != null) {
+                        const parsed_data = try std.json.parseFromSlice(
+                            std.json.Value,
+                            self.client.allocator,
+                            payload.data_json,
+                            .{},
+                        );
+                        defer parsed_data.deinit();
+                        const data_object = switch (parsed_data.value) {
+                            .object => |object| object,
+                            else => return error.InvalidSessionEvent,
+                        };
+                        requested_schema_json = try stringifyJsonValue(
+                            self.client.allocator,
+                            data_object.get("requestedSchema") orelse
+                                return error.InvalidSessionEvent,
+                        );
+                    }
+                    var result = handler(self.client.allocator, .{
+                        .session_id = self.id,
+                        .message = payload.data.message,
+                        .requested_schema_json = requested_schema_json,
+                        .mode = payload.data.mode,
+                        .elicitation_source = payload.data.elicitation_source,
+                        .url = payload.data.url,
+                    }, runtime.elicitation_context) catch {
+                        try self.respondToElicitation(payload.data.request_id, .cancelled);
+                        return event;
+                    };
+                    defer result.deinit(self.client.allocator);
+                    const content = if (result.content_json) |json|
+                        std.json.parseFromSlice(std.json.Value, self.client.allocator, json, .{}) catch {
+                            try self.respondToElicitation(payload.data.request_id, .cancelled);
+                            return event;
+                        }
+                    else
+                        null;
+                    defer if (content) |value| value.deinit();
+                    if (content) |value| {
+                        if (value.value != .object) {
+                            try self.respondToElicitation(payload.data.request_id, .cancelled);
+                            return event;
+                        }
+                    }
+                    try self.respondToElicitation(payload.data.request_id, .{ .result = .{
+                        .action = result.action,
+                        .content = if (content) |value| value.value else null,
+                    } });
+                }
+            }
+        }
         if (event == .permission_requested) {
             const request = event.permission_requested;
             if (self.client.findPermissionHandler(self.id)) |handler| {
@@ -2441,6 +2998,43 @@ pub const Session = struct {
     pub fn capabilities(self: Session) ext.CapabilitySet {
         const runtime = self.client.findExtensionRuntime(self.id) orelse return .{};
         return runtime.capabilities;
+    }
+
+    pub fn ui(self: Session) SessionUi {
+        return .{ .session = self };
+    }
+
+    fn respondToElicitation(
+        self: Session,
+        response_id: []const u8,
+        result: ElicitationResponse,
+    ) !void {
+        switch (result) {
+            .cancelled => {
+                const parsed = try self.client.call(
+                    struct { success: bool },
+                    "session.ui.handlePendingElicitation",
+                    .{
+                        .sessionId = self.id,
+                        .requestId = response_id,
+                        .result = .{ .action = session_types.ElicitationAction.cancel },
+                    },
+                );
+                parsed.deinit();
+            },
+            .result => |value| {
+                const parsed = try self.client.call(
+                    struct { success: bool },
+                    "session.ui.handlePendingElicitation",
+                    .{
+                        .sessionId = self.id,
+                        .requestId = response_id,
+                        .result = value,
+                    },
+                );
+                parsed.deinit();
+            },
+        }
     }
 
     pub fn experimental(
@@ -2934,6 +3528,225 @@ pub const JoinedSession = struct {
     }
 };
 
+pub const SessionUi = struct {
+    session: Session,
+
+    pub fn elicitation(
+        self: SessionUi,
+        params: session_types.UiElicitationParams,
+    ) !session_types.UiElicitationResult {
+        const schema = try std.json.parseFromSlice(
+            std.json.Value,
+            self.session.client.allocator,
+            params.requested_schema_json,
+            .{},
+        );
+        defer schema.deinit();
+        if (schema.value != .object) return error.InvalidElicitationSchema;
+        var result = try self.elicitationValue(params.message, schema.value);
+        defer result.deinit();
+        return .{
+            .allocator = self.session.client.allocator,
+            .action = result.action,
+            .content_json = if (result.content) |content|
+                try stringifyJsonValue(self.session.client.allocator, content)
+            else
+                null,
+        };
+    }
+
+    pub fn confirm(self: SessionUi, message: []const u8) !bool {
+        var schema: std.json.ObjectMap = .empty;
+        defer schema.deinit(self.session.client.allocator);
+        var properties: std.json.ObjectMap = .empty;
+        defer properties.deinit(self.session.client.allocator);
+        var confirmed: std.json.ObjectMap = .empty;
+        defer confirmed.deinit(self.session.client.allocator);
+        try confirmed.put(self.session.client.allocator, "type", .{ .string = "boolean" });
+        try confirmed.put(self.session.client.allocator, "default", .{ .bool = true });
+        try properties.put(self.session.client.allocator, "confirmed", .{ .object = confirmed });
+        try schema.put(self.session.client.allocator, "type", .{ .string = "object" });
+        try schema.put(self.session.client.allocator, "properties", .{ .object = properties });
+        var required = std.json.Array.init(self.session.client.allocator);
+        defer required.deinit();
+        try required.append(.{ .string = "confirmed" });
+        try schema.put(self.session.client.allocator, "required", .{ .array = required });
+        var result = try self.elicitationValue(message, .{ .object = schema });
+        defer result.deinit();
+        if (result.action != .accept) return false;
+        const content = result.content orelse return error.InvalidElicitationResult;
+        const object = switch (content) {
+            .object => |object| object,
+            else => return error.InvalidElicitationResult,
+        };
+        return switch (object.get("confirmed") orelse return error.InvalidElicitationResult) {
+            .bool => |value| value,
+            else => error.InvalidElicitationResult,
+        };
+    }
+
+    pub fn select(
+        self: SessionUi,
+        message: []const u8,
+        options: []const []const u8,
+    ) !?[]u8 {
+        var schema: std.json.ObjectMap = .empty;
+        defer schema.deinit(self.session.client.allocator);
+        var properties: std.json.ObjectMap = .empty;
+        defer properties.deinit(self.session.client.allocator);
+        var selection: std.json.ObjectMap = .empty;
+        defer selection.deinit(self.session.client.allocator);
+        try selection.put(self.session.client.allocator, "type", .{ .string = "string" });
+        var choices = std.json.Array.init(self.session.client.allocator);
+        defer choices.deinit();
+        for (options) |option| try choices.append(.{ .string = option });
+        try selection.put(self.session.client.allocator, "enum", .{ .array = choices });
+        try properties.put(self.session.client.allocator, "selection", .{ .object = selection });
+        try schema.put(self.session.client.allocator, "type", .{ .string = "object" });
+        try schema.put(self.session.client.allocator, "properties", .{ .object = properties });
+        var required = std.json.Array.init(self.session.client.allocator);
+        defer required.deinit();
+        try required.append(.{ .string = "selection" });
+        try schema.put(self.session.client.allocator, "required", .{ .array = required });
+
+        var result = try self.elicitationValue(message, .{ .object = schema });
+        defer result.deinit();
+        if (result.action != .accept) return null;
+        const selected = try elicitationStringField(
+            self.session.client.allocator,
+            result.content,
+            "selection",
+        );
+        errdefer {
+            wipeSecret(selected);
+            self.session.client.allocator.free(selected);
+        }
+        for (options) |option| {
+            if (std.mem.eql(u8, selected, option)) return selected;
+        }
+        return error.InvalidElicitationResult;
+    }
+
+    pub fn input(
+        self: SessionUi,
+        message: []const u8,
+        options: session_types.UiInputOptions,
+    ) !?[]u8 {
+        if (options.min_length != null and options.max_length != null and
+            options.min_length.? > options.max_length.?)
+        {
+            return error.InvalidElicitationSchema;
+        }
+        var schema: std.json.ObjectMap = .empty;
+        defer schema.deinit(self.session.client.allocator);
+        var properties: std.json.ObjectMap = .empty;
+        defer properties.deinit(self.session.client.allocator);
+        var field: std.json.ObjectMap = .empty;
+        defer field.deinit(self.session.client.allocator);
+        try field.put(self.session.client.allocator, "type", .{ .string = "string" });
+        if (options.title) |value| try field.put(self.session.client.allocator, "title", .{ .string = value });
+        if (options.description) |value| try field.put(self.session.client.allocator, "description", .{ .string = value });
+        if (options.min_length) |value| try field.put(
+            self.session.client.allocator,
+            "minLength",
+            .{ .integer = std.math.cast(i64, value) orelse return error.InvalidElicitationSchema },
+        );
+        if (options.max_length) |value| try field.put(
+            self.session.client.allocator,
+            "maxLength",
+            .{ .integer = std.math.cast(i64, value) orelse return error.InvalidElicitationSchema },
+        );
+        if (options.format) |value| try field.put(self.session.client.allocator, "format", .{ .string = @tagName(value) });
+        if (options.default) |value| try field.put(self.session.client.allocator, "default", .{ .string = value });
+        try properties.put(self.session.client.allocator, "value", .{ .object = field });
+        try schema.put(self.session.client.allocator, "type", .{ .string = "object" });
+        try schema.put(self.session.client.allocator, "properties", .{ .object = properties });
+        var required = std.json.Array.init(self.session.client.allocator);
+        defer required.deinit();
+        try required.append(.{ .string = "value" });
+        try schema.put(self.session.client.allocator, "required", .{ .array = required });
+
+        var result = try self.elicitationValue(message, .{ .object = schema });
+        defer result.deinit();
+        if (result.action != .accept) return null;
+        const value = try elicitationStringField(
+            self.session.client.allocator,
+            result.content,
+            "value",
+        );
+        return value;
+    }
+
+    fn elicitationValue(
+        self: SessionUi,
+        message: []const u8,
+        requested_schema: std.json.Value,
+    ) !OwnedUiElicitationResult {
+        const runtime = self.session.client.findExtensionRuntime(self.session.id) orelse
+            return error.UnsupportedCapability;
+        if (!runtime.capabilities.supports(.elicitation))
+            return error.UnsupportedCapability;
+        var parsed = try self.session.client.call(
+            std.json.Value,
+            "session.ui.elicitation",
+            .{
+                .sessionId = self.session.id,
+                .message = message,
+                .requestedSchema = requested_schema,
+            },
+        );
+        errdefer {
+            wipeJsonStrings(parsed.value);
+            parsed.deinit();
+        }
+        const object = switch (parsed.value) {
+            .object => |value| value,
+            else => return error.InvalidElicitationResult,
+        };
+        const action_string = jsonRequiredString(object, "action") catch
+            return error.InvalidElicitationResult;
+        const action = std.meta.stringToEnum(
+            session_types.ElicitationAction,
+            action_string,
+        ) orelse return error.InvalidElicitationResult;
+        const content = if (object.get("content")) |content| blk: {
+            if (content != .object) return error.InvalidElicitationResult;
+            break :blk content;
+        } else null;
+        return .{
+            .response = parsed,
+            .action = action,
+            .content = content,
+        };
+    }
+};
+
+const OwnedUiElicitationResult = struct {
+    response: std.json.Parsed(std.json.Value),
+    action: session_types.ElicitationAction,
+    content: ?std.json.Value,
+
+    fn deinit(self: *OwnedUiElicitationResult) void {
+        wipeJsonStrings(self.response.value);
+        self.response.deinit();
+        self.* = undefined;
+    }
+};
+
+fn elicitationStringField(
+    allocator: std.mem.Allocator,
+    content: ?std.json.Value,
+    name: []const u8,
+) ![]u8 {
+    const content_value = content orelse return error.InvalidElicitationResult;
+    const object = switch (content_value) {
+        .object => |value| value,
+        else => return error.InvalidElicitationResult,
+    };
+    const value = jsonRequiredString(object, name) catch return error.InvalidElicitationResult;
+    return allocator.dupe(u8, value);
+}
+
 pub const McpApps = struct {
     session: Session,
 
@@ -3067,6 +3880,31 @@ fn jsonOptionalBool(object: std.json.ObjectMap, name: []const u8) !?bool {
     };
 }
 
+fn validateExpAssignments(value: session_types.CopilotExpAssignmentResponse) !void {
+    for (value.flights, 0..) |flight, index| {
+        for (value.flights[index + 1 ..]) |candidate| {
+            if (std.mem.eql(u8, flight.name, candidate.name))
+                return error.InvalidExpAssignments;
+        }
+    }
+    for (value.configs) |config| {
+        for (config.parameters, 0..) |parameter, index| {
+            switch (parameter.value) {
+                .number => |number| if (!std.math.isFinite(number))
+                    return error.InvalidExpAssignments,
+                else => {},
+            }
+            for (config.parameters[index + 1 ..]) |candidate| {
+                if (std.mem.eql(u8, parameter.name, candidate.name))
+                    return error.InvalidExpAssignments;
+            }
+        }
+    }
+    if (value.flighting_version) |version| {
+        if (!std.math.isFinite(version)) return error.InvalidExpAssignments;
+    }
+}
+
 fn parseHookBase(input: std.json.ObjectMap) !ext.HookBaseInput {
     const timestamp = switch (input.get("timestamp") orelse return error.MissingField) {
         .integer => |value| value,
@@ -3131,6 +3969,102 @@ const WireTool = struct {
     isTerminal: bool,
 };
 
+const WireCommand = struct {
+    name: []const u8,
+    description: []const u8,
+};
+
+const WireCommands = struct {
+    values: []const session_types.CommandDefinition,
+
+    pub fn jsonStringify(self: WireCommands, writer: anytype) !void {
+        try writer.beginArray();
+        for (self.values) |command| {
+            try writer.write(WireCommand{
+                .name = command.name,
+                .description = command.description orelse "",
+            });
+        }
+        try writer.endArray();
+    }
+};
+
+const WireExpAssignments = struct {
+    value: session_types.CopilotExpAssignmentResponse,
+
+    pub fn jsonStringify(self: WireExpAssignments, writer: anytype) !void {
+        try writer.beginObject();
+        try writer.objectField("Features");
+        try writer.write(self.value.features);
+        try writer.objectField("Flights");
+        try writer.beginObject();
+        for (self.value.flights) |flight| {
+            try writer.objectField(flight.name);
+            try writer.write(flight.value);
+        }
+        try writer.endObject();
+        try writer.objectField("Configs");
+        try writer.beginArray();
+        for (self.value.configs) |config| {
+            try writer.beginObject();
+            try writer.objectField("Id");
+            try writer.write(config.id);
+            try writer.objectField("Parameters");
+            try writer.beginObject();
+            for (config.parameters) |parameter| {
+                try writer.objectField(parameter.name);
+                switch (parameter.value) {
+                    .string => |value| try writer.write(value),
+                    .number => |value| try writer.write(value),
+                    .boolean => |value| try writer.write(value),
+                    .null => try writer.write(null),
+                }
+            }
+            try writer.endObject();
+            try writer.endObject();
+        }
+        try writer.endArray();
+        if (self.value.parameter_groups) |value| {
+            try writer.objectField("ParameterGroups");
+            try writer.write(value);
+        }
+        if (self.value.flighting_version) |value| {
+            try writer.objectField("FlightingVersion");
+            try writer.write(value);
+        }
+        if (self.value.impression_id) |value| {
+            try writer.objectField("ImpressionId");
+            try writer.write(value);
+        }
+        try writer.objectField("AssignmentContext");
+        try writer.write(self.value.assignment_context);
+        try writer.endObject();
+    }
+};
+
+const WireToolSearch = struct {
+    enabled: ?bool = null,
+    deferThreshold: ?u64 = null,
+};
+
+const WireGitHubMcpToolConfig = struct {
+    enableAllTools: ?bool = null,
+    additionalToolsets: ?[]const []const u8 = null,
+    additionalTools: ?[]const []const u8 = null,
+    enableInsidersMode: ?bool = null,
+    disableFormDeferral: ?bool = null,
+};
+
+const WireCloudSessionRepository = struct {
+    owner: []const u8,
+    name: []const u8,
+    branch: ?[]const u8 = null,
+};
+
+const WireCloudSessionOptions = struct {
+    repository: ?WireCloudSessionRepository = null,
+};
+
 const WireModelSwitchRequest = struct {
     sessionId: []const u8,
     modelId: []const u8,
@@ -3162,6 +4096,27 @@ const WireUserInputRequest = struct {
 const WireProviderTokenRequest = struct {
     sessionId: []const u8,
     providerName: []const u8,
+};
+
+const WireGitHubTokenRequest = struct {
+    registrationId: []const u8,
+    host: []const u8,
+    sessionId: ?[]const u8 = null,
+    reason: session_types.GitHubTokenReason,
+};
+
+const WireExitPlanModeRequest = struct {
+    sessionId: []const u8,
+    summary: []const u8,
+    planContent: ?[]const u8 = null,
+    actions: []const session_types.ExitPlanModeAction,
+    recommendedAction: session_types.ExitPlanModeAction,
+};
+
+const WireAutoModeSwitchRequest = struct {
+    sessionId: []const u8,
+    errorCode: ?[]const u8 = null,
+    retryAfterSeconds: ?u64 = null,
 };
 
 const WireManagedSettingsPermissions = struct {
@@ -3212,6 +4167,7 @@ const WireOpenCanvas = struct {
 };
 
 const WireCapabilitiesUi = struct {
+    elicitation: ?bool = null,
     canvases: ?bool = null,
     mcpApps: ?bool = null,
 };
@@ -3249,6 +4205,7 @@ fn parseCapabilities(value: ?WireCapabilities) ext.CapabilitySet {
     const capabilities = value orelse return .{};
     const ui = capabilities.ui orelse return .{};
     return .{
+        .elicitation = capabilityState(ui.elicitation),
         .canvases = capabilityState(ui.canvases),
         .mcp_apps = capabilityState(ui.mcpApps),
     };
@@ -3430,6 +4387,10 @@ const ExtensionWireValues = struct {
     custom_agents_present: bool = false,
     custom_agents: std.ArrayList(WireCustomAgent) = .empty,
     custom_agent_mcp_objects: std.ArrayList(std.json.ObjectMap) = .empty,
+    feature_flags_object: std.json.ObjectMap = .empty,
+    feature_flags: ?std.json.Value = null,
+    exp_assignments: ?WireExpAssignments = null,
+    git_hub_token_registration_id: ?[]const u8 = null,
 
     fn init(allocator: std.mem.Allocator) ExtensionWireValues {
         return .{ .allocator = allocator };
@@ -3439,6 +4400,7 @@ const ExtensionWireValues = struct {
         for (self.custom_agent_mcp_objects.items) |*object| object.deinit(self.allocator);
         self.custom_agent_mcp_objects.deinit(self.allocator);
         self.custom_agents.deinit(self.allocator);
+        self.feature_flags_object.deinit(self.allocator);
         self.mcp_object.deinit(self.allocator);
         for (self.json_values.items) |value| {
             wipeJsonStrings(value.value);
@@ -3448,6 +4410,29 @@ const ExtensionWireValues = struct {
         self.canvas_actions.deinit(self.allocator);
         self.canvases.deinit(self.allocator);
         self.open_canvases.deinit(self.allocator);
+    }
+
+    fn lowerHostInjection(
+        self: *ExtensionWireValues,
+        feature_flags: ?[]const session_types.FeatureFlag,
+        exp_assignments: ?session_types.CopilotExpAssignmentResponse,
+    ) !void {
+        if (feature_flags) |flags| {
+            for (flags) |flag| {
+                if (flag.name.len == 0 or self.feature_flags_object.contains(flag.name))
+                    return error.InvalidFeatureFlags;
+                try self.feature_flags_object.put(
+                    self.allocator,
+                    flag.name,
+                    .{ .bool = flag.enabled },
+                );
+            }
+            self.feature_flags = .{ .object = self.feature_flags_object };
+        }
+        if (exp_assignments) |value| {
+            try validateExpAssignments(value);
+            self.exp_assignments = .{ .value = value };
+        }
     }
 
     fn parseJson(self: *ExtensionWireValues, source: []const u8) !std.json.Value {
@@ -3607,7 +4592,10 @@ const CreateSessionRequest = struct {
     modelCapabilities: ?models.CapabilitiesOverride,
     workingDirectory: ?[]const u8,
     streaming: bool,
+    includeSubAgentStreamingEvents: bool,
     tools: []const WireTool,
+    commands: ?WireCommands,
+    toolSearch: ?WireToolSearch,
     availableTools: ?[]const []const u8,
     excludedTools: ?[]const []const u8,
     customAgents: ?[]const WireCustomAgent,
@@ -3617,8 +4605,15 @@ const CreateSessionRequest = struct {
     excludedBuiltinAgents: ?[]const []const u8,
     toolFilterPrecedence: ToolFilterPrecedence = .excluded,
     systemMessage: ?session_types.SystemMessageConfig,
+    enableSessionTelemetry: ?bool,
+    enableFileChangeTracking: ?bool,
     requestPermission: bool,
     requestUserInput: bool,
+    requestElicitation: bool,
+    askUserVariant: ?session_types.AskUserVariant,
+    githubMcpToolConfig: ?WireGitHubMcpToolConfig,
+    requestExitPlanMode: bool,
+    requestAutoModeSwitch: bool,
     enableConfigDiscovery: ?bool,
     skillDirectories: ?[]const []const u8,
     enableSkills: ?bool,
@@ -3642,6 +4637,12 @@ const CreateSessionRequest = struct {
     pluginDirectories: ?[]const []const u8,
     disabledSkills: ?[]const []const u8,
     disabledMcpServers: ?[]const []const u8,
+    gitHubToken: ?[]const u8,
+    gitHubTokenProviderRegistrationId: ?[]const u8,
+    remoteSession: ?session_types.RemoteSessionMode,
+    cloud: ?WireCloudSessionOptions,
+    featureFlags: ?std.json.Value,
+    expAssignments: ?WireExpAssignments,
 };
 
 const ResumeSessionRequest = struct {
@@ -3653,7 +4654,10 @@ const ResumeSessionRequest = struct {
     modelCapabilities: ?models.CapabilitiesOverride,
     workingDirectory: ?[]const u8,
     streaming: bool,
+    includeSubAgentStreamingEvents: bool,
     tools: []const WireTool,
+    commands: ?WireCommands,
+    toolSearch: ?WireToolSearch,
     availableTools: ?[]const []const u8,
     excludedTools: ?[]const []const u8,
     customAgents: ?[]const WireCustomAgent,
@@ -3663,8 +4667,15 @@ const ResumeSessionRequest = struct {
     excludedBuiltinAgents: ?[]const []const u8,
     toolFilterPrecedence: ToolFilterPrecedence = .excluded,
     systemMessage: ?session_types.SystemMessageConfig,
+    enableSessionTelemetry: ?bool,
+    enableFileChangeTracking: ?bool,
     requestPermission: bool,
     requestUserInput: bool,
+    requestElicitation: bool,
+    askUserVariant: ?session_types.AskUserVariant,
+    githubMcpToolConfig: ?WireGitHubMcpToolConfig,
+    requestExitPlanMode: bool,
+    requestAutoModeSwitch: bool,
     enableConfigDiscovery: ?bool,
     skillDirectories: ?[]const []const u8,
     enableSkills: ?bool,
@@ -3692,6 +4703,11 @@ const ResumeSessionRequest = struct {
     disabledMcpServers: ?[]const []const u8,
     openCanvases: ?[]const WireOpenCanvas,
     requestedEnvironmentVariables: ?[]const []const u8,
+    gitHubToken: ?[]const u8,
+    gitHubTokenProviderRegistrationId: ?[]const u8,
+    remoteSession: ?session_types.RemoteSessionMode,
+    featureFlags: ?std.json.Value,
+    expAssignments: ?WireExpAssignments,
 };
 
 const ToolFilterPrecedence = enum {
@@ -3713,6 +4729,15 @@ fn managedSettingsEnabled(config: anytype) bool {
     return enabled or injected;
 }
 
+fn validateLifecycleConfig(config: anytype) !void {
+    if (config.git_hub_token != null and config.git_hub_token_provider != null)
+        return error.ConflictingGitHubAuthentication;
+    if (comptime @hasField(@TypeOf(config), "cloud")) {
+        if (config.cloud != null and config.session_id != null)
+            return error.ConflictingCloudSessionId;
+    }
+}
+
 fn resumeConfigFromCreate(config: session_types.CreateSessionConfig) session_types.ResumeSessionConfig {
     return .{
         .model = config.model,
@@ -3722,7 +4747,10 @@ fn resumeConfigFromCreate(config: session_types.CreateSessionConfig) session_typ
         .model_capabilities = config.model_capabilities,
         .working_directory = config.working_directory,
         .streaming = config.streaming,
+        .include_subagent_streaming_events = config.include_subagent_streaming_events,
         .tools = config.tools,
+        .commands = config.commands,
+        .tool_search = config.tool_search,
         .available_tools = config.available_tools,
         .excluded_tools = config.excluded_tools,
         .custom_agents = config.custom_agents,
@@ -3731,6 +4759,10 @@ fn resumeConfigFromCreate(config: session_types.CreateSessionConfig) session_typ
         .custom_agents_local_only = config.custom_agents_local_only,
         .excluded_builtin_agents = config.excluded_builtin_agents,
         .system_message = config.system_message,
+        .enable_session_telemetry = config.enable_session_telemetry,
+        .enable_file_change_tracking = config.enable_file_change_tracking,
+        .coauthor_enabled = config.coauthor_enabled,
+        .manage_schedule_enabled = config.manage_schedule_enabled,
         .request_permission = config.request_permission,
         .enable_config_discovery = config.enable_config_discovery,
         .skill_directories = config.skill_directories,
@@ -3744,6 +4776,19 @@ fn resumeConfigFromCreate(config: session_types.CreateSessionConfig) session_typ
         .permission_context = config.permission_context,
         .on_user_input_request = config.on_user_input_request,
         .user_input_context = config.user_input_context,
+        .ask_user_variant = config.ask_user_variant,
+        .on_elicitation_request = config.on_elicitation_request,
+        .elicitation_context = config.elicitation_context,
+        .github_mcp_tool_config = config.github_mcp_tool_config,
+        .on_exit_plan_mode_request = config.on_exit_plan_mode_request,
+        .exit_plan_mode_context = config.exit_plan_mode_context,
+        .on_auto_mode_switch_request = config.on_auto_mode_switch_request,
+        .auto_mode_switch_context = config.auto_mode_switch_context,
+        .git_hub_token = config.git_hub_token,
+        .git_hub_token_provider = config.git_hub_token_provider,
+        .remote_session = config.remote_session,
+        .feature_flags = config.feature_flags,
+        .exp_assignments = config.exp_assignments,
         .suppress_resume_event = true,
         .extensions = .{
             .common = config.extensions.common,
@@ -3762,7 +4807,10 @@ fn resumeConfigFromJoin(config: session_types.JoinSessionConfig) session_types.R
         .model_capabilities = config.model_capabilities,
         .working_directory = config.working_directory,
         .streaming = config.streaming,
+        .include_subagent_streaming_events = config.include_subagent_streaming_events,
         .tools = config.tools,
+        .commands = config.commands,
+        .tool_search = config.tool_search,
         .available_tools = config.available_tools,
         .excluded_tools = config.excluded_tools,
         .custom_agents = config.custom_agents,
@@ -3771,6 +4819,10 @@ fn resumeConfigFromJoin(config: session_types.JoinSessionConfig) session_types.R
         .custom_agents_local_only = config.custom_agents_local_only,
         .excluded_builtin_agents = config.excluded_builtin_agents,
         .system_message = config.system_message,
+        .enable_session_telemetry = config.enable_session_telemetry,
+        .enable_file_change_tracking = config.enable_file_change_tracking,
+        .coauthor_enabled = config.coauthor_enabled,
+        .manage_schedule_enabled = config.manage_schedule_enabled,
         .request_permission = config.request_permission,
         .enable_config_discovery = config.enable_config_discovery,
         .skill_directories = config.skill_directories,
@@ -3785,6 +4837,19 @@ fn resumeConfigFromJoin(config: session_types.JoinSessionConfig) session_types.R
         .permission_context = config.permission_context,
         .on_user_input_request = config.on_user_input_request,
         .user_input_context = config.user_input_context,
+        .ask_user_variant = config.ask_user_variant,
+        .on_elicitation_request = config.on_elicitation_request,
+        .elicitation_context = config.elicitation_context,
+        .github_mcp_tool_config = config.github_mcp_tool_config,
+        .on_exit_plan_mode_request = config.on_exit_plan_mode_request,
+        .exit_plan_mode_context = config.exit_plan_mode_context,
+        .on_auto_mode_switch_request = config.on_auto_mode_switch_request,
+        .auto_mode_switch_context = config.auto_mode_switch_context,
+        .git_hub_token = config.git_hub_token,
+        .git_hub_token_provider = config.git_hub_token_provider,
+        .remote_session = config.remote_session,
+        .feature_flags = config.feature_flags,
+        .exp_assignments = config.exp_assignments,
         .suppress_resume_event = config.suppress_resume_event,
         .continue_pending_work = config.continue_pending_work,
         .extensions = .{
@@ -3826,6 +4891,42 @@ fn lowerManagedSettings(
             .deny = permissions.deny,
             .ask = permissions.ask,
             .allow = permissions.allow,
+        } else null,
+    };
+}
+
+fn lowerToolSearch(
+    config: ?session_types.ToolSearchConfig,
+) ?WireToolSearch {
+    const value = config orelse return null;
+    return .{
+        .enabled = value.enabled,
+        .deferThreshold = value.defer_threshold,
+    };
+}
+
+fn lowerGitHubMcpToolConfig(
+    config: ?session_types.GitHubMcpToolConfig,
+) ?WireGitHubMcpToolConfig {
+    const value = config orelse return null;
+    return .{
+        .enableAllTools = value.enable_all_tools,
+        .additionalToolsets = value.additional_toolsets,
+        .additionalTools = value.additional_tools,
+        .enableInsidersMode = value.enable_insiders_mode,
+        .disableFormDeferral = value.disable_form_deferral,
+    };
+}
+
+fn lowerCloud(
+    config: ?session_types.CloudSessionOptions,
+) ?WireCloudSessionOptions {
+    const value = config orelse return null;
+    return .{
+        .repository = if (value.repository) |repository| .{
+            .owner = repository.owner,
+            .name = repository.name,
+            .branch = repository.branch,
         } else null,
     };
 }
@@ -3884,7 +4985,10 @@ fn buildPreparedCreateSessionRequest(
         .modelCapabilities = config.model_capabilities,
         .workingDirectory = config.working_directory,
         .streaming = config.streaming,
+        .includeSubAgentStreamingEvents = config.include_subagent_streaming_events,
         .tools = tools,
+        .commands = if (config.commands.len == 0) null else .{ .values = config.commands },
+        .toolSearch = lowerToolSearch(config.tool_search),
         .availableTools = config.available_tools,
         .excludedTools = config.excluded_tools,
         .customAgents = values.wireCustomAgents(),
@@ -3893,8 +4997,15 @@ fn buildPreparedCreateSessionRequest(
         .customAgentsLocalOnly = config.custom_agents_local_only,
         .excludedBuiltinAgents = config.excluded_builtin_agents,
         .systemMessage = config.system_message,
+        .enableSessionTelemetry = config.enable_session_telemetry,
+        .enableFileChangeTracking = config.enable_file_change_tracking,
         .requestPermission = config.request_permission or config.on_permission_request != null,
         .requestUserInput = config.on_user_input_request != null,
+        .requestElicitation = config.on_elicitation_request != null,
+        .askUserVariant = config.ask_user_variant,
+        .githubMcpToolConfig = lowerGitHubMcpToolConfig(config.github_mcp_tool_config),
+        .requestExitPlanMode = config.on_exit_plan_mode_request != null,
+        .requestAutoModeSwitch = config.on_auto_mode_switch_request != null,
         .enableConfigDiscovery = config.enable_config_discovery,
         .skillDirectories = config.skill_directories orelse
             optionalSlice(features.skills.directories),
@@ -3928,6 +5039,12 @@ fn buildPreparedCreateSessionRequest(
         .pluginDirectories = optionalSlice(features.plugin_directories),
         .disabledSkills = optionalSlice(features.skills.disabled),
         .disabledMcpServers = optionalSlice(features.mcp.disabled_servers),
+        .gitHubToken = config.git_hub_token,
+        .gitHubTokenProviderRegistrationId = values.git_hub_token_registration_id,
+        .remoteSession = config.remote_session,
+        .cloud = lowerCloud(config.cloud),
+        .featureFlags = values.feature_flags,
+        .expAssignments = values.exp_assignments,
     };
 }
 
@@ -3989,7 +5106,10 @@ fn buildPreparedResumeSessionRequest(
         .modelCapabilities = config.model_capabilities,
         .workingDirectory = config.working_directory,
         .streaming = config.streaming,
+        .includeSubAgentStreamingEvents = config.include_subagent_streaming_events,
         .tools = tools,
+        .commands = if (config.commands.len == 0) null else .{ .values = config.commands },
+        .toolSearch = lowerToolSearch(config.tool_search),
         .availableTools = config.available_tools,
         .excludedTools = config.excluded_tools,
         .customAgents = values.wireCustomAgents(),
@@ -3998,8 +5118,15 @@ fn buildPreparedResumeSessionRequest(
         .customAgentsLocalOnly = config.custom_agents_local_only,
         .excludedBuiltinAgents = config.excluded_builtin_agents,
         .systemMessage = config.system_message,
+        .enableSessionTelemetry = config.enable_session_telemetry,
+        .enableFileChangeTracking = config.enable_file_change_tracking,
         .requestPermission = config.request_permission or config.on_permission_request != null,
         .requestUserInput = config.on_user_input_request != null,
+        .requestElicitation = config.on_elicitation_request != null,
+        .askUserVariant = config.ask_user_variant,
+        .githubMcpToolConfig = lowerGitHubMcpToolConfig(config.github_mcp_tool_config),
+        .requestExitPlanMode = config.on_exit_plan_mode_request != null,
+        .requestAutoModeSwitch = config.on_auto_mode_switch_request != null,
         .enableConfigDiscovery = config.enable_config_discovery,
         .skillDirectories = config.skill_directories orelse
             optionalSlice(features.skills.directories),
@@ -4040,6 +5167,11 @@ fn buildPreparedResumeSessionRequest(
         else
             null,
         .requestedEnvironmentVariables = optionalSlice(requested_environment_variables),
+        .gitHubToken = config.git_hub_token,
+        .gitHubTokenProviderRegistrationId = values.git_hub_token_registration_id,
+        .remoteSession = config.remote_session,
+        .featureFlags = values.feature_flags,
+        .expAssignments = values.exp_assignments,
     };
 }
 
@@ -4142,6 +5274,11 @@ test "public client API type checks" {
     _ = &Session.setAutoTier;
     _ = &Session.log;
     _ = &Session.capabilities;
+    _ = &Session.ui;
+    _ = &SessionUi.elicitation;
+    _ = &SessionUi.confirm;
+    _ = &SessionUi.select;
+    _ = &SessionUi.input;
     _ = &Session.experimental;
     _ = &Session.openCanvas;
     _ = &Session.closeCanvas;
@@ -4388,6 +5525,1625 @@ test "user input handler receives requests and returns responses" {
     const result = response.value.object.get("result").?.object;
     try std.testing.expectEqualStrings("Yes", result.get("answer").?.string);
     try std.testing.expect(!result.get("wasFreeform").?.bool);
+}
+
+const TestGitHubTokenState = struct {
+    expires_in_seconds: u64 = 3601,
+    cancelled: bool = false,
+    fail: bool = false,
+    calls: usize = 0,
+    last_reason: ?session_types.GitHubTokenReason = null,
+    last_session_id: ?[]const u8 = null,
+};
+
+fn testGitHubTokenProvider(
+    allocator: std.mem.Allocator,
+    request: session_types.GitHubTokenRequest,
+    context: ?*anyopaque,
+) !session_types.GitHubTokenResult {
+    const state: *TestGitHubTokenState = @ptrCast(@alignCast(context.?));
+    state.calls += 1;
+    state.last_reason = request.reason;
+    state.last_session_id = request.session_id;
+    if (state.fail) return error.TokenProviderFailed;
+    if (state.cancelled) return .cancelled;
+    return .{ .token = .{
+        .access_token = try allocator.dupe(u8, "secret-token"),
+        .token_type = try allocator.dupe(u8, "bearer"),
+        .expires_in_seconds = state.expires_in_seconds,
+    } };
+}
+
+fn responseErrorCode(allocator: std.mem.Allocator, framed: []const u8) !i64 {
+    const body = try framedBody(allocator, framed);
+    defer allocator.free(body);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    return parsed.value.object.get("error").?.object.get("code").?.integer;
+}
+
+test "GitHub token callbacks route by registration and session and validate lifetime" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        client.rollbackExtensionRuntime();
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+    }
+
+    var committed_state = TestGitHubTokenState{};
+    var committed = try SessionExtensionRuntime.init(allocator, "committed", session_types.CreateSessionConfig{
+        .git_hub_token_provider = .{
+            .callback = testGitHubTokenProvider,
+            .context = &committed_state,
+        },
+    }, &.{});
+    committed.git_hub_token_registration_id = try allocator.dupe(u8, "committed-registration");
+    try client.extension_runtimes.append(allocator, committed);
+
+    var pending_state = TestGitHubTokenState{ .expires_in_seconds = 3600 };
+    try client.beginExtensionRuntime("pending", session_types.CreateSessionConfig{
+        .git_hub_token_provider = .{
+            .callback = testGitHubTokenProvider,
+            .context = &pending_state,
+        },
+    }, &.{});
+    client.pending_extension_runtime.?.git_hub_token_registration_id =
+        try allocator.dupe(u8, "pending-registration");
+
+    const invalid_lifetime_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"registrationId":"pending-registration","host":"github.com","sessionId":"pending","reason":"initial"}
+    ,
+        .{},
+    );
+    defer invalid_lifetime_params.deinit();
+    var invalid_lifetime_output: std.Io.Writer.Allocating = .init(allocator);
+    defer invalid_lifetime_output.deinit();
+    try client.dispatchServerRequest(
+        &invalid_lifetime_output.writer,
+        .{ .integer = 1 },
+        "gitHubToken.getToken",
+        invalid_lifetime_params.value,
+    );
+    try std.testing.expectEqual(
+        @as(i64, -32603),
+        try responseErrorCode(allocator, invalid_lifetime_output.written()),
+    );
+    try std.testing.expectEqual(@as(usize, 1), pending_state.calls);
+    try std.testing.expectEqual(session_types.GitHubTokenReason.initial, pending_state.last_reason.?);
+
+    pending_state.expires_in_seconds = 3601;
+    var valid_output: std.Io.Writer.Allocating = .init(allocator);
+    defer valid_output.deinit();
+    try client.dispatchServerRequest(
+        &valid_output.writer,
+        .{ .integer = 2 },
+        "gitHubToken.getToken",
+        invalid_lifetime_params.value,
+    );
+    const valid_body = try framedBody(allocator, valid_output.written());
+    defer allocator.free(valid_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":2,"result":{"kind":"token","accessToken":"secret-token","tokenType":"bearer","expiresIn":3601}}
+    , valid_body);
+
+    const committed_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"registrationId":"committed-registration","host":"github.example","sessionId":"committed","reason":"refresh"}
+    ,
+        .{},
+    );
+    defer committed_params.deinit();
+    committed_state.cancelled = true;
+    var cancelled_output: std.Io.Writer.Allocating = .init(allocator);
+    defer cancelled_output.deinit();
+    try client.dispatchServerRequest(
+        &cancelled_output.writer,
+        .{ .integer = 3 },
+        "gitHubToken.getToken",
+        committed_params.value,
+    );
+    const cancelled_body = try framedBody(allocator, cancelled_output.written());
+    defer allocator.free(cancelled_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":3,"result":{"kind":"cancelled"}}
+    , cancelled_body);
+    try std.testing.expectEqualStrings("committed", committed_state.last_session_id.?);
+    try std.testing.expectEqual(session_types.GitHubTokenReason.refresh, committed_state.last_reason.?);
+
+    const mismatched_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"registrationId":"pending-registration","host":"github.com","sessionId":"committed","reason":"refresh"}
+    ,
+        .{},
+    );
+    defer mismatched_params.deinit();
+    var mismatched_output: std.Io.Writer.Allocating = .init(allocator);
+    defer mismatched_output.deinit();
+    try client.dispatchServerRequest(
+        &mismatched_output.writer,
+        .{ .integer = 4 },
+        "gitHubToken.getToken",
+        mismatched_params.value,
+    );
+    try std.testing.expectEqual(
+        @as(i64, -32602),
+        try responseErrorCode(allocator, mismatched_output.written()),
+    );
+
+    const unknown_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"registrationId":"unknown","host":"github.com","reason":"initial"}
+    ,
+        .{},
+    );
+    defer unknown_params.deinit();
+    var unknown_output: std.Io.Writer.Allocating = .init(allocator);
+    defer unknown_output.deinit();
+    try client.dispatchServerRequest(
+        &unknown_output.writer,
+        .{ .integer = 5 },
+        "gitHubToken.getToken",
+        unknown_params.value,
+    );
+    try std.testing.expectEqual(
+        @as(i64, -32602),
+        try responseErrorCode(allocator, unknown_output.written()),
+    );
+
+    const invalid_reason_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"registrationId":"pending-registration","host":"github.com","reason":"future"}
+    ,
+        .{},
+    );
+    defer invalid_reason_params.deinit();
+    var invalid_reason_output: std.Io.Writer.Allocating = .init(allocator);
+    defer invalid_reason_output.deinit();
+    try client.dispatchServerRequest(
+        &invalid_reason_output.writer,
+        .{ .integer = 6 },
+        "gitHubToken.getToken",
+        invalid_reason_params.value,
+    );
+    try std.testing.expectEqual(
+        @as(i64, -32602),
+        try responseErrorCode(allocator, invalid_reason_output.written()),
+    );
+
+    const unknown_field_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"registrationId":"pending-registration","host":"github.com","reason":"initial","extra":true}
+    ,
+        .{},
+    );
+    defer unknown_field_params.deinit();
+    var unknown_field_output: std.Io.Writer.Allocating = .init(allocator);
+    defer unknown_field_output.deinit();
+    try client.dispatchServerRequest(
+        &unknown_field_output.writer,
+        .{ .integer = 7 },
+        "gitHubToken.getToken",
+        unknown_field_params.value,
+    );
+    try std.testing.expectEqual(
+        @as(i64, -32602),
+        try responseErrorCode(allocator, unknown_field_output.written()),
+    );
+
+    const null_session_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"registrationId":"pending-registration","host":"github.com","sessionId":null,"reason":"initial"}
+    ,
+        .{},
+    );
+    defer null_session_params.deinit();
+    var null_session_output: std.Io.Writer.Allocating = .init(allocator);
+    defer null_session_output.deinit();
+    try client.dispatchServerRequest(
+        &null_session_output.writer,
+        .{ .integer = 8 },
+        "gitHubToken.getToken",
+        null_session_params.value,
+    );
+    try std.testing.expectEqual(
+        @as(i64, -32602),
+        try responseErrorCode(allocator, null_session_output.written()),
+    );
+
+    pending_state.fail = true;
+    var failed_output: std.Io.Writer.Allocating = .init(allocator);
+    defer failed_output.deinit();
+    try client.dispatchServerRequest(
+        &failed_output.writer,
+        .{ .integer = 9 },
+        "gitHubToken.getToken",
+        invalid_lifetime_params.value,
+    );
+    try std.testing.expectEqual(
+        @as(i64, -32000),
+        try responseErrorCode(allocator, failed_output.written()),
+    );
+}
+
+test "pending cloud credential routing permits provider callbacks but rejects forged GitHub session ids" {
+    const allocator = std.testing.allocator;
+    var model_state = ProviderTokenTestContext{
+        .token = "model-token",
+        .expected_session_id = "forged",
+        .expected_provider_name = "model-provider",
+    };
+    var github_state = TestGitHubTokenState{};
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        client.rollbackExtensionRuntime();
+        client.provider_tokens.deinit(allocator);
+        client.session_ids.deinit(allocator);
+    }
+    try client.beginExtensionRuntime(null, session_types.CreateSessionConfig{
+        .git_hub_token_provider = .{
+            .callback = testGitHubTokenProvider,
+            .context = &github_state,
+        },
+    }, &.{});
+    try client.installRuntimeProviderTokens(&.{.{
+        .provider_name = "model-provider",
+        .token_provider = .{
+            .callback = providerTokenTestCallback,
+            .context = &model_state,
+        },
+    }});
+    client.pending_extension_runtime.?.git_hub_token_registration_id =
+        try allocator.dupe(u8, "cloud-registration");
+
+    const provider_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"forged","providerName":"model-provider"}
+    ,
+        .{},
+    );
+    defer provider_params.deinit();
+    var provider_output: std.Io.Writer.Allocating = .init(allocator);
+    defer provider_output.deinit();
+    try client.dispatchServerRequest(
+        &provider_output.writer,
+        .{ .integer = 1 },
+        "providerToken.getToken",
+        provider_params.value,
+    );
+    const provider_body = try framedBody(allocator, provider_output.written());
+    defer allocator.free(provider_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":1,"result":{"token":"model-token"}}
+    ,
+        provider_body,
+    );
+    try std.testing.expectEqual(@as(usize, 1), model_state.calls);
+
+    const forged_github_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"registrationId":"cloud-registration","host":"github.com","sessionId":"forged","reason":"initial"}
+    ,
+        .{},
+    );
+    defer forged_github_params.deinit();
+    var forged_github_output: std.Io.Writer.Allocating = .init(allocator);
+    defer forged_github_output.deinit();
+    try client.dispatchServerRequest(
+        &forged_github_output.writer,
+        .{ .integer = 2 },
+        "gitHubToken.getToken",
+        forged_github_params.value,
+    );
+    const forged_github_body = try framedBody(allocator, forged_github_output.written());
+    defer allocator.free(forged_github_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"GitHub token registration mismatch"}}
+    ,
+        forged_github_body,
+    );
+    try std.testing.expectEqual(@as(usize, 0), github_state.calls);
+
+    const initial_github_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"registrationId":"cloud-registration","host":"github.com","reason":"initial"}
+    ,
+        .{},
+    );
+    defer initial_github_params.deinit();
+    var initial_github_output: std.Io.Writer.Allocating = .init(allocator);
+    defer initial_github_output.deinit();
+    try client.dispatchServerRequest(
+        &initial_github_output.writer,
+        .{ .integer = 3 },
+        "gitHubToken.getToken",
+        initial_github_params.value,
+    );
+    const initial_github_body = try framedBody(allocator, initial_github_output.written());
+    defer allocator.free(initial_github_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":3,"result":{"kind":"token","accessToken":"secret-token","tokenType":"bearer","expiresIn":3601}}
+    , initial_github_body);
+    try std.testing.expectEqual(@as(usize, 1), github_state.calls);
+    try std.testing.expect(github_state.last_session_id == null);
+}
+
+test "session UI lowers confirm select and input exactly" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const response_bodies = [_][]const u8{
+        \\{"jsonrpc":"2.0","id":1,"result":{"action":"accept","content":{"confirmed":true}}}
+        ,
+        \\{"jsonrpc":"2.0","id":2,"result":{"action":"accept","content":{"selection":"two"}}}
+        ,
+        \\{"jsonrpc":"2.0","id":3,"result":{"action":"accept","content":{"value":"hello"}}}
+        ,
+    };
+    var response_bytes: std.Io.Writer.Allocating = .init(allocator);
+    defer response_bytes.deinit();
+    for (response_bodies) |body| {
+        try response_bytes.writer.print("Content-Length: {d}\r\n\r\n{s}", .{ body.len, body });
+    }
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "responses",
+        .data = response_bytes.written(),
+    });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{ .mode = .read_only });
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [8192]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+        client.events.deinit(allocator);
+        client.session_ids.deinit(allocator);
+    }
+    var runtime = try SessionExtensionRuntime.init(
+        allocator,
+        "ui-session",
+        session_types.CreateSessionConfig{},
+        &.{},
+    );
+    runtime.capabilities.elicitation = .supported;
+    try client.extension_runtimes.append(allocator, runtime);
+
+    const ui = (Session{ .client = &client, .id = "ui-session" }).ui();
+    try std.testing.expect(try ui.confirm("Proceed?"));
+    const selected = (try ui.select("Choose", &.{ "one", "two" })).?;
+    defer allocator.free(selected);
+    try std.testing.expectEqualStrings("two", selected);
+    const input = (try ui.input("Value", .{
+        .title = "Name",
+        .description = "Enter a name",
+        .min_length = 1,
+        .max_length = 20,
+        .format = .email,
+        .default = "a@example.com",
+    })).?;
+    defer allocator.free(input);
+    try std.testing.expectEqualStrings("hello", input);
+
+    try writer.interface.flush();
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "requests",
+        allocator,
+        .limited(64 * 1024),
+    );
+    defer allocator.free(requests);
+    var request_reader = std.Io.Reader.fixed(requests);
+    const confirm_body = try json_rpc.readFrame(allocator, &request_reader);
+    defer allocator.free(confirm_body);
+    const select_body = try json_rpc.readFrame(allocator, &request_reader);
+    defer allocator.free(select_body);
+    const input_body = try json_rpc.readFrame(allocator, &request_reader);
+    defer allocator.free(input_body);
+
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":1,"method":"session.ui.elicitation","params":{"sessionId":"ui-session","message":"Proceed?","requestedSchema":{"type":"object","properties":{"confirmed":{"type":"boolean","default":true}},"required":["confirmed"]}}}
+    , confirm_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":2,"method":"session.ui.elicitation","params":{"sessionId":"ui-session","message":"Choose","requestedSchema":{"type":"object","properties":{"selection":{"type":"string","enum":["one","two"]}},"required":["selection"]}}}
+    , select_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":3,"method":"session.ui.elicitation","params":{"sessionId":"ui-session","message":"Value","requestedSchema":{"type":"object","properties":{"value":{"type":"string","title":"Name","description":"Enter a name","minLength":1,"maxLength":20,"format":"email","default":"a@example.com"}},"required":["value"]}}}
+    , input_body);
+}
+
+test "command and elicitation events invoke handlers and resolve pending requests" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const response_body =
+        "Content-Length: 50\r\n\r\n" ++
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"success\":true}}" ++
+        "Content-Length: 50\r\n\r\n" ++
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"success\":true}}";
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "responses",
+        .data = response_body,
+    });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{ .mode = .read_only });
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [2048]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [4096]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+
+    const HandlerState = struct {
+        command_called: bool = false,
+        elicitation_called: bool = false,
+    };
+    var state = HandlerState{};
+    const command_handler = struct {
+        fn handle(
+            request: session_types.CommandContext,
+            context: ?*anyopaque,
+        ) !void {
+            const handler_state: *HandlerState = @ptrCast(@alignCast(context.?));
+            try std.testing.expectEqualStrings("events", request.session_id);
+            try std.testing.expectEqualStrings("/ship now", request.command);
+            try std.testing.expectEqualStrings("ship", request.command_name);
+            try std.testing.expectEqualStrings("now", request.args);
+            handler_state.command_called = true;
+        }
+    }.handle;
+    const elicitation_handler = struct {
+        fn handle(
+            inner_allocator: std.mem.Allocator,
+            request: session_types.ElicitationRequest,
+            context: ?*anyopaque,
+        ) !session_types.ElicitationResult {
+            const handler_state: *HandlerState = @ptrCast(@alignCast(context.?));
+            try std.testing.expectEqualStrings("events", request.session_id);
+            try std.testing.expectEqualStrings("Pick", request.message);
+            try std.testing.expectEqualStrings(
+                "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}}}",
+                request.requested_schema_json.?,
+            );
+            handler_state.elicitation_called = true;
+            return .{
+                .action = .accept,
+                .content_json = try inner_allocator.dupe(u8, "{\"answer\":\"ok\"}"),
+            };
+        }
+    }.handle;
+
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.events.items) |*queued| queued.deinit(allocator);
+        client.events.deinit(allocator);
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+        client.session_ids.deinit(allocator);
+    }
+    const commands = [_]session_types.CommandDefinition{.{
+        .name = "ship",
+        .handler = command_handler,
+        .context = &state,
+    }};
+    const runtime = try SessionExtensionRuntime.init(allocator, "events", session_types.CreateSessionConfig{
+        .commands = &commands,
+        .on_elicitation_request = elicitation_handler,
+        .elicitation_context = &state,
+    }, &.{});
+    try client.extension_runtimes.append(allocator, runtime);
+
+    const command_json = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"command.execute","data":{"requestId":"command-1","command":"/ship now","commandName":"ship","args":"now"}}
+    ,
+        .{},
+    );
+    defer command_json.deinit();
+    try client.events.append(allocator, .{
+        .session_id = try allocator.dupe(u8, "events"),
+        .event = try session_types.parseEvent(allocator, command_json.value),
+    });
+    const elicitation_json = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"elicitation.requested","data":{"requestId":"elicit-1","message":"Pick","mode":"form","requestedSchema":{"type":"object","properties":{"answer":{"type":"string"}}}}}
+    ,
+        .{},
+    );
+    defer elicitation_json.deinit();
+    try client.events.append(allocator, .{
+        .session_id = try allocator.dupe(u8, "events"),
+        .event = try session_types.parseEvent(allocator, elicitation_json.value),
+    });
+
+    const session = Session{ .client = &client, .id = "events" };
+    var command_event = try session.nextEvent();
+    defer command_event.deinit(allocator);
+    var elicitation_event = try session.nextEvent();
+    defer elicitation_event.deinit(allocator);
+    try std.testing.expect(state.command_called);
+    try std.testing.expect(state.elicitation_called);
+
+    try writer.interface.flush();
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "requests",
+        allocator,
+        .limited(16 * 1024),
+    );
+    defer allocator.free(requests);
+    var request_reader = std.Io.Reader.fixed(requests);
+    const command_body = try json_rpc.readFrame(allocator, &request_reader);
+    defer allocator.free(command_body);
+    const elicitation_body = try json_rpc.readFrame(allocator, &request_reader);
+    defer allocator.free(elicitation_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":1,"method":"session.commands.handlePendingCommand","params":{"sessionId":"events","requestId":"command-1"}}
+    , command_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":2,"method":"session.ui.handlePendingElicitation","params":{"sessionId":"events","requestId":"elicit-1","result":{"action":"accept","content":{"answer":"ok"}}}}
+    , elicitation_body);
+}
+
+test "exit plan and auto mode callbacks validate and lower exact responses" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+    }
+    var exit_called = false;
+    var auto_called = false;
+    const exit_handler = struct {
+        fn handle(
+            request: session_types.ExitPlanModeRequest,
+            context: ?*anyopaque,
+        ) !session_types.ExitPlanModeResult {
+            const called: *bool = @ptrCast(@alignCast(context.?));
+            try std.testing.expectEqualStrings("callbacks", request.session_id);
+            try std.testing.expectEqualStrings("Plan", request.summary);
+            try std.testing.expectEqualStrings("Do it", request.plan_content.?);
+            try std.testing.expectEqual(@as(usize, 2), request.actions.len);
+            try std.testing.expectEqual(session_types.ExitPlanModeAction.autopilot, request.recommended_action);
+            called.* = true;
+            return .{
+                .approved = true,
+                .selected_action = .interactive,
+                .feedback = "Looks good",
+            };
+        }
+    }.handle;
+    const auto_handler = struct {
+        fn handle(
+            request: session_types.AutoModeSwitchRequest,
+            context: ?*anyopaque,
+        ) !session_types.AutoModeSwitchResponse {
+            const called: *bool = @ptrCast(@alignCast(context.?));
+            try std.testing.expectEqualStrings("callbacks", request.session_id);
+            try std.testing.expectEqualStrings("rate_limit", request.error_code.?);
+            try std.testing.expectEqual(@as(u64, 12), request.retry_after_seconds.?);
+            called.* = true;
+            return .yes_always;
+        }
+    }.handle;
+    const runtime = try SessionExtensionRuntime.init(allocator, "callbacks", session_types.CreateSessionConfig{
+        .on_exit_plan_mode_request = exit_handler,
+        .exit_plan_mode_context = &exit_called,
+        .on_auto_mode_switch_request = auto_handler,
+        .auto_mode_switch_context = &auto_called,
+    }, &.{});
+    try client.extension_runtimes.append(allocator, runtime);
+
+    const exit_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"callbacks","summary":"Plan","planContent":"Do it","actions":["interactive","autopilot"],"recommendedAction":"autopilot"}
+    ,
+        .{},
+    );
+    defer exit_params.deinit();
+    var exit_output: std.Io.Writer.Allocating = .init(allocator);
+    defer exit_output.deinit();
+    try client.dispatchServerRequest(
+        &exit_output.writer,
+        .{ .integer = 1 },
+        "exitPlanMode.request",
+        exit_params.value,
+    );
+    const exit_body = try framedBody(allocator, exit_output.written());
+    defer allocator.free(exit_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":1,"result":{"approved":true,"selectedAction":"interactive","feedback":"Looks good"}}
+    , exit_body);
+    try std.testing.expect(exit_called);
+
+    const auto_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"callbacks","errorCode":"rate_limit","retryAfterSeconds":12}
+    ,
+        .{},
+    );
+    defer auto_params.deinit();
+    var auto_output: std.Io.Writer.Allocating = .init(allocator);
+    defer auto_output.deinit();
+    try client.dispatchServerRequest(
+        &auto_output.writer,
+        .{ .integer = 2 },
+        "autoModeSwitch.request",
+        auto_params.value,
+    );
+    const auto_body = try framedBody(allocator, auto_output.written());
+    defer allocator.free(auto_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":2,"result":{"response":"yes_always"}}
+    , auto_body);
+    try std.testing.expect(auto_called);
+
+    const invalid_exit_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"callbacks","summary":"Plan","actions":["future"],"recommendedAction":"future"}
+    ,
+        .{},
+    );
+    defer invalid_exit_params.deinit();
+    var invalid_output: std.Io.Writer.Allocating = .init(allocator);
+    defer invalid_output.deinit();
+    try client.dispatchServerRequest(
+        &invalid_output.writer,
+        .{ .integer = 3 },
+        "exitPlanMode.request",
+        invalid_exit_params.value,
+    );
+    try std.testing.expectEqual(
+        @as(i64, -32602),
+        try responseErrorCode(allocator, invalid_output.written()),
+    );
+}
+
+test "cloud create lowers stable session fields and adopts the server id" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const create_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"sessionId":"cloud-id","capabilities":{"ui":{"elicitation":true}}}}
+    ;
+    const update_response =
+        \\{"jsonrpc":"2.0","id":2,"result":{"success":true}}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{ create_response.len, create_response, update_response.len, update_response },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = responses });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{ .mode = .read_only });
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [8192]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.session_ids.items) |id| allocator.free(id);
+        client.session_ids.deinit(allocator);
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+    }
+
+    const command_handler = struct {
+        fn handle(_: session_types.CommandContext, _: ?*anyopaque) !void {}
+    }.handle;
+    const elicitation_handler = struct {
+        fn handle(
+            inner_allocator: std.mem.Allocator,
+            _: session_types.ElicitationRequest,
+            _: ?*anyopaque,
+        ) !session_types.ElicitationResult {
+            return .{
+                .action = .cancel,
+                .content_json = try inner_allocator.dupe(u8, "{}"),
+            };
+        }
+    }.handle;
+    const exit_handler = struct {
+        fn handle(
+            _: session_types.ExitPlanModeRequest,
+            _: ?*anyopaque,
+        ) !session_types.ExitPlanModeResult {
+            return .{ .approved = true };
+        }
+    }.handle;
+    const auto_handler = struct {
+        fn handle(
+            _: session_types.AutoModeSwitchRequest,
+            _: ?*anyopaque,
+        ) !session_types.AutoModeSwitchResponse {
+            return .no;
+        }
+    }.handle;
+    const exp_parameters = [_]session_types.ExpParameter{
+        .{ .name = "enabled", .value = .{ .boolean = true } },
+        .{ .name = "count", .value = .{ .number = 2 } },
+        .{ .name = "ratio", .value = .{ .number = 1.5 } },
+        .{ .name = "label", .value = .{ .string = "x" } },
+        .{ .name = "empty", .value = .null },
+    };
+    const exp_configs = [_]session_types.ExpConfigEntry{.{
+        .id = "config",
+        .parameters = &exp_parameters,
+    }};
+    const exp_assignments = session_types.CopilotExpAssignmentResponse{
+        .features = &.{"flight"},
+        .flights = &.{.{ .name = "flight", .value = "treatment" }},
+        .configs = &exp_configs,
+        .flighting_version = 2.5,
+        .impression_id = "impression",
+        .assignment_context = "context",
+    };
+
+    const created = try client.createSession(.{
+        .cloud = .{ .repository = .{
+            .owner = "github",
+            .name = "copilot-sdk",
+            .branch = "main",
+        } },
+        .include_subagent_streaming_events = false,
+        .commands = &.{.{
+            .name = "ship",
+            .description = "Ship it",
+            .handler = command_handler,
+        }},
+        .tool_search = .{ .enabled = true, .defer_threshold = 7 },
+        .enable_session_telemetry = true,
+        .enable_file_change_tracking = true,
+        .coauthor_enabled = false,
+        .manage_schedule_enabled = true,
+        .ask_user_variant = .elicitation,
+        .on_elicitation_request = elicitation_handler,
+        .github_mcp_tool_config = .{
+            .enable_all_tools = false,
+            .additional_toolsets = &.{"repos"},
+            .additional_tools = &.{"get_file"},
+            .enable_insiders_mode = true,
+            .disable_form_deferral = true,
+        },
+        .on_exit_plan_mode_request = exit_handler,
+        .on_auto_mode_switch_request = auto_handler,
+        .git_hub_token = "static-secret",
+        .remote_session = .@"export",
+        .feature_flags = &.{
+            .{ .name = "alpha", .enabled = true },
+            .{ .name = "beta", .enabled = false },
+        },
+        .exp_assignments = exp_assignments,
+    });
+    try std.testing.expectEqualStrings("cloud-id", created.id);
+    try std.testing.expect(created.capabilities().supports(.elicitation));
+
+    try writer.interface.flush();
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "requests",
+        allocator,
+        .limited(32 * 1024),
+    );
+    defer allocator.free(requests);
+    var frames = std.Io.Reader.fixed(requests);
+    const create_body = try json_rpc.readFrame(allocator, &frames);
+    defer {
+        wipeSecret(create_body);
+        allocator.free(create_body);
+    }
+    const update_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(update_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":1,"method":"session.create","params":{"streaming":false,"includeSubAgentStreamingEvents":false,"tools":[],"commands":[{"name":"ship","description":"Ship it"}],"toolSearch":{"enabled":true,"deferThreshold":7},"toolFilterPrecedence":"excluded","enableSessionTelemetry":true,"enableFileChangeTracking":true,"requestPermission":false,"requestUserInput":false,"requestElicitation":true,"askUserVariant":"elicitation","githubMcpToolConfig":{"enableAllTools":false,"additionalToolsets":["repos"],"additionalTools":["get_file"],"enableInsidersMode":true,"disableFormDeferral":true},"requestExitPlanMode":true,"requestAutoModeSwitch":true,"enableManagedSettings":false,"gitHubToken":"static-secret","remoteSession":"export","cloud":{"repository":{"owner":"github","name":"copilot-sdk","branch":"main"}},"featureFlags":{"alpha":true,"beta":false},"expAssignments":{"Features":["flight"],"Flights":{"flight":"treatment"},"Configs":[{"Id":"config","Parameters":{"enabled":true,"count":2,"ratio":1.5,"label":"x","empty":null}}],"FlightingVersion":2.5,"ImpressionId":"impression","AssignmentContext":"context"}}}
+    , create_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":2,"method":"session.options.update","params":{"sessionId":"cloud-id","coauthorEnabled":false,"manageScheduleEnabled":true}}
+    , update_body);
+    try std.testing.expectError(
+        error.ConflictingCloudSessionId,
+        validateLifecycleConfig(session_types.CreateSessionConfig{
+            .session_id = "caller",
+            .cloud = .{},
+        }),
+    );
+    try std.testing.expectError(
+        error.ConflictingGitHubAuthentication,
+        validateLifecycleConfig(session_types.CreateSessionConfig{
+            .git_hub_token = "static",
+            .git_hub_token_provider = .{
+                .callback = testGitHubTokenProvider,
+            },
+        }),
+    );
+}
+
+test "ExP assignment lowering rejects duplicate record keys" {
+    const allocator = std.testing.allocator;
+    var values = ExtensionWireValues.init(allocator);
+    defer values.deinit();
+    try std.testing.expectError(
+        error.InvalidExpAssignments,
+        values.lowerHostInjection(null, .{
+            .features = &.{},
+            .flights = &.{
+                .{ .name = "duplicate", .value = "first" },
+                .{ .name = "duplicate", .value = "second" },
+            },
+            .configs = &.{},
+            .assignment_context = "context",
+        }),
+    );
+
+    var parameter_values = ExtensionWireValues.init(allocator);
+    defer parameter_values.deinit();
+    try std.testing.expectError(
+        error.InvalidExpAssignments,
+        parameter_values.lowerHostInjection(null, .{
+            .features = &.{},
+            .flights = &.{},
+            .configs = &.{.{
+                .id = "config",
+                .parameters = &.{
+                    .{ .name = "duplicate", .value = .{ .boolean = true } },
+                    .{ .name = "duplicate", .value = .{ .boolean = false } },
+                },
+            }},
+            .assignment_context = "context",
+        }),
+    );
+
+    var non_finite_values = ExtensionWireValues.init(allocator);
+    defer non_finite_values.deinit();
+    try std.testing.expectError(
+        error.InvalidExpAssignments,
+        non_finite_values.lowerHostInjection(null, .{
+            .features = &.{},
+            .flights = &.{},
+            .configs = &.{.{
+                .id = "config",
+                .parameters = &.{.{
+                    .name = "invalid",
+                    .value = .{ .number = std.math.nan(f64) },
+                }},
+            }},
+            .assignment_context = "context",
+        }),
+    );
+}
+
+test "post-response lifecycle failure detaches creates and quarantines resumed credentials" {
+    const allocator = std.testing.allocator;
+    const command_handler = struct {
+        fn handle(_: session_types.CommandContext, _: ?*anyopaque) !void {}
+    }.handle;
+
+    {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const create_response =
+            \\{"jsonrpc":"2.0","id":1,"result":{"sessionId":"new-session"}}
+        ;
+        const update_response =
+            \\{"jsonrpc":"2.0","id":2,"result":{"success":false}}
+        ;
+        const detach_response =
+            \\{"jsonrpc":"2.0","id":3,"result":{"success":true}}
+        ;
+        const token_request =
+            \\{"jsonrpc":"2.0","id":77,"method":"providerToken.getToken","params":{"sessionId":"new-session","providerName":"model-provider"}}
+        ;
+        const responses = try std.fmt.allocPrint(
+            allocator,
+            "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+            .{
+                create_response.len,
+                create_response,
+                update_response.len,
+                update_response,
+                token_request.len,
+                token_request,
+                detach_response.len,
+                detach_response,
+            },
+        );
+        defer allocator.free(responses);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = responses });
+        const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{ .mode = .read_only });
+        defer response_file.close(std.testing.io);
+        var reader_buffer: [2048]u8 = undefined;
+        var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+        const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+        defer request_file.close(std.testing.io);
+        var writer_buffer: [4096]u8 = undefined;
+        var writer = request_file.writer(std.testing.io, &writer_buffer);
+        var client = Client{
+            .allocator = allocator,
+            .io = std.testing.io,
+            .child = null,
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        };
+        defer {
+            for (client.session_ids.items) |id| allocator.free(id);
+            client.session_ids.deinit(allocator);
+            for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+            client.extension_runtimes.deinit(allocator);
+        }
+        var model_state = ProviderTokenTestContext{
+            .token = "model-token",
+            .expected_session_id = "new-session",
+            .expected_provider_name = "model-provider",
+        };
+
+        try std.testing.expectError(
+            error.SessionOptionsNotAccepted,
+            client.createSession(.{
+                .cloud = .{},
+                .coauthor_enabled = true,
+                .provider = .{
+                    .base_url = "https://example.test",
+                    .provider_name = "model-provider",
+                    .bearer_token_provider = .{
+                        .callback = providerTokenTestCallback,
+                        .context = &model_state,
+                    },
+                },
+            }),
+        );
+        try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
+        try std.testing.expectEqual(@as(usize, 0), client.extension_runtimes.items.len);
+        try std.testing.expectEqual(@as(usize, 0), model_state.calls);
+        try writer.interface.flush();
+        const requests = try tmp.dir.readFileAlloc(
+            std.testing.io,
+            "requests",
+            allocator,
+            .limited(16 * 1024),
+        );
+        defer allocator.free(requests);
+        var frames = std.Io.Reader.fixed(requests);
+        const create_body = try json_rpc.readFrame(allocator, &frames);
+        defer allocator.free(create_body);
+        const update_body = try json_rpc.readFrame(allocator, &frames);
+        defer allocator.free(update_body);
+        const detach_body = try json_rpc.readFrame(allocator, &frames);
+        defer allocator.free(detach_body);
+        const token_body = try json_rpc.readFrame(allocator, &frames);
+        defer allocator.free(token_body);
+        try std.testing.expect(
+            std.mem.indexOf(u8, detach_body, "\"method\":\"session.detach\"") != null,
+        );
+        try std.testing.expectEqualStrings(
+            \\{"jsonrpc":"2.0","id":77,"error":{"code":-32000,"message":"bearer token provider not registered"}}
+        , token_body);
+    }
+
+    {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const resume_response =
+            \\{"jsonrpc":"2.0","id":1,"result":{"sessionId":"resident"}}
+        ;
+        const update_response =
+            \\{"jsonrpc":"2.0","id":2,"result":{"success":false}}
+        ;
+        const responses = try std.fmt.allocPrint(
+            allocator,
+            "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+            .{ resume_response.len, resume_response, update_response.len, update_response },
+        );
+        defer allocator.free(responses);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = responses });
+        const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{ .mode = .read_only });
+        defer response_file.close(std.testing.io);
+        var reader_buffer: [2048]u8 = undefined;
+        var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+        const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+        defer request_file.close(std.testing.io);
+        var writer_buffer: [4096]u8 = undefined;
+        var writer = request_file.writer(std.testing.io, &writer_buffer);
+        var client = Client{
+            .allocator = allocator,
+            .io = std.testing.io,
+            .child = null,
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        };
+        defer {
+            for (client.session_ids.items) |id| allocator.free(id);
+            client.session_ids.deinit(allocator);
+            for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+            client.extension_runtimes.deinit(allocator);
+        }
+        try client.session_ids.append(allocator, try allocator.dupe(u8, "resident"));
+        var old_github_state = TestGitHubTokenState{};
+        var new_github_state = TestGitHubTokenState{};
+        var old_model_state = ProviderTokenTestContext{
+            .token = "old-model-token",
+            .expected_session_id = "resident",
+            .expected_provider_name = "model-provider",
+        };
+        var new_model_state = ProviderTokenTestContext{
+            .token = "new-model-token",
+            .expected_session_id = "resident",
+            .expected_provider_name = "model-provider",
+        };
+        const old_commands = [_]session_types.CommandDefinition{.{
+            .name = "old",
+            .handler = command_handler,
+        }};
+        try client.beginExtensionRuntime(
+            "resident",
+            session_types.ResumeSessionConfig{
+                .commands = &old_commands,
+                .git_hub_token_provider = .{
+                    .callback = testGitHubTokenProvider,
+                    .context = &old_github_state,
+                },
+            },
+            &.{},
+        );
+        try client.installRuntimeProviderTokens(&.{.{
+            .provider_name = "model-provider",
+            .token_provider = .{
+                .callback = providerTokenTestCallback,
+                .context = &old_model_state,
+            },
+        }});
+        client.pending_extension_runtime.?.git_hub_token_registration_id =
+            try allocator.dupe(u8, "old-registration");
+        try client.commitExtensionRuntime("resident", .{}, &.{});
+        const new_commands = [_]session_types.CommandDefinition{.{
+            .name = "new",
+            .handler = command_handler,
+        }};
+        try std.testing.expectError(
+            error.SessionOptionsNotAccepted,
+            client.resumeSession("resident", .{
+                .commands = &new_commands,
+                .manage_schedule_enabled = true,
+                .git_hub_token_provider = .{
+                    .callback = testGitHubTokenProvider,
+                    .context = &new_github_state,
+                },
+                .provider = .{
+                    .base_url = "https://example.test",
+                    .provider_name = "model-provider",
+                    .bearer_token_provider = .{
+                        .callback = providerTokenTestCallback,
+                        .context = &new_model_state,
+                    },
+                },
+            }),
+        );
+        try writer.interface.flush();
+        const requests = try tmp.dir.readFileAlloc(
+            std.testing.io,
+            "requests",
+            allocator,
+            .limited(16 * 1024),
+        );
+        defer allocator.free(requests);
+        var frames = std.Io.Reader.fixed(requests);
+        const resume_body = try json_rpc.readFrame(allocator, &frames);
+        defer allocator.free(resume_body);
+        const resume_request = try std.json.parseFromSlice(std.json.Value, allocator, resume_body, .{});
+        defer resume_request.deinit();
+        const replacement_registration = resume_request.value.object
+            .get("params").?.object
+            .get("gitHubTokenProviderRegistrationId").?.string;
+        const update_body = try json_rpc.readFrame(allocator, &frames);
+        defer allocator.free(update_body);
+        try std.testing.expectEqualStrings("", frames.buffered());
+
+        const token_params_json = try std.fmt.allocPrint(
+            allocator,
+            "{{\"registrationId\":\"{s}\",\"host\":\"github.com\",\"sessionId\":\"resident\",\"reason\":\"refresh\"}}",
+            .{replacement_registration},
+        );
+        defer allocator.free(token_params_json);
+        const token_params = try std.json.parseFromSlice(
+            std.json.Value,
+            allocator,
+            token_params_json,
+            .{},
+        );
+        defer token_params.deinit();
+        var token_output: std.Io.Writer.Allocating = .init(allocator);
+        defer token_output.deinit();
+        try client.dispatchServerRequest(
+            &token_output.writer,
+            .{ .integer = 3 },
+            "gitHubToken.getToken",
+            token_params.value,
+        );
+        try std.testing.expectEqual(@as(i64, -32602), try responseErrorCode(allocator, token_output.written()));
+        try std.testing.expectEqual(@as(usize, 0), old_github_state.calls);
+        try std.testing.expectEqual(@as(usize, 0), new_github_state.calls);
+
+        const old_token_params = try std.json.parseFromSlice(
+            std.json.Value,
+            allocator,
+            \\{"registrationId":"old-registration","host":"github.com","sessionId":"resident","reason":"refresh"}
+        ,
+            .{},
+        );
+        defer old_token_params.deinit();
+        var old_token_output: std.Io.Writer.Allocating = .init(allocator);
+        defer old_token_output.deinit();
+        try client.dispatchServerRequest(
+            &old_token_output.writer,
+            .{ .integer = 4 },
+            "gitHubToken.getToken",
+            old_token_params.value,
+        );
+        try std.testing.expectEqual(@as(i64, -32602), try responseErrorCode(allocator, old_token_output.written()));
+        try std.testing.expectEqual(@as(usize, 0), old_github_state.calls);
+
+        const provider_params = try std.json.parseFromSlice(
+            std.json.Value,
+            allocator,
+            \\{"sessionId":"resident","providerName":"model-provider"}
+        ,
+            .{},
+        );
+        defer provider_params.deinit();
+        var provider_output: std.Io.Writer.Allocating = .init(allocator);
+        defer provider_output.deinit();
+        try client.dispatchServerRequest(
+            &provider_output.writer,
+            .{ .integer = 5 },
+            "providerToken.getToken",
+            provider_params.value,
+        );
+        try std.testing.expectEqual(@as(i64, -32000), try responseErrorCode(allocator, provider_output.written()));
+        try std.testing.expectEqual(@as(usize, 0), old_model_state.calls);
+        try std.testing.expectEqual(@as(usize, 0), new_model_state.calls);
+
+        const resident = client.findExtensionRuntime("resident").?;
+        try std.testing.expectEqual(@as(usize, 1), resident.commands.len);
+        try std.testing.expectEqualStrings("old", resident.commands[0].name);
+        try std.testing.expect(resident.credentials_quarantined);
+        try std.testing.expect(client.findGitHubTokenRuntime("old-registration") == null);
+        try std.testing.expect(client.findGitHubTokenRuntime(replacement_registration) == null);
+    }
+}
+
+test "resident resume response failure quarantines old and replacement credentials" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const resume_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"sessionId":"resident","grantedEnvironmentVariables":{"TOKEN":1}}}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ resume_response.len, resume_response },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = responses });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{ .mode = .read_only });
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [2048]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [4096]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.session_ids.items) |id| allocator.free(id);
+        client.session_ids.deinit(allocator);
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+    }
+
+    try client.session_ids.append(allocator, try allocator.dupe(u8, "resident"));
+    var old_github_state = TestGitHubTokenState{};
+    var old_model_state = ProviderTokenTestContext{
+        .token = "old-model-token",
+        .expected_session_id = "resident",
+        .expected_provider_name = "model-provider",
+    };
+    try client.beginExtensionRuntime(
+        "resident",
+        session_types.ResumeSessionConfig{
+            .git_hub_token_provider = .{
+                .callback = testGitHubTokenProvider,
+                .context = &old_github_state,
+            },
+        },
+        &.{},
+    );
+    try client.installRuntimeProviderTokens(&.{.{
+        .provider_name = "model-provider",
+        .token_provider = .{
+            .callback = providerTokenTestCallback,
+            .context = &old_model_state,
+        },
+    }});
+    client.pending_extension_runtime.?.git_hub_token_registration_id =
+        try allocator.dupe(u8, "old-registration");
+    try client.commitExtensionRuntime("resident", .{}, &.{});
+
+    var new_github_state = TestGitHubTokenState{};
+    var new_model_state = ProviderTokenTestContext{
+        .token = "new-model-token",
+        .expected_session_id = "resident",
+        .expected_provider_name = "model-provider",
+    };
+    try std.testing.expectError(
+        error.InvalidGrantedEnvironmentVariables,
+        client.resumeSessionWithEnvironment(
+            "resident",
+            .{
+                .git_hub_token_provider = .{
+                    .callback = testGitHubTokenProvider,
+                    .context = &new_github_state,
+                },
+                .provider = .{
+                    .base_url = "https://example.test",
+                    .provider_name = "model-provider",
+                    .bearer_token_provider = .{
+                        .callback = providerTokenTestCallback,
+                        .context = &new_model_state,
+                    },
+                },
+            },
+            &.{"TOKEN"},
+        ),
+    );
+
+    try writer.interface.flush();
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "requests",
+        allocator,
+        .limited(16 * 1024),
+    );
+    defer allocator.free(requests);
+    var frames = std.Io.Reader.fixed(requests);
+    const resume_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(resume_body);
+    const resume_request = try std.json.parseFromSlice(std.json.Value, allocator, resume_body, .{});
+    defer resume_request.deinit();
+    const replacement_registration = resume_request.value.object
+        .get("params").?.object
+        .get("gitHubTokenProviderRegistrationId").?.string;
+
+    const token_params_json = try std.fmt.allocPrint(
+        allocator,
+        "{{\"registrationId\":\"{s}\",\"host\":\"github.com\",\"sessionId\":\"resident\",\"reason\":\"refresh\"}}",
+        .{replacement_registration},
+    );
+    defer allocator.free(token_params_json);
+    const token_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        token_params_json,
+        .{},
+    );
+    defer token_params.deinit();
+    var token_output: std.Io.Writer.Allocating = .init(allocator);
+    defer token_output.deinit();
+    try client.dispatchServerRequest(
+        &token_output.writer,
+        .{ .integer = 2 },
+        "gitHubToken.getToken",
+        token_params.value,
+    );
+    try std.testing.expectEqual(@as(i64, -32602), try responseErrorCode(allocator, token_output.written()));
+    try std.testing.expectEqual(@as(usize, 0), old_github_state.calls);
+    try std.testing.expectEqual(@as(usize, 0), new_github_state.calls);
+
+    const old_token_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"registrationId":"old-registration","host":"github.com","sessionId":"resident","reason":"refresh"}
+    ,
+        .{},
+    );
+    defer old_token_params.deinit();
+    var old_token_output: std.Io.Writer.Allocating = .init(allocator);
+    defer old_token_output.deinit();
+    try client.dispatchServerRequest(
+        &old_token_output.writer,
+        .{ .integer = 3 },
+        "gitHubToken.getToken",
+        old_token_params.value,
+    );
+    try std.testing.expectEqual(@as(i64, -32602), try responseErrorCode(allocator, old_token_output.written()));
+
+    const provider_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"resident","providerName":"model-provider"}
+    ,
+        .{},
+    );
+    defer provider_params.deinit();
+    var provider_output: std.Io.Writer.Allocating = .init(allocator);
+    defer provider_output.deinit();
+    try client.dispatchServerRequest(
+        &provider_output.writer,
+        .{ .integer = 4 },
+        "providerToken.getToken",
+        provider_params.value,
+    );
+    try std.testing.expectEqual(@as(i64, -32000), try responseErrorCode(allocator, provider_output.written()));
+    try std.testing.expectEqual(@as(usize, 0), old_model_state.calls);
+    try std.testing.expectEqual(@as(usize, 0), new_model_state.calls);
+
+    const resident = client.findExtensionRuntime("resident").?;
+    try std.testing.expect(resident.credentials_quarantined);
+    try std.testing.expect(client.findGitHubTokenRuntime("old-registration") == null);
+    try std.testing.expect(client.findGitHubTokenRuntime(replacement_registration) == null);
+}
+
+test "invalid resident resume ids preserve non-secret callbacks and quarantine credentials" {
+    const allocator = std.testing.allocator;
+    const command_handler = struct {
+        fn handle(_: session_types.CommandContext, _: ?*anyopaque) !void {}
+    }.handle;
+    const cases = [_]struct {
+        response: []const u8,
+        expected_error: anyerror,
+        detached_session_id: ?[]const u8,
+    }{
+        .{
+            .response = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}",
+            .expected_error = error.MissingSessionId,
+            .detached_session_id = null,
+        },
+        .{
+            .response = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"sessionId\":\"unexpected\"}}",
+            .expected_error = error.SessionIdMismatch,
+            .detached_session_id = "unexpected",
+        },
+    };
+
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const detach_response =
+            \\{"jsonrpc":"2.0","id":2,"result":{"success":true}}
+        ;
+        const token_request =
+            \\{"jsonrpc":"2.0","id":77,"method":"gitHubToken.getToken","params":{"registrationId":"old-registration","host":"github.com","sessionId":"resident","reason":"refresh"}}
+        ;
+        const responses = if (case.detached_session_id != null)
+            try std.fmt.allocPrint(
+                allocator,
+                "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+                .{
+                    case.response.len,
+                    case.response,
+                    token_request.len,
+                    token_request,
+                    detach_response.len,
+                    detach_response,
+                },
+            )
+        else
+            try std.fmt.allocPrint(
+                allocator,
+                "Content-Length: {d}\r\n\r\n{s}",
+                .{ case.response.len, case.response },
+            );
+        defer allocator.free(responses);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = responses });
+        const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{ .mode = .read_only });
+        defer response_file.close(std.testing.io);
+        var reader_buffer: [2048]u8 = undefined;
+        var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+        const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+        defer request_file.close(std.testing.io);
+        var writer_buffer: [4096]u8 = undefined;
+        var writer = request_file.writer(std.testing.io, &writer_buffer);
+        var client = Client{
+            .allocator = allocator,
+            .io = std.testing.io,
+            .child = null,
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        };
+        defer {
+            for (client.session_ids.items) |id| allocator.free(id);
+            client.session_ids.deinit(allocator);
+            for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+            client.extension_runtimes.deinit(allocator);
+        }
+
+        try client.session_ids.append(allocator, try allocator.dupe(u8, "resident"));
+        var old_github_state = TestGitHubTokenState{};
+        const old_commands = [_]session_types.CommandDefinition{.{
+            .name = "old",
+            .handler = command_handler,
+        }};
+        var old_runtime = try SessionExtensionRuntime.init(
+            allocator,
+            "resident",
+            session_types.ResumeSessionConfig{
+                .commands = &old_commands,
+                .git_hub_token_provider = .{
+                    .callback = testGitHubTokenProvider,
+                    .context = &old_github_state,
+                },
+            },
+            &.{},
+        );
+        old_runtime.git_hub_token_registration_id =
+            try allocator.dupe(u8, "old-registration");
+        try client.extension_runtimes.append(allocator, old_runtime);
+
+        var new_github_state = TestGitHubTokenState{};
+        try std.testing.expectError(
+            case.expected_error,
+            client.resumeSession("resident", .{
+                .git_hub_token_provider = .{
+                    .callback = testGitHubTokenProvider,
+                    .context = &new_github_state,
+                },
+            }),
+        );
+
+        try writer.interface.flush();
+        const requests = try tmp.dir.readFileAlloc(
+            std.testing.io,
+            "requests",
+            allocator,
+            .limited(16 * 1024),
+        );
+        defer allocator.free(requests);
+        var frames = std.Io.Reader.fixed(requests);
+        const resume_body = try json_rpc.readFrame(allocator, &frames);
+        defer allocator.free(resume_body);
+        const resume_request = try std.json.parseFromSlice(std.json.Value, allocator, resume_body, .{});
+        defer resume_request.deinit();
+        const replacement_registration = resume_request.value.object
+            .get("params").?.object
+            .get("gitHubTokenProviderRegistrationId").?.string;
+
+        const resident = client.findExtensionRuntime("resident").?;
+        try std.testing.expectEqual(@as(usize, 1), resident.commands.len);
+        try std.testing.expectEqualStrings("old", resident.commands[0].name);
+        try std.testing.expect(resident.credentials_quarantined);
+        try std.testing.expect(client.findGitHubTokenRuntime("old-registration") == null);
+        try std.testing.expect(client.findGitHubTokenRuntime(replacement_registration) == null);
+
+        const old_token_params = try std.json.parseFromSlice(
+            std.json.Value,
+            allocator,
+            \\{"registrationId":"old-registration","host":"github.com","sessionId":"resident","reason":"refresh"}
+        ,
+            .{},
+        );
+        defer old_token_params.deinit();
+        var token_output: std.Io.Writer.Allocating = .init(allocator);
+        defer token_output.deinit();
+        try client.dispatchServerRequest(
+            &token_output.writer,
+            .{ .integer = 3 },
+            "gitHubToken.getToken",
+            old_token_params.value,
+        );
+        try std.testing.expectEqual(
+            @as(i64, -32602),
+            try responseErrorCode(allocator, token_output.written()),
+        );
+        try std.testing.expectEqual(@as(usize, 0), old_github_state.calls);
+        try std.testing.expectEqual(@as(usize, 0), new_github_state.calls);
+
+        if (case.detached_session_id) |detached_session_id| {
+            const detach_body = try json_rpc.readFrame(allocator, &frames);
+            defer allocator.free(detach_body);
+            const cleanup_token_body = try json_rpc.readFrame(allocator, &frames);
+            defer allocator.free(cleanup_token_body);
+            const expected_detach = try std.fmt.allocPrint(
+                allocator,
+                "{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session.detach\",\"params\":{{\"sessionId\":\"{s}\"}}}}",
+                .{detached_session_id},
+            );
+            defer allocator.free(expected_detach);
+            try std.testing.expectEqualStrings(expected_detach, detach_body);
+            try std.testing.expectEqualStrings(
+                \\{"jsonrpc":"2.0","id":77,"error":{"code":-32602,"message":"unknown GitHub token registration"}}
+            , cleanup_token_body);
+        }
+        try std.testing.expectEqualStrings("", frames.buffered());
+    }
 }
 
 test "permission handler receives events and can leave requests pending" {
@@ -5732,7 +8488,7 @@ test "createSession and resumeSession preserve deep partial model capability ove
         defer allocator.free(requests);
         var frames = std.Io.Reader.fixed(requests);
         const model_and_provider = "\"model\":\"local-vision-model\",\"provider\":{\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"http://localhost:8000/v1\",\"modelId\":\"local-vision-model\",\"wireModel\":\"local-vision-model\"}";
-        const defaults = ",\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false";
+        const defaults = ",\"streaming\":false,\"includeSubAgentStreamingEvents\":true,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"requestElicitation\":false,\"requestExitPlanMode\":false,\"requestAutoModeSwitch\":false,\"enableManagedSettings\":false";
         const expected_create = try std.fmt.allocPrint(
             allocator,
             "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.create\",\"params\":{{{s}{s}{s}}}}}",
@@ -6132,7 +8888,7 @@ test "session requests lower both managed settings sources" {
     );
     defer allocator.free(create_encoded);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"session.create\",\"params\":{\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":false,\"managedSettings\":{\"permissions\":{\"disableBypassPermissionsMode\":\"allow-auto-only\",\"deny\":[\"Shell(git push *)\"],\"ask\":[\"Read(**)\"],\"allow\":[\"Read(src/**)\"]}}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"session.create\",\"params\":{\"streaming\":false,\"includeSubAgentStreamingEvents\":true,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":true,\"requestUserInput\":false,\"requestElicitation\":false,\"requestExitPlanMode\":false,\"requestAutoModeSwitch\":false,\"enableManagedSettings\":false,\"managedSettings\":{\"permissions\":{\"disableBypassPermissionsMode\":\"allow-auto-only\",\"deny\":[\"Shell(git push *)\"],\"ask\":[\"Read(**)\"],\"allow\":[\"Read(src/**)\"]}}}}",
         create_encoded,
     );
 
@@ -6150,7 +8906,7 @@ test "session requests lower both managed settings sources" {
     );
     defer allocator.free(resume_encoded);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"session-1\",\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":false,\"managedSettings\":{\"permissions\":{\"disableBypassPermissionsMode\":\"allow-auto-only\",\"deny\":[\"Shell(git push *)\"],\"ask\":[\"Read(**)\"],\"allow\":[\"Read(src/**)\"]}}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"session-1\",\"streaming\":false,\"includeSubAgentStreamingEvents\":true,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":true,\"requestUserInput\":false,\"requestElicitation\":false,\"requestExitPlanMode\":false,\"requestAutoModeSwitch\":false,\"enableManagedSettings\":false,\"managedSettings\":{\"permissions\":{\"disableBypassPermissionsMode\":\"allow-auto-only\",\"deny\":[\"Shell(git push *)\"],\"ask\":[\"Read(**)\"],\"allow\":[\"Read(src/**)\"]}}}}",
         resume_encoded,
     );
 
@@ -6172,7 +8928,7 @@ test "session requests lower both managed settings sources" {
     );
     defer allocator.free(fetched_create_encoded);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"session.create\",\"params\":{\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"session.create\",\"params\":{\"streaming\":false,\"includeSubAgentStreamingEvents\":true,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":true,\"requestUserInput\":false,\"requestElicitation\":false,\"requestExitPlanMode\":false,\"requestAutoModeSwitch\":false,\"enableManagedSettings\":true}}",
         fetched_create_encoded,
     );
 
@@ -6190,7 +8946,7 @@ test "session requests lower both managed settings sources" {
     );
     defer allocator.free(fetched_resume_encoded);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"session-1\",\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":true,\"requestUserInput\":false,\"enableManagedSettings\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"session-1\",\"streaming\":false,\"includeSubAgentStreamingEvents\":true,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":true,\"requestUserInput\":false,\"requestElicitation\":false,\"requestExitPlanMode\":false,\"requestAutoModeSwitch\":false,\"enableManagedSettings\":true}}",
         fetched_resume_encoded,
     );
 }
@@ -6815,22 +9571,85 @@ test "resident resume prefers and commits replacement runtime" {
             .context = &old_context,
         } } },
     }, &.{});
+    client.pending_extension_runtime.?.git_hub_token_registration_id =
+        try allocator.dupe(u8, "old-registration");
     try client.commitExtensionRuntime("s1", .{}, &.{});
     try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
         .extensions = .{ .common = .{ .hooks = .{
             .context = &new_context,
         } } },
     }, &.{});
+    client.pending_extension_runtime.?.git_hub_token_registration_id =
+        try allocator.dupe(u8, "new-registration");
     try std.testing.expectEqual(
         @as(?*anyopaque, &new_context),
         client.findExtensionRuntime("s1").?.hooks.context,
     );
+    try std.testing.expect(client.findGitHubTokenRuntime("new-registration") != null);
+    try std.testing.expect(client.findGitHubTokenRuntime("old-registration") != null);
     try client.commitExtensionRuntime("s1", .{}, &.{});
     try std.testing.expectEqual(@as(usize, 1), client.extension_runtimes.items.len);
     try std.testing.expectEqual(
         @as(?*anyopaque, &new_context),
         client.findExtensionRuntime("s1").?.hooks.context,
     );
+    try std.testing.expect(client.findGitHubTokenRuntime("new-registration") != null);
+    try std.testing.expect(client.findGitHubTokenRuntime("old-registration") == null);
+}
+
+test "credential quarantine is idempotent and cleared by replacement and removal" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        client.rollbackExtensionRuntime();
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+        for (client.session_ids.items) |id| allocator.free(id);
+        client.session_ids.deinit(allocator);
+    }
+    try client.session_ids.append(allocator, try allocator.dupe(u8, "s1"));
+
+    var old_github_state = TestGitHubTokenState{};
+    try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
+        .git_hub_token_provider = .{
+            .callback = testGitHubTokenProvider,
+            .context = &old_github_state,
+        },
+    }, &.{});
+    client.pending_extension_runtime.?.git_hub_token_registration_id =
+        try allocator.dupe(u8, "old-registration");
+    try client.commitExtensionRuntime("s1", .{}, &.{});
+
+    client.quarantineSessionCredentials("s1");
+    client.quarantineSessionCredentials("s1");
+    try std.testing.expect(client.findExtensionRuntime("s1").?.credentials_quarantined);
+    try std.testing.expect(client.findGitHubTokenRuntime("old-registration") == null);
+
+    var new_github_state = TestGitHubTokenState{};
+    try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
+        .git_hub_token_provider = .{
+            .callback = testGitHubTokenProvider,
+            .context = &new_github_state,
+        },
+    }, &.{});
+    client.pending_extension_runtime.?.git_hub_token_registration_id =
+        try allocator.dupe(u8, "new-registration");
+    try client.commitExtensionRuntime("s1", .{}, &.{});
+    try std.testing.expect(!client.findExtensionRuntime("s1").?.credentials_quarantined);
+    try std.testing.expect(client.findGitHubTokenRuntime("new-registration") != null);
+
+    client.removeSession("s1");
+    client.removeSession("s1");
+    try std.testing.expect(client.findExtensionRuntimeExact("s1") == null);
+    try std.testing.expect(client.findGitHubTokenRuntime("new-registration") == null);
 }
 
 test "failed resident resume preserves committed runtime and session id" {
@@ -7711,17 +10530,17 @@ test "create resume and parent join lower custom agents to literal lifecycle JSO
     const create_body = try json_rpc.readFrame(allocator, &frames);
     defer allocator.free(create_body);
     try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":1,"method":"session.create","params":{"sessionId":"created","streaming":false,"tools":[],"customAgents":[{"name":"reviewer","displayName":"Code reviewer","description":"Reviews code.","tools":["read"],"prompt":"Review.","mcpServers":{"docs":{"type":"stdio","command":"docs-mcp","args":["--stdio"],"env":{"TOKEN":"secret"},"cwd":"/repo","tools":["lookup"],"timeout":25}},"infer":false,"skills":["review"],"model":"gpt-5.4","reasoningEffort":"xhigh"}],"defaultAgent":{"excludedTools":["deploy"]},"agent":"reviewer","customAgentsLocalOnly":true,"excludedBuiltinAgents":["explore"],"toolFilterPrecedence":"excluded","requestPermission":false,"requestUserInput":false,"enableManagedSettings":false}}
+        \\{"jsonrpc":"2.0","id":1,"method":"session.create","params":{"sessionId":"created","streaming":false,"includeSubAgentStreamingEvents":true,"tools":[],"customAgents":[{"name":"reviewer","displayName":"Code reviewer","description":"Reviews code.","tools":["read"],"prompt":"Review.","mcpServers":{"docs":{"type":"stdio","command":"docs-mcp","args":["--stdio"],"env":{"TOKEN":"secret"},"cwd":"/repo","tools":["lookup"],"timeout":25}},"infer":false,"skills":["review"],"model":"gpt-5.4","reasoningEffort":"xhigh"}],"defaultAgent":{"excludedTools":["deploy"]},"agent":"reviewer","customAgentsLocalOnly":true,"excludedBuiltinAgents":["explore"],"toolFilterPrecedence":"excluded","requestPermission":false,"requestUserInput":false,"requestElicitation":false,"requestExitPlanMode":false,"requestAutoModeSwitch":false,"enableManagedSettings":false}}
     , create_body);
     const resume_body = try json_rpc.readFrame(allocator, &frames);
     defer allocator.free(resume_body);
     try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":2,"method":"session.resume","params":{"sessionId":"session-1","streaming":false,"tools":[],"customAgents":[{"name":"docs","prompt":"Answer from docs.","mcpServers":{"search":{"type":"sse","url":"https://example.test/mcp","headers":{"Authorization":"secret"},"tools":["search"],"timeout":50}}}],"agent":"docs","toolFilterPrecedence":"excluded","requestPermission":false,"requestUserInput":false,"enableManagedSettings":false}}
+        \\{"jsonrpc":"2.0","id":2,"method":"session.resume","params":{"sessionId":"session-1","streaming":false,"includeSubAgentStreamingEvents":true,"tools":[],"customAgents":[{"name":"docs","prompt":"Answer from docs.","mcpServers":{"search":{"type":"sse","url":"https://example.test/mcp","headers":{"Authorization":"secret"},"tools":["search"],"timeout":50}}}],"agent":"docs","toolFilterPrecedence":"excluded","requestPermission":false,"requestUserInput":false,"requestElicitation":false,"requestExitPlanMode":false,"requestAutoModeSwitch":false,"enableManagedSettings":false}}
     , resume_body);
     const join_body = try json_rpc.readFrame(allocator, &frames);
     defer allocator.free(join_body);
     try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":3,"method":"session.resume","params":{"sessionId":"parent-session","streaming":false,"tools":[],"customAgents":[{"name":"parent-reviewer","displayName":"Parent reviewer","description":"Reviews the parent session.","tools":["read"],"prompt":"Review the parent.","mcpServers":{"parent-docs":{"type":"stdio","command":"parent-mcp","args":["--stdio"],"env":{"TOKEN":"secret"},"cwd":"/parent","tools":["lookup"],"timeout":75}},"infer":true,"skills":["review"],"model":"gpt-5.4","reasoningEffort":"max"}],"defaultAgent":{"excludedTools":["write"]},"agent":"parent-reviewer","customAgentsLocalOnly":false,"excludedBuiltinAgents":["task"],"toolFilterPrecedence":"excluded","requestPermission":true,"requestUserInput":false,"enableManagedSettings":false,"disableResume":true}}
+        \\{"jsonrpc":"2.0","id":3,"method":"session.resume","params":{"sessionId":"parent-session","streaming":false,"includeSubAgentStreamingEvents":true,"tools":[],"customAgents":[{"name":"parent-reviewer","displayName":"Parent reviewer","description":"Reviews the parent session.","tools":["read"],"prompt":"Review the parent.","mcpServers":{"parent-docs":{"type":"stdio","command":"parent-mcp","args":["--stdio"],"env":{"TOKEN":"secret"},"cwd":"/parent","tools":["lookup"],"timeout":75}},"infer":true,"skills":["review"],"model":"gpt-5.4","reasoningEffort":"max"}],"defaultAgent":{"excludedTools":["write"]},"agent":"parent-reviewer","customAgentsLocalOnly":false,"excludedBuiltinAgents":["task"],"toolFilterPrecedence":"excluded","requestPermission":true,"requestUserInput":false,"requestElicitation":false,"requestExitPlanMode":false,"requestAutoModeSwitch":false,"enableManagedSettings":false,"disableResume":true}}
     , join_body);
     try std.testing.expectEqualStrings("", frames.buffered());
 }
@@ -8037,7 +10856,7 @@ test "create and resume requests encode complete provider graphs exactly" {
     );
     defer allocator.free(create);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"session.create\",\"params\":{\"sessionId\":\"session-provider-graph\",\"providers\":[{\"name\":\"openai\",\"type\":\"openai\",\"wireApi\":\"responses\",\"transport\":\"websockets\",\"baseUrl\":\"https://api.openai.com/v1\",\"apiKey\":\"key\",\"bearerToken\":\"static\",\"headers\":{\"X-Tenant\":\"acme\"},\"hasBearerTokenProvider\":true}],\"models\":[{\"id\":\"reasoner\",\"provider\":\"openai\",\"wireModel\":\"deployment\",\"modelId\":\"gpt-4.1\",\"name\":\"Reasoner\",\"maxPromptTokens\":100,\"maxContextWindowTokens\":200,\"maxOutputTokens\":50,\"capabilities\":{\"supports\":{\"reasoningEffort\":true}}}],\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"session.create\",\"params\":{\"sessionId\":\"session-provider-graph\",\"providers\":[{\"name\":\"openai\",\"type\":\"openai\",\"wireApi\":\"responses\",\"transport\":\"websockets\",\"baseUrl\":\"https://api.openai.com/v1\",\"apiKey\":\"key\",\"bearerToken\":\"static\",\"headers\":{\"X-Tenant\":\"acme\"},\"hasBearerTokenProvider\":true}],\"models\":[{\"id\":\"reasoner\",\"provider\":\"openai\",\"wireModel\":\"deployment\",\"modelId\":\"gpt-4.1\",\"name\":\"Reasoner\",\"maxPromptTokens\":100,\"maxContextWindowTokens\":200,\"maxOutputTokens\":50,\"capabilities\":{\"supports\":{\"reasoningEffort\":true}}}],\"streaming\":false,\"includeSubAgentStreamingEvents\":true,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"requestElicitation\":false,\"requestExitPlanMode\":false,\"requestAutoModeSwitch\":false,\"enableManagedSettings\":false}}",
         create,
     );
 
@@ -8056,7 +10875,7 @@ test "create and resume requests encode complete provider graphs exactly" {
     );
     defer allocator.free(resume_encoded);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"session-provider-graph\",\"providers\":[{\"name\":\"openai\",\"type\":\"openai\",\"wireApi\":\"responses\",\"transport\":\"websockets\",\"baseUrl\":\"https://api.openai.com/v1\",\"apiKey\":\"key\",\"bearerToken\":\"static\",\"headers\":{\"X-Tenant\":\"acme\"},\"hasBearerTokenProvider\":true}],\"models\":[{\"id\":\"reasoner\",\"provider\":\"openai\",\"wireModel\":\"deployment\",\"modelId\":\"gpt-4.1\",\"name\":\"Reasoner\",\"maxPromptTokens\":100,\"maxContextWindowTokens\":200,\"maxOutputTokens\":50,\"capabilities\":{\"supports\":{\"reasoningEffort\":true}}}],\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false,\"disableResume\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"session-provider-graph\",\"providers\":[{\"name\":\"openai\",\"type\":\"openai\",\"wireApi\":\"responses\",\"transport\":\"websockets\",\"baseUrl\":\"https://api.openai.com/v1\",\"apiKey\":\"key\",\"bearerToken\":\"static\",\"headers\":{\"X-Tenant\":\"acme\"},\"hasBearerTokenProvider\":true}],\"models\":[{\"id\":\"reasoner\",\"provider\":\"openai\",\"wireModel\":\"deployment\",\"modelId\":\"gpt-4.1\",\"name\":\"Reasoner\",\"maxPromptTokens\":100,\"maxContextWindowTokens\":200,\"maxOutputTokens\":50,\"capabilities\":{\"supports\":{\"reasoningEffort\":true}}}],\"streaming\":false,\"includeSubAgentStreamingEvents\":true,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"requestElicitation\":false,\"requestExitPlanMode\":false,\"requestAutoModeSwitch\":false,\"enableManagedSettings\":false,\"disableResume\":true}}",
         resume_encoded,
     );
 }
@@ -8119,7 +10938,7 @@ test "singular create request encodes every provider field and default callback 
     );
     defer allocator.free(encoded);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"session.create\",\"params\":{\"sessionId\":\"singular\",\"provider\":{\"type\":\"openai\",\"wireApi\":\"responses\",\"transport\":\"websockets\",\"baseUrl\":\"https://api.example.test\",\"apiKey\":\"key\",\"bearerToken\":\"static\",\"headers\":{\"X-Region\":\"west\"},\"modelId\":\"gpt-4.1\",\"modelCapabilities\":{\"supports\":{\"vision\":true}},\"providerName\":\"telemetry\",\"wireModel\":\"deployment\",\"maxPromptTokens\":100,\"maxContextWindowTokens\":200,\"maxOutputTokens\":50,\"hasBearerTokenProvider\":true},\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"session.create\",\"params\":{\"sessionId\":\"singular\",\"provider\":{\"type\":\"openai\",\"wireApi\":\"responses\",\"transport\":\"websockets\",\"baseUrl\":\"https://api.example.test\",\"apiKey\":\"key\",\"bearerToken\":\"static\",\"headers\":{\"X-Region\":\"west\"},\"modelId\":\"gpt-4.1\",\"modelCapabilities\":{\"supports\":{\"vision\":true}},\"providerName\":\"telemetry\",\"wireModel\":\"deployment\",\"maxPromptTokens\":100,\"maxContextWindowTokens\":200,\"maxOutputTokens\":50,\"hasBearerTokenProvider\":true},\"streaming\":false,\"includeSubAgentStreamingEvents\":true,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"requestElicitation\":false,\"requestExitPlanMode\":false,\"requestAutoModeSwitch\":false,\"enableManagedSettings\":false}}",
         encoded,
     );
 
@@ -8138,7 +10957,7 @@ test "singular create request encodes every provider field and default callback 
     );
     defer allocator.free(resume_encoded);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"singular\",\"provider\":{\"type\":\"openai\",\"wireApi\":\"responses\",\"transport\":\"websockets\",\"baseUrl\":\"https://api.example.test\",\"apiKey\":\"key\",\"bearerToken\":\"static\",\"headers\":{\"X-Region\":\"west\"},\"modelId\":\"gpt-4.1\",\"modelCapabilities\":{\"supports\":{\"vision\":true}},\"providerName\":\"telemetry\",\"wireModel\":\"deployment\",\"maxPromptTokens\":100,\"maxContextWindowTokens\":200,\"maxOutputTokens\":50,\"hasBearerTokenProvider\":true},\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false,\"disableResume\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"singular\",\"provider\":{\"type\":\"openai\",\"wireApi\":\"responses\",\"transport\":\"websockets\",\"baseUrl\":\"https://api.example.test\",\"apiKey\":\"key\",\"bearerToken\":\"static\",\"headers\":{\"X-Region\":\"west\"},\"modelId\":\"gpt-4.1\",\"modelCapabilities\":{\"supports\":{\"vision\":true}},\"providerName\":\"telemetry\",\"wireModel\":\"deployment\",\"maxPromptTokens\":100,\"maxContextWindowTokens\":200,\"maxOutputTokens\":50,\"hasBearerTokenProvider\":true},\"streaming\":false,\"includeSubAgentStreamingEvents\":true,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"requestElicitation\":false,\"requestExitPlanMode\":false,\"requestAutoModeSwitch\":false,\"enableManagedSettings\":false,\"disableResume\":true}}",
         resume_encoded,
     );
 }
@@ -8247,7 +11066,7 @@ test "createSession and joinSession preserve deep partial model capability overr
         defer allocator.free(requests);
         var frames = std.Io.Reader.fixed(requests);
         const model_and_provider = "\"model\":\"local-vision-model\",\"provider\":{\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"http://localhost:8000/v1\",\"modelId\":\"local-vision-model\",\"wireModel\":\"local-vision-model\"}";
-        const defaults = ",\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false";
+        const defaults = ",\"streaming\":false,\"includeSubAgentStreamingEvents\":true,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"requestElicitation\":false,\"requestExitPlanMode\":false,\"requestAutoModeSwitch\":false,\"enableManagedSettings\":false";
         const expected_create = try std.fmt.allocPrint(
             allocator,
             "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.create\",\"params\":{{{s}{s}{s}}}}}",
@@ -8380,7 +11199,7 @@ test "provider token callback is routable before create response" {
     const create_frame = try json_rpc.readFrame(allocator, &frames);
     defer allocator.free(create_frame);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.create\",\"params\":{\"sessionId\":\"early-create\",\"provider\":{\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"https://example.test\",\"providerName\":\"attribution-only\",\"hasBearerTokenProvider\":true},\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.create\",\"params\":{\"sessionId\":\"early-create\",\"provider\":{\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"https://example.test\",\"providerName\":\"attribution-only\",\"hasBearerTokenProvider\":true},\"streaming\":false,\"includeSubAgentStreamingEvents\":true,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"requestElicitation\":false,\"requestExitPlanMode\":false,\"requestAutoModeSwitch\":false,\"enableManagedSettings\":false}}",
         create_frame,
     );
     const token_frame = try json_rpc.readFrame(allocator, &frames);
@@ -8481,7 +11300,7 @@ test "two named provider callbacks are routable before resume response" {
     const resume_frame = try json_rpc.readFrame(allocator, &frames);
     defer allocator.free(resume_frame);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"early-resume\",\"providers\":[{\"name\":\"first\",\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"https://first.test\",\"hasBearerTokenProvider\":true},{\"name\":\"second\",\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"https://second.test\",\"hasBearerTokenProvider\":true}],\"models\":[{\"id\":\"one\",\"provider\":\"first\"},{\"id\":\"two\",\"provider\":\"second\"}],\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false,\"disableResume\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"early-resume\",\"providers\":[{\"name\":\"first\",\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"https://first.test\",\"hasBearerTokenProvider\":true},{\"name\":\"second\",\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"https://second.test\",\"hasBearerTokenProvider\":true}],\"models\":[{\"id\":\"one\",\"provider\":\"first\"},{\"id\":\"two\",\"provider\":\"second\"}],\"streaming\":false,\"includeSubAgentStreamingEvents\":true,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"requestElicitation\":false,\"requestExitPlanMode\":false,\"requestAutoModeSwitch\":false,\"enableManagedSettings\":false,\"disableResume\":true}}",
         resume_frame,
     );
     const first_frame = try json_rpc.readFrame(allocator, &frames);
@@ -8572,12 +11391,12 @@ test "provider token dispatch routes by session and provider and rejects invalid
         .{
             .id = 64,
             .params_json = "{\"sessionId\":\"session-two\",\"providerName\":\"missing\"}",
-            .expected = "{\"jsonrpc\":\"2.0\",\"id\":64,\"error\":{\"code\":-32601,\"message\":\"method not found\"}}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":64,\"error\":{\"code\":-32000,\"message\":\"bearer token provider not registered\"}}",
         },
         .{
             .id = 65,
             .params_json = "{\"sessionId\":\"session-two\"}",
-            .expected = "{\"jsonrpc\":\"2.0\",\"id\":65,\"error\":{\"code\":-32601,\"message\":\"method not found\"}}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":65,\"error\":{\"code\":-32602,\"message\":\"invalid provider token request\"}}",
         },
         .{
             .id = 66,
@@ -8587,7 +11406,7 @@ test "provider token dispatch routes by session and provider and rejects invalid
         .{
             .id = 67,
             .params_json = null,
-            .expected = "{\"jsonrpc\":\"2.0\",\"id\":67,\"error\":{\"code\":-32601,\"message\":\"method not found\"}}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":67,\"error\":{\"code\":-32602,\"message\":\"invalid provider token request\"}}",
         },
     };
 
@@ -8614,46 +11433,6 @@ test "provider token dispatch routes by session and provider and rejects invalid
     try std.testing.expectEqual(@as(usize, 1), second_context.calls);
     try std.testing.expect(first_context.matched);
     try std.testing.expect(second_context.matched);
-
-    try client.registerRpcHandler("providerToken.getToken", struct {
-        fn handle(
-            inner_allocator: std.mem.Allocator,
-            params_json: ?[]const u8,
-            _: ?*anyopaque,
-        ) ![]u8 {
-            if (params_json == null or
-                !std.mem.eql(
-                    u8,
-                    params_json.?,
-                    "{\"sessionId\":\"session-two\",\"providerName\":\"untyped\"}",
-                ))
-            {
-                return error.UnexpectedParams;
-            }
-            return inner_allocator.dupe(u8, "{\"token\":\"generic-token\"}");
-        }
-    }.handle, null);
-    const fallback_params = try std.json.parseFromSlice(
-        std.json.Value,
-        allocator,
-        "{\"sessionId\":\"session-two\",\"providerName\":\"untyped\"}",
-        .{},
-    );
-    defer fallback_params.deinit();
-    var fallback_output: std.Io.Writer.Allocating = .init(allocator);
-    defer fallback_output.deinit();
-    try client.dispatchServerRequest(
-        &fallback_output.writer,
-        .{ .integer = 68 },
-        "providerToken.getToken",
-        fallback_params.value,
-    );
-    const fallback_body = try framedBody(allocator, fallback_output.written());
-    defer allocator.free(fallback_body);
-    try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":68,\"result\":{\"token\":\"generic-token\"}}",
-        fallback_body,
-    );
 
     try std.testing.expectError(
         error.SessionAlreadyActive,
