@@ -2479,6 +2479,10 @@ pub const Client = struct {
         defer self.dispatching_rpc_handler = false;
 
         if (std.mem.eql(u8, method, "sessionFs.readFile")) {
+            validateObjectFields(object, &.{ "sessionId", "path" }) catch {
+                try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
+                return;
+            };
             const path = jsonRequiredString(object, "path") catch {
                 try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
                 return;
@@ -2510,6 +2514,10 @@ pub const Client = struct {
         if (std.mem.eql(u8, method, "sessionFs.writeFile") or
             std.mem.eql(u8, method, "sessionFs.appendFile"))
         {
+            validateObjectFields(object, &.{ "sessionId", "path", "content", "mode" }) catch {
+                try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
+                return;
+            };
             const path = jsonRequiredString(object, "path") catch {
                 try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
                 return;
@@ -2534,6 +2542,10 @@ pub const Client = struct {
             return;
         }
         if (std.mem.eql(u8, method, "sessionFs.exists")) {
+            validateObjectFields(object, &.{ "sessionId", "path" }) catch {
+                try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
+                return;
+            };
             const path = jsonRequiredString(object, "path") catch {
                 try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
                 return;
@@ -2546,6 +2558,10 @@ pub const Client = struct {
             return;
         }
         if (std.mem.eql(u8, method, "sessionFs.stat")) {
+            validateObjectFields(object, &.{ "sessionId", "path" }) catch {
+                try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
+                return;
+            };
             const path = jsonRequiredString(object, "path") catch {
                 try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
                 return;
@@ -2575,11 +2591,15 @@ pub const Client = struct {
             return;
         }
         if (std.mem.eql(u8, method, "sessionFs.mkdir")) {
+            validateObjectFields(object, &.{ "sessionId", "path", "recursive", "mode" }) catch {
+                try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
+                return;
+            };
             const path = jsonRequiredString(object, "path") catch {
                 try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
                 return;
             };
-            const recursive = (jsonOptionalBool(object, "recursive") catch {
+            const recursive = (jsonOptionalNonNullBool(object, "recursive") catch {
                 try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
                 return;
             }) orelse false;
@@ -2600,6 +2620,10 @@ pub const Client = struct {
             return;
         }
         if (std.mem.eql(u8, method, "sessionFs.readdir")) {
+            validateObjectFields(object, &.{ "sessionId", "path" }) catch {
+                try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
+                return;
+            };
             const path = jsonRequiredString(object, "path") catch {
                 try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
                 return;
@@ -2629,6 +2653,10 @@ pub const Client = struct {
             return;
         }
         if (std.mem.eql(u8, method, "sessionFs.readdirWithTypes")) {
+            validateObjectFields(object, &.{ "sessionId", "path" }) catch {
+                try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
+                return;
+            };
             const path = jsonRequiredString(object, "path") catch {
                 try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
                 return;
@@ -2658,15 +2686,19 @@ pub const Client = struct {
             return;
         }
         if (std.mem.eql(u8, method, "sessionFs.rm")) {
+            validateObjectFields(object, &.{ "sessionId", "path", "recursive", "force" }) catch {
+                try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
+                return;
+            };
             const path = jsonRequiredString(object, "path") catch {
                 try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
                 return;
             };
-            const recursive = (jsonOptionalBool(object, "recursive") catch {
+            const recursive = (jsonOptionalNonNullBool(object, "recursive") catch {
                 try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
                 return;
             }) orelse false;
-            const force = (jsonOptionalBool(object, "force") catch {
+            const force = (jsonOptionalNonNullBool(object, "force") catch {
                 try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
                 return;
             }) orelse false;
@@ -2683,6 +2715,10 @@ pub const Client = struct {
             return;
         }
         if (std.mem.eql(u8, method, "sessionFs.rename")) {
+            validateObjectFields(object, &.{ "sessionId", "src", "dest" }) catch {
+                try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
+                return;
+            };
             const source = jsonRequiredString(object, "src") catch {
                 try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
                 return;
@@ -2703,6 +2739,10 @@ pub const Client = struct {
             return;
         }
         if (std.mem.eql(u8, method, "sessionFs.sqliteExists")) {
+            validateObjectFields(object, &.{"sessionId"}) catch {
+                try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
+                return;
+            };
             const sqlite = filesystem_provider.sqlite orelse {
                 try self.writeRpcSuccess(writer, id, .{ .exists = false });
                 return;
@@ -2715,6 +2755,10 @@ pub const Client = struct {
             return;
         }
         if (std.mem.eql(u8, method, "sessionFs.sqliteQuery")) {
+            validateObjectFields(object, &.{ "sessionId", "queryType", "query", "params" }) catch {
+                try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
+                return;
+            };
             const sqlite = filesystem_provider.sqlite orelse {
                 try self.writeServerRequestError(writer, id, -32601, "SQLite is not supported by this provider");
                 return;
@@ -2755,6 +2799,10 @@ pub const Client = struct {
             return;
         }
         if (std.mem.eql(u8, method, "sessionFs.sqliteTransaction")) {
+            validateObjectFields(object, &.{ "sessionId", "statements" }) catch {
+                try self.writeServerRequestError(writer, id, -32602, "invalid session filesystem request");
+                return;
+            };
             const sqlite = filesystem_provider.sqlite orelse {
                 try self.writeServerRequestError(writer, id, -32601, "SQLite is not supported by this provider");
                 return;
@@ -4650,8 +4698,13 @@ fn stringifyRpcParams(
 }
 
 const FilesystemError = struct {
-    code: []const u8,
+    code: SessionFilesystemErrorCode,
     message: []const u8,
+};
+
+const SessionFilesystemErrorCode = enum {
+    ENOENT,
+    UNKNOWN,
 };
 
 const WireReadFileResult = struct {
@@ -4724,11 +4777,7 @@ const WireSqliteTransactionResult = struct {
         if (self.value.@"error") |failure| {
             try writer.objectField("error");
             try writer.write(.{
-                .errorClass = switch (failure.error_class) {
-                    .busy_or_locked => "busyOrLocked",
-                    .fatal => "fatal",
-                    .post_commit_ambiguous => "postCommitAmbiguous",
-                },
+                .errorClass = @tagName(failure.error_class),
                 .message = failure.message,
             });
         }
@@ -4738,15 +4787,38 @@ const WireSqliteTransactionResult = struct {
 
 fn filesystemError(err: anyerror) FilesystemError {
     return .{
-        .code = if (err == error.FileNotFound) "ENOENT" else "UNKNOWN",
+        .code = if (err == error.FileNotFound) .ENOENT else .UNKNOWN,
         .message = @errorName(err),
     };
+}
+
+fn validateObjectFields(
+    object: std.json.ObjectMap,
+    allowed_fields: []const []const u8,
+) !void {
+    var iterator = object.iterator();
+    while (iterator.next()) |entry| {
+        var allowed = false;
+        for (allowed_fields) |field| {
+            if (std.mem.eql(u8, entry.key_ptr.*, field)) {
+                allowed = true;
+                break;
+            }
+        }
+        if (!allowed) return error.InvalidField;
+    }
 }
 
 fn jsonOptionalU32(object: std.json.ObjectMap, name: []const u8) !?u32 {
     return switch (object.get(name) orelse return null) {
         .integer => |value| std.math.cast(u32, value) orelse error.InvalidField,
-        .null => null,
+        else => error.InvalidField,
+    };
+}
+
+fn jsonOptionalNonNullBool(object: std.json.ObjectMap, name: []const u8) !?bool {
+    return switch (object.get(name) orelse return null) {
+        .bool => |value| value,
         else => error.InvalidField,
     };
 }
@@ -4756,10 +4828,63 @@ fn parseSqliteQueryType(value: ?std.json.Value) !runtime_types.SessionFilesystem
         .string => |item| item,
         else => return error.InvalidField,
     };
-    if (std.mem.eql(u8, string, "exec")) return .exec;
-    if (std.mem.eql(u8, string, "query")) return .query;
-    if (std.mem.eql(u8, string, "run")) return .run;
-    return error.InvalidField;
+    return std.meta.stringToEnum(
+        runtime_types.SessionFilesystemSqliteQueryType,
+        string,
+    ) orelse error.InvalidField;
+}
+
+test "session filesystem enums use pinned wire values" {
+    try std.testing.expectEqualStrings(
+        "posix",
+        @tagName(runtime_types.SessionFilesystemConventions.posix),
+    );
+    try std.testing.expectEqualStrings(
+        "directory",
+        @tagName(runtime_types.SessionFilesystemEntryType.directory),
+    );
+    try std.testing.expectEqual(
+        runtime_types.SessionFilesystemSqliteQueryType.exec,
+        try parseSqliteQueryType(.{ .string = "exec" }),
+    );
+    try std.testing.expectEqual(
+        runtime_types.SessionFilesystemSqliteQueryType.query,
+        try parseSqliteQueryType(.{ .string = "query" }),
+    );
+    try std.testing.expectEqual(
+        runtime_types.SessionFilesystemSqliteQueryType.run,
+        try parseSqliteQueryType(.{ .string = "run" }),
+    );
+
+    const allocator = std.testing.allocator;
+    const transaction_json = try std.json.Stringify.valueAlloc(
+        allocator,
+        WireSqliteTransactionResult{ .value = .{
+            .@"error" = .{
+                .error_class = .postCommitAmbiguous,
+                .message = "unknown commit state",
+            },
+        } },
+        .{},
+    );
+    defer allocator.free(transaction_json);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        transaction_json,
+        "\"errorClass\":\"postCommitAmbiguous\"",
+    ) != null);
+
+    const filesystem_error_json = try std.json.Stringify.valueAlloc(
+        allocator,
+        filesystemError(error.FileNotFound),
+        .{},
+    );
+    defer allocator.free(filesystem_error_json);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        filesystem_error_json,
+        "\"code\":\"ENOENT\"",
+    ) != null);
 }
 
 fn parseSqliteStatements(
@@ -4778,6 +4903,10 @@ fn parseSqliteStatements(
             .object => |entry| entry,
             else => return error.InvalidField,
         };
+        try validateObjectFields(object, &.{ "queryType", "query", "params" });
+        if (object.get("params")) |params| {
+            if (params != .object) return error.InvalidField;
+        }
         result.appendAssumeCapacity(.{
             .query_type = try parseSqliteQueryType(object.get("queryType")),
             .query = try jsonRequiredString(object, "query"),
@@ -4793,7 +4922,6 @@ fn jsonOptionalObjectValue(
 ) !?std.json.Value {
     return switch (object.get(name) orelse return null) {
         .object => |value| .{ .object = value },
-        .null => null,
         else => error.InvalidField,
     };
 }
@@ -4911,21 +5039,170 @@ test "session filesystem structured results wipe owned strings" {
 }
 
 fn validDateTime(value: []const u8) bool {
-    if (!std.unicode.utf8ValidateSlice(value) or value.len < 20) return false;
-    if (value[4] != '-' or value[7] != '-' or
+    if (value.len < 20 or
+        value[4] != '-' or
+        value[7] != '-' or
         (value[10] != 'T' and value[10] != 't') or
-        value[13] != ':' or value[16] != ':')
+        value[13] != ':' or
+        value[16] != ':')
     {
         return false;
     }
-    for ([_]usize{ 0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18 }) |index| {
-        if (!std.ascii.isDigit(value[index])) return false;
+    const year = parseDateTimeDigits(value[0..4]) orelse return false;
+    const month = parseDateTimeDigits(value[5..7]) orelse return false;
+    const day = parseDateTimeDigits(value[8..10]) orelse return false;
+    const hour = parseDateTimeDigits(value[11..13]) orelse return false;
+    const minute = parseDateTimeDigits(value[14..16]) orelse return false;
+    const second = parseDateTimeDigits(value[17..19]) orelse return false;
+    if (month < 1 or month > 12 or hour > 23 or minute > 59 or second > 60)
+        return false;
+    if (day < 1 or day > daysInMonth(year, month)) return false;
+
+    var index: usize = 19;
+    if (index < value.len and value[index] == '.') {
+        index += 1;
+        const fraction_start = index;
+        while (index < value.len and std.ascii.isDigit(value[index])) : (index += 1) {}
+        if (index == fraction_start) return false;
     }
-    return value[value.len - 1] == 'Z' or
-        value[value.len - 1] == 'z' or
-        (value.len >= 25 and
-            (value[value.len - 6] == '+' or value[value.len - 6] == '-') and
-            value[value.len - 3] == ':');
+    if (index >= value.len) return false;
+    var offset_minutes: i32 = 0;
+    if (value[index] == 'Z' or value[index] == 'z') {
+        if (index + 1 != value.len) return false;
+    } else {
+        if ((value[index] != '+' and value[index] != '-') or index + 6 != value.len)
+            return false;
+        if (value[index + 3] != ':') return false;
+        const offset_hour = parseDateTimeDigits(value[index + 1 .. index + 3]) orelse
+            return false;
+        const offset_minute = parseDateTimeDigits(value[index + 4 .. index + 6]) orelse
+            return false;
+        if (offset_hour > 23 or offset_minute > 59) return false;
+        offset_minutes = @as(i32, offset_hour) * 60 + offset_minute;
+        if (value[index] == '-') offset_minutes = -offset_minutes;
+    }
+    if (second != 60) return true;
+
+    var utc_year = year;
+    var utc_month = month;
+    var utc_day = day;
+    var utc_minutes = @as(i32, hour) * 60 + minute - offset_minutes;
+    if (utc_minutes < 0) {
+        utc_minutes += 24 * 60;
+        if (utc_day > 1) {
+            utc_day -= 1;
+        } else {
+            if (utc_month > 1) {
+                utc_month -= 1;
+            } else {
+                if (utc_year == 0) return false;
+                utc_year -= 1;
+                utc_month = 12;
+            }
+            utc_day = daysInMonth(utc_year, utc_month);
+        }
+    } else if (utc_minutes >= 24 * 60) {
+        utc_minutes -= 24 * 60;
+        const month_days = daysInMonth(utc_year, utc_month);
+        if (utc_day < month_days) {
+            utc_day += 1;
+        } else {
+            utc_day = 1;
+            if (utc_month < 12) {
+                utc_month += 1;
+            } else {
+                if (utc_year == 9999) return false;
+                utc_year += 1;
+                utc_month = 1;
+            }
+        }
+    }
+    return utc_minutes == 23 * 60 + 59 and
+        isLeapSecondDate(utc_year, utc_month, utc_day);
+}
+
+fn parseDateTimeDigits(value: []const u8) ?u16 {
+    var result: u16 = 0;
+    for (value) |character| {
+        if (!std.ascii.isDigit(character)) return null;
+        result = result * 10 + character - '0';
+    }
+    return result;
+}
+
+fn daysInMonth(year: u16, month: u16) u16 {
+    return switch (month) {
+        1, 3, 5, 7, 8, 10, 12 => 31,
+        4, 6, 9, 11 => 30,
+        2 => if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)) 29 else 28,
+        else => unreachable,
+    };
+}
+
+fn isLeapSecondDate(year: u16, month: u16, day: u16) bool {
+    const date = @as(u32, year) * 10_000 + @as(u32, month) * 100 + day;
+    return switch (date) {
+        19720630,
+        19721231,
+        19731231,
+        19741231,
+        19751231,
+        19761231,
+        19771231,
+        19781231,
+        19791231,
+        19810630,
+        19820630,
+        19830630,
+        19850630,
+        19871231,
+        19891231,
+        19901231,
+        19920630,
+        19930630,
+        19940630,
+        19951231,
+        19970630,
+        19981231,
+        20051231,
+        20081231,
+        20120630,
+        20150630,
+        20161231,
+        => true,
+        else => false,
+    };
+}
+
+test "session filesystem timestamps require RFC 3339 values" {
+    for ([_][]const u8{
+        "2026-09-13T00:00:00Z",
+        "2016-12-31t23:59:60.123z",
+        "2017-01-01T01:59:60+02:00",
+        "2016-12-31T16:59:60-07:00",
+        "2026-09-13T00:00:00+14:00",
+        "2026-09-13T00:00:00-07:30",
+    }) |value| {
+        try std.testing.expect(validDateTime(value));
+    }
+    for ([_][]const u8{
+        "2026-99-99T99:99:99garbageZ",
+        "2025-02-29T00:00:00Z",
+        "2026-04-31T00:00:00Z",
+        "2026-09-13T24:00:00Z",
+        "2026-09-13T00:60:00Z",
+        "2026-09-13T00:00:61Z",
+        "2024-02-29T23:59:60Z",
+        "2024-06-30T23:59:60Z",
+        "2024-06-30T22:59:60Z",
+        "2024-07-01T01:59:60+01:00",
+        "2026-09-13T00:00:00.Z",
+        "2026-09-13T00:00:00+24:00",
+        "2026-09-13T00:00:00+00:60",
+        "2026-09-13T00:00:00",
+    }) |value| {
+        try std.testing.expect(!validDateTime(value));
+    }
 }
 
 fn validSqliteRows(rows: []const std.json.Value) bool {
@@ -7922,6 +8199,71 @@ test "session filesystem routes by session and reports protocol errors" {
     try std.testing.expectEqual(
         @as(i64, -32602),
         malformed_result.value.object.get("error").?.object.get("code").?.integer,
+    );
+
+    const unknown_field = try client.callRpc(std.json.Value, "test.fs", .{
+        .method = "sessionFs.readFile",
+        .params = .{
+            .sessionId = "fs-one",
+            .path = "/note.txt",
+            .unexpected = true,
+        },
+    });
+    defer unknown_field.deinit();
+    try std.testing.expectEqual(
+        @as(i64, -32602),
+        unknown_field.value.object.get("error").?.object.get("code").?.integer,
+    );
+
+    const null_mode_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        "{\"sessionId\":\"fs-one\",\"path\":\"/note.txt\",\"content\":\"content\",\"mode\":null}",
+        .{},
+    );
+    defer null_mode_params.deinit();
+    const null_mode = try client.callRpc(std.json.Value, "test.fs", .{
+        .method = "sessionFs.writeFile",
+        .params = null_mode_params.value,
+    });
+    defer null_mode.deinit();
+    try std.testing.expectEqual(
+        @as(i64, -32602),
+        null_mode.value.object.get("error").?.object.get("code").?.integer,
+    );
+
+    const null_transaction_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        "{\"sessionId\":\"fs-one\",\"statements\":[{\"queryType\":\"query\",\"query\":\"select 7\",\"params\":null}]}",
+        .{},
+    );
+    defer null_transaction_params.deinit();
+    const null_sqlite_params = try client.callRpc(std.json.Value, "test.fs", .{
+        .method = "sessionFs.sqliteTransaction",
+        .params = null_transaction_params.value,
+    });
+    defer null_sqlite_params.deinit();
+    try std.testing.expectEqual(
+        @as(i64, -32602),
+        null_sqlite_params.value.object.get("error").?.object.get("code").?.integer,
+    );
+
+    const unknown_statement_field = try client.callRpc(std.json.Value, "test.fs", .{
+        .method = "sessionFs.sqliteTransaction",
+        .params = .{
+            .sessionId = "fs-one",
+            .statements = &.{.{
+                .queryType = "query",
+                .query = "select 7",
+                .unexpected = true,
+            }},
+        },
+    });
+    defer unknown_statement_field.deinit();
+    try std.testing.expectEqual(
+        @as(i64, -32602),
+        unknown_statement_field.value.object.get("error").?.object.get("code").?.integer,
     );
 
     const invalid_result = try client.callRpc(std.json.Value, "test.fs", .{

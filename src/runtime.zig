@@ -134,9 +134,9 @@ pub const SessionFilesystemSqliteStatement = struct {
 };
 
 pub const SessionFilesystemSqliteTransactionErrorClass = enum {
-    busy_or_locked,
+    busyOrLocked,
     fatal,
-    post_commit_ambiguous,
+    postCommitAmbiguous,
 };
 
 pub const SessionFilesystemSqliteTransactionError = struct {
