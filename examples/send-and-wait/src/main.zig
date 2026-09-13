@@ -12,7 +12,9 @@ pub fn main(init: std.process.Init) !void {
     const session = try client.createSession(.{
         .model = "gpt-5.6-luna",
     });
-    defer session.disconnect() catch {};
+    defer session.disconnect() catch |err| {
+        std.log.err("session cleanup failed: {s}", .{@errorName(err)});
+    };
 
     const response = try session.sendAndWait(.{
         .prompt = "Explain Zig error unions in one sentence.",

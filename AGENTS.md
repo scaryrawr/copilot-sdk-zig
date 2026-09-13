@@ -52,6 +52,10 @@ after SDK or synchronization changes. Build affected examples with
   representation. Wipe encoded requests, raw responses, intermediate JSON,
   owned copies, partial-construction cleanup paths, and both streaming transport
   backing buffers before releasing their storage.
+- On clean child-transport EOF, mark the logical transport closed before
+  waiting so copied reader/writer handles cannot be reused after process cleanup.
+  Do not clear `Child.id` after a failed wait: Windows wait failures can leave
+  process and pipe handles live, which shutdown must still kill and clean up.
 - Validate handler-produced values against the wire schema before responding;
   invalid OAuth token results must securely deinitialize and cancel the pending
   request rather than sending a response the CLI will reject.
