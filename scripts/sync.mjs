@@ -517,8 +517,8 @@ function verifyStableSessionRuntimeSourceContract(clientSource, typesSource) {
     zigClientSource,
     [
       "workspacePath: ?[]const u8 = null",
-      "try self.prepareSessionCommit(returned_id, parsed.value.workspacePath)",
-      "try self.prepareSessionCommit(runtime_session_id, parsed.value.workspacePath)",
+      "self.prepareSessionCommit(returned_id, parsed.value.workspacePath) catch",
+      "self.prepareSessionCommit(runtime_session_id, parsed.value.workspacePath) catch",
       "pub fn workspacePath(self: Session) !?[]const u8",
     ],
     "Zig workspacePath lifecycle",
