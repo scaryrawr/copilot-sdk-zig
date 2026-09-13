@@ -9783,10 +9783,12 @@ pub const Session = struct {
     pub fn subscribe(self: Session) !EventSubscriber {
         var lease = try self.eventLog();
         errdefer lease.deinit();
+        const token = try lease.log.subscribe();
+        errdefer lease.log.unsubscribe(token);
         try self.client.ensurePump();
         return .{
             .lease = lease,
-            .token = try lease.log.subscribe(),
+            .token = token,
         };
     }
 
@@ -10489,13 +10491,12 @@ pub const Session = struct {
                 ) };
             };
             if (event == .session_error) {
-                const failure = try sessionFailureFromEvent(
+                defer event.deinit(self.client.allocator);
+                return .{ .failure = try sessionFailureFromEvent(
                     self.client.allocator,
                     lease.log.session_id,
                     event.session_error,
-                );
-                event.deinit(self.client.allocator);
-                return .{ .failure = failure };
+                ) };
             }
             return switch (try self.processRetainedEvent(
                 .detailed,
@@ -10569,13 +10570,12 @@ pub const Session = struct {
             ) };
         };
         if (event == .session_error) {
-            const failure = try sessionFailureFromEvent(
+            defer event.deinit(self.client.allocator);
+            return .{ .failure = try sessionFailureFromEvent(
                 self.client.allocator,
                 lease.log.session_id,
                 event.session_error,
-            );
-            event.deinit(self.client.allocator);
-            return .{ .failure = failure };
+            ) };
         }
         return switch (try self.processRetainedEvent(
             .detailed,
