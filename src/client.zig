@@ -93,26 +93,26 @@ const WireAttachment = struct {
             .file => |value| try writer.write(.{
                 .type = "file",
                 .path = value.path,
-                .displayName = value.display_name,
+                .displayName = attachmentDisplayName(value.display_name, value.path),
                 .lineRange = value.line_range,
             }),
             .directory => |value| try writer.write(.{
                 .type = "directory",
                 .path = value.path,
-                .displayName = value.display_name,
+                .displayName = attachmentDisplayName(value.display_name, value.path),
             }),
             .selection => |value| try writer.write(.{
                 .type = "selection",
                 .filePath = value.file_path,
                 .text = value.text,
-                .displayName = value.display_name,
+                .displayName = attachmentDisplayName(value.display_name, value.file_path),
                 .selection = value.selection,
             }),
             .blob => |value| try writer.write(.{
                 .type = "blob",
                 .data = value.data,
                 .mimeType = value.mime_type,
-                .displayName = value.display_name,
+                .displayName = nonEmptyDisplayName(value.display_name) orelse "attachment",
             }),
             .github_reference => |value| try writer.write(.{
                 .type = "github_reference",
@@ -198,6 +198,18 @@ const WireAttachment = struct {
         }
     }
 };
+
+fn nonEmptyDisplayName(display_name: ?[]const u8) ?[]const u8 {
+    const value = display_name orelse return null;
+    return if (std.mem.trim(u8, value, " \t\r\n").len == 0) null else value;
+}
+
+fn attachmentDisplayName(display_name: ?[]const u8, path: []const u8) []const u8 {
+    if (nonEmptyDisplayName(display_name)) |value| return value;
+    const base_name = std.fs.path.basename(path);
+    if (base_name.len != 0) return base_name;
+    return if (path.len != 0) path else "attachment";
+}
 
 const WireGitHubRepoPointer = struct {
     id: ?i64 = null,
@@ -2479,17 +2491,18 @@ test "session.send serializes every attachment variant" {
     , result.request_body);
 }
 
-test "session.send omits absent attachment fields" {
+test "session.send normalizes display names and omits absent optional fields" {
     const repo = session_types.Attachment.GitHubRepoPointer{
         .name = "repo",
         .owner = "owner",
     };
     const attachments = [_]session_types.Attachment{
         .{ .file = .{ .path = "/tmp/a.zig" } },
-        .{ .directory = .{ .path = "/tmp" } },
+        .{ .directory = .{ .path = "/tmp", .display_name = "" } },
         .{ .selection = .{
             .file_path = "/tmp/a.zig",
             .text = "a",
+            .display_name = " \t",
             .selection = .{
                 .start = .{ .line = 0, .character = 0 },
                 .end = .{ .line = 0, .character = 1 },
@@ -2517,7 +2530,7 @@ test "session.send omits absent attachment fields" {
     defer std.testing.allocator.free(result.request_body);
 
     try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"inspect","attachments":[{"type":"file","path":"/tmp/a.zig"},{"type":"directory","path":"/tmp"},{"type":"selection","filePath":"/tmp/a.zig","text":"a","selection":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}}},{"type":"blob","data":"YQ==","mimeType":"text/plain"},{"type":"github_actions_job","jobId":1,"jobName":"test","repo":{"name":"repo","owner":"owner"},"url":"https://github.com/owner/repo/actions","workflowName":"CI"},{"type":"github_repository","repo":{"name":"repo","owner":"owner"},"url":"https://github.com/owner/repo"}]}}
+        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"inspect","attachments":[{"type":"file","path":"/tmp/a.zig","displayName":"a.zig"},{"type":"directory","path":"/tmp","displayName":"tmp"},{"type":"selection","filePath":"/tmp/a.zig","text":"a","displayName":"a.zig","selection":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}}},{"type":"blob","data":"YQ==","mimeType":"text/plain","displayName":"attachment"},{"type":"github_actions_job","jobId":1,"jobName":"test","repo":{"name":"repo","owner":"owner"},"url":"https://github.com/owner/repo/actions","workflowName":"CI"},{"type":"github_repository","repo":{"name":"repo","owner":"owner"},"url":"https://github.com/owner/repo"}]}}
     , result.request_body);
 }
 
@@ -2634,7 +2647,7 @@ test "session.send preserves attachment order" {
     defer std.testing.allocator.free(result.request_body);
 
     try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"order","attachments":[{"type":"github_url","url":"first"},{"type":"directory","path":"second"},{"type":"blob","data":"dGhpcmQ=","mimeType":"text/plain"}]}}
+        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"order","attachments":[{"type":"github_url","url":"first"},{"type":"directory","path":"second","displayName":"second"},{"type":"blob","data":"dGhpcmQ=","mimeType":"text/plain","displayName":"attachment"}]}}
     , result.request_body);
 }
 
@@ -2720,7 +2733,7 @@ test "session.sendAndWait cleans its message id and returns an owned assistant m
     const request_body = try framedBody(allocator, request_frame);
     defer allocator.free(request_body);
     try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"inspect","attachments":[{"type":"file","path":"/tmp/a.zig"}]}}
+        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"inspect","attachments":[{"type":"file","path":"/tmp/a.zig","displayName":"a.zig"}]}}
     , request_body);
 }
 
