@@ -1051,7 +1051,7 @@ const EventDelivery = struct {
         allocator: std.mem.Allocator,
     ) session_types.SessionEvent {
         allocator.free(self.session_id);
-        if (self.diagnostic_frame) |frame| allocator.free(frame);
+        if (self.diagnostic_frame) |frame| errors.freeRpcData(allocator, frame);
         const event = self.event;
         self.* = undefined;
         return event;
@@ -1068,13 +1068,13 @@ const EventDelivery = struct {
         defer event.deinit(allocator);
         const session_id = self.session_id;
         self.* = undefined;
-        defer allocator.free(frame);
+        defer errors.freeRpcData(allocator, frame);
         return sessionFailureFromFrame(allocator, session_id, frame);
     }
 
     fn deinit(self: *EventDelivery, allocator: std.mem.Allocator) void {
         allocator.free(self.session_id);
-        if (self.diagnostic_frame) |frame| allocator.free(frame);
+        if (self.diagnostic_frame) |frame| errors.freeRpcData(allocator, frame);
         self.event.deinit(allocator);
         self.* = undefined;
     }
@@ -1708,14 +1708,15 @@ pub const Client = struct {
             },
         }
         client.setBuiltinPluginDirectories(options.builtin_plugin_directories) catch |err| {
-            client.deinit();
             if (err == error.OutOfMemory) return error.OutOfMemory;
-            return .{ .failure = try policyFailure(
+            const failure = try policyFailure(
                 failure_policy,
                 err,
                 recordInvalidConfig,
                 .{ allocator, "builtin_plugin_directories", err },
-            ) };
+            );
+            client.deinit();
+            return .{ .failure = failure };
         };
         return .{ .success = client };
     }
@@ -11024,6 +11025,32 @@ test "nested RPC failure deinit wipes canonical data before free" {
     try std.testing.expect(!RpcDataWipeProbe.saw_nonzero);
 }
 
+test "invalid envelope deinit wipes canonical message before free" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"token":"literal-secret"}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    var failure = try recordInvalidEnvelope(
+        allocator,
+        error.InvalidJsonRpc,
+        .non_object,
+        parsed.value,
+    );
+
+    RpcDataWipeProbe.reset();
+    errors.setRpcDataWipeObserverForTest(RpcDataWipeProbe.observe);
+    defer errors.setRpcDataWipeObserverForTest(null);
+    failure.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), RpcDataWipeProbe.calls);
+    try std.testing.expect(!RpcDataWipeProbe.saw_nonzero);
+}
+
 test "RPC ownership rollback wipes canonical data when context allocation fails" {
     const allocator = std.testing.allocator;
     const remote_error =
@@ -11129,11 +11156,16 @@ test "legacy delivery preserves the public session error" {
             \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"session-1","event":{"type":"session.error","data":{"errorType":"provider","message":"Try later"}}}}
         ),
     };
+    RpcDataWipeProbe.reset();
+    errors.setRpcDataWipeObserverForTest(RpcDataWipeProbe.observe);
+    defer errors.setRpcDataWipeObserverForTest(null);
     var event = delivery.intoEvent(allocator);
     defer event.deinit(allocator);
 
     try std.testing.expect(event == .session_error);
     try std.testing.expectEqualStrings("Try later", event.session_error.message);
+    try std.testing.expectEqual(@as(usize, 1), RpcDataWipeProbe.calls);
+    try std.testing.expect(!RpcDataWipeProbe.saw_nonzero);
 }
 
 test "connect validates the protocol version" {
