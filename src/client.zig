@@ -137,6 +137,7 @@ const SendOperation = struct {
     completed: std.Io.Event = .unset,
     failure: ?anyerror = null,
     future: ?std.Io.Future(void) = null,
+    future_published: bool = false,
 };
 
 const SessionRemoval = struct {
@@ -146,6 +147,7 @@ const SessionRemoval = struct {
     owner: SendOperationOwner = .waiter,
     completed: std.Io.Event = .unset,
     future: ?std.Io.Future(void) = null,
+    future_published: bool = false,
 };
 
 const RegisteredTool = struct {
@@ -605,8 +607,6 @@ pub const Client = struct {
     event_queue_ready: std.Io.Event = .unset,
     event_queue: std.ArrayList(QueuedSessionEvent) = .empty,
     event_processor_future: ?std.Io.Future(void) = null,
-    event_processor_starting: bool = false,
-    event_processor_started: std.Io.Event = .is_set,
     event_processor_closing: bool = false,
     send_operations_mutex: std.Io.Mutex = .init,
     send_operations: std.ArrayList(*SendOperation) = .empty,
@@ -619,9 +619,8 @@ pub const Client = struct {
     session_removal_reaper_future: ?std.Io.Future(void) = null,
     session_removal_reaper_closing: bool = false,
     pump_future: ?std.Io.Future(void) = null,
-    pump_starting: bool = false,
-    pump_started: std.Io.Event = .is_set,
     pump_stopped: std.Io.Event = .is_set,
+    pump_closing: bool = false,
     pump_failure: ?anyerror = null,
     ignore_eof: bool = false,
     synchronize_test_responses: bool = true,
@@ -851,12 +850,12 @@ pub const Client = struct {
     fn completeShutdownTransport(self: *Client) void {
         if (self.shutdown_complete) return;
         self.pending_mutex.lockUncancelable(self.io);
-        const pump_starting = self.pump_starting;
+        self.pump_closing = true;
+        var pump_future = self.pump_future;
+        self.pump_future = null;
         self.pending_mutex.unlock(self.io);
-        if (pump_starting) self.pump_started.waitUncancelable(self.io);
-        if (self.pump_future) |*pump| {
+        if (pump_future) |*pump| {
             pump.cancel(self.io);
-            self.pump_future = null;
         }
         self.stopSendReaper();
         self.finishSendOperations();
@@ -2165,6 +2164,7 @@ pub const Client = struct {
         };
         errdefer self.removePendingCall(&pending);
 
+        try self.ensurePump();
         try self.writer_mutex.lock(self.io);
         const write_result = writeFrameAndWipe(
             &self.writer.interface,
@@ -2173,11 +2173,10 @@ pub const Client = struct {
         );
         self.writer_mutex.unlock(self.io);
         try write_result;
-        self.ensurePump();
 
         if (self.ignore_eof) {
             while (!pending.completed.isSet()) {
-                self.ensurePump();
+                try self.ensurePump();
                 if (!pending.completed.isSet()) {
                     try std.Io.sleep(
                         self.io,
@@ -2241,6 +2240,12 @@ pub const Client = struct {
         };
         errdefer operation.log_lease.deinit();
         self.send_operations_mutex.lockUncancelable(self.io);
+        if (self.send_reaper_future == null) {
+            self.send_reaper_future = self.io.concurrent(sendReaperMain, .{self}) catch |err| {
+                self.send_operations_mutex.unlock(self.io);
+                return err;
+            };
+        }
         if (self.send_operations.items.len >= detached_send_limit) {
             self.send_operations_mutex.unlock(self.io);
             return error.TooManyPendingSends;
@@ -2249,11 +2254,23 @@ pub const Client = struct {
             self.send_operations_mutex.unlock(self.io);
             return err;
         };
-        if (self.send_reaper_future == null) {
-            self.send_reaper_future = self.io.async(sendReaperMain, .{self});
-        }
         self.send_operations_mutex.unlock(self.io);
-        operation.future = self.io.async(sendOperationMain, .{operation});
+        const operation_future =
+            self.io.concurrent(sendOperationMain, .{operation}) catch |err| {
+                self.send_operations_mutex.lockUncancelable(self.io);
+                for (self.send_operations.items, 0..) |candidate, index| {
+                    if (candidate != operation) continue;
+                    _ = self.send_operations.orderedRemove(index);
+                    break;
+                }
+                self.send_operations_mutex.unlock(self.io);
+                return err;
+            };
+        self.send_operations_mutex.lockUncancelable(self.io);
+        operation.future = operation_future;
+        operation.future_published = true;
+        self.send_reaper_ready.set(self.io);
+        self.send_operations_mutex.unlock(self.io);
         return operation;
     }
 
@@ -2309,6 +2326,7 @@ pub const Client = struct {
         for (self.send_operations.items, 0..) |candidate, index| {
             if (candidate != operation or
                 candidate.owner != owner or
+                !candidate.future_published or
                 !candidate.completed.isSet())
             {
                 continue;
@@ -2329,7 +2347,7 @@ pub const Client = struct {
         defer self.send_operations_mutex.unlock(self.io);
         for (self.send_operations.items, 0..) |candidate, index| {
             if (candidate != operation or candidate.owner != .waiter) continue;
-            if (candidate.completed.isSet()) {
+            if (candidate.future_published and candidate.completed.isSet()) {
                 return .{ .completed = self.send_operations.orderedRemove(index) };
             }
             candidate.owner = .reaper;
@@ -2345,6 +2363,7 @@ pub const Client = struct {
             var completed: ?*SendOperation = null;
             for (self.send_operations.items, 0..) |operation, index| {
                 if (operation.owner != .reaper or
+                    !operation.future_published or
                     !operation.completed.isSet() or
                     operation.future == null)
                 {
@@ -2451,7 +2470,7 @@ pub const Client = struct {
         self: *Client,
         removal: *SessionRemoval,
         owner: SendOperationOwner,
-    ) void {
+    ) !void {
         removal.owner = owner;
         removal.log_lease.log.beginClose();
         if (self.retireSessionId(removal.session_id)) |owned_session_id| {
@@ -2461,10 +2480,19 @@ pub const Client = struct {
         self.session_removals_mutex.lockUncancelable(self.io);
         if (self.session_removal_reaper_future == null) {
             self.session_removal_reaper_future =
-                self.io.async(sessionRemovalReaperMain, .{self});
+                self.io.concurrent(sessionRemovalReaperMain, .{self}) catch |err| {
+                    self.session_removals_mutex.unlock(self.io);
+                    return err;
+                };
         }
         self.session_removals_mutex.unlock(self.io);
-        removal.future = self.io.async(sessionRemovalMain, .{removal});
+        const removal_future =
+            try self.io.concurrent(sessionRemovalMain, .{removal});
+        self.session_removals_mutex.lockUncancelable(self.io);
+        removal.future = removal_future;
+        removal.future_published = true;
+        self.session_removal_reaper_ready.set(self.io);
+        self.session_removals_mutex.unlock(self.io);
     }
 
     fn finishSessionRemoval(self: *Client, removal: *SessionRemoval) void {
@@ -2499,8 +2527,8 @@ pub const Client = struct {
             var completed: ?*SessionRemoval = null;
             for (self.session_removals.items, 0..) |removal, index| {
                 if (removal.owner != .reaper or
-                    !removal.completed.isSet() or
-                    removal.future == null)
+                    !removal.future_published or
+                    !removal.completed.isSet())
                 {
                     continue;
                 }
@@ -2550,7 +2578,10 @@ pub const Client = struct {
                 self.session_removals.orderedRemove(0);
             self.session_removals_mutex.unlock(self.io);
             const value = removal orelse break;
-            if (value.future) |*future| future.await(self.io);
+            if (value.future) |*future|
+                future.await(self.io)
+            else
+                sessionRemovalMain(value);
             value.log_lease.deinit();
             self.allocator.free(value.session_id);
             self.allocator.destroy(value);
@@ -2558,27 +2589,18 @@ pub const Client = struct {
         self.session_removals.deinit(self.allocator);
     }
 
-    fn ensurePump(self: *Client) void {
+    fn ensurePump(self: *Client) !void {
         self.pending_mutex.lockUncancelable(self.io);
+        defer self.pending_mutex.unlock(self.io);
+        if (self.pump_closing) return error.ClientDeinitialized;
         if (self.pump_future != null and self.pump_stopped.isSet()) {
             self.pump_future.?.await(self.io);
             self.pump_future = null;
             if (self.ignore_eof) self.reader.size = null;
         }
-        const start_pump = self.pump_future == null and !self.pump_starting;
-        if (start_pump) {
-            self.pump_starting = true;
-            self.pump_started.reset();
-            self.pump_stopped.reset();
-        }
-        self.pending_mutex.unlock(self.io);
-        if (!start_pump) return;
-        const future = self.io.async(pumpMain, .{self});
-        self.pending_mutex.lockUncancelable(self.io);
-        self.pump_future = future;
-        self.pump_starting = false;
-        self.pump_started.set(self.io);
-        self.pending_mutex.unlock(self.io);
+        if (self.pump_future != null) return;
+        self.pump_stopped.reset();
+        self.pump_future = try self.io.concurrent(pumpMain, .{self});
     }
 
     fn removePendingCall(self: *Client, pending: *PendingCall) void {
@@ -3534,36 +3556,22 @@ pub const Client = struct {
         );
         errdefer event.deinit(self.allocator);
         try self.event_queue_mutex.lock(self.io);
+        defer self.event_queue_mutex.unlock(self.io);
         if (self.event_processor_closing) {
-            self.event_queue_mutex.unlock(self.io);
             return error.SessionDisconnected;
         }
         if (self.event_queue.items.len == event_ingress_limit) {
-            self.event_queue_mutex.unlock(self.io);
             return error.EventIngressOverflow;
+        }
+        if (self.event_processor_future == null) {
+            self.event_processor_future =
+                try self.io.concurrent(eventProcessorMain, .{self});
         }
         self.event_queue.append(self.allocator, .{
             .log = log,
             .event = event,
-        }) catch |err| {
-            self.event_queue_mutex.unlock(self.io);
-            return err;
-        };
+        }) catch |err| return err;
         self.event_queue_ready.set(self.io);
-        const start_processor =
-            self.event_processor_future == null and !self.event_processor_starting;
-        if (start_processor) {
-            self.event_processor_starting = true;
-            self.event_processor_started.reset();
-        }
-        self.event_queue_mutex.unlock(self.io);
-        if (!start_processor) return;
-        const future = self.io.async(eventProcessorMain, .{self});
-        self.event_queue_mutex.lockUncancelable(self.io);
-        self.event_processor_future = future;
-        self.event_processor_starting = false;
-        self.event_processor_started.set(self.io);
-        self.event_queue_mutex.unlock(self.io);
     }
 
     fn ensureEventLog(self: *Client, session_id: []const u8) !*event_log.EventLog {
@@ -3655,11 +3663,7 @@ pub const Client = struct {
         self.event_queue_mutex.lockUncancelable(self.io);
         self.event_processor_closing = true;
         self.event_queue_ready.set(self.io);
-        const processor_starting = self.event_processor_starting;
         self.event_queue_mutex.unlock(self.io);
-        if (processor_starting) {
-            self.event_processor_started.waitUncancelable(self.io);
-        }
         if (self.event_processor_future) |*future| {
             future.await(self.io);
             self.event_processor_future = null;
@@ -5507,7 +5511,7 @@ pub const Session = struct {
         removal_started = true;
         const owner: SendOperationOwner =
             if (removal.log_lease.log.hasActiveCallbacks()) .reaper else .waiter;
-        self.client.startSessionRemoval(removal, owner);
+        try self.client.startSessionRemoval(removal, owner);
         if (owner == .waiter) {
             self.client.finishSessionRemoval(removal);
         }
@@ -7630,6 +7634,8 @@ test "permission response delivery failures are explicit" {
         .{ .mode = .read_only },
     );
     defer transport.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = transport.readerStreaming(std.testing.io, &reader_buffer);
     var writer_buffer: [1024]u8 = undefined;
     var writer = transport.writer(std.testing.io, &writer_buffer);
 
@@ -7637,10 +7643,11 @@ test "permission response delivery failures are explicit" {
         .allocator = allocator,
         .io = std.testing.io,
         .child = null,
-        .reader = undefined,
+        .reader = &reader,
         .writer = &writer,
         .reader_buffer = &.{},
         .writer_buffer = &.{},
+        .ignore_eof = true,
     };
     try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
     defer {
@@ -7695,10 +7702,11 @@ fn framedBody(allocator: std.mem.Allocator, framed: []const u8) ![]u8 {
 fn deinitTestMessaging(client: *Client) void {
     client.stopEventProcessor();
     client.pending_mutex.lockUncancelable(client.io);
-    const pump_starting = client.pump_starting;
+    client.pump_closing = true;
+    var pump_future = client.pump_future;
+    client.pump_future = null;
     client.pending_mutex.unlock(client.io);
-    if (pump_starting) client.pump_started.waitUncancelable(client.io);
-    if (client.pump_future) |*pump| pump.await(client.io);
+    if (pump_future) |*pump| pump.await(client.io);
     client.finishPump(error.EndOfStream);
     client.stopSessionRemovalReaper();
     client.finishSessionRemovals();
@@ -8595,6 +8603,7 @@ test "completed send remains owned by its waiter while the reaper runs" {
     operation.future = std.testing.io.async(struct {
         fn run() void {}
     }.run, .{});
+    operation.future_published = true;
     operation.completed.set(std.testing.io);
 
     client.reapSendOperations();
@@ -8639,6 +8648,7 @@ test "detached send failures remain observable after reaping" {
     operation.future = std.testing.io.async(struct {
         fn run() void {}
     }.run, .{});
+    operation.future_published = true;
     operation.completed.set(std.testing.io);
     try client.send_operations.append(allocator, operation);
 
