@@ -31,14 +31,6 @@ pub const ClientLogLevel = enum {
     }
 };
 
-pub const RuntimeAuthentication = union(enum) {
-    default,
-    logged_in_user,
-    token: []const u8,
-    token_and_logged_in_user: []const u8,
-    disabled,
-};
-
 pub const TelemetryConfig = struct {
     otlp_endpoint: ?[]const u8 = null,
     otlp_protocol: ?enum { http_json, http_protobuf } = null,
@@ -48,34 +40,23 @@ pub const TelemetryConfig = struct {
     capture_content: ?bool = null,
 };
 
-pub const ChildRuntime = struct {
-    executable: []const u8 = "copilot",
-    args: []const []const u8 = &.{},
-    working_directory: ?[]const u8 = null,
-    mode: RuntimeMode = .copilot_cli,
-    base_directory: ?[]const u8 = null,
-    log_level: ?ClientLogLevel = null,
-    environment: ?[]const EnvironmentVariable = null,
-    authentication: RuntimeAuthentication = .default,
-    telemetry: ?TelemetryConfig = null,
-    session_idle_timeout_seconds: u32 = 0,
-    enable_remote_sessions: bool = false,
-};
-
 pub const StdioConnection = struct {
-    runtime: ChildRuntime = .{},
+    path: []const u8 = "copilot",
+    args: []const []const u8 = &.{},
+    env: ?[]const EnvironmentVariable = null,
 };
 
 pub const TcpConnection = struct {
-    runtime: ChildRuntime = .{},
+    path: []const u8 = "copilot",
+    args: []const []const u8 = &.{},
+    env: ?[]const EnvironmentVariable = null,
     port: u16 = 0,
-    connection_token: ?[]const u8 = null,
+    token: ?[]const u8 = null,
 };
 
 pub const UriConnection = struct {
-    uri: []const u8,
-    connection_token: ?[]const u8 = null,
-    mode: RuntimeMode = .copilot_cli,
+    url: []const u8,
+    token: ?[]const u8 = null,
 };
 
 pub const RuntimeConnection = union(enum) {
@@ -208,12 +189,19 @@ pub const SessionFilesystemProvider = struct {
     deinit: ?*const fn (?*anyopaque) void = null,
 };
 
+pub const SessionFilesystemCapabilities = struct {
+    sqlite: bool = false,
+};
+
 pub const SessionFilesystemConfig = struct {
     initial_working_directory: []const u8,
     session_state_path: []const u8,
     conventions: SessionFilesystemConventions,
-    sqlite: bool = false,
-    create_provider: *const fn (
+    capabilities: SessionFilesystemCapabilities = .{},
+};
+
+pub const SessionFilesystemProviderFactory = struct {
+    handler: *const fn (
         std.mem.Allocator,
         []const u8,
         ?*anyopaque,
@@ -223,10 +211,8 @@ pub const SessionFilesystemConfig = struct {
 
 test "runtime connection keeps child-only settings out of URI" {
     const connection = RuntimeConnection{ .uri = .{
-        .uri = "localhost:4321",
-        .connection_token = "secret",
-        .mode = .empty,
+        .url = "localhost:4321",
+        .token = "secret",
     } };
-    try std.testing.expectEqualStrings("localhost:4321", connection.uri.uri);
-    try std.testing.expectEqual(RuntimeMode.empty, connection.uri.mode);
+    try std.testing.expectEqualStrings("localhost:4321", connection.uri.url);
 }

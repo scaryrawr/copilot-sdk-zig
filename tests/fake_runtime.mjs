@@ -6,6 +6,12 @@ const pidPathIndex = args.indexOf("--pid-path");
 if (pidPathIndex >= 0) {
     writeFileSync(args[pidPathIndex + 1], String(process.pid));
 }
+const shutdownPathIndex = args.indexOf("--shutdown-path");
+const shutdownPath =
+    shutdownPathIndex >= 0 ? args[shutdownPathIndex + 1] : null;
+const shutdownFsPathIndex = args.indexOf("--shutdown-fs-path");
+const shutdownFsPath =
+    shutdownFsPathIndex >= 0 ? args[shutdownFsPathIndex + 1] : null;
 const announceDelayIndex = args.indexOf("--announce-delay-ms");
 const announceDelayMs =
     announceDelayIndex >= 0 ? Number(args[announceDelayIndex + 1]) : 0;
@@ -35,6 +41,7 @@ let lastRequest = null;
 let nextRequestId = 10_000;
 let activeConnections = 0;
 const requests = [];
+let failNextOptionsUpdate = false;
 
 function attach(input, output) {
     let buffer = Buffer.alloc(0);
@@ -91,7 +98,29 @@ function attach(input, output) {
                 result = { ok: true, protocolVersion: 3, version: "fake" };
                 break;
             case "runtime.shutdown":
-                result = {};
+                if (shutdownPath !== null) {
+                    writeFileSync(shutdownPath, "requested");
+                }
+                if (shutdownFsPath !== null) {
+                    const response = await request("sessionFs.readFile", {
+                        sessionId: "shutdown-provider",
+                        path: "/during-shutdown",
+                    });
+                    writeFileSync(
+                        shutdownFsPath,
+                        response.result?.content ?? "missing"
+                    );
+                }
+                if (args.includes("--hang-shutdown")) return;
+                if (args.includes("--fail-shutdown")) {
+                    send({
+                        jsonrpc: "2.0",
+                        id: message.id,
+                        error: { code: -32000, message: "shutdown rejected" },
+                    });
+                    return;
+                }
+                result = null;
                 break;
             case "plugins.builtin.set":
             case "session.detach":
@@ -117,7 +146,11 @@ function attach(input, output) {
                 break;
             case "session.create":
             case "session.resume":
-                if (args.includes("--fail-session")) {
+                if (
+                    args.includes("--fail-session") ||
+                    (args.includes("--fail-resume") &&
+                        message.method === "session.resume")
+                ) {
                     send({
                         jsonrpc: "2.0",
                         id: message.id,
@@ -125,13 +158,23 @@ function attach(input, output) {
                     });
                     return;
                 }
+                if (
+                    args.includes("--fail-options-update-on-resume") &&
+                    message.method === "session.resume"
+                ) {
+                    failNextOptionsUpdate = true;
+                }
                 result = { sessionId: message.params.sessionId, capabilities: {} };
                 break;
             case "session.send":
                 result = { messageId: "message-1" };
                 break;
             case "session.options.update":
-                if (args.includes("--fail-options-update")) {
+                if (
+                    args.includes("--fail-options-update") ||
+                    failNextOptionsUpdate
+                ) {
+                    failNextOptionsUpdate = false;
                     send({
                         jsonrpc: "2.0",
                         id: message.id,

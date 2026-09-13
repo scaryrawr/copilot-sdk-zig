@@ -10,6 +10,7 @@ const ext = @import("extensibility.zig");
 
 const max_queued_events: usize = 1024;
 const teardown_oauth_release_timeout = std.Io.Duration.fromMilliseconds(250);
+const runtime_shutdown_timeout = std.Io.Duration.fromSeconds(10);
 
 fn wipeSecret(value: []const u8) void {
     @memset(@constCast(value), 0);
@@ -48,6 +49,15 @@ pub const ClientOptions = struct {
     /// Absolute trusted plugin directories installed before `init` returns.
     builtin_plugin_directories: []const []const u8 = &.{},
     connection: ?runtime_types.RuntimeConnection = null,
+    mode: runtime_types.RuntimeMode = .copilot_cli,
+    base_directory: ?[]const u8 = null,
+    log_level: ?runtime_types.ClientLogLevel = null,
+    env: ?[]const runtime_types.EnvironmentVariable = null,
+    github_token: ?[]const u8 = null,
+    use_logged_in_user: ?bool = null,
+    telemetry: ?runtime_types.TelemetryConfig = null,
+    session_idle_timeout_seconds: u32 = 0,
+    enable_remote_sessions: bool = false,
     on_list_models: ?runtime_types.ModelListCallback = null,
     on_get_trace_context: ?runtime_types.TraceContextCallback = null,
     session_filesystem: ?runtime_types.SessionFilesystemConfig = null,
@@ -563,11 +573,21 @@ const Transport = union(enum) {
         };
     }
 
-    fn deinit(self: *Transport, allocator: std.mem.Allocator, io: std.Io) void {
+    fn ownsRuntime(self: *const Transport) bool {
+        return switch (self.*) {
+            .stdio_child, .tcp_child => true,
+            .none, .uri, .parent_stdio, .fixture => false,
+        };
+    }
+
+    fn close(self: *Transport, allocator: std.mem.Allocator, io: std.Io) void {
         switch (self.*) {
             .none => {},
             .stdio_child => |*value| {
-                value.child.kill(io);
+                if (value.child.stdin) |file| file.close(io);
+                value.child.stdin = null;
+                if (value.child.stdout) |file| file.close(io);
+                value.child.stdout = null;
                 wipeSecret(value.io.reader_buffer);
                 wipeSecret(value.io.writer_buffer);
                 allocator.free(value.io.reader_buffer);
@@ -575,7 +595,6 @@ const Transport = union(enum) {
             },
             .tcp_child => |*value| {
                 value.io.stream.close(io);
-                value.child.kill(io);
                 wipeSecret(value.io.reader_buffer);
                 wipeSecret(value.io.writer_buffer);
                 allocator.free(value.io.reader_buffer);
@@ -605,17 +624,25 @@ const Transport = union(enum) {
                 }
             },
         }
+    }
+
+    fn terminateAndReap(self: *Transport, io: std.Io) void {
+        switch (self.*) {
+            .stdio_child => |*value| value.child.kill(io),
+            .tcp_child => |*value| value.child.kill(io),
+            .none, .uri, .parent_stdio, .fixture => {},
+        }
         self.* = undefined;
     }
 };
 
 const ResolvedConnection = union(enum) {
     stdio: struct {
-        child: runtime_types.ChildRuntime,
+        child: ResolvedChild,
         token: ?[]const u8,
     },
     tcp: struct {
-        child: runtime_types.ChildRuntime,
+        child: ResolvedChild,
         port: u16,
         token: ?[]const u8,
     },
@@ -623,8 +650,22 @@ const ResolvedConnection = union(enum) {
         host: []const u8,
         port: u16,
         token: ?[]const u8,
-        mode: runtime_types.RuntimeMode,
     },
+};
+
+const ResolvedChild = struct {
+    executable: []const u8 = "copilot",
+    args: []const []const u8 = &.{},
+    working_directory: ?[]const u8 = null,
+    mode: runtime_types.RuntimeMode = .copilot_cli,
+    base_directory: ?[]const u8 = null,
+    log_level: ?runtime_types.ClientLogLevel = null,
+    environment: ?[]const runtime_types.EnvironmentVariable = null,
+    github_token: ?[]const u8 = null,
+    use_logged_in_user: bool = true,
+    telemetry: ?runtime_types.TelemetryConfig = null,
+    session_idle_timeout_seconds: u32 = 0,
+    enable_remote_sessions: bool = false,
 };
 
 const DefaultConnection = enum {
@@ -663,6 +704,109 @@ const RegisteredSessionFilesystem = struct {
     }
 };
 
+const SessionFilesystemRegistry = struct {
+    pending: std.ArrayList(RegisteredSessionFilesystem) = .empty,
+    committed: std.ArrayList(RegisteredSessionFilesystem) = .empty,
+
+    fn begin(
+        self: *SessionFilesystemRegistry,
+        allocator: std.mem.Allocator,
+        session_id: []const u8,
+        factory: runtime_types.SessionFilesystemProviderFactory,
+        require_sqlite: bool,
+    ) !void {
+        if (self.pendingIndex(session_id) != null)
+            return error.SessionLifecycleAlreadyInProgress;
+        try self.pending.ensureUnusedCapacity(allocator, 1);
+        if (self.committedIndex(session_id) == null)
+            try self.committed.ensureUnusedCapacity(allocator, 1);
+        const owned_session_id = try allocator.dupe(u8, session_id);
+        errdefer allocator.free(owned_session_id);
+        const filesystem_provider = try factory.handler(
+            allocator,
+            session_id,
+            factory.context,
+        );
+        if (require_sqlite and filesystem_provider.sqlite == null) {
+            if (filesystem_provider.deinit) |deinit_provider|
+                deinit_provider(filesystem_provider.context);
+            return error.MissingSessionFilesystemSqliteProvider;
+        }
+        self.pending.appendAssumeCapacity(.{
+            .session_id = owned_session_id,
+            .provider = filesystem_provider,
+        });
+    }
+
+    fn resolve(
+        self: *SessionFilesystemRegistry,
+        session_id: []const u8,
+    ) ?runtime_types.SessionFilesystemProvider {
+        if (self.pendingIndex(session_id)) |index|
+            return self.pending.items[index].provider;
+        if (self.committedIndex(session_id)) |index|
+            return self.committed.items[index].provider;
+        return null;
+    }
+
+    fn rollback(
+        self: *SessionFilesystemRegistry,
+        allocator: std.mem.Allocator,
+        session_id: []const u8,
+    ) void {
+        const index = self.pendingIndex(session_id) orelse return;
+        var removed = self.pending.orderedRemove(index);
+        removed.deinit(allocator);
+    }
+
+    fn commitReplacement(
+        self: *SessionFilesystemRegistry,
+        allocator: std.mem.Allocator,
+        session_id: []const u8,
+    ) void {
+        const pending_index = self.pendingIndex(session_id) orelse return;
+        const replacement = self.pending.orderedRemove(pending_index);
+        if (self.committedIndex(session_id)) |committed_index| {
+            var displaced = self.committed.items[committed_index];
+            self.committed.items[committed_index] = replacement;
+            displaced.deinit(allocator);
+            return;
+        }
+        self.committed.appendAssumeCapacity(replacement);
+    }
+
+    fn remove(
+        self: *SessionFilesystemRegistry,
+        allocator: std.mem.Allocator,
+        session_id: []const u8,
+    ) void {
+        self.rollback(allocator, session_id);
+        const index = self.committedIndex(session_id) orelse return;
+        var removed = self.committed.orderedRemove(index);
+        removed.deinit(allocator);
+    }
+
+    fn deinit(self: *SessionFilesystemRegistry, allocator: std.mem.Allocator) void {
+        for (self.pending.items) |*entry| entry.deinit(allocator);
+        self.pending.deinit(allocator);
+        for (self.committed.items) |*entry| entry.deinit(allocator);
+        self.committed.deinit(allocator);
+        self.* = .{};
+    }
+
+    fn pendingIndex(self: *const SessionFilesystemRegistry, session_id: []const u8) ?usize {
+        for (self.pending.items, 0..) |entry, index|
+            if (std.mem.eql(u8, entry.session_id, session_id)) return index;
+        return null;
+    }
+
+    fn committedIndex(self: *const SessionFilesystemRegistry, session_id: []const u8) ?usize {
+        for (self.committed.items, 0..) |entry, index|
+            if (std.mem.eql(u8, entry.session_id, session_id)) return index;
+        return null;
+    }
+};
+
 fn parseDefaultConnection(value: ?[]const u8) !DefaultConnection {
     const configured = value orelse return .stdio;
     if (std.ascii.eqlIgnoreCase(configured, "stdio")) return .stdio;
@@ -674,24 +818,25 @@ fn resolveConnection(
     options: ClientOptions,
     default_connection: DefaultConnection,
 ) !ResolvedConnection {
+    const effective_login = options.use_logged_in_user orelse
+        (options.github_token == null);
     if (options.connection) |connection| {
         return switch (connection) {
             .stdio => |value| .{ .stdio = .{
-                .child = value.runtime,
+                .child = resolvedChild(options, value.path, value.args, value.env, effective_login),
                 .token = null,
             } },
             .tcp => |value| .{ .tcp = .{
-                .child = value.runtime,
+                .child = resolvedChild(options, value.path, value.args, value.env, effective_login),
                 .port = value.port,
-                .token = value.connection_token,
+                .token = value.token,
             } },
             .uri => |value| blk: {
-                const parsed = try parseRuntimeUri(value.uri);
+                const parsed = try parseRuntimeUri(value.url);
                 break :blk .{ .uri = .{
                     .host = parsed.host,
                     .port = parsed.port,
-                    .token = value.connection_token,
-                    .mode = value.mode,
+                    .token = value.token,
                 } };
             },
         };
@@ -703,16 +848,40 @@ fn resolveConnection(
             .executable = options.cli_path,
             .args = options.cli_args,
             .working_directory = options.working_directory,
+            .mode = options.mode,
+            .base_directory = options.base_directory,
+            .log_level = options.log_level,
+            .environment = options.env,
+            .github_token = options.github_token,
+            .use_logged_in_user = effective_login,
+            .telemetry = options.telemetry,
+            .session_idle_timeout_seconds = options.session_idle_timeout_seconds,
+            .enable_remote_sessions = options.enable_remote_sessions,
         },
         .token = options.connection_token,
     } };
 }
 
-fn connectionMode(connection: ResolvedConnection) runtime_types.RuntimeMode {
-    return switch (connection) {
-        .stdio => |value| value.child.mode,
-        .tcp => |value| value.child.mode,
-        .uri => |value| value.mode,
+fn resolvedChild(
+    options: ClientOptions,
+    path: []const u8,
+    args: []const []const u8,
+    connection_env: ?[]const runtime_types.EnvironmentVariable,
+    effective_login: bool,
+) ResolvedChild {
+    return .{
+        .executable = path,
+        .args = args,
+        .working_directory = options.working_directory,
+        .mode = options.mode,
+        .base_directory = options.base_directory,
+        .log_level = options.log_level,
+        .environment = connection_env orelse options.env,
+        .github_token = options.github_token,
+        .use_logged_in_user = effective_login,
+        .telemetry = options.telemetry,
+        .session_idle_timeout_seconds = options.session_idle_timeout_seconds,
+        .enable_remote_sessions = options.enable_remote_sessions,
     };
 }
 
@@ -734,12 +903,18 @@ fn needsGeneratedConnectionToken(connection: ResolvedConnection) bool {
 fn validateClientOptions(options: ClientOptions, connection: ResolvedConnection) !void {
     if (options.connection != null and
         (!std.mem.eql(u8, options.cli_path, "copilot") or
-            options.working_directory != null or
             options.cli_args.len != 0 or
             options.connection_token != null))
     {
         return error.ConflictingConnectionOptions;
     }
+    if (options.connection) |explicit| switch (explicit) {
+        .stdio => |value| if (value.env != null and options.env != null)
+            return error.ConflictingEnvironmentOptions,
+        .tcp => |value| if (value.env != null and options.env != null)
+            return error.ConflictingEnvironmentOptions,
+        .uri => {},
+    };
 
     if (options.builtin_plugin_directories.len > 64)
         return error.TooManyBuiltinPluginDirectories;
@@ -778,19 +953,15 @@ fn validateClientOptions(options: ClientOptions, connection: ResolvedConnection)
 }
 
 fn validateChildRuntime(
-    child_runtime: runtime_types.ChildRuntime,
+    child_runtime: ResolvedChild,
     has_session_filesystem: bool,
 ) !void {
     if (child_runtime.executable.len == 0) return error.InvalidRuntimeExecutable;
     if (child_runtime.base_directory) |directory| {
         if (directory.len == 0) return error.InvalidBaseDirectory;
     }
-    switch (child_runtime.authentication) {
-        .token, .token_and_logged_in_user => |token| {
-            if (token.len == 0) return error.InvalidGitHubToken;
-        },
-        .default, .logged_in_user, .disabled => {},
-    }
+    if (child_runtime.github_token) |token|
+        if (token.len == 0) return error.InvalidGitHubToken;
     if (child_runtime.mode == .empty and
         child_runtime.base_directory == null and
         !has_session_filesystem)
@@ -895,7 +1066,7 @@ fn openTransport(
 fn spawnStdio(
     allocator: std.mem.Allocator,
     io: std.Io,
-    child_runtime: runtime_types.ChildRuntime,
+    child_runtime: ResolvedChild,
     connection_token: ?[]const u8,
 ) !Transport {
     var port_buffer: [5]u8 = undefined;
@@ -945,7 +1116,7 @@ fn spawnStdio(
 fn spawnTcp(
     allocator: std.mem.Allocator,
     io: std.Io,
-    child_runtime: runtime_types.ChildRuntime,
+    child_runtime: ResolvedChild,
     requested_port: u16,
     connection_token: ?[]const u8,
 ) !Transport {
@@ -1037,7 +1208,7 @@ const RuntimeTransportKind = enum { stdio, tcp };
 
 fn buildRuntimeArgv(
     allocator: std.mem.Allocator,
-    child_runtime: runtime_types.ChildRuntime,
+    child_runtime: ResolvedChild,
     transport_kind: RuntimeTransportKind,
     port: u16,
     port_buffer: *[5]u8,
@@ -1058,19 +1229,14 @@ fn buildRuntimeArgv(
             try argv.appendSlice(allocator, &.{ "--port", port_text });
         },
     }
-    switch (child_runtime.authentication) {
-        .token, .token_and_logged_in_user => {
-            try argv.appendSlice(allocator, &.{
-                "--auth-token-env",
-                "COPILOT_SDK_AUTH_TOKEN",
-            });
-        },
-        .default, .logged_in_user, .disabled => {},
+    if (child_runtime.github_token != null) {
+        try argv.appendSlice(allocator, &.{
+            "--auth-token-env",
+            "COPILOT_SDK_AUTH_TOKEN",
+        });
     }
-    switch (child_runtime.authentication) {
-        .token, .disabled => try argv.append(allocator, "--no-auto-login"),
-        .default, .logged_in_user, .token_and_logged_in_user => {},
-    }
+    if (!child_runtime.use_logged_in_user)
+        try argv.append(allocator, "--no-auto-login");
     if (child_runtime.session_idle_timeout_seconds != 0) {
         const timeout = try std.fmt.bufPrint(
             timeout_buffer,
@@ -1087,7 +1253,7 @@ fn buildRuntimeArgv(
 
 fn buildRuntimeEnvironment(
     allocator: std.mem.Allocator,
-    child_runtime: runtime_types.ChildRuntime,
+    child_runtime: ResolvedChild,
     connection_token: ?[]const u8,
     io: std.Io,
 ) !std.process.Environ.Map {
@@ -1102,12 +1268,8 @@ fn buildRuntimeEnvironment(
         }
     }
     _ = result.swapRemove("NODE_DEBUG");
-    switch (child_runtime.authentication) {
-        .token, .token_and_logged_in_user => |token| {
-            try result.put("COPILOT_SDK_AUTH_TOKEN", token);
-        },
-        .default, .logged_in_user, .disabled => {},
-    }
+    if (child_runtime.github_token) |token|
+        try result.put("COPILOT_SDK_AUTH_TOKEN", token);
     if (connection_token) |token| {
         try result.put("COPILOT_CONNECTION_TOKEN", token);
     }
@@ -1309,8 +1471,7 @@ pub const Client = struct {
     on_get_trace_context: ?runtime_types.TraceContextCallback = null,
     session_filesystem: ?runtime_types.SessionFilesystemConfig = null,
     mode: runtime_types.RuntimeMode = .copilot_cli,
-    session_filesystem_providers: std.ArrayList(RegisteredSessionFilesystem) = .empty,
-    pending_session_filesystem_provider: ?RegisteredSessionFilesystem = null,
+    session_filesystems: SessionFilesystemRegistry = .{},
     next_request_id: u64 = 1,
     session_ids: std.ArrayList([]u8) = .empty,
     events: std.ArrayList(QueuedEvent) = .empty,
@@ -1323,6 +1484,7 @@ pub const Client = struct {
     pending_provider_tokens: ?RegisteredProviderTokens = null,
     rpc_handlers: std.ArrayList(RegisteredRpcHandler) = .empty,
     dispatching_rpc_handler: bool = false,
+    rpc_ready: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -1358,10 +1520,11 @@ pub const Client = struct {
             .on_list_models = options.on_list_models,
             .on_get_trace_context = options.on_get_trace_context,
             .session_filesystem = options.session_filesystem,
-            .mode = connectionMode(connection),
+            .mode = options.mode,
         };
         errdefer client.deinit();
         try client.connect(token, options.client_info);
+        client.rpc_ready = true;
         try client.setBuiltinPluginDirectories(options.builtin_plugin_directories);
         try client.setSessionFilesystemProvider();
         return client;
@@ -1385,18 +1548,16 @@ pub const Client = struct {
         };
         errdefer client.deinit();
         try client.connect(null, null);
+        client.rpc_ready = true;
         return client;
     }
 
     pub fn deinit(self: *Client) void {
         self.releaseInterestsAndDetachSessionsBounded();
-        if (self.pending_session_filesystem_provider) |*registered| {
-            registered.deinit(self.allocator);
-        }
-        for (self.session_filesystem_providers.items) |*registered| {
-            registered.deinit(self.allocator);
-        }
-        self.session_filesystem_providers.deinit(self.allocator);
+        self.shutdownOwnedRuntimeBounded();
+        self.transport.close(self.allocator, self.io);
+        self.transport.terminateAndReap(self.io);
+        self.session_filesystems.deinit(self.allocator);
         for (self.events.items) |*event| event.deinit(self.allocator);
         self.events.deinit(self.allocator);
         for (self.tools.items) |tool| tool.deinit(self.allocator);
@@ -1419,8 +1580,34 @@ pub const Client = struct {
         self.rpc_handlers.deinit(self.allocator);
         for (self.session_ids.items) |id| self.allocator.free(id);
         self.session_ids.deinit(self.allocator);
-        self.transport.deinit(self.allocator, self.io);
         self.* = undefined;
+    }
+
+    fn shutdownOwnedRuntimeBounded(self: *Client) void {
+        if (!self.rpc_ready or !self.transport.ownsRuntime()) return;
+        const Result = union(enum) {
+            shutdown: anyerror!void,
+            timeout: anyerror!void,
+        };
+        var result_buffer: [2]Result = undefined;
+        var select = std.Io.Select(Result).init(self.io, &result_buffer);
+        defer select.cancelDiscard();
+        select.async(.shutdown, Client.requestRuntimeShutdown, .{self});
+        select.async(.timeout, std.Io.sleep, .{
+            self.io,
+            runtime_shutdown_timeout,
+            std.Io.Clock.awake,
+        });
+        switch (select.await() catch return) {
+            .shutdown => |result| result catch {},
+            .timeout => |result| result catch {},
+        }
+    }
+
+    fn requestRuntimeShutdown(self: *Client) !void {
+        const parsed = try self.call(std.json.Value, "runtime.shutdown", .{});
+        defer parsed.deinit();
+        if (parsed.value != .null) return error.InvalidRuntimeShutdownResponse;
     }
 
     fn releaseInterestsAndDetachSessionsBounded(self: *Client) void {
@@ -1500,7 +1687,7 @@ pub const Client = struct {
             .sessionStatePath = config.session_state_path,
             .conventions = @tagName(config.conventions),
             .capabilities = .{
-                .sqlite = config.sqlite,
+                .sqlite = config.capabilities.sqlite,
             },
         });
         defer parsed.deinit();
@@ -1563,6 +1750,7 @@ pub const Client = struct {
         try ext.validate(config.extensions.common);
         try validateCustomAgentMcpServers(config.custom_agents);
         try provider.validateCapabilities(config.model_capabilities);
+        try self.validateSessionFilesystemFactory(config.create_session_filesystem_provider);
 
         var prepared_providers = try provider.prepareSessionProviders(
             self.allocator,
@@ -1602,8 +1790,8 @@ pub const Client = struct {
         errdefer self.rollbackProviderTokens();
         try self.beginExtensionRuntime(owned_session_id, config, &.{});
         errdefer self.rollbackExtensionRuntime();
-        try self.beginSessionFilesystem(owned_session_id);
-        errdefer self.rollbackSessionFilesystem();
+        try self.beginSessionFilesystem(owned_session_id, config.create_session_filesystem_provider);
+        errdefer self.session_filesystems.rollback(self.allocator, owned_session_id);
 
         var request = try buildPreparedCreateSessionRequest(
             owned_session_id,
@@ -1636,7 +1824,7 @@ pub const Client = struct {
 
         try self.updateSessionOptionsForMode(returned_id, config);
         try self.commitExtensionRuntime(returned_id, parsed.value, &.{});
-        self.commitSessionFilesystem(returned_id);
+        self.session_filesystems.commitReplacement(self.allocator, returned_id);
         self.commitProviderTokens();
         return .{ .client = self, .id = owned_session_id };
     }
@@ -1669,6 +1857,7 @@ pub const Client = struct {
         try ext.validate(config.extensions.common);
         try validateCustomAgentMcpServers(config.custom_agents);
         try provider.validateCapabilities(config.model_capabilities);
+        try self.validateSessionFilesystemFactory(config.create_session_filesystem_provider);
 
         var prepared_providers = try provider.prepareSessionProviders(
             self.allocator,
@@ -1710,8 +1899,8 @@ pub const Client = struct {
             config.extensions.open_canvases orelse &.{},
         );
         errdefer self.rollbackExtensionRuntime();
-        try self.beginSessionFilesystem(runtime_session_id);
-        errdefer self.rollbackSessionFilesystem();
+        try self.beginSessionFilesystem(runtime_session_id, config.create_session_filesystem_provider);
+        errdefer self.session_filesystems.rollback(self.allocator, runtime_session_id);
 
         var request = try buildPreparedResumeSessionRequest(
             runtime_session_id,
@@ -1745,7 +1934,7 @@ pub const Client = struct {
             parsed.value,
             requested_environment_variables,
         );
-        self.commitSessionFilesystem(runtime_session_id);
+        self.session_filesystems.commitReplacement(self.allocator, runtime_session_id);
         self.commitProviderTokens();
         return .{ .client = self, .id = runtime_session_id };
     }
@@ -1804,50 +1993,27 @@ pub const Client = struct {
         self.pending_extension_runtime = null;
     }
 
-    fn beginSessionFilesystem(self: *Client, session_id: []const u8) !void {
+    fn beginSessionFilesystem(
+        self: *Client,
+        session_id: []const u8,
+        supplied_factory: ?runtime_types.SessionFilesystemProviderFactory,
+    ) !void {
         const config = self.session_filesystem orelse return;
-        if (self.pending_session_filesystem_provider != null)
-            return error.SessionLifecycleAlreadyInProgress;
-        try self.session_filesystem_providers.ensureUnusedCapacity(self.allocator, 1);
-        const owned_session_id = try self.allocator.dupe(u8, session_id);
-        errdefer self.allocator.free(owned_session_id);
-        const filesystem_provider = try config.create_provider(
+        const factory = supplied_factory orelse unreachable;
+        try self.session_filesystems.begin(
             self.allocator,
             session_id,
-            config.context,
+            factory,
+            config.capabilities.sqlite,
         );
-        if (config.sqlite and filesystem_provider.sqlite == null) {
-            if (filesystem_provider.deinit) |deinit_provider| {
-                deinit_provider(filesystem_provider.context);
-            }
-            return error.MissingSessionFilesystemSqliteProvider;
-        }
-        self.pending_session_filesystem_provider = .{
-            .session_id = owned_session_id,
-            .provider = filesystem_provider,
-        };
     }
 
-    fn rollbackSessionFilesystem(self: *Client) void {
-        if (self.pending_session_filesystem_provider) |*registered| {
-            registered.deinit(self.allocator);
-        }
-        self.pending_session_filesystem_provider = null;
-    }
-
-    fn commitSessionFilesystem(self: *Client, session_id: []const u8) void {
-        const pending = self.pending_session_filesystem_provider orelse return;
-        std.debug.assert(std.mem.eql(u8, pending.session_id, session_id));
-        for (self.session_filesystem_providers.items, 0..) |*existing, index| {
-            if (std.mem.eql(u8, existing.session_id, session_id)) {
-                existing.deinit(self.allocator);
-                self.session_filesystem_providers.items[index] = pending;
-                self.pending_session_filesystem_provider = null;
-                return;
-            }
-        }
-        self.session_filesystem_providers.appendAssumeCapacity(pending);
-        self.pending_session_filesystem_provider = null;
+    fn validateSessionFilesystemFactory(
+        self: *const Client,
+        supplied_factory: ?runtime_types.SessionFilesystemProviderFactory,
+    ) !void {
+        if (self.session_filesystem != null and supplied_factory == null)
+            return error.MissingSessionFilesystemProviderFactory;
     }
 
     fn commitExtensionRuntime(
@@ -2279,15 +2445,7 @@ pub const Client = struct {
         self: *Client,
         session_id: []const u8,
     ) ?runtime_types.SessionFilesystemProvider {
-        if (self.pending_session_filesystem_provider) |registered| {
-            if (std.mem.eql(u8, registered.session_id, session_id))
-                return registered.provider;
-        }
-        for (self.session_filesystem_providers.items) |registered| {
-            if (std.mem.eql(u8, registered.session_id, session_id))
-                return registered.provider;
-        }
-        return null;
+        return self.session_filesystems.resolve(session_id);
     }
 
     fn dispatchSessionFilesystemRequest(
@@ -2457,7 +2615,10 @@ pub const Client = struct {
                 });
                 return;
             };
-            defer result.deinit();
+            defer {
+                wipeStrings(result.value.entries);
+                result.deinit();
+            }
             if (!validStrings(result.value.entries)) {
                 try self.writeServerRequestError(writer, id, -32603, "invalid session filesystem callback result");
                 return;
@@ -2483,7 +2644,10 @@ pub const Client = struct {
                 });
                 return;
             };
-            defer result.deinit();
+            defer {
+                wipeFilesystemEntries(result.value.entries);
+                result.deinit();
+            }
             if (!validFilesystemEntries(result.value.entries)) {
                 try self.writeServerRequestError(writer, id, -32603, "invalid session filesystem callback result");
                 return;
@@ -2577,7 +2741,10 @@ pub const Client = struct {
                 try self.writeServerRequestError(writer, id, -32000, @errorName(err));
                 return;
             };
-            defer result.deinit();
+            defer {
+                wipeSqliteQueryResult(result.value);
+                result.deinit();
+            }
             if (!validSqliteQueryResult(result.value)) {
                 try self.writeServerRequestError(writer, id, -32603, "invalid session filesystem callback result");
                 return;
@@ -2621,7 +2788,10 @@ pub const Client = struct {
                 });
                 return;
             };
-            defer result.deinit();
+            defer {
+                wipeSqliteTransactionResult(result.value);
+                result.deinit();
+            }
             if (!validSqliteTransactionResult(result.value, statements.items.len)) {
                 try self.writeServerRequestError(writer, id, -32603, "invalid session filesystem callback result");
                 return;
@@ -3407,13 +3577,7 @@ pub const Client = struct {
             }
         }
 
-        for (self.session_filesystem_providers.items, 0..) |*registered, filesystem_index| {
-            if (std.mem.eql(u8, registered.session_id, session_id)) {
-                var removed = self.session_filesystem_providers.orderedRemove(filesystem_index);
-                removed.deinit(self.allocator);
-                break;
-            }
-        }
+        self.session_filesystems.remove(self.allocator, session_id);
 
         self.removeSessionId(session_id);
     }
@@ -4650,6 +4814,102 @@ fn validFilesystemEntries(
     return true;
 }
 
+fn wipeStrings(values: []const []const u8) void {
+    for (values) |value| wipeSecret(value);
+}
+
+fn wipeFilesystemEntries(
+    entries: []const runtime_types.SessionFilesystemEntry,
+) void {
+    for (entries) |entry| wipeSecret(entry.name);
+}
+
+fn wipeOwnedJsonStrings(value: std.json.Value) void {
+    switch (value) {
+        .string, .number_string => |string| wipeSecret(string),
+        .array => |array| for (array.items) |item| wipeOwnedJsonStrings(item),
+        .object => |object| {
+            var iterator = object.iterator();
+            while (iterator.next()) |entry| {
+                wipeSecret(entry.key_ptr.*);
+                wipeOwnedJsonStrings(entry.value_ptr.*);
+            }
+        },
+        else => {},
+    }
+}
+
+fn wipeSqliteQueryResult(
+    result: runtime_types.SessionFilesystemSqliteQueryResult,
+) void {
+    wipeStrings(result.columns);
+    for (result.rows) |row| wipeOwnedJsonStrings(row);
+}
+
+fn wipeSqliteTransactionResult(
+    result: runtime_types.SessionFilesystemSqliteTransactionResult,
+) void {
+    for (result.results) |item| wipeSqliteQueryResult(item);
+    if (result.@"error") |failure| wipeSecret(failure.message);
+}
+
+test "session filesystem structured results wipe owned strings" {
+    const allocator = std.testing.allocator;
+
+    const directory = try std.json.parseFromSlice(
+        runtime_types.SessionFilesystemReadDirectoryResult,
+        allocator,
+        "{\"entries\":[\"directory-secret\"]}",
+        .{ .allocate = .alloc_always },
+    );
+    wipeStrings(directory.value.entries);
+    try std.testing.expect(std.mem.allEqual(u8, directory.value.entries[0], 0));
+    directory.deinit();
+
+    const typed_directory = try std.json.parseFromSlice(
+        runtime_types.SessionFilesystemReadDirectoryWithTypesResult,
+        allocator,
+        "{\"entries\":[{\"name\":\"typed-secret\",\"entry_type\":\"file\"}]}",
+        .{ .allocate = .alloc_always },
+    );
+    wipeFilesystemEntries(typed_directory.value.entries);
+    try std.testing.expect(std.mem.allEqual(
+        u8,
+        typed_directory.value.entries[0].name,
+        0,
+    ));
+    typed_directory.deinit();
+
+    const query = try std.json.parseFromSlice(
+        runtime_types.SessionFilesystemSqliteQueryResult,
+        allocator,
+        "{\"columns\":[\"column-secret\"],\"rows\":[{\"row-secret\":\"value-secret\"}]}",
+        .{ .allocate = .alloc_always },
+    );
+    wipeSqliteQueryResult(query.value);
+    try std.testing.expect(std.mem.allEqual(u8, query.value.columns[0], 0));
+    const row = query.value.rows[0].object;
+    var row_iterator = row.iterator();
+    const row_entry = row_iterator.next().?;
+    try std.testing.expect(std.mem.allEqual(u8, row_entry.key_ptr.*, 0));
+    try std.testing.expect(std.mem.allEqual(u8, row_entry.value_ptr.string, 0));
+    query.deinit();
+
+    const transaction = try std.json.parseFromSlice(
+        runtime_types.SessionFilesystemSqliteTransactionResult,
+        allocator,
+        "{\"results\":[],\"error\":{\"error_class\":\"fatal\",\"message\":\"transaction-secret\"}}",
+        .{ .allocate = .alloc_always },
+    );
+    wipeSqliteTransactionResult(transaction.value);
+    try std.testing.expect(std.mem.allEqual(
+        u8,
+        transaction.value.@"error".?.message,
+        0,
+    ));
+    transaction.deinit();
+}
+
 fn validDateTime(value: []const u8) bool {
     if (!std.unicode.utf8ValidateSlice(value) or value.len < 20) return false;
     if (value[4] != '-' or value[7] != '-' or
@@ -5313,6 +5573,7 @@ const CreateSessionRequest = struct {
     pluginDirectories: ?[]const []const u8,
     disabledSkills: ?[]const []const u8,
     disabledMcpServers: ?[]const []const u8,
+    remoteSession: ?[]const u8,
     traceparent: ?[]const u8 = null,
     tracestate: ?[]const u8 = null,
 };
@@ -5373,6 +5634,7 @@ const ResumeSessionRequest = struct {
     disabledMcpServers: ?[]const []const u8,
     openCanvases: ?[]const WireOpenCanvas,
     requestedEnvironmentVariables: ?[]const []const u8,
+    remoteSession: ?[]const u8,
     traceparent: ?[]const u8 = null,
     tracestate: ?[]const u8 = null,
 };
@@ -5455,6 +5717,8 @@ fn resumeConfigFromCreate(config: session_types.CreateSessionConfig) session_typ
         .permission_context = config.permission_context,
         .on_user_input_request = config.on_user_input_request,
         .user_input_context = config.user_input_context,
+        .remote_session = config.remote_session,
+        .create_session_filesystem_provider = config.create_session_filesystem_provider,
         .suppress_resume_event = true,
         .extensions = .{
             .common = config.extensions.common,
@@ -5496,6 +5760,8 @@ fn resumeConfigFromJoin(config: session_types.JoinSessionConfig) session_types.R
         .permission_context = config.permission_context,
         .on_user_input_request = config.on_user_input_request,
         .user_input_context = config.user_input_context,
+        .remote_session = config.remote_session,
+        .create_session_filesystem_provider = config.create_session_filesystem_provider,
         .suppress_resume_event = config.suppress_resume_event,
         .continue_pending_work = config.continue_pending_work,
         .extensions = .{
@@ -5696,6 +5962,7 @@ fn buildPreparedCreateSessionRequest(
         .pluginDirectories = optionalSlice(features.plugin_directories),
         .disabledSkills = optionalSlice(features.skills.disabled),
         .disabledMcpServers = optionalSlice(features.mcp.disabled_servers),
+        .remoteSession = if (config.remote_session) |value| value.wireValue() else null,
     };
 }
 
@@ -5823,11 +6090,61 @@ fn buildPreparedResumeSessionRequest(
         else
             null,
         .requestedEnvironmentVariables = optionalSlice(requested_environment_variables),
+        .remoteSession = if (config.remote_session) |value| value.wireValue() else null,
     };
 }
 
 fn optionalSlice(value: anytype) ?@TypeOf(value) {
     return if (value.len == 0) null else value;
+}
+
+test "remote session mode lowers for create and resume and omits null" {
+    const allocator = std.testing.allocator;
+    var values = ExtensionWireValues.init(allocator);
+    defer values.deinit();
+
+    const create = try buildCreateSessionRequest(.{
+        .remote_session = .@"export",
+    }, &.{}, &values);
+    const create_json = try std.json.Stringify.valueAlloc(
+        allocator,
+        create,
+        .{ .emit_null_optional_fields = false },
+    );
+    defer allocator.free(create_json);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        create_json,
+        "\"remoteSession\":\"export\"",
+    ) != null);
+
+    const resume_request = try buildResumeSessionRequest(
+        "session",
+        .{ .remote_session = .on },
+        &.{},
+        &values,
+        &.{},
+    );
+    const resume_json = try std.json.Stringify.valueAlloc(
+        allocator,
+        resume_request,
+        .{ .emit_null_optional_fields = false },
+    );
+    defer allocator.free(resume_json);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        resume_json,
+        "\"remoteSession\":\"on\"",
+    ) != null);
+
+    const omitted = try buildCreateSessionRequest(.{}, &.{}, &values);
+    const omitted_json = try std.json.Stringify.valueAlloc(
+        allocator,
+        omitted,
+        .{ .emit_null_optional_fields = false },
+    );
+    defer allocator.free(omitted_json);
+    try std.testing.expect(std.mem.indexOf(u8, omitted_json, "remoteSession") == null);
 }
 
 const RpcSuccess = struct {
@@ -5922,28 +6239,29 @@ test "stdio runtime lowers stable argv and environment options" {
     defer allocator.free(fake_runtime);
 
     var client = try Client.init(allocator, std.testing.io, .{
-        .connection = .{ .stdio = .{ .runtime = .{
-            .executable = "node",
+        .connection = .{ .stdio = .{
+            .path = "node",
             .args = &.{ fake_runtime, "--user-flag" },
-            .mode = .empty,
-            .base_directory = "/tmp/copilot-sdk-zig-home",
-            .log_level = .debug,
-            .environment = &.{.{
+            .env = &.{.{
                 .name = "TEST_RUNTIME_VALUE",
                 .value = "kept",
             }},
-            .authentication = .{ .token_and_logged_in_user = "github-secret" },
-            .telemetry = .{
-                .otlp_endpoint = "http://127.0.0.1:4318",
-                .otlp_protocol = .http_json,
-                .file_path = "/tmp/copilot-traces.jsonl",
-                .exporter_type = "file",
-                .source_name = "zig-tests",
-                .capture_content = false,
-            },
-            .session_idle_timeout_seconds = 90,
-            .enable_remote_sessions = true,
-        } } },
+        } },
+        .mode = .empty,
+        .base_directory = "/tmp/copilot-sdk-zig-home",
+        .log_level = .debug,
+        .github_token = "github-secret",
+        .use_logged_in_user = true,
+        .telemetry = .{
+            .otlp_endpoint = "http://127.0.0.1:4318",
+            .otlp_protocol = .http_json,
+            .file_path = "/tmp/copilot-traces.jsonl",
+            .exporter_type = "file",
+            .source_name = "zig-tests",
+            .capture_content = false,
+        },
+        .session_idle_timeout_seconds = 90,
+        .enable_remote_sessions = true,
     });
     defer client.deinit();
 
@@ -6020,30 +6338,32 @@ test "stdio runtime lowers stable argv and environment options" {
     _ = &Session.respondToToolError;
 }
 
-test "runtime authentication preserves every stable upstream state" {
+test "runtime authentication defaults match upstream" {
     const allocator = std.testing.allocator;
     const fake_runtime = try fakeRuntimePath(allocator);
     defer allocator.free(fake_runtime);
 
     const cases = [_]struct {
-        authentication: runtime_types.RuntimeAuthentication,
+        github_token: ?[]const u8,
+        use_logged_in_user: ?bool,
         expects_no_auto_login: bool,
         expects_auth_token: bool,
     }{
-        .{ .authentication = .default, .expects_no_auto_login = false, .expects_auth_token = false },
-        .{ .authentication = .logged_in_user, .expects_no_auto_login = false, .expects_auth_token = false },
-        .{ .authentication = .{ .token = "token-only" }, .expects_no_auto_login = true, .expects_auth_token = true },
-        .{ .authentication = .{ .token_and_logged_in_user = "token-and-user" }, .expects_no_auto_login = false, .expects_auth_token = true },
-        .{ .authentication = .disabled, .expects_no_auto_login = true, .expects_auth_token = false },
+        .{ .github_token = null, .use_logged_in_user = null, .expects_no_auto_login = false, .expects_auth_token = false },
+        .{ .github_token = null, .use_logged_in_user = true, .expects_no_auto_login = false, .expects_auth_token = false },
+        .{ .github_token = "token-only", .use_logged_in_user = null, .expects_no_auto_login = true, .expects_auth_token = true },
+        .{ .github_token = "token-and-user", .use_logged_in_user = true, .expects_no_auto_login = false, .expects_auth_token = true },
+        .{ .github_token = null, .use_logged_in_user = false, .expects_no_auto_login = true, .expects_auth_token = false },
     };
 
     for (cases) |case| {
         var client = try Client.init(allocator, std.testing.io, .{
-            .connection = .{ .stdio = .{ .runtime = .{
-                .executable = "node",
+            .connection = .{ .stdio = .{
+                .path = "node",
                 .args = &.{fake_runtime},
-                .authentication = case.authentication,
-            } } },
+            } },
+            .github_token = case.github_token,
+            .use_logged_in_user = case.use_logged_in_user,
         });
         defer client.deinit();
 
@@ -6063,13 +6383,8 @@ test "runtime authentication preserves every stable upstream state" {
 
         const environment = inspected.value.object.get("env").?.object;
         if (case.expects_auth_token) {
-            const expected = switch (case.authentication) {
-                .token => |token| token,
-                .token_and_logged_in_user => |token| token,
-                else => unreachable,
-            };
             try std.testing.expectEqualStrings(
-                expected,
+                case.github_token.?,
                 environment.get("COPILOT_SDK_AUTH_TOKEN").?.string,
             );
         } else {
@@ -6085,56 +6400,103 @@ test "runtime configuration rejects invalid state before spawning" {
         error.ConflictingConnectionOptions,
         Client.init(std.testing.allocator, std.testing.io, .{
             .cli_path = invalid_executable,
-            .connection = .{ .stdio = .{ .runtime = .{
-                .executable = invalid_executable,
-            } } },
+            .connection = .{ .stdio = .{ .path = invalid_executable } },
         }),
     );
     try std.testing.expectError(
         error.ManagedEnvironmentVariable,
         Client.init(std.testing.allocator, std.testing.io, .{
-            .connection = .{ .stdio = .{ .runtime = .{
-                .executable = invalid_executable,
-                .environment = &.{.{
+            .connection = .{ .stdio = .{
+                .path = invalid_executable,
+                .env = &.{.{
                     .name = "COPILOT_SDK_AUTH_TOKEN",
                     .value = "raw-secret",
                 }},
-            } } },
+            } },
         }),
     );
     try std.testing.expectError(
         error.EmptyModeRequiresPersistence,
         Client.init(std.testing.allocator, std.testing.io, .{
-            .connection = .{ .stdio = .{ .runtime = .{
-                .executable = invalid_executable,
-                .mode = .empty,
-            } } },
+            .connection = .{ .stdio = .{ .path = invalid_executable } },
+            .mode = .empty,
         }),
     );
     try std.testing.expectError(
         error.InvalidBaseDirectory,
         Client.init(std.testing.allocator, std.testing.io, .{
-            .connection = .{ .stdio = .{ .runtime = .{
-                .executable = invalid_executable,
-                .base_directory = "",
-            } } },
+            .connection = .{ .stdio = .{ .path = invalid_executable } },
+            .base_directory = "",
         }),
     );
     try std.testing.expectError(
         error.InvalidGitHubToken,
         Client.init(std.testing.allocator, std.testing.io, .{
-            .connection = .{ .stdio = .{ .runtime = .{
-                .executable = invalid_executable,
-                .authentication = .{ .token = "" },
-            } } },
+            .connection = .{ .stdio = .{ .path = invalid_executable } },
+            .github_token = "",
         }),
     );
     try std.testing.expectError(
         error.InvalidRuntimeUri,
         Client.init(std.testing.allocator, std.testing.io, .{
-            .connection = .{ .uri = .{ .uri = "not-a-host-and-port" } },
+            .connection = .{ .uri = .{ .url = "not-a-host-and-port" } },
         }),
     );
+}
+
+test "connection types contain transport data and client policy resolves conflicts" {
+    try std.testing.expect(@hasField(runtime_types.StdioConnection, "path"));
+    try std.testing.expect(@hasField(runtime_types.StdioConnection, "args"));
+    try std.testing.expect(@hasField(runtime_types.StdioConnection, "env"));
+    try std.testing.expect(!@hasField(runtime_types.StdioConnection, "mode"));
+    try std.testing.expect(@hasField(runtime_types.TcpConnection, "token"));
+    try std.testing.expect(!@hasField(runtime_types.TcpConnection, "runtime"));
+    try std.testing.expect(@hasField(runtime_types.UriConnection, "url"));
+    try std.testing.expect(!@hasField(runtime_types.UriConnection, "mode"));
+
+    const explicit_working_directory = ClientOptions{
+        .working_directory = "/workspace",
+        .connection = .{ .tcp = .{} },
+    };
+    const resolved = try resolveConnection(explicit_working_directory, .stdio);
+    try validateClientOptions(explicit_working_directory, resolved);
+    try std.testing.expectEqualStrings(
+        "/workspace",
+        resolved.tcp.child.working_directory.?,
+    );
+
+    const conflicting_environment = ClientOptions{
+        .env = &.{.{ .name = "CLIENT_ENV", .value = "client" }},
+        .connection = .{ .stdio = .{
+            .env = &.{.{ .name = "CHILD_ENV", .value = "child" }},
+        } },
+    };
+    const conflict = try resolveConnection(conflicting_environment, .stdio);
+    try std.testing.expectError(
+        error.ConflictingEnvironmentOptions,
+        validateClientOptions(conflicting_environment, conflict),
+    );
+
+    const external_auth = ClientOptions{
+        .github_token = "token",
+        .connection = .{ .uri = .{ .url = "localhost:4321" } },
+    };
+    const external_auth_connection = try resolveConnection(external_auth, .stdio);
+    try validateClientOptions(external_auth, external_auth_connection);
+    const external_login = ClientOptions{
+        .use_logged_in_user = false,
+        .connection = .{ .uri = .{ .url = "localhost:4321" } },
+    };
+    const external_login_connection = try resolveConnection(external_login, .stdio);
+    try validateClientOptions(external_login, external_login_connection);
+
+    const ignored_uri_policy = ClientOptions{
+        .base_directory = "",
+        .env = &.{.{ .name = "COPILOT_HOME", .value = "ignored" }},
+        .connection = .{ .uri = .{ .url = "localhost:4321" } },
+    };
+    const ignored_uri_connection = try resolveConnection(ignored_uri_policy, .stdio);
+    try validateClientOptions(ignored_uri_policy, ignored_uri_connection);
 }
 
 test "runtime environment distinguishes inheritance from explicit empty" {
@@ -6183,7 +6545,7 @@ test "default connection environment selection matches upstream" {
         resolveConnection(.{}, .inprocess),
     );
     const explicit = try resolveConnection(.{
-        .connection = .{ .uri = .{ .uri = "localhost:4321" } },
+        .connection = .{ .uri = .{ .url = "localhost:4321" } },
     }, .inprocess);
     try std.testing.expectEqual(@as(u16, 4321), explicit.uri.port);
 }
@@ -6229,10 +6591,10 @@ test "failed child handshake kills and reaps the runtime" {
     try std.testing.expectError(
         error.JsonRpcError,
         Client.init(allocator, std.testing.io, .{
-            .connection = .{ .stdio = .{ .runtime = .{
-                .executable = "node",
+            .connection = .{ .stdio = .{
+                .path = "node",
                 .args = &.{ fake_runtime, "--pid-path", pid_path, "--fail-connect" },
-            } } },
+            } },
         }),
     );
 
@@ -6247,7 +6609,7 @@ test "failed child handshake kills and reaps the runtime" {
     try std.testing.expectError(error.ProcessNotFound, std.posix.kill(pid, .CONT));
 }
 
-test "client deinit does not wait for an unresponsive owned runtime" {
+test "owned runtime shutdown times out then kills and reaps the child" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
@@ -6263,15 +6625,16 @@ test "client deinit does not wait for an unresponsive owned runtime" {
     defer allocator.free(pid_path);
 
     var client = try Client.init(allocator, std.testing.io, .{
-        .connection = .{ .stdio = .{ .runtime = .{
-            .executable = "node",
-            .args = &.{ fake_runtime, "--pid-path", pid_path, "--hang-after-connect" },
-        } } },
+        .connection = .{ .stdio = .{
+            .path = "node",
+            .args = &.{ fake_runtime, "--pid-path", pid_path, "--hang-shutdown" },
+        } },
     });
     const start = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
     client.deinit();
     const elapsed = start.durationTo(std.Io.Clock.Timestamp.now(std.testing.io, .awake));
-    try std.testing.expect(elapsed.raw.toMilliseconds() < 1000);
+    try std.testing.expect(elapsed.raw.toMilliseconds() >= 9_500);
+    try std.testing.expect(elapsed.raw.toMilliseconds() < 12_000);
 
     const pid_text = try tmp.dir.readFileAlloc(
         std.testing.io,
@@ -6282,6 +6645,162 @@ test "client deinit does not wait for an unresponsive owned runtime" {
     defer allocator.free(pid_text);
     const pid = try std.fmt.parseInt(std.posix.pid_t, pid_text, 10);
     try std.testing.expectError(error.ProcessNotFound, std.posix.kill(pid, .CONT));
+}
+
+test "owned runtime shutdown succeeds before guaranteed kill and reap" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    const fake_runtime = try fakeRuntimePath(allocator);
+    defer allocator.free(fake_runtime);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const pid_path = try std.fmt.allocPrint(
+        allocator,
+        ".zig-cache/tmp/{s}/runtime.pid",
+        .{tmp.sub_path},
+    );
+    defer allocator.free(pid_path);
+    const shutdown_path = try std.fmt.allocPrint(
+        allocator,
+        ".zig-cache/tmp/{s}/shutdown.txt",
+        .{tmp.sub_path},
+    );
+    defer allocator.free(shutdown_path);
+
+    var client = try Client.init(allocator, std.testing.io, .{
+        .connection = .{ .stdio = .{
+            .path = "node",
+            .args = &.{
+                fake_runtime,
+                "--pid-path",
+                pid_path,
+                "--shutdown-path",
+                shutdown_path,
+            },
+        } },
+    });
+    client.deinit();
+
+    const shutdown = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "shutdown.txt",
+        allocator,
+        .limited(64),
+    );
+    defer allocator.free(shutdown);
+    try std.testing.expectEqualStrings("requested", shutdown);
+    const pid_text = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "runtime.pid",
+        allocator,
+        .limited(64),
+    );
+    defer allocator.free(pid_text);
+    const pid = try std.fmt.parseInt(std.posix.pid_t, pid_text, 10);
+    try std.testing.expectError(error.ProcessNotFound, std.posix.kill(pid, .CONT));
+}
+
+test "owned runtime shutdown RPC failure still kills and reaps the child" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    const fake_runtime = try fakeRuntimePath(allocator);
+    defer allocator.free(fake_runtime);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const pid_path = try std.fmt.allocPrint(
+        allocator,
+        ".zig-cache/tmp/{s}/runtime.pid",
+        .{tmp.sub_path},
+    );
+    defer allocator.free(pid_path);
+    const shutdown_path = try std.fmt.allocPrint(
+        allocator,
+        ".zig-cache/tmp/{s}/shutdown.txt",
+        .{tmp.sub_path},
+    );
+    defer allocator.free(shutdown_path);
+
+    var client = try Client.init(allocator, std.testing.io, .{
+        .connection = .{ .stdio = .{
+            .path = "node",
+            .args = &.{
+                fake_runtime,
+                "--pid-path",
+                pid_path,
+                "--shutdown-path",
+                shutdown_path,
+                "--fail-shutdown",
+            },
+        } },
+    });
+    client.deinit();
+
+    const shutdown = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "shutdown.txt",
+        allocator,
+        .limited(64),
+    );
+    defer allocator.free(shutdown);
+    try std.testing.expectEqualStrings("requested", shutdown);
+    const pid_text = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "runtime.pid",
+        allocator,
+        .limited(64),
+    );
+    defer allocator.free(pid_text);
+    const pid = try std.fmt.parseInt(std.posix.pid_t, pid_text, 10);
+    try std.testing.expectError(error.ProcessNotFound, std.posix.kill(pid, .CONT));
+}
+
+test "session filesystem providers remain callable through owned runtime shutdown" {
+    const allocator = std.testing.allocator;
+    const fake_runtime = try fakeRuntimePath(allocator);
+    defer allocator.free(fake_runtime);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const shutdown_fs_path = try std.fmt.allocPrint(
+        allocator,
+        ".zig-cache/tmp/{s}/shutdown-fs.txt",
+        .{tmp.sub_path},
+    );
+    defer allocator.free(shutdown_fs_path);
+    var deinit_count: usize = 0;
+    var client = try Client.init(allocator, std.testing.io, .{
+        .connection = .{ .stdio = .{
+            .path = "node",
+            .args = &.{ fake_runtime, "--shutdown-fs-path", shutdown_fs_path },
+        } },
+        .session_filesystem = .{
+            .initial_working_directory = "/workspace",
+            .session_state_path = "/state",
+            .conventions = .posix,
+        },
+    });
+    _ = try client.createSession(.{
+        .session_id = "shutdown-provider",
+        .create_session_filesystem_provider = .{
+            .handler = createTestFilesystem,
+            .context = &deinit_count,
+        },
+    });
+    client.deinit();
+
+    const observed = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "shutdown-fs.txt",
+        allocator,
+        .limited(128),
+    );
+    defer allocator.free(observed);
+    try std.testing.expectEqualStrings(
+        "shutdown-provider:/during-shutdown",
+        observed,
+    );
+    try std.testing.expectEqual(@as(usize, 1), deinit_count);
 }
 
 fn unusedTcpPort(io: std.Io) !u16 {
@@ -6303,10 +6822,8 @@ test "TCP startup consumes delayed announcements and validates fixed ports" {
     var client = try Client.init(allocator, std.testing.io, .{
         .connection = .{ .tcp = .{
             .port = port,
-            .runtime = .{
-                .executable = "node",
-                .args = &.{ fake_runtime, "--announce-delay-ms", "100" },
-            },
+            .path = "node",
+            .args = &.{ fake_runtime, "--announce-delay-ms", "100" },
         } },
     });
     defer client.deinit();
@@ -6320,6 +6837,37 @@ test "TCP startup consumes delayed announcements and validates fixed ports" {
     try std.testing.expectEqualStrings(port_text, args[5].string);
 }
 
+test "owned TCP runtime receives shutdown before teardown" {
+    const allocator = std.testing.allocator;
+    const fake_runtime = try fakeRuntimePath(allocator);
+    defer allocator.free(fake_runtime);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const shutdown_path = try std.fmt.allocPrint(
+        allocator,
+        ".zig-cache/tmp/{s}/shutdown.txt",
+        .{tmp.sub_path},
+    );
+    defer allocator.free(shutdown_path);
+
+    var client = try Client.init(allocator, std.testing.io, .{
+        .connection = .{ .tcp = .{
+            .path = "node",
+            .args = &.{ fake_runtime, "--shutdown-path", shutdown_path },
+        } },
+    });
+    client.deinit();
+
+    const shutdown = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "shutdown.txt",
+        allocator,
+        .limited(64),
+    );
+    defer allocator.free(shutdown);
+    try std.testing.expectEqualStrings("requested", shutdown);
+}
+
 test "TCP startup rejects a mismatched fixed-port announcement" {
     const allocator = std.testing.allocator;
     const fake_runtime = try fakeRuntimePath(allocator);
@@ -6331,10 +6879,8 @@ test "TCP startup rejects a mismatched fixed-port announcement" {
         Client.init(allocator, std.testing.io, .{
             .connection = .{ .tcp = .{
                 .port = port,
-                .runtime = .{
-                    .executable = "node",
-                    .args = &.{ fake_runtime, "--announce-port-offset", "1" },
-                },
+                .path = "node",
+                .args = &.{ fake_runtime, "--announce-port-offset", "1" },
             } },
         }),
     );
@@ -6349,10 +6895,10 @@ test "TCP startup times out when the runtime never announces a port" {
     try std.testing.expectError(
         error.RuntimeStartupTimeout,
         Client.init(allocator, std.testing.io, .{
-            .connection = .{ .tcp = .{ .runtime = .{
-                .executable = "node",
+            .connection = .{ .tcp = .{
+                .path = "node",
                 .args = &.{ fake_runtime, "--never-announce" },
-            } } },
+            } },
         }),
     );
     const elapsed = start.durationTo(std.Io.Clock.Timestamp.now(std.testing.io, .awake));
@@ -6382,14 +6928,14 @@ test "failed URI handshake closes its socket without stopping the server" {
         error.JsonRpcError,
         Client.init(allocator, std.testing.io, .{
             .connection = .{ .uri = .{
-                .uri = uri,
-                .connection_token = "reject",
+                .url = uri,
+                .token = "reject",
             } },
         }),
     );
 
     var client = try Client.init(allocator, std.testing.io, .{
-        .connection = .{ .uri = .{ .uri = uri } },
+        .connection = .{ .uri = .{ .url = uri } },
     });
     defer client.deinit();
     const inspected = try client.callRpc(std.json.Value, "test.inspect", .{});
@@ -6408,10 +6954,10 @@ test "failed TCP startup reaps the child before returning" {
     try std.testing.expectError(
         error.MissingRuntimePortAnnouncement,
         Client.init(allocator, std.testing.io, .{
-            .connection = .{ .tcp = .{ .runtime = .{
-                .executable = "node",
+            .connection = .{ .tcp = .{
+                .path = "node",
                 .args = &.{ fake_runtime, "--no-listen" },
-            } } },
+            } },
         }),
     );
 }
@@ -6581,10 +7127,10 @@ test "TCP child connects and URI teardown leaves the external runtime alive" {
     defer allocator.free(fake_runtime);
 
     var tcp_client = try Client.init(allocator, std.testing.io, .{
-        .connection = .{ .tcp = .{ .runtime = .{
-            .executable = "node",
+        .connection = .{ .tcp = .{
+            .path = "node",
             .args = &.{fake_runtime},
-        } } },
+        } },
     });
     const tcp_port = tcp_client.runtimePort().?;
     try std.testing.expect(tcp_port != 0);
@@ -6617,19 +7163,20 @@ test "TCP child connects and URI teardown leaves the external runtime alive" {
     defer allocator.free(uri);
 
     var first = try Client.init(allocator, std.testing.io, .{
-        .connection = .{ .uri = .{ .uri = uri } },
+        .connection = .{ .uri = .{ .url = uri } },
     });
     _ = try first.createSession(.{ .session_id = "external-session" });
     first.deinit();
 
     var second = try Client.init(allocator, std.testing.io, .{
-        .connection = .{ .uri = .{ .uri = uri } },
+        .connection = .{ .uri = .{ .url = uri } },
     });
     defer second.deinit();
     const inspection = try second.callRpc(std.json.Value, "test.inspect", .{});
     defer inspection.deinit();
     try std.testing.expectEqual(@as(usize, 0), inspection.value.object.get("args").?.array.items.len);
     var saw_detach = false;
+    var saw_shutdown = false;
     for (inspection.value.object.get("requests").?.array.items) |request| {
         if (std.mem.eql(
             u8,
@@ -6637,10 +7184,15 @@ test "TCP child connects and URI teardown leaves the external runtime alive" {
             request.object.get("method").?.string,
         )) {
             saw_detach = true;
-            break;
         }
+        saw_shutdown = saw_shutdown or std.mem.eql(
+            u8,
+            "runtime.shutdown",
+            request.object.get("method").?.string,
+        );
     }
     try std.testing.expect(saw_detach);
+    try std.testing.expect(!saw_shutdown);
 }
 
 test "model and trace callbacks stay isolated per client" {
@@ -6686,10 +7238,10 @@ test "model and trace callbacks stay isolated per client" {
         .traceparent = "00-22222222222222222222222222222222-2222222222222222-01",
     };
     var first = try Client.init(allocator, std.testing.io, .{
-        .connection = .{ .stdio = .{ .runtime = .{
-            .executable = "node",
+        .connection = .{ .stdio = .{
+            .path = "node",
             .args = &.{fake_runtime},
-        } } },
+        } },
         .on_list_models = .{
             .handler = callbacks.listModels,
             .context = &first_context,
@@ -6701,10 +7253,10 @@ test "model and trace callbacks stay isolated per client" {
     });
     defer first.deinit();
     var second = try Client.init(allocator, std.testing.io, .{
-        .connection = .{ .stdio = .{ .runtime = .{
-            .executable = "node",
+        .connection = .{ .stdio = .{
+            .path = "node",
             .args = &.{fake_runtime},
-        } } },
+        } },
         .on_list_models = .{
             .handler = callbacks.listModels,
             .context = &second_context,
@@ -6792,12 +7344,12 @@ test "empty mode lowers restrictive create and resume requests" {
     const fake_runtime = try fakeRuntimePath(allocator);
     defer allocator.free(fake_runtime);
     var client = try Client.init(allocator, std.testing.io, .{
-        .connection = .{ .stdio = .{ .runtime = .{
-            .executable = "node",
+        .connection = .{ .stdio = .{
+            .path = "node",
             .args = &.{fake_runtime},
-            .mode = .empty,
-            .base_directory = "/tmp/copilot-sdk-zig-empty",
-        } } },
+        } },
+        .mode = .empty,
+        .base_directory = "/tmp/copilot-sdk-zig-empty",
     });
     defer client.deinit();
 
@@ -6873,12 +7425,12 @@ test "empty mode rejects sessions without explicit available tools" {
     const fake_runtime = try fakeRuntimePath(allocator);
     defer allocator.free(fake_runtime);
     var client = try Client.init(allocator, std.testing.io, .{
-        .connection = .{ .stdio = .{ .runtime = .{
-            .executable = "node",
+        .connection = .{ .stdio = .{
+            .path = "node",
             .args = &.{fake_runtime},
-            .mode = .empty,
-            .base_directory = "/tmp/copilot-sdk-zig-empty",
-        } } },
+        } },
+        .mode = .empty,
+        .base_directory = "/tmp/copilot-sdk-zig-empty",
     });
     defer client.deinit();
 
@@ -6916,9 +7468,9 @@ test "URI empty mode requires available tools and lowers session defaults" {
 
     var client = try Client.init(allocator, std.testing.io, .{
         .connection = .{ .uri = .{
-            .uri = uri,
-            .mode = .empty,
+            .url = uri,
         } },
+        .mode = .empty,
     });
     defer client.deinit();
 
@@ -6965,19 +7517,17 @@ test "empty mode rolls back when its options update fails" {
     defer allocator.free(fake_runtime);
     var deinit_count: usize = 0;
     var client = try Client.init(allocator, std.testing.io, .{
-        .connection = .{ .stdio = .{ .runtime = .{
-            .executable = "node",
+        .connection = .{ .stdio = .{
+            .path = "node",
             .args = &.{ fake_runtime, "--fail-options-update" },
-            .mode = .empty,
-            .base_directory = "/tmp/copilot-sdk-zig-empty",
-        } } },
+        } },
+        .mode = .empty,
+        .base_directory = "/tmp/copilot-sdk-zig-empty",
         .session_filesystem = .{
             .initial_working_directory = "/workspace",
             .session_state_path = "/state",
             .conventions = .posix,
-            .sqlite = true,
-            .create_provider = createTestFilesystem,
-            .context = &deinit_count,
+            .capabilities = .{ .sqlite = true },
         },
     });
     defer client.deinit();
@@ -6987,6 +7537,10 @@ test "empty mode rolls back when its options update fails" {
         client.createSession(.{
             .session_id = "empty-update-failure",
             .available_tools = &.{},
+            .create_session_filesystem_provider = .{
+                .handler = createTestFilesystem,
+                .context = &deinit_count,
+            },
         }),
     );
     try std.testing.expectEqual(@as(usize, 1), deinit_count);
@@ -7006,10 +7560,10 @@ test "trace callback failures are isolated from session requests" {
     const fake_runtime = try fakeRuntimePath(allocator);
     defer allocator.free(fake_runtime);
     var client = try Client.init(allocator, std.testing.io, .{
-        .connection = .{ .stdio = .{ .runtime = .{
-            .executable = "node",
+        .connection = .{ .stdio = .{
+            .path = "node",
             .args = &.{fake_runtime},
-        } } },
+        } },
         .on_get_trace_context = .{ .handler = callbacks.fail },
     });
     defer client.deinit();
@@ -7189,28 +7743,101 @@ fn deinitTestFilesystem(context_pointer: ?*anyopaque) void {
     context.allocator.destroy(context);
 }
 
+const TaggedFilesystemFactoryContext = struct {
+    label: []const u8,
+    deinit_count: *usize,
+};
+
+const TaggedFilesystemContext = struct {
+    allocator: std.mem.Allocator,
+    label: []u8,
+    deinit_count: *usize,
+};
+
+fn createTaggedFilesystem(
+    allocator: std.mem.Allocator,
+    _: []const u8,
+    context_pointer: ?*anyopaque,
+) !runtime_types.SessionFilesystemProvider {
+    const factory: *TaggedFilesystemFactoryContext = @ptrCast(@alignCast(context_pointer.?));
+    const context = try allocator.create(TaggedFilesystemContext);
+    errdefer allocator.destroy(context);
+    context.* = .{
+        .allocator = allocator,
+        .label = try allocator.dupe(u8, factory.label),
+        .deinit_count = factory.deinit_count,
+    };
+    return .{
+        .context = context,
+        .read_file = taggedFilesystemReadFile,
+        .write_file = testFilesystemWriteFile,
+        .append_file = testFilesystemWriteFile,
+        .exists = testFilesystemExists,
+        .stat = testFilesystemStat,
+        .make_directory = testFilesystemMakeDirectory,
+        .read_directory = testFilesystemReadDirectory,
+        .read_directory_with_types = testFilesystemReadDirectoryWithTypes,
+        .remove = testFilesystemRemove,
+        .rename = testFilesystemRename,
+        .sqlite = .{
+            .query = testFilesystemSqliteQuery,
+            .transaction = testFilesystemSqliteTransaction,
+            .exists = taggedFilesystemSqliteExists,
+        },
+        .deinit = deinitTaggedFilesystem,
+    };
+}
+
+fn taggedFilesystemReadFile(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    context_pointer: ?*anyopaque,
+) ![]u8 {
+    const context: *TaggedFilesystemContext = @ptrCast(@alignCast(context_pointer.?));
+    return std.fmt.allocPrint(allocator, "{s}:{s}", .{ context.label, path });
+}
+
+fn taggedFilesystemSqliteExists(_: ?*anyopaque) !bool {
+    return true;
+}
+
+fn deinitTaggedFilesystem(context_pointer: ?*anyopaque) void {
+    const context: *TaggedFilesystemContext = @ptrCast(@alignCast(context_pointer.?));
+    context.deinit_count.* += 1;
+    context.allocator.free(context.label);
+    context.allocator.destroy(context);
+}
+
 test "session filesystem routes by session and reports protocol errors" {
     const allocator = std.testing.allocator;
     const fake_runtime = try fakeRuntimePath(allocator);
     defer allocator.free(fake_runtime);
     var deinit_count: usize = 0;
     var client = try Client.init(allocator, std.testing.io, .{
-        .connection = .{ .stdio = .{ .runtime = .{
-            .executable = "node",
+        .connection = .{ .stdio = .{
+            .path = "node",
             .args = &.{fake_runtime},
-        } } },
+        } },
         .session_filesystem = .{
             .initial_working_directory = "/workspace",
             .session_state_path = "/state",
             .conventions = .posix,
-            .sqlite = true,
-            .create_provider = createTestFilesystem,
-            .context = &deinit_count,
+            .capabilities = .{ .sqlite = true },
         },
     });
     defer client.deinit();
-    const first_session = try client.createSession(.{ .session_id = "fs-one" });
-    const second_session = try client.createSession(.{ .session_id = "fs-two" });
+    const factory = runtime_types.SessionFilesystemProviderFactory{
+        .handler = createTestFilesystem,
+        .context = &deinit_count,
+    };
+    const first_session = try client.createSession(.{
+        .session_id = "fs-one",
+        .create_session_filesystem_provider = factory,
+    });
+    const second_session = try client.createSession(.{
+        .session_id = "fs-two",
+        .create_session_filesystem_provider = factory,
+    });
 
     const read_result = try client.callRpc(std.json.Value, "test.fs", .{
         .method = "sessionFs.readFile",
@@ -7351,26 +7978,458 @@ test "session filesystem provider rolls back when session creation fails" {
     defer allocator.free(fake_runtime);
     var deinit_count: usize = 0;
     var client = try Client.init(allocator, std.testing.io, .{
-        .connection = .{ .stdio = .{ .runtime = .{
-            .executable = "node",
+        .connection = .{ .stdio = .{
+            .path = "node",
             .args = &.{ fake_runtime, "--fail-session" },
-        } } },
+        } },
         .session_filesystem = .{
             .initial_working_directory = "/workspace",
             .session_state_path = "/state",
             .conventions = .posix,
-            .sqlite = true,
-            .create_provider = createTestFilesystem,
-            .context = &deinit_count,
+            .capabilities = .{ .sqlite = true },
         },
     });
     defer client.deinit();
 
     try std.testing.expectError(
         error.JsonRpcError,
-        client.createSession(.{ .session_id = "rollback" }),
+        client.createSession(.{
+            .session_id = "rollback",
+            .create_session_filesystem_provider = .{
+                .handler = createTestFilesystem,
+                .context = &deinit_count,
+            },
+        }),
     );
     try std.testing.expectEqual(@as(usize, 1), deinit_count);
+}
+
+test "session filesystem metadata requires a factory before mutation" {
+    const allocator = std.testing.allocator;
+    const fake_runtime = try fakeRuntimePath(allocator);
+    defer allocator.free(fake_runtime);
+    var client = try Client.init(allocator, std.testing.io, .{
+        .connection = .{ .stdio = .{
+            .path = "node",
+            .args = &.{fake_runtime},
+        } },
+        .session_filesystem = .{
+            .initial_working_directory = "/workspace",
+            .session_state_path = "/state",
+            .conventions = .posix,
+        },
+    });
+    defer client.deinit();
+
+    try std.testing.expectError(
+        error.MissingSessionFilesystemProviderFactory,
+        client.createSession(.{ .session_id = "missing-factory" }),
+    );
+    try std.testing.expect(!client.hasSession("missing-factory"));
+    const inspected = try client.callRpc(std.json.Value, "test.inspect", .{});
+    defer inspected.deinit();
+    try std.testing.expect(
+        findObservedRequest(
+            inspected.value.object.get("requests").?.array.items,
+            "session.create",
+        ) == null,
+    );
+}
+
+test "session filesystem factory is ignored without client metadata" {
+    const allocator = std.testing.allocator;
+    const fake_runtime = try fakeRuntimePath(allocator);
+    defer allocator.free(fake_runtime);
+    var deinit_count: usize = 0;
+    var factory_context = TaggedFilesystemFactoryContext{
+        .label = "ignored",
+        .deinit_count = &deinit_count,
+    };
+    var client = try Client.init(allocator, std.testing.io, .{
+        .connection = .{ .stdio = .{
+            .path = "node",
+            .args = &.{fake_runtime},
+        } },
+    });
+    defer client.deinit();
+
+    const session = try client.createSession(.{
+        .session_id = "ignored-factory",
+        .create_session_filesystem_provider = .{
+            .handler = createTaggedFilesystem,
+            .context = &factory_context,
+        },
+    });
+    try session.disconnect();
+    try std.testing.expectEqual(@as(usize, 0), deinit_count);
+}
+
+test "session filesystem providers remain isolated and replace transactionally" {
+    const allocator = std.testing.allocator;
+    const fake_runtime = try fakeRuntimePath(allocator);
+    defer allocator.free(fake_runtime);
+    var first_deinit_count: usize = 0;
+    var second_deinit_count: usize = 0;
+    var replacement_deinit_count: usize = 0;
+    var first_context = TaggedFilesystemFactoryContext{
+        .label = "first",
+        .deinit_count = &first_deinit_count,
+    };
+    var second_context = TaggedFilesystemFactoryContext{
+        .label = "second",
+        .deinit_count = &second_deinit_count,
+    };
+    var replacement_context = TaggedFilesystemFactoryContext{
+        .label = "replacement",
+        .deinit_count = &replacement_deinit_count,
+    };
+    var client = try Client.init(allocator, std.testing.io, .{
+        .connection = .{ .stdio = .{
+            .path = "node",
+            .args = &.{ fake_runtime, "--fail-resume" },
+        } },
+        .session_filesystem = .{
+            .initial_working_directory = "/workspace",
+            .session_state_path = "/state",
+            .conventions = .posix,
+            .capabilities = .{ .sqlite = true },
+        },
+    });
+    defer client.deinit();
+
+    const first = try client.createSession(.{
+        .session_id = "provider-one",
+        .create_session_filesystem_provider = .{
+            .handler = createTaggedFilesystem,
+            .context = &first_context,
+        },
+    });
+    const second = try client.createSession(.{
+        .session_id = "provider-two",
+        .create_session_filesystem_provider = .{
+            .handler = createTaggedFilesystem,
+            .context = &second_context,
+        },
+    });
+    const first_read = try client.callRpc(std.json.Value, "test.fs", .{
+        .method = "sessionFs.readFile",
+        .params = .{ .sessionId = "provider-one", .path = "/value" },
+    });
+    defer first_read.deinit();
+    try std.testing.expectEqualStrings(
+        "first:/value",
+        first_read.value.object.get("result").?.object.get("content").?.string,
+    );
+    const second_read = try client.callRpc(std.json.Value, "test.fs", .{
+        .method = "sessionFs.readFile",
+        .params = .{ .sessionId = "provider-two", .path = "/value" },
+    });
+    defer second_read.deinit();
+    try std.testing.expectEqualStrings(
+        "second:/value",
+        second_read.value.object.get("result").?.object.get("content").?.string,
+    );
+
+    try std.testing.expectError(
+        error.JsonRpcError,
+        client.resumeSession("provider-one", .{
+            .create_session_filesystem_provider = .{
+                .handler = createTaggedFilesystem,
+                .context = &replacement_context,
+            },
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), first_deinit_count);
+    try std.testing.expectEqual(@as(usize, 1), replacement_deinit_count);
+    const retained_read = try client.callRpc(std.json.Value, "test.fs", .{
+        .method = "sessionFs.readFile",
+        .params = .{ .sessionId = "provider-one", .path = "/retained" },
+    });
+    defer retained_read.deinit();
+    try std.testing.expectEqualStrings(
+        "first:/retained",
+        retained_read.value.object.get("result").?.object.get("content").?.string,
+    );
+    const inspected = try client.callRpc(std.json.Value, "test.inspect", .{});
+    defer inspected.deinit();
+    try std.testing.expect(
+        findObservedRequest(
+            inspected.value.object.get("requests").?.array.items,
+            "session.detach",
+        ) == null,
+    );
+
+    try first.disconnect();
+    try second.disconnect();
+    try std.testing.expectEqual(@as(usize, 1), first_deinit_count);
+    try std.testing.expectEqual(@as(usize, 1), second_deinit_count);
+}
+
+test "session filesystem registry resolves exact pending before committed" {
+    const allocator = std.testing.allocator;
+    var first_deinit_count: usize = 0;
+    var second_deinit_count: usize = 0;
+    var replacement_deinit_count: usize = 0;
+    var first_context = TaggedFilesystemFactoryContext{
+        .label = "first",
+        .deinit_count = &first_deinit_count,
+    };
+    var second_context = TaggedFilesystemFactoryContext{
+        .label = "second",
+        .deinit_count = &second_deinit_count,
+    };
+    var replacement_context = TaggedFilesystemFactoryContext{
+        .label = "replacement",
+        .deinit_count = &replacement_deinit_count,
+    };
+    var registry = SessionFilesystemRegistry{};
+    defer registry.deinit(allocator);
+
+    try registry.begin(allocator, "one", .{
+        .handler = createTaggedFilesystem,
+        .context = &first_context,
+    }, false);
+    registry.commitReplacement(allocator, "one");
+    try registry.begin(allocator, "two", .{
+        .handler = createTaggedFilesystem,
+        .context = &second_context,
+    }, false);
+    registry.commitReplacement(allocator, "two");
+    try registry.begin(allocator, "one", .{
+        .handler = createTaggedFilesystem,
+        .context = &replacement_context,
+    }, false);
+
+    const pending_read = try registry.resolve("one").?.read_file(
+        allocator,
+        "/value",
+        registry.resolve("one").?.context,
+    );
+    defer allocator.free(pending_read);
+    try std.testing.expectEqualStrings("replacement:/value", pending_read);
+    const committed_read = try registry.resolve("two").?.read_file(
+        allocator,
+        "/value",
+        registry.resolve("two").?.context,
+    );
+    defer allocator.free(committed_read);
+    try std.testing.expectEqualStrings("second:/value", committed_read);
+
+    registry.rollback(allocator, "one");
+    try std.testing.expectEqual(@as(usize, 0), first_deinit_count);
+    try std.testing.expectEqual(@as(usize, 0), second_deinit_count);
+    try std.testing.expectEqual(@as(usize, 1), replacement_deinit_count);
+}
+
+test "resident resume post-response failure preserves the committed provider" {
+    const allocator = std.testing.allocator;
+    const fake_runtime = try fakeRuntimePath(allocator);
+    defer allocator.free(fake_runtime);
+    var original_deinit_count: usize = 0;
+    var replacement_deinit_count: usize = 0;
+    var original_context = TaggedFilesystemFactoryContext{
+        .label = "original",
+        .deinit_count = &original_deinit_count,
+    };
+    var replacement_context = TaggedFilesystemFactoryContext{
+        .label = "replacement",
+        .deinit_count = &replacement_deinit_count,
+    };
+    var client = try Client.init(allocator, std.testing.io, .{
+        .connection = .{ .stdio = .{
+            .path = "node",
+            .args = &.{ fake_runtime, "--fail-options-update-on-resume" },
+        } },
+        .mode = .empty,
+        .base_directory = "/project-state",
+        .session_filesystem = .{
+            .initial_working_directory = "/workspace",
+            .session_state_path = "/state",
+            .conventions = .posix,
+            .capabilities = .{ .sqlite = true },
+        },
+    });
+    defer client.deinit();
+
+    const session = try client.createSession(.{
+        .session_id = "resident",
+        .available_tools = &.{},
+        .create_session_filesystem_provider = .{
+            .handler = createTaggedFilesystem,
+            .context = &original_context,
+        },
+    });
+    try std.testing.expectError(
+        error.JsonRpcError,
+        client.resumeSession("resident", .{
+            .available_tools = &.{},
+            .create_session_filesystem_provider = .{
+                .handler = createTaggedFilesystem,
+                .context = &replacement_context,
+            },
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), original_deinit_count);
+    try std.testing.expectEqual(@as(usize, 1), replacement_deinit_count);
+    const retained_read = try client.callRpc(std.json.Value, "test.fs", .{
+        .method = "sessionFs.readFile",
+        .params = .{ .sessionId = "resident", .path = "/retained" },
+    });
+    defer retained_read.deinit();
+    try std.testing.expectEqualStrings(
+        "original:/retained",
+        retained_read.value.object.get("result").?.object.get("content").?.string,
+    );
+    const inspected = try client.callRpc(std.json.Value, "test.inspect", .{});
+    defer inspected.deinit();
+    try std.testing.expect(
+        findObservedRequest(
+            inspected.value.object.get("requests").?.array.items,
+            "session.detach",
+        ) == null,
+    );
+
+    try session.disconnect();
+    try std.testing.expectEqual(@as(usize, 1), original_deinit_count);
+}
+
+test "cold resume detaches only after a successful remote attach" {
+    const allocator = std.testing.allocator;
+    const fake_runtime = try fakeRuntimePath(allocator);
+    defer allocator.free(fake_runtime);
+
+    var rpc_failure_deinit_count: usize = 0;
+    var rpc_failure_client = try Client.init(allocator, std.testing.io, .{
+        .connection = .{ .stdio = .{
+            .path = "node",
+            .args = &.{ fake_runtime, "--fail-resume" },
+        } },
+        .session_filesystem = .{
+            .initial_working_directory = "/workspace",
+            .session_state_path = "/state",
+            .conventions = .posix,
+        },
+    });
+    defer rpc_failure_client.deinit();
+    try std.testing.expectError(
+        error.JsonRpcError,
+        rpc_failure_client.resumeSession("cold-rpc-failure", .{
+            .create_session_filesystem_provider = .{
+                .handler = createTestFilesystem,
+                .context = &rpc_failure_deinit_count,
+            },
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), rpc_failure_deinit_count);
+    const rpc_failure_inspection = try rpc_failure_client.callRpc(
+        std.json.Value,
+        "test.inspect",
+        .{},
+    );
+    defer rpc_failure_inspection.deinit();
+    try std.testing.expect(
+        findObservedRequest(
+            rpc_failure_inspection.value.object.get("requests").?.array.items,
+            "session.detach",
+        ) == null,
+    );
+
+    var post_response_deinit_count: usize = 0;
+    var post_response_client = try Client.init(allocator, std.testing.io, .{
+        .connection = .{ .stdio = .{
+            .path = "node",
+            .args = &.{ fake_runtime, "--fail-options-update-on-resume" },
+        } },
+        .mode = .empty,
+        .base_directory = "/project-state",
+        .session_filesystem = .{
+            .initial_working_directory = "/workspace",
+            .session_state_path = "/state",
+            .conventions = .posix,
+        },
+    });
+    defer post_response_client.deinit();
+    try std.testing.expectError(
+        error.JsonRpcError,
+        post_response_client.resumeSession("cold-post-response", .{
+            .available_tools = &.{},
+            .create_session_filesystem_provider = .{
+                .handler = createTestFilesystem,
+                .context = &post_response_deinit_count,
+            },
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), post_response_deinit_count);
+    try std.testing.expect(!post_response_client.hasSession("cold-post-response"));
+    const post_response_inspection = try post_response_client.callRpc(
+        std.json.Value,
+        "test.inspect",
+        .{},
+    );
+    defer post_response_inspection.deinit();
+    try std.testing.expect(
+        findObservedRequest(
+            post_response_inspection.value.object.get("requests").?.array.items,
+            "session.detach",
+        ) != null,
+    );
+}
+
+test "resident resume installs replacement before deinitializing the old provider" {
+    const allocator = std.testing.allocator;
+    const fake_runtime = try fakeRuntimePath(allocator);
+    defer allocator.free(fake_runtime);
+    var original_deinit_count: usize = 0;
+    var replacement_deinit_count: usize = 0;
+    var original_context = TaggedFilesystemFactoryContext{
+        .label = "original",
+        .deinit_count = &original_deinit_count,
+    };
+    var replacement_context = TaggedFilesystemFactoryContext{
+        .label = "replacement",
+        .deinit_count = &replacement_deinit_count,
+    };
+    var client = try Client.init(allocator, std.testing.io, .{
+        .connection = .{ .stdio = .{
+            .path = "node",
+            .args = &.{fake_runtime},
+        } },
+        .session_filesystem = .{
+            .initial_working_directory = "/workspace",
+            .session_state_path = "/state",
+            .conventions = .posix,
+            .capabilities = .{ .sqlite = true },
+        },
+    });
+    defer client.deinit();
+
+    const original = try client.createSession(.{
+        .session_id = "replace-provider",
+        .create_session_filesystem_provider = .{
+            .handler = createTaggedFilesystem,
+            .context = &original_context,
+        },
+    });
+    const replacement = try client.resumeSession("replace-provider", .{
+        .create_session_filesystem_provider = .{
+            .handler = createTaggedFilesystem,
+            .context = &replacement_context,
+        },
+    });
+    try std.testing.expectEqual(@as(usize, 1), original_deinit_count);
+    try std.testing.expectEqual(@as(usize, 0), replacement_deinit_count);
+    const read = try client.callRpc(std.json.Value, "test.fs", .{
+        .method = "sessionFs.readFile",
+        .params = .{ .sessionId = "replace-provider", .path = "/value" },
+    });
+    defer read.deinit();
+    try std.testing.expectEqualStrings(
+        "replacement:/value",
+        read.value.object.get("result").?.object.get("content").?.string,
+    );
+    _ = original;
+    try replacement.disconnect();
+    try std.testing.expectEqual(@as(usize, 1), replacement_deinit_count);
 }
 
 test "sqliteExists provider errors remain correlated JSON-RPC errors" {
@@ -7379,21 +8438,25 @@ test "sqliteExists provider errors remain correlated JSON-RPC errors" {
     defer allocator.free(fake_runtime);
     var deinit_count: usize = 0;
     var client = try Client.init(allocator, std.testing.io, .{
-        .connection = .{ .stdio = .{ .runtime = .{
-            .executable = "node",
+        .connection = .{ .stdio = .{
+            .path = "node",
             .args = &.{fake_runtime},
-        } } },
+        } },
         .session_filesystem = .{
             .initial_working_directory = "/workspace",
             .session_state_path = "/state",
             .conventions = .posix,
-            .sqlite = true,
-            .create_provider = createTestFilesystem,
-            .context = &deinit_count,
+            .capabilities = .{ .sqlite = true },
         },
     });
     defer client.deinit();
-    const session = try client.createSession(.{ .session_id = "fs-sqlite-error" });
+    const session = try client.createSession(.{
+        .session_id = "fs-sqlite-error",
+        .create_session_filesystem_provider = .{
+            .handler = createTestFilesystem,
+            .context = &deinit_count,
+        },
+    });
     defer session.disconnect() catch {};
 
     const response = try client.callRpc(std.json.Value, "test.fs", .{
@@ -10239,15 +11302,15 @@ test "client teardown bounds OAuth interest release and reaps the child" {
     }.handle;
 
     var client = try Client.init(allocator, std.testing.io, .{
-        .connection = .{ .stdio = .{ .runtime = .{
-            .executable = "node",
+        .connection = .{ .stdio = .{
+            .path = "node",
             .args = &.{
                 fake_runtime,
                 "--pid-path",
                 pid_path,
                 "--hang-release-interest",
             },
-        } } },
+        } },
     });
     _ = try client.createSession(.{
         .session_id = "hung-release",
@@ -10442,11 +11505,13 @@ test "review regressions preserve protocol semantics" {
     const mapped = resumeConfigFromCreate(.{
         .model = "model",
         .streaming = true,
+        .remote_session = .@"export",
         .extensions = .{ .extension_sdk_path = "/sdk" },
     });
     try std.testing.expectEqualStrings("model", mapped.model.?);
     try std.testing.expect(mapped.streaming);
     try std.testing.expect(mapped.suppress_resume_event);
+    try std.testing.expectEqual(session_types.RemoteSessionMode.@"export", mapped.remote_session.?);
     try std.testing.expectEqualStrings("/sdk", mapped.extensions.extension_sdk_path.?);
 
     const joined = resumeConfigFromJoin(.{});
@@ -10456,10 +11521,12 @@ test "review regressions preserve protocol semantics" {
     );
     const overridden_join = resumeConfigFromJoin(.{
         .on_permission_request = session_types.approveAll,
+        .remote_session = .on,
     });
     try std.testing.expect(
         overridden_join.on_permission_request.? == session_types.approveAll,
     );
+    try std.testing.expectEqual(session_types.RemoteSessionMode.on, overridden_join.remote_session.?);
 
     const stdio_json = try lowerStdioMcp(allocator, .{
         .command = "server",

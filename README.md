@@ -138,20 +138,20 @@ stdio connection. New code can select the transport explicitly:
 
 ```zig
 var client = try copilot.Client.init(allocator, io, .{
-    .connection = .{ .stdio = .{ .runtime = .{
-        .executable = "copilot",
+    .connection = .{ .stdio = .{
+        .path = "copilot",
         .args = &.{"--verbose"},
-        .mode = .copilot_cli,
-        .base_directory = "/srv/copilot",
-        .log_level = .info,
-        .environment = &.{.{
+        .env = &.{.{
             .name = "ACME_REGION",
             .value = "us-east",
         }},
-        .authentication = .logged_in_user,
-        .session_idle_timeout_seconds = 300,
-        .enable_remote_sessions = true,
-    } } },
+    } },
+    .mode = .copilot_cli,
+    .base_directory = "/srv/copilot",
+    .log_level = .info,
+    .use_logged_in_user = true,
+    .session_idle_timeout_seconds = 300,
+    .enable_remote_sessions = true,
 });
 defer client.deinit();
 ```
@@ -161,7 +161,7 @@ lets the runtime choose a port, and an omitted connection token is generated:
 
 ```zig
 .connection = .{ .tcp = .{
-    .runtime = .{ .executable = "copilot" },
+    .path = "copilot",
     .port = 0,
 } },
 ```
@@ -170,18 +170,20 @@ Use `.uri` to connect to an already running runtime:
 
 ```zig
 .connection = .{ .uri = .{
-    .uri = "127.0.0.1:4321",
-    .connection_token = "shared-secret",
-    .mode = .empty,
+    .url = "127.0.0.1:4321",
+    .token = "shared-secret",
 } },
+.mode = .empty,
 ```
 
 A URI connection has no child-process fields. Deinitializing its client closes
 only the client-owned socket after bounded session detach attempts. It never
 shuts down the external runtime. URI connection setup has a ten-second
-deadline. Its optional `.mode` selects the behavior of the external runtime.
-Stdio and TCP connections terminate and reap their child without waiting for a
-runtime shutdown response.
+deadline. The client keeps `.mode` active for URI session defaults. It ignores
+the other process policy, including authentication settings, because the
+external runtime owns that policy. Stdio and TCP clients request
+`runtime.shutdown` for at most ten seconds, close the transport, then
+unconditionally terminate and reap their child.
 
 When `.connection` is omitted, `COPILOT_SDK_DEFAULT_CONNECTION` accepts
 `stdio`, `inprocess`, or no value. `stdio` and no value select the compatibility
@@ -189,28 +191,24 @@ stdio connection. This SDK returns `error.UnsupportedInProcessConnection` for
 `inprocess`. Other values return `error.InvalidDefaultConnection`. An explicit
 `.connection` ignores this environment variable.
 
-`RuntimeAuthentication` preserves the runtime's authentication policies:
-
-- `.default` uses the runtime default.
-- `.logged_in_user` uses only the current Copilot login.
-- `.token = token` uses only the supplied GitHub token.
-- `.token_and_logged_in_user = token` allows both sources.
-- `.disabled` disables automatic login.
+Set `.github_token` and `.use_logged_in_user` on `ClientOptions`. If
+`.github_token` is set and `.use_logged_in_user` is omitted, the child uses only
+the token. If no token is set and `.use_logged_in_user` is omitted, the child
+uses the current Copilot login.
 
 Tokens are passed through a managed environment variable rather than argv.
-Raw `.environment` entries cannot override SDK-owned connection,
+Raw `.env` entries cannot override SDK-owned connection,
 authentication, telemetry, empty-mode, or base-directory variables. All
 configuration is validated before a child is spawned or a socket is opened.
-Omit `.environment` to inherit the parent environment. Set it to `&.{}` to
+Omit `.env` to inherit the parent environment. Set it to `&.{}` to
 start the child with only SDK-managed variables.
 
 Empty mode disables the runtime's normal disk-backed configuration:
 
 ```zig
-.connection = .{ .stdio = .{ .runtime = .{
-    .mode = .empty,
-    .base_directory = "/srv/copilot",
-} } },
+.connection = .{ .stdio = .{} },
+.mode = .empty,
+.base_directory = "/srv/copilot",
 ```
 
 For child connections, empty mode requires either `.base_directory` or
@@ -261,22 +259,35 @@ var client = try copilot.Client.init(allocator, io, .{
 });
 ```
 
-For virtual or remote workspaces, `.session_filesystem` supplies a provider
-factory. The factory receives each session ID and returns that session's file
-operations, optional SQLite operations, context, and optional `deinit`
-callback. Providers are routed by session ID and destroyed exactly once on
-rollback or detach:
+For virtual or remote workspaces, `.session_filesystem` supplies client-wide
+metadata. Each create, resume, or join config selects its provider factory.
+The factory receives the session ID and returns that session's file operations,
+optional SQLite operations, context, and optional `deinit` callback. Providers
+are routed by exact session ID and destroyed exactly once on rollback,
+replacement, disconnect, or client teardown:
 
 ```zig
 .session_filesystem = .{
     .initial_working_directory = "/workspace",
     .session_state_path = "/state/sessions",
     .conventions = .posix,
-    .sqlite = true,
-    .create_provider = createSessionFilesystem,
-    .context = filesystem_context,
+    .capabilities = .{ .sqlite = true },
 },
 ```
+
+```zig
+const session = try client.createSession(.{
+    .create_session_filesystem_provider = .{
+        .handler = createSessionFilesystem,
+        .context = filesystem_context,
+    },
+    .remote_session = .@"export",
+});
+```
+
+`remote_session` accepts `.off`, `.@"export"`, or `.on`. It controls one
+session and is separate from `ClientOptions.enable_remote_sessions`, which
+enables runtime-wide remote-session support for an owned child.
 
 Filesystem callbacks return owned byte slices or `std.json.Parsed` results
 with the allocator supplied by the SDK. `error.FileNotFound` is reported to

@@ -2,7 +2,8 @@
 
 ## Selected shape
 
-`ClientOptions` keeps its existing fields so current named initializers compile. A new optional `connection` selects a `RuntimeConnection` union.
+`ClientOptions` keeps the pre-PR compatibility fields. An optional `connection`
+selects a transport, while runtime policy remains client-scoped.
 
 ```zig
 pub const RuntimeConnection = union(enum) {
@@ -12,29 +13,72 @@ pub const RuntimeConnection = union(enum) {
 };
 ```
 
-Stdio and TCP contain a shared child-runtime value. URI contains only an address and optional connection token. Child-only process settings cannot be constructed for URI.
+The connection variants contain only transport data.
 
 ```zig
-pub const ChildRuntime = struct {
-    executable: []const u8 = "copilot",
+pub const StdioConnection = struct {
+    path: []const u8 = "copilot",
     args: []const []const u8 = &.{},
+    env: ?[]const EnvironmentVariable = null,
+};
+```
+
+TCP adds `port` and `token`. URI contains only `url` and `token`.
+`ClientOptions` owns mode, directories, logging, environment, authentication,
+telemetry, idle timeout, and remote-session enablement. Token plus omitted
+login disables logged-in-user fallback. No token plus omitted login enables it.
+
+```zig
+pub const ClientOptions = struct {
+    cli_path: []const u8 = "copilot",
     working_directory: ?[]const u8 = null,
+    cli_args: []const []const u8 = &.{},
+    connection_token: ?[]const u8 = null,
+    connection: ?RuntimeConnection = null,
     mode: RuntimeMode = .copilot_cli,
     base_directory: ?[]const u8 = null,
     log_level: ?ClientLogLevel = null,
-    environment: ?[]const EnvironmentVariable = null,
-    authentication: RuntimeAuthentication = .default,
+    env: ?[]const EnvironmentVariable = null,
+    github_token: ?[]const u8 = null,
+    use_logged_in_user: ?bool = null,
     telemetry: ?TelemetryConfig = null,
     session_idle_timeout_seconds: u32 = 0,
     enable_remote_sessions: bool = false,
 };
 ```
 
-`RuntimeAuthentication` is a tagged union that represents default behavior, logged-in user only, token only, token plus logged-in user, and disabled authentication. Raw environment entries cannot override typed SDK-owned variables.
-
 The initialized client owns one private transport union. Stdio owns a child and pipes. TCP owns a child and socket. URI owns only a socket. Parent stdio remains an internal variant. Cleanup switches exhaustively on that union.
 
-Client callbacks use separate descriptors and contexts per callback. Model-list results retain the existing `std.json.Parsed(models.ModelList)` ownership contract. Trace context is collected for create, resume, and send. Session filesystem configuration creates isolated provider state per attached session and lowers callback failures at the JSON-RPC boundary.
+Client callbacks use separate descriptors and contexts per callback.
+Filesystem metadata is client-scoped. Each session config selects a provider
+factory. A linear registry stores pending and committed providers by exact
+session ID, with pending replacements winning callback routing.
+
+Owned stdio and TCP teardown releases interests, detaches sessions, and requests
+`runtime.shutdown` with a ten-second bound while callback state remains alive.
+It then closes the transport and unconditionally kills and reaps the child.
+URI, parent stdio, and fixtures never receive `runtime.shutdown`.
+
+`RemoteSessionMode` is a typed `.off`, `.@"export"`, or `.on` session option.
+Create and resume serialize it as `remoteSession` and omit it when unset.
+
+```zig
+pub const SessionFilesystemConfig = struct {
+    initial_working_directory: []const u8,
+    session_state_path: []const u8,
+    conventions: SessionFilesystemConventions,
+    capabilities: SessionFilesystemCapabilities = .{},
+};
+
+pub const SessionFilesystemProviderFactory = struct {
+    handler: *const fn (
+        std.mem.Allocator,
+        []const u8,
+        ?*anyopaque,
+    ) anyerror!SessionFilesystemProvider,
+    context: ?*anyopaque = null,
+};
+```
 
 ## Compatibility
 
@@ -57,5 +101,9 @@ Client callbacks use separate descriptors and contexts per callback. Model-list 
 - Per-client callback routing with two simultaneous clients.
 - Trace context on create, resume, and send.
 - Session filesystem request routing, error mapping, and exactly-once cleanup.
+- Pending provider routing and resident-resume replacement rollback.
+- Bounded owned-runtime shutdown success, RPC failure, and timeout.
+- No shutdown request for URI connections.
+- Literal `remoteSession` create and resume lowering.
 - Failure rollback after spawn, socket connect, handshake, and callback setup.
 - Existing `Client.init` call forms compile.
