@@ -1468,15 +1468,17 @@ fn connectToHost(io: std.Io, host: []const u8, port: u16) !std.Io.net.Stream {
 
 const SessionRecord = struct {
     id: ?[]u8 = null,
-    active: bool = true,
     generation: u64 = 1,
     workspace_path: ?[]u8 = null,
 
+    fn isActive(self: SessionRecord) bool {
+        return self.id != null;
+    }
+
     fn deactivate(self: *SessionRecord, allocator: std.mem.Allocator) void {
-        if (!self.active) return;
-        allocator.free(self.id.?);
+        const id = self.id orelse return;
+        allocator.free(id);
         if (self.workspace_path) |path| allocator.free(path);
-        self.active = false;
         self.id = null;
         self.workspace_path = null;
     }
@@ -1688,7 +1690,7 @@ pub const Client = struct {
 
     fn hasActiveSessions(self: *const Client) bool {
         for (self.sessions.items) |session| {
-            if (session.active) return true;
+            if (session.isActive()) return true;
         }
         return false;
     }
@@ -1701,7 +1703,7 @@ pub const Client = struct {
             self.releaseMcpOAuthInterest(runtime) catch {};
         }
         for (self.sessions.items) |session| {
-            if (session.active) self.detachSessionBestEffort(session.id.?);
+            if (session.id) |id| self.detachSessionBestEffort(id);
         }
     }
 
@@ -3636,7 +3638,7 @@ pub const Client = struct {
         }
         if (prior_record_index) |index| {
             if (index >= self.sessions.items.len or
-                !self.sessions.items[index].active or
+                !self.sessions.items[index].isActive() or
                 !std.mem.eql(u8, self.sessions.items[index].id.?, session_id))
             {
                 return error.SessionNotActive;
@@ -3644,7 +3646,7 @@ pub const Client = struct {
         }
         const record_index = prior_record_index orelse index: {
             for (self.sessions.items, 0..) |record, index| {
-                if (!record.active) break :index index;
+                if (!record.isActive()) break :index index;
             }
             try self.sessions.ensureUnusedCapacity(self.allocator, 1);
             break :index self.sessions.items.len;
@@ -3690,7 +3692,6 @@ pub const Client = struct {
         self.pending_session = null;
         const record = SessionRecord{
             .id = pending.id,
-            .active = true,
             .generation = pending.generation,
             .workspace_path = pending.workspace_path,
         };
@@ -3705,7 +3706,7 @@ pub const Client = struct {
 
     fn sessionHandle(self: *Client, record_index: usize) Session {
         const record = self.sessions.items[record_index];
-        std.debug.assert(record.active);
+        std.debug.assert(record.isActive());
         return .{
             .client = self,
             .id = record.id.?,
@@ -3721,8 +3722,9 @@ pub const Client = struct {
 
     fn findSessionIndex(self: *Client, session_id: []const u8) ?usize {
         for (self.sessions.items, 0..) |session, index| {
-            if (session.active and std.mem.eql(u8, session.id.?, session_id))
-                return index;
+            if (session.id) |id| {
+                if (std.mem.eql(u8, id, session_id)) return index;
+            }
         }
         return null;
     }
@@ -3800,8 +3802,8 @@ pub const Client = struct {
     fn removeSessionAt(self: *Client, record_index: usize) void {
         if (record_index >= self.sessions.items.len) return;
         const record = &self.sessions.items[record_index];
-        if (!record.active) return;
-        self.removeSessionState(record.id.?);
+        const id = record.id orelse return;
+        self.removeSessionState(id);
         record.deactivate(self.allocator);
     }
 
@@ -4151,7 +4153,7 @@ pub const Session = struct {
         if (self.record_index >= self.client.sessions.items.len)
             return error.SessionNotActive;
         const record = &self.client.sessions.items[self.record_index];
-        if (!record.active or record.generation != self.generation)
+        if (!record.isActive() or record.generation != self.generation)
             return error.SessionNotActive;
         return .{ .record_index = self.record_index, .id = record.id.? };
     }
@@ -4172,7 +4174,6 @@ pub const Session = struct {
         self: Session,
         options: session_types.MessageOptions,
     ) !?session_types.AssistantMessage {
-        _ = try self.resolve();
         const message_id = try self.send(options);
         defer self.client.allocator.free(message_id);
 
@@ -6923,7 +6924,6 @@ test "inactive session slots skip bounded shutdown work" {
         client.sessions.deinit(allocator);
     }
     try client.sessions.append(allocator, .{
-        .active = false,
         .generation = 7,
     });
 
@@ -12689,7 +12689,7 @@ test "disconnect removes session-owned allocations" {
     client.removeSession("s1");
 
     try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
-    try std.testing.expect(!client.sessions.items[0].active);
+    try std.testing.expect(!client.sessions.items[0].isActive());
     try std.testing.expectEqual(@as(usize, 0), client.events.items.len);
 }
 
@@ -13955,7 +13955,7 @@ test "disconnect removes provider token registrations" {
 
     try (try client.sessionForId("disconnect-session")).disconnect();
     try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
-    try std.testing.expect(!client.sessions.items[0].active);
+    try std.testing.expect(!client.sessions.items[0].isActive());
     try std.testing.expectEqual(@as(usize, 0), client.provider_tokens.items.len);
 
     const request = try tmp.dir.readFileAlloc(std.testing.io, "request", allocator, .limited(1024));
