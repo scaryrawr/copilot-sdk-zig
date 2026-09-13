@@ -27,7 +27,7 @@ pub const PingResponse = struct {
     allocator: std.mem.Allocator,
     message: []u8,
     timestamp: []u8,
-    protocol_version: ?u64,
+    protocol_version: u64,
 
     pub fn deinit(self: *PingResponse) void {
         self.allocator.free(self.message);
@@ -223,10 +223,38 @@ pub const PingParams = struct {
 
 pub const EmptyParams = struct {};
 
+const StrictU64 = struct {
+    value: u64,
+
+    pub fn jsonParse(
+        allocator: std.mem.Allocator,
+        source: anytype,
+        options: std.json.ParseOptions,
+    ) !StrictU64 {
+        const token = try source.nextAllocMax(
+            allocator,
+            .alloc_if_needed,
+            options.max_value_len.?,
+        );
+        return switch (token) {
+            .number => |value| .{ .value = try std.fmt.parseInt(u64, value, 10) },
+            .allocated_number => |value| result: {
+                defer allocator.free(value);
+                break :result .{ .value = try std.fmt.parseInt(u64, value, 10) };
+            },
+            .allocated_string => |value| {
+                allocator.free(value);
+                return error.UnexpectedToken;
+            },
+            else => error.UnexpectedToken,
+        };
+    }
+};
+
 pub const PingResult = struct {
     message: []const u8,
     timestamp: []const u8,
-    protocolVersion: ?u64 = null,
+    protocolVersion: StrictU64,
 };
 
 pub const StatusGetResult = struct {
@@ -311,7 +339,7 @@ pub fn ownPing(allocator: std.mem.Allocator, wire: PingResult) !PingResponse {
         .allocator = allocator,
         .message = message,
         .timestamp = timestamp,
-        .protocol_version = wire.protocolVersion,
+        .protocol_version = wire.protocolVersion.value,
     };
 }
 
@@ -568,7 +596,7 @@ fn exerciseOwnedAdministration(allocator: std.mem.Allocator) !void {
     var ping = try ownPing(allocator, .{
         .message = "pong",
         .timestamp = "now",
-        .protocolVersion = null,
+        .protocolVersion = .{ .value = 3 },
     });
     defer ping.deinit();
     var auth = try ownAuthStatus(allocator, .{

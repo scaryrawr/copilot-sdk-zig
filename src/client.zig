@@ -15534,7 +15534,7 @@ test "client administration and history use exact wire requests and owned result
     var frames: std.ArrayList(u8) = .empty;
     defer frames.deinit(allocator);
     const responses = [_][]const u8{
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"message\":\"pong-one\",\"timestamp\":\"2026-01-01T00:00:00Z\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"message\":\"pong-one\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"protocolVersion\":3}}",
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"message\":\"pong-two\",\"timestamp\":\"2026-01-02T00:00:00Z\",\"protocolVersion\":9223372036854775808}}",
         "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"version\":\"1.2.3\",\"protocolVersion\":3}}",
         "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"isAuthenticated\":true,\"authType\":\"future-auth\",\"host\":\"github.com\",\"login\":\"octocat\",\"statusMessage\":\"ready\",\"future\":true}}",
@@ -15583,7 +15583,7 @@ test "client administration and history use exact wire requests and owned result
     var first_ping = try client.ping(null);
     defer first_ping.deinit();
     try std.testing.expectEqualStrings("pong-one", first_ping.message);
-    try std.testing.expect(first_ping.protocol_version == null);
+    try std.testing.expectEqual(@as(u64, 3), first_ping.protocol_version);
 
     var second_ping = switch (try client.pingDetailed("hello")) {
         .success => |value| value,
@@ -15594,7 +15594,7 @@ test "client administration and history use exact wire requests and owned result
         },
     };
     defer second_ping.deinit();
-    try std.testing.expectEqual(@as(?u64, 9_223_372_036_854_775_808), second_ping.protocol_version);
+    try std.testing.expectEqual(@as(u64, 9_223_372_036_854_775_808), second_ping.protocol_version);
 
     var status = try client.getStatus();
     defer status.deinit();
@@ -15850,7 +15850,7 @@ test "all three read loops share lifecycle and session event routing" {
     defer frames.deinit(allocator);
     const messages = [_][]const u8{
         "{\"jsonrpc\":\"2.0\",\"method\":\"session.lifecycle\",\"params\":{\"type\":\"session.created\",\"sessionId\":\"created-session\"}}",
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"message\":\"ok\",\"timestamp\":\"now\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"message\":\"ok\",\"timestamp\":\"now\",\"protocolVersion\":3}}",
         "{\"jsonrpc\":\"2.0\",\"method\":\"session.lifecycle\",\"params\":{\"type\":\"session.updated\",\"sessionId\":\"updated-session\",\"metadata\":null}}",
         "{\"jsonrpc\":\"2.0\",\"method\":\"session.event\",\"params\":{\"sessionId\":\"event-session\",\"event\":{\"type\":\"session.idle\",\"data\":{}}}}",
         "{\"jsonrpc\":\"2.0\",\"method\":\"session.event\",\"params\":{\"sessionId\":\"event-session\",\"event\":{\"type\":\"assistant.message\",\"data\":{\"content\":\"queued\",\"messageId\":\"m2\"}}}}",
@@ -15946,7 +15946,7 @@ test "lifecycle overflow through an RPC preserves prefix marker and next epoch" 
     try appendTestFrame(
         allocator,
         &frames,
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"message\":\"ok\",\"timestamp\":\"now\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"message\":\"ok\",\"timestamp\":\"now\",\"protocolVersion\":3}}",
     );
     try appendTestFrame(
         allocator,
@@ -15961,7 +15961,7 @@ test "lifecycle overflow through an RPC preserves prefix marker and next epoch" 
     try appendTestFrame(
         allocator,
         &frames,
-        "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"message\":\"again\",\"timestamp\":\"later\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"message\":\"again\",\"timestamp\":\"later\",\"protocolVersion\":3}}",
     );
 
     var tmp = std.testing.tmpDir(.{});
