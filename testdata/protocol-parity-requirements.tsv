@@ -1,0 +1,56 @@
+case_id	boundary	context
+fragmented_frame	framing	read response or event frame
+missing_content_length	framing	read response or event frame
+invalid_content_length	framing	read response or event frame
+frame_too_large	framing	read response or event frame
+truncated_frame	framing	read response or event frame
+invalid_json	json_envelope	parse inbound frame
+non_object_envelope	json_envelope	classify inbound message
+invalid_jsonrpc_version	json_envelope	classify inbound message
+missing_response_id	json_envelope	classify response
+invalid_response_id	json_envelope	classify response
+missing_result_and_error	json_envelope	classify response
+result_and_error	json_envelope	classify response
+invalid_error_object	json_envelope	validate RPC error
+invalid_error_code	json_envelope	validate RPC error
+invalid_error_message	json_envelope	validate RPC error
+invalid_request_method	json_envelope	classify server request
+session_event_missing_params	session_events	dispatch session.event notification
+session_event_malformed_field	session_events	dispatch session.event notification
+session_event_invalid_status	session_events	dispatch session.error event
+session_agent_error	session_events	deliver session.error event
+generic_rpc_rejection	rpc	generic RPC
+missing_session_rpc_rejection	rpc	join or resume session
+session_rpc_rejection	rpc	ordinary session RPC
+unexpected_response	rpc	await RPC response
+unknown_server_request	server_requests	dispatch unregistered server request
+successful_server_request	server_requests	dispatch registered server request
+server_handler_error	server_requests	dispatch registered server request
+invalid_server_handler_result	server_requests	dispatch registered server request
+invalid_user_input_request	server_requests	dispatch userInput.request
+absent_user_input_handler	server_requests	dispatch userInput.request
+event_queue_full	queue	queue session event
+queue_rpc_rejection	queue	deliver queued operation
+invalid_permission_decision	permissions	validate permission decision
+permission_handler_error	permissions	automatic permission handler
+permission_delivery_rejection	permissions	deliver permission decision
+permission_not_accepted	permissions	deliver permission decision
+invalid_tool_result	tools	validate tool result
+tool_handler_error	tools	automatic tool handler
+tool_delivery_rejection	tools	deliver tool result
+tool_not_accepted	tools	deliver tool result
+process_spawn	process_lifecycle	spawn CLI
+process_exit	process_lifecycle	read CLI output
+process_terminate	process_lifecycle	stop client
+transport_read	process_lifecycle	read CLI output
+transport_write	process_lifecycle	write CLI input
+shutdown_aggregate	shutdown	stop client
+shutdown_diagnostics_dropped	shutdown	stop client
+session_detach_failed	session_lifecycle	disconnect session
+json_conversion	client	encode request or decode result
+invalid_config	client	create or resume session
+connect_rejected	client	connect
+reentrant_rpc	client	call RPC from callback
+unsupported_protocol_version	protocol_version	connect
+invalid_protocol_version	protocol_version	connect
+root_sdk_error_export	public_api	import copilot_sdk root module

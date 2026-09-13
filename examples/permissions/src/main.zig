@@ -33,7 +33,9 @@ pub fn main(init: std.process.Init) !void {
         .tools = &.{status_tool},
         .request_permission = true,
     });
-    defer session.disconnect() catch {};
+    defer session.disconnect() catch |err| {
+        std.log.err("session cleanup failed: {s}", .{@errorName(err)});
+    };
 
     const message_id = try session.send(.{
         .prompt = "Use read_deployment_status for production and report the result.",

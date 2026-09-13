@@ -11,5 +11,8 @@
         "README.md",
         "src",
         "examples",
+        "scripts/parity-census.sh",
+        "scripts/parity_census_runner.zig",
+        "testdata",
     },
 }

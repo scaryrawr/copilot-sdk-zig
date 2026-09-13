@@ -528,6 +528,104 @@ pub const SessionEvent = session_events.SessionEvent;
 pub const SessionEventTag = session_events.SessionEventTag;
 pub const parseEvent = session_events.parseEvent;
 
+pub const ClassifiedParseError = error{
+    MissingField,
+    MalformedFieldType,
+    OutOfMemory,
+};
+
+fn classifyRequiredString(
+    object: std.json.ObjectMap,
+    name: []const u8,
+) ClassifiedParseError!void {
+    return switch (object.get(name) orelse return error.MissingField) {
+        .string => {},
+        else => error.MalformedFieldType,
+    };
+}
+
+fn classifyOptionalString(
+    object: std.json.ObjectMap,
+    name: []const u8,
+) ClassifiedParseError!void {
+    return switch (object.get(name) orelse return) {
+        .string, .null => {},
+        else => error.MalformedFieldType,
+    };
+}
+
+fn classifyOptionalBool(
+    object: std.json.ObjectMap,
+    name: []const u8,
+) ClassifiedParseError!void {
+    return switch (object.get(name) orelse return) {
+        .bool, .null => {},
+        else => error.MalformedFieldType,
+    };
+}
+
+fn classifyFocusedEvent(value: std.json.Value) ClassifiedParseError!void {
+    const object = switch (value) {
+        .object => |object| object,
+        else => return error.MalformedFieldType,
+    };
+    try classifyRequiredString(object, "type");
+    const event_type = object.get("type").?.string;
+    const data_value: std.json.Value = object.get("data") orelse .{ .object = .empty };
+    const data = switch (data_value) {
+        .object => |data| data,
+        else => return error.MalformedFieldType,
+    };
+
+    if (std.mem.eql(u8, event_type, "assistant.message")) {
+        try classifyRequiredString(data, "content");
+        try classifyOptionalString(data, "messageId");
+    } else if (std.mem.eql(u8, event_type, "assistant.message_delta")) {
+        try classifyRequiredString(data, "deltaContent");
+        try classifyRequiredString(data, "messageId");
+    } else if (std.mem.eql(u8, event_type, "assistant.reasoning")) {
+        try classifyRequiredString(data, "reasoningId");
+        try classifyRequiredString(data, "content");
+        try classifyOptionalBool(data, "rte");
+    } else if (std.mem.eql(u8, event_type, "assistant.reasoning_delta")) {
+        try classifyRequiredString(data, "reasoningId");
+        try classifyRequiredString(data, "deltaContent");
+    } else if (std.mem.eql(u8, event_type, "session.idle")) {
+        try classifyOptionalBool(data, "aborted");
+        try classifyOptionalString(data, "mode");
+    } else if (std.mem.eql(u8, event_type, "session.error")) {
+        try classifyRequiredString(data, "message");
+    } else if (std.mem.eql(u8, event_type, "permission.requested")) {
+        try classifyRequiredString(data, "requestId");
+        const permission_request = data.get("permissionRequest") orelse
+            return error.MissingField;
+        const permission_object = switch (permission_request) {
+            .object => |permission_object| permission_object,
+            else => return error.MalformedFieldType,
+        };
+        if (permission_object.get("managedApprovalRequired")) |managed| {
+            if (managed != .bool) return error.MalformedFieldType;
+        }
+    } else if (std.mem.eql(u8, event_type, "external_tool.requested")) {
+        try classifyRequiredString(data, "requestId");
+        try classifyRequiredString(data, "toolCallId");
+        try classifyRequiredString(data, "toolName");
+    }
+}
+
+pub fn parseEventClassified(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) ClassifiedParseError!SessionEvent {
+    return session_events.parseEvent(allocator, value) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.InvalidSessionEvent => {
+            try classifyFocusedEvent(value);
+            return error.MalformedFieldType;
+        },
+    };
+}
+
 test "known and unknown events retain owned data" {
     const allocator = std.testing.allocator;
     const known_json = try std.json.parseFromSlice(
@@ -1044,10 +1142,58 @@ test "permission event rejects non-object request" {
     try std.testing.expectError(error.InvalidSessionEvent, parseEvent(allocator, parsed.value));
 }
 
+test "classified event parsing distinguishes missing fields from malformed types" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        json: []const u8,
+        classified_error: ClassifiedParseError,
+    }{
+        .{
+            .json =
+            \\{"type":"assistant.message","data":{}}
+            ,
+            .classified_error = error.MissingField,
+        },
+        .{
+            .json =
+            \\{"type":"assistant.message","data":{"content":7}}
+            ,
+            .classified_error = error.MalformedFieldType,
+        },
+        .{
+            .json =
+            \\{"type":"permission.requested","data":{"permissionRequest":{}}}
+            ,
+            .classified_error = error.MissingField,
+        },
+        .{
+            .json =
+            \\{"type":"permission.requested","data":{"requestId":7,"permissionRequest":{}}}
+            ,
+            .classified_error = error.MalformedFieldType,
+        },
+    };
+
+    for (cases) |case| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, case.json, .{});
+        defer parsed.deinit();
+        try std.testing.expectError(
+            case.classified_error,
+            parseEventClassified(allocator, parsed.value),
+        );
+        try std.testing.expectError(
+            error.InvalidSessionEvent,
+            parseEvent(allocator, parsed.value),
+        );
+    }
+}
+
 test "approveAll matches official permission semantics" {
+    var request_id_1 = "p1".*;
+    var request_json_1 = "{}".*;
     const ordinary = PermissionRequested{
-        .request_id = @constCast("p1"),
-        .permission_request_json = @constCast("{}"),
+        .request_id = &request_id_1,
+        .permission_request_json = &request_json_1,
     };
     try std.testing.expectEqual(
         PermissionDecision.approve_once,
@@ -1057,9 +1203,11 @@ test "approveAll matches official permission semantics" {
         }, null),
     );
 
+    var request_id_2 = "p2".*;
+    var request_json_2 = "{\"kind\":\"future-kind\"}".*;
     const unknown_kind = PermissionRequested{
-        .request_id = @constCast("p2"),
-        .permission_request_json = @constCast("{\"kind\":\"future-kind\"}"),
+        .request_id = &request_id_2,
+        .permission_request_json = &request_json_2,
     };
     try std.testing.expectEqual(
         PermissionDecision.approve_once,
@@ -1069,9 +1217,11 @@ test "approveAll matches official permission semantics" {
         }, null),
     );
 
+    var request_id_3 = "p3".*;
+    var request_json_3 = "{}".*;
     const managed = PermissionRequested{
-        .request_id = @constCast("p3"),
-        .permission_request_json = @constCast("{}"),
+        .request_id = &request_id_3,
+        .permission_request_json = &request_json_3,
         .managed_approval_required = true,
     };
     try std.testing.expectEqual(
@@ -1092,9 +1242,11 @@ test "approveAll matches official permission semantics" {
 }
 
 test "default join permission handler leaves requests pending" {
+    var request_id = "p1".*;
+    var request_json = "{}".*;
     const request = PermissionRequested{
-        .request_id = @constCast("p1"),
-        .permission_request_json = @constCast("{}"),
+        .request_id = &request_id,
+        .permission_request_json = &request_json,
     };
     try std.testing.expectEqual(
         PermissionDecision.no_result,

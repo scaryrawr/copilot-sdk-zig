@@ -33,7 +33,9 @@ pub fn main(init: std.process.Init) !void {
         .model = "gpt-5.6-luna",
         .tools = &.{weather_tool},
     });
-    defer session.disconnect() catch {};
+    defer session.disconnect() catch |err| {
+        std.log.err("session cleanup failed: {s}", .{@errorName(err)});
+    };
 
     const message_id = try session.send(.{
         .prompt = "Use get_weather to check the weather in Seattle, then summarize it.",
