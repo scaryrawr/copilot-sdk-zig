@@ -1,12 +1,38 @@
+const std = @import("std");
+
 pub const json_rpc = @import("json_rpc.zig");
 pub const client = @import("client.zig");
+const client_admin = @import("client_admin.zig");
 pub const session = @import("session.zig");
 pub const extensibility = @import("extensibility.zig");
 pub const models = @import("models.zig");
 pub const runtime = @import("runtime.zig");
+const errors = @import("errors.zig");
 const provider = @import("provider.zig");
 
 pub const Client = client.Client;
+pub const DetailedError = errors.DetailedError;
+pub const DetailedResult = errors.DetailedResult;
+pub const Failure = errors.Failure;
+pub const FailureDetail = errors.FailureDetail;
+pub const Cause = errors.Cause;
+pub const ProcessFailure = errors.ProcessFailure;
+pub const ProcessExit = errors.ProcessExit;
+pub const ClientFailure = errors.ClientFailure;
+pub const ClientOperation = errors.ClientOperation;
+pub const SessionOperation = errors.SessionOperation;
+pub const ProtocolFailure = errors.ProtocolFailure;
+pub const SdkError = errors.SdkError;
+pub const EnvelopeViolation = errors.EnvelopeViolation;
+pub const ProtocolMismatch = errors.ProtocolMismatch;
+pub const RpcFailure = errors.RpcFailure;
+pub const RpcOperationContext = errors.RpcOperationContext;
+pub const SessionFailure = errors.SessionFailure;
+pub const SessionAgentFailure = errors.SessionAgentFailure;
+pub const QueueFailure = errors.QueueFailure;
+pub const PermissionFailure = errors.PermissionFailure;
+pub const ToolFailure = errors.ToolFailure;
+pub const ShutdownFailure = errors.ShutdownFailure;
 pub const ClientInfo = client.ClientInfo;
 pub const ClientOptions = client.ClientOptions;
 pub const RuntimeConnection = runtime.RuntimeConnection;
@@ -39,6 +65,20 @@ pub const SessionFilesystemSqliteTransactionError = runtime.SessionFilesystemSql
 pub const SessionFilesystemSqliteTransactionResult = runtime.SessionFilesystemSqliteTransactionResult;
 pub const RpcHandler = client.RpcHandler;
 pub const Session = client.Session;
+pub const PingResponse = client_admin.PingResponse;
+pub const ClientStatus = client_admin.ClientStatus;
+pub const AuthStatus = client_admin.AuthStatus;
+pub const SessionId = client_admin.SessionId;
+pub const SessionListFilter = client_admin.SessionListFilter;
+pub const SessionContext = client_admin.SessionContext;
+pub const SessionMetadata = client_admin.SessionMetadata;
+pub const SessionCatalog = client_admin.SessionCatalog;
+pub const SessionLifecycleType = client_admin.SessionLifecycleType;
+pub const SessionLifecycleMetadata = client_admin.SessionLifecycleMetadata;
+pub const SessionLifecycleEvent = client_admin.SessionLifecycleEvent;
+pub const SessionLifecycleOverflow = client_admin.SessionLifecycleOverflow;
+pub const SessionLifecycleDelivery = client_admin.SessionLifecycleDelivery;
+pub const SessionEventHistory = session.SessionEventHistory;
 pub const AbortResult = session.AbortResult;
 pub const AutoTier = session.AutoTier;
 pub const AutoTierSwitchResult = session.AutoTierSwitchResult;
@@ -158,12 +198,13 @@ pub const ModelWarningText = models.WarningText;
 pub const ModelMessage = models.Message;
 pub const ModelAdaptiveThinking = models.AdaptiveThinking;
 
-test {
+test "root declarations compile" {
     _ = json_rpc;
     _ = client;
     _ = session;
     _ = models;
     _ = runtime;
+    _ = errors;
     _ = provider;
     _ = extensibility;
     _ = CustomAgentConfig;
@@ -178,4 +219,11 @@ test {
     _ = NamedProviderConfig;
     _ = ProviderModelConfig;
     _ = Attachment;
+}
+
+test "parity census root SdkError export" {
+    const sdk_error: SdkError = error.ProtocolFailure;
+    const error_tag_fn: *const fn (*const Failure) SdkError = &Failure.errorTag;
+    try std.testing.expectEqual(errors.SdkError, @TypeOf(sdk_error));
+    _ = error_tag_fn;
 }

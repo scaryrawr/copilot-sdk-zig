@@ -63,6 +63,34 @@ const weather_tool = schema.defineTool(WeatherArguments, .{
 });
 ```
 
+## Client administration
+
+`Client` has typed methods for health, status, authentication, session catalog,
+session deletion, and foreground selection. Each method also has a `Detailed`
+form.
+
+```zig
+var pong = try client.ping("health check");
+defer pong.deinit();
+
+var status = try client.getStatus();
+defer status.deinit();
+
+var auth = try client.getAuthStatus();
+defer auth.deinit();
+
+var catalog = try client.listSessions(.{
+    .repository = "scaryrawr/copilot-sdk-zig",
+    .branch = "main",
+});
+defer catalog.deinit();
+```
+
+Input strings are borrowed until the call returns. Administration results own
+their strings and slices. Call `deinit` once on each owned result. Moving a
+result transfers cleanup responsibility. Copying a result does not copy its
+owned memory.
+
 ## Send a prompt
 
 Pass a `std.Io` implementation to `Client.init`. With default options, the
@@ -79,7 +107,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
     defer client.deinit();
 
     const session = try client.createSession(.{ .streaming = true });
-    defer session.disconnect() catch {};
+    defer session.disconnect() catch |err| {
+        std.log.err("session cleanup failed: {s}", .{@errorName(err)});
+    };
 
     const message_id = try session.send(.{ .prompt = "Explain this repository." });
     defer allocator.free(message_id);
@@ -359,6 +389,64 @@ if (try session.workspacePath()) |workspace_path| {
 }
 ```
 
+## Read session history and lifecycle events
+
+`Session.getEvents` returns the persisted event history in transport order. The
+history owns its event slice and each `SessionEvent`.
+
+```zig
+var history = try session.getEvents();
+defer history.deinit();
+```
+
+`Client.nextLifecycleEvent` blocks until a client-wide lifecycle delivery is
+available. The SDK uses a pull API instead of callbacks so user code cannot
+reenter the single transport reader.
+
+```zig
+var delivery = try client.nextLifecycleEvent();
+defer delivery.deinit();
+
+switch (delivery) {
+    .event => |event| {
+        _ = event;
+    },
+    .overflow => |overflow| {
+        std.log.warn("dropped {d} lifecycle events", .{overflow.dropped_count});
+    },
+}
+```
+
+Lifecycle deliveries own their strings. Unknown lifecycle types are successful
+`.unknown` events. An `.overflow` delivery reports a contiguous dropped suffix.
+It does not close the client. Rebuild the catalog and foreground state after an
+overflow.
+
+## Inspect detailed failures
+
+Methods such as `send` return native Zig errors directly. Use the corresponding
+method whose name ends in `Detailed` when you also need the remote code, JSON
+data, identifiers, or process exit.
+
+```zig
+const joined = try client.resumeSessionDetailed("missing-session", .{});
+const session = switch (joined) {
+    .success => |value| value,
+    .failure => |failure_value| {
+        var failure = failure_value;
+        defer failure.deinit();
+        std.log.err("{s}", .{failure.message() orelse @errorName(failure.native_error)});
+        return;
+    },
+};
+_ = session;
+```
+
+The `Failure` variant of `DetailedResult(T)` stores its allocator and owns every
+string in its detail. You can inspect the failure after the client has been
+deinitialized. Call `Failure.deinit()` when you finish. The `Success` variant
+follows the ownership contract of the underlying method.
+
 ## Configure extensions
 
 Trusted built-in plugins are installed transactionally after `connect` and
@@ -408,15 +496,16 @@ host-owned OAuth token-store callbacks are not present in the pinned contract;
 see `sync/extensibility-contract.json` for the reproducible compatibility
 classification.
 
-Use `SessionConfig.available_tools` and `SessionConfig.excluded_tools` to
-constrain the model-visible tool set for each created or resumed session. Tool
-filters use source-qualified names such as `builtin:ask_user`, `custom:*`, and
+Use `CreateSessionConfig.available_tools` and
+`ResumeSessionConfig.available_tools`, with their matching `excluded_tools`
+fields, to constrain the model-visible tool set. Tool filters use
+source-qualified names such as `builtin:ask_user`, `custom:*`, and
 `mcp:server-tool`; a bare `*` does not match all sources. The SDK sends
 `toolFilterPrecedence: "excluded"` so an exclusion still applies when both
 lists are present. Process-level CLI arguments do not replace these
 session-level fields in headless SDK mode.
 
-Set `.enable_config_discovery = true` when creating or joining a session to
+Set `.enable_config_discovery = true` when creating or resuming a session to
 discover MCP server configurations (`.mcp.json` and `.vscode/mcp.json`) and
 skill directories from the working directory. Treat enabling discovery as a
 trust decision because discovered MCP servers may be started by the session.
@@ -458,7 +547,8 @@ const session = try client.createSession(.{
     .agent = .{ .custom_agent = "reviewer" },
     .excluded_builtin_agents = &.{"explore"},
 });
-defer session.disconnect() catch {};
+defer session.disconnect() catch |err|
+    std.log.err("failed to disconnect session: {s}", .{@errorName(err)});
 ```
 
 A null custom-agent `tools` field inherits the session tools. An empty slice
@@ -551,8 +641,9 @@ client is deinitialized. A dynamic token takes precedence over a static bearer
 token and an API key. Singular providers always use the callback route
 `"default"`. `provider_name` only supplies provider attribution.
 
-Use `SessionConfig.providers` and `SessionConfig.models` to add named provider
-connections and selectable models:
+Use `CreateSessionConfig.providers` and `CreateSessionConfig.models` to add
+named provider connections and selectable models. The same fields are
+available on `ResumeSessionConfig`:
 
 ```zig
 const session = try client.createSession(.{
@@ -615,8 +706,9 @@ has `vision`, `reasoningEffort`, and `adaptive_thinking`; `ModelLimitsOverride`
 has `max_prompt_tokens`, `max_output_tokens`, `max_context_window_tokens`, and
 optional `vision`. `ModelVisionLimitsOverride` has optional
 `supported_media_types`, `max_prompt_images`, and `max_prompt_image_size`.
-When supplied, `max_prompt_images` must be at least 1; both session APIs return
-`error.InvalidMaxPromptImages` for zero before sending an RPC.
+When supplied, `max_prompt_images` must be at least 1. Both session APIs return
+`error.InvalidMaxPromptImages` for zero before sending an RPC. Their detailed
+counterparts return the same native error in `Failure`.
 Capability overrides require a runtime that supports `modelCapabilities`; they
 do not add image support to a text-only model.
 
@@ -728,22 +820,20 @@ responding manually:
 
 ```zig
 .permission_requested => |request| switch (request.automatic_handling) {
-    .handled => {}, // The automatic response succeeded; do not respond again.
+    .handled => {},
     .not_configured, .no_result, .handler_failed => {
         try handlePermissionManually(session, request);
     },
     .delivery_failed => |err| {
-        // Delivery may be indeterminate. Surface or reconcile the failure
-        // instead of blindly sending a duplicate response.
         std.log.err("permission response failed: {s}", .{@errorName(err)});
     },
 },
 ```
 
 `.no_result` preserves the request for manual handling.
-`.handler_failed` also occurs before any response is attempted and carries the
-handler error. `.delivery_failed` carries response preparation, transport, RPC,
-or rejection errors; it does not promise that retrying is safe.
+`.handler_failed` occurs before the SDK attempts a response and carries the
+native handler cause. `.delivery_failed` carries the native delivery error. Do
+not retry a delivery failure without reconciling the request state.
 
 ## Examples
 
@@ -841,7 +931,7 @@ returns `error.EventQueueFull` when callers leave other sessions undrained.
 Run the checks from the repository root:
 
 ```sh
-zig fmt --check build.zig src examples
+zig fmt --check build.zig src examples scripts/parity_census_runner.zig
 zig build test
 zig build
 for example in basic custom-tools external-tools permissions prompt-customization send-and-wait join-session; do

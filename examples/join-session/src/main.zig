@@ -44,7 +44,11 @@ pub fn main(init: std.process.Init) !void {
     }
 
     while (true) {
-        var event = session.nextEvent() catch break;
+        var event = session.nextEvent() catch |err| {
+            std.log.err("event stream failed: {s}", .{@errorName(err)});
+            return err;
+        };
         defer event.deinit(init.gpa);
+        if (event == .session_idle) break;
     }
 }
