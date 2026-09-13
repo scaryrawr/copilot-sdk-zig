@@ -10183,6 +10183,16 @@ pub const Session = struct {
         if (self.client.findEventLog(resolved.id, self.generation) != null) {
             var lease = try self.client.acquireEventLog(resolved.id, self.generation);
             defer lease.deinit();
+            try self.client.ensurePump();
+            if (self.client.hasQueuedSessionEvent(resolved.id)) {
+                return switch (try self.nextEventDeliveryImpl(.legacy)) {
+                    .success => |delivery_value| {
+                        var delivery = delivery_value;
+                        return delivery.intoEvent(self.client.allocator);
+                    },
+                    .failure => |failure| failure.native_error,
+                };
+            }
             const event = try self.client.nextSubscriberEvent(
                 lease.log,
                 lease.log.compatibilityToken(),
@@ -10209,6 +10219,16 @@ pub const Session = struct {
         }
         var lease = try self.client.ensureEventLogLease(resolved.id, self.generation);
         defer lease.deinit();
+        try self.client.ensurePump();
+        if (self.client.hasQueuedSessionEvent(resolved.id)) {
+            return switch (try self.nextEventDeliveryImpl(.legacy)) {
+                .success => |delivery_value| {
+                    var delivery = delivery_value;
+                    return delivery.intoEvent(self.client.allocator);
+                },
+                .failure => |failure| failure.native_error,
+            };
+        }
         return self.client.nextSubscriberEvent(
             lease.log,
             lease.log.compatibilityToken(),
@@ -10248,6 +10268,25 @@ pub const Session = struct {
                 err,
             ) };
             defer lease.deinit();
+            self.client.ensurePump() catch |err| return .{ .failure = try recordClientIo(
+                self.client.allocator,
+                .read,
+                err,
+            ) };
+            if (self.client.hasQueuedSessionEvent(resolved.id)) {
+                return switch (try self.nextEventDeliveryImpl(.detailed)) {
+                    .success => |delivery_value| {
+                        var delivery = delivery_value;
+                        switch (delivery.event) {
+                            .session_error => return .{ .failure = try delivery.intoFailure(
+                                self.client.allocator,
+                            ) },
+                            else => return .{ .success = delivery.intoEvent(self.client.allocator) },
+                        }
+                    },
+                    .failure => |failure| .{ .failure = failure },
+                };
+            }
             var event = self.client.nextSubscriberEvent(
                 lease.log,
                 lease.log.compatibilityToken(),
@@ -10303,6 +10342,25 @@ pub const Session = struct {
             err,
         ) };
         defer lease.deinit();
+        self.client.ensurePump() catch |err| return .{ .failure = try recordClientIo(
+            self.client.allocator,
+            .read,
+            err,
+        ) };
+        if (self.client.hasQueuedSessionEvent(resolved.id)) {
+            return switch (try self.nextEventDeliveryImpl(.detailed)) {
+                .success => |delivery_value| {
+                    var delivery = delivery_value;
+                    switch (delivery.event) {
+                        .session_error => return .{ .failure = try delivery.intoFailure(
+                            self.client.allocator,
+                        ) },
+                        else => return .{ .success = delivery.intoEvent(self.client.allocator) },
+                    }
+                },
+                .failure => |failure| .{ .failure = failure },
+            };
+        }
         var event = self.client.nextSubscriberEvent(
             lease.log,
             lease.log.compatibilityToken(),
