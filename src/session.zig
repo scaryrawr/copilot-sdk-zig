@@ -1,5 +1,6 @@
 const std = @import("std");
 const provider = @import("provider.zig");
+const runtime = @import("runtime.zig");
 const ModelCapabilitiesOverride = @import("models.zig").CapabilitiesOverride;
 const extensibility = @import("extensibility.zig");
 const event_payloads = @import("session_event_payloads.zig");
@@ -74,10 +75,44 @@ pub const GitHubMcpToolConfig = struct {
     disable_form_deferral: ?bool = null,
 };
 
+pub const LargeOutputConfig = struct {
+    enabled: ?bool = null,
+    max_size_bytes: ?u64 = null,
+    output_directory: ?[]const u8 = null,
+};
+
+pub const InfiniteSessionConfig = struct {
+    enabled: ?bool = null,
+    background_compaction_threshold: ?f64 = null,
+    buffer_exhaustion_threshold: ?f64 = null,
+};
+
+pub const MemoryConfiguration = struct {
+    enabled: bool,
+};
+
+pub const EmbeddingCacheStorage = enum {
+    persistent,
+    in_memory,
+};
+
+pub const CapiSessionOptions = struct {
+    auto_tier: ?AutoTier = null,
+    enable_websocket_responses: ?bool = null,
+};
+
 pub const RemoteSessionMode = enum {
     off,
     @"export",
     on,
+
+    pub fn wireValue(self: RemoteSessionMode) []const u8 {
+        return switch (self) {
+            .off => "off",
+            .@"export" => "export",
+            .on => "on",
+        };
+    }
 };
 
 pub const CloudSessionRepository = struct {
@@ -102,20 +137,9 @@ pub const ExpFlagValue = union(enum) {
     null,
 };
 
-pub const ExpParameter = struct {
-    name: []const u8,
-    value: ExpFlagValue,
-};
-
-pub const ExpFlight = struct {
-    name: []const u8,
-    value: []const u8,
-};
-
-pub const ExpConfigEntry = struct {
-    id: []const u8,
-    parameters: []const ExpParameter,
-};
+pub const ExpParameter = struct { name: []const u8, value: ExpFlagValue };
+pub const ExpFlight = struct { name: []const u8, value: []const u8 };
+pub const ExpConfigEntry = struct { id: []const u8, parameters: []const ExpParameter };
 
 pub const CopilotExpAssignmentResponse = struct {
     features: []const []const u8,
@@ -127,22 +151,12 @@ pub const CopilotExpAssignmentResponse = struct {
     assignment_context: []const u8,
 };
 
-pub const GitHubTokenReason = enum {
-    initial,
-    refresh,
-};
-
-pub const GitHubTokenRequest = struct {
-    host: []const u8,
-    session_id: ?[]const u8,
-    reason: GitHubTokenReason,
-};
-
+pub const GitHubTokenReason = enum { initial, refresh };
+pub const GitHubTokenRequest = struct { host: []const u8, session_id: ?[]const u8, reason: GitHubTokenReason };
 pub const GitHubToken = struct {
     access_token: []u8,
     token_type: ?[]u8 = null,
     expires_in_seconds: u64,
-
     pub fn deinitSecure(self: *GitHubToken, allocator: std.mem.Allocator) void {
         @memset(self.access_token, 0);
         allocator.free(self.access_token);
@@ -153,34 +167,15 @@ pub const GitHubToken = struct {
         self.* = undefined;
     }
 };
-
-pub const GitHubTokenResult = union(enum) {
-    token: GitHubToken,
-    cancelled,
-};
-
-pub const GitHubTokenCallback = *const fn (
-    allocator: std.mem.Allocator,
-    request: GitHubTokenRequest,
-    context: ?*anyopaque,
-) anyerror!GitHubTokenResult;
-
-pub const GitHubTokenProvider = struct {
-    callback: GitHubTokenCallback,
-    context: ?*anyopaque = null,
-};
-
+pub const GitHubTokenResult = union(enum) { token: GitHubToken, cancelled };
+pub const GitHubTokenCallback = *const fn (std.mem.Allocator, GitHubTokenRequest, ?*anyopaque) anyerror!GitHubTokenResult;
+pub const GitHubTokenProvider = struct { callback: GitHubTokenCallback, context: ?*anyopaque = null };
 pub const GitHubTokenProviderArgs = GitHubTokenRequest;
 pub const GitHubTokenProviderResult = GitHubTokenResult;
 pub const GitHubTokenAcquireReason = GitHubTokenReason;
 pub const GitHubTokenAcquireResult = GitHubTokenResult;
 
-pub const ElicitationAction = enum {
-    accept,
-    decline,
-    cancel,
-};
-
+pub const ElicitationAction = enum { accept, decline, cancel };
 pub const ElicitationRequest = struct {
     session_id: []const u8,
     message: []const u8,
@@ -189,11 +184,9 @@ pub const ElicitationRequest = struct {
     elicitation_source: ?[]const u8 = null,
     url: ?[]const u8 = null,
 };
-
 pub const ElicitationResult = struct {
     action: ElicitationAction,
     content_json: ?[]u8 = null,
-
     pub fn deinit(self: *ElicitationResult, allocator: std.mem.Allocator) void {
         if (self.content_json) |value| {
             @memset(value, 0);
@@ -202,85 +195,23 @@ pub const ElicitationResult = struct {
         self.* = undefined;
     }
 };
-
-pub const ElicitationHandler = *const fn (
-    allocator: std.mem.Allocator,
-    request: ElicitationRequest,
-    context: ?*anyopaque,
-) anyerror!ElicitationResult;
-
-pub const ExitPlanModeAction = enum {
-    exit_only,
-    interactive,
-    autopilot,
-    autopilot_fleet,
-};
-
-pub const ExitPlanModeRequest = struct {
-    session_id: []const u8,
-    summary: []const u8,
-    plan_content: ?[]const u8,
-    actions: []const ExitPlanModeAction,
-    recommended_action: ExitPlanModeAction,
-};
-
-pub const ExitPlanModeResult = struct {
-    approved: bool,
-    selected_action: ?ExitPlanModeAction = null,
-    feedback: ?[]const u8 = null,
-};
-
-pub const ExitPlanModeHandler = *const fn (
-    request: ExitPlanModeRequest,
-    context: ?*anyopaque,
-) anyerror!ExitPlanModeResult;
-
-pub const AutoModeSwitchRequest = struct {
-    session_id: []const u8,
-    error_code: ?[]const u8 = null,
-    retry_after_seconds: ?u64 = null,
-};
-
-pub const AutoModeSwitchResponse = enum {
-    yes,
-    yes_always,
-    no,
-};
-
-pub const AutoModeSwitchHandler = *const fn (
-    request: AutoModeSwitchRequest,
-    context: ?*anyopaque,
-) anyerror!AutoModeSwitchResponse;
-
-pub const UiInputFormat = enum {
-    email,
-    uri,
-    date,
-    @"date-time",
-};
-
-pub const UiInputOptions = struct {
-    title: ?[]const u8 = null,
-    description: ?[]const u8 = null,
-    min_length: ?u64 = null,
-    max_length: ?u64 = null,
-    format: ?UiInputFormat = null,
-    default: ?[]const u8 = null,
-};
-
-pub const UiElicitationParams = struct {
-    message: []const u8,
-    requested_schema_json: []const u8,
-};
-
+pub const ElicitationHandler = *const fn (std.mem.Allocator, ElicitationRequest, ?*anyopaque) anyerror!ElicitationResult;
+pub const ExitPlanModeAction = enum { exit_only, interactive, autopilot, autopilot_fleet };
+pub const ExitPlanModeRequest = struct { session_id: []const u8, summary: []const u8, plan_content: ?[]const u8, actions: []const ExitPlanModeAction, recommended_action: ExitPlanModeAction };
+pub const ExitPlanModeResult = struct { approved: bool, selected_action: ?ExitPlanModeAction = null, feedback: ?[]const u8 = null };
+pub const ExitPlanModeHandler = *const fn (ExitPlanModeRequest, ?*anyopaque) anyerror!ExitPlanModeResult;
+pub const AutoModeSwitchRequest = struct { session_id: []const u8, error_code: ?[]const u8 = null, retry_after_seconds: ?u64 = null };
+pub const AutoModeSwitchResponse = enum { yes, yes_always, no };
+pub const AutoModeSwitchHandler = *const fn (AutoModeSwitchRequest, ?*anyopaque) anyerror!AutoModeSwitchResponse;
+pub const UiInputFormat = enum { email, uri, date, @"date-time" };
+pub const UiInputOptions = struct { title: ?[]const u8 = null, description: ?[]const u8 = null, min_length: ?u64 = null, max_length: ?u64 = null, format: ?UiInputFormat = null, default: ?[]const u8 = null };
+pub const UiElicitationParams = struct { message: []const u8, requested_schema_json: []const u8 };
 pub const ElicitationContext = ElicitationRequest;
 pub const ElicitationParams = UiElicitationParams;
-
 pub const UiElicitationResult = struct {
     allocator: std.mem.Allocator,
     action: ElicitationAction,
     content_json: ?[]u8 = null,
-
     pub fn deinit(self: *UiElicitationResult) void {
         if (self.content_json) |value| {
             @memset(value, 0);
@@ -339,10 +270,28 @@ pub const CreateSessionConfig = struct {
     auto_mode_switch_context: ?*anyopaque = null,
     git_hub_token: ?[]const u8 = null,
     git_hub_token_provider: ?GitHubTokenProvider = null,
-    remote_session: ?RemoteSessionMode = null,
     feature_flags: ?[]const FeatureFlag = null,
     exp_assignments: ?CopilotExpAssignmentResponse = null,
+    remote_session: ?RemoteSessionMode = null,
+    create_session_filesystem_provider: ?runtime.SessionFilesystemProviderFactory = null,
     extensions: extensibility.CreateExtensions = .{},
+    client_name: ?[]const u8 = null,
+    reasoning_effort: ?ReasoningEffort = null,
+    reasoning_summary: ?ReasoningSummary = null,
+    enable_experimental_mode: ?bool = null,
+    context_tier: ?ContextTier = null,
+    large_output: ?LargeOutputConfig = null,
+    config_directory: ?[]const u8 = null,
+    capi: ?CapiSessionOptions = null,
+    additional_directories: ?[]const []const u8 = null,
+    infinite_sessions: ?InfiniteSessionConfig = null,
+    memory: ?MemoryConfiguration = null,
+    skip_embedding_retrieval: ?bool = null,
+    embedding_cache_storage: ?EmbeddingCacheStorage = null,
+    organization_custom_instructions: ?[]const u8 = null,
+    enable_file_hooks: ?bool = null,
+    enable_host_git_operations: ?bool = null,
+    enable_session_store: ?bool = null,
 };
 
 pub const ResumeSessionConfig = struct {
@@ -392,12 +341,30 @@ pub const ResumeSessionConfig = struct {
     auto_mode_switch_context: ?*anyopaque = null,
     git_hub_token: ?[]const u8 = null,
     git_hub_token_provider: ?GitHubTokenProvider = null,
-    remote_session: ?RemoteSessionMode = null,
     feature_flags: ?[]const FeatureFlag = null,
     exp_assignments: ?CopilotExpAssignmentResponse = null,
     suppress_resume_event: bool = false,
     continue_pending_work: bool = false,
+    remote_session: ?RemoteSessionMode = null,
+    create_session_filesystem_provider: ?runtime.SessionFilesystemProviderFactory = null,
     extensions: extensibility.ResumeExtensions = .{},
+    client_name: ?[]const u8 = null,
+    reasoning_effort: ?ReasoningEffort = null,
+    reasoning_summary: ?ReasoningSummary = null,
+    enable_experimental_mode: ?bool = null,
+    context_tier: ?ContextTier = null,
+    large_output: ?LargeOutputConfig = null,
+    config_directory: ?[]const u8 = null,
+    capi: ?CapiSessionOptions = null,
+    additional_directories: ?[]const []const u8 = null,
+    infinite_sessions: ?InfiniteSessionConfig = null,
+    memory: ?MemoryConfiguration = null,
+    skip_embedding_retrieval: ?bool = null,
+    embedding_cache_storage: ?EmbeddingCacheStorage = null,
+    organization_custom_instructions: ?[]const u8 = null,
+    enable_file_hooks: ?bool = null,
+    enable_host_git_operations: ?bool = null,
+    enable_session_store: ?bool = null,
 };
 
 pub const JoinSessionConfig = struct {
@@ -447,44 +414,31 @@ pub const JoinSessionConfig = struct {
     auto_mode_switch_context: ?*anyopaque = null,
     git_hub_token: ?[]const u8 = null,
     git_hub_token_provider: ?GitHubTokenProvider = null,
-    remote_session: ?RemoteSessionMode = null,
     feature_flags: ?[]const FeatureFlag = null,
     exp_assignments: ?CopilotExpAssignmentResponse = null,
     suppress_resume_event: bool = true,
     continue_pending_work: bool = false,
+    remote_session: ?RemoteSessionMode = null,
+    create_session_filesystem_provider: ?runtime.SessionFilesystemProviderFactory = null,
     extensions: extensibility.JoinExtensions = .{},
+    client_name: ?[]const u8 = null,
+    reasoning_effort: ?ReasoningEffort = null,
+    reasoning_summary: ?ReasoningSummary = null,
+    enable_experimental_mode: ?bool = null,
+    context_tier: ?ContextTier = null,
+    large_output: ?LargeOutputConfig = null,
+    config_directory: ?[]const u8 = null,
+    capi: ?CapiSessionOptions = null,
+    additional_directories: ?[]const []const u8 = null,
+    infinite_sessions: ?InfiniteSessionConfig = null,
+    memory: ?MemoryConfiguration = null,
+    skip_embedding_retrieval: ?bool = null,
+    embedding_cache_storage: ?EmbeddingCacheStorage = null,
+    organization_custom_instructions: ?[]const u8 = null,
+    enable_file_hooks: ?bool = null,
+    enable_host_git_operations: ?bool = null,
+    enable_session_store: ?bool = null,
 };
-
-test "stable session configuration applicability matches public lifecycle types" {
-    const shared_fields = [_][]const u8{
-        "commands",
-        "tool_search",
-        "ask_user_variant",
-        "on_elicitation_request",
-        "github_mcp_tool_config",
-        "on_exit_plan_mode_request",
-        "on_auto_mode_switch_request",
-        "git_hub_token",
-        "git_hub_token_provider",
-        "remote_session",
-        "enable_session_telemetry",
-        "enable_file_change_tracking",
-        "coauthor_enabled",
-        "manage_schedule_enabled",
-        "include_subagent_streaming_events",
-        "feature_flags",
-        "exp_assignments",
-    };
-    inline for (shared_fields) |field| {
-        try std.testing.expect(@hasField(CreateSessionConfig, field));
-        try std.testing.expect(@hasField(ResumeSessionConfig, field));
-        try std.testing.expect(@hasField(JoinSessionConfig, field));
-    }
-    try std.testing.expect(@hasField(CreateSessionConfig, "cloud"));
-    try std.testing.expect(!@hasField(ResumeSessionConfig, "cloud"));
-    try std.testing.expect(!@hasField(JoinSessionConfig, "cloud"));
-    try std.testing.expect(!@hasField(JoinSessionConfig, "session_id"));
-}
 
 /// Compatibility alias for callers constructing create-session options.
 /// Use `CreateSessionConfig` in new code.
@@ -872,7 +826,116 @@ pub const RawEvent = event_payloads.RawEvent;
 pub const UnknownEvent = event_payloads.UnknownEvent;
 pub const SessionEvent = session_events.SessionEvent;
 pub const SessionEventTag = session_events.SessionEventTag;
+
+pub const SessionEventHistory = struct {
+    allocator: std.mem.Allocator,
+    events: []SessionEvent,
+
+    pub fn deinit(self: *SessionEventHistory) void {
+        for (self.events) |*event| event.deinit(self.allocator);
+        self.allocator.free(self.events);
+        self.* = undefined;
+    }
+};
 pub const parseEvent = session_events.parseEvent;
+
+pub const ClassifiedParseError = error{
+    MissingField,
+    MalformedFieldType,
+    OutOfMemory,
+};
+
+fn classifyRequiredString(
+    object: std.json.ObjectMap,
+    name: []const u8,
+) ClassifiedParseError!void {
+    return switch (object.get(name) orelse return error.MissingField) {
+        .string => {},
+        else => error.MalformedFieldType,
+    };
+}
+
+fn classifyOptionalString(
+    object: std.json.ObjectMap,
+    name: []const u8,
+) ClassifiedParseError!void {
+    return switch (object.get(name) orelse return) {
+        .string, .null => {},
+        else => error.MalformedFieldType,
+    };
+}
+
+fn classifyOptionalBool(
+    object: std.json.ObjectMap,
+    name: []const u8,
+) ClassifiedParseError!void {
+    return switch (object.get(name) orelse return) {
+        .bool, .null => {},
+        else => error.MalformedFieldType,
+    };
+}
+
+fn classifyFocusedEvent(value: std.json.Value) ClassifiedParseError!void {
+    const object = switch (value) {
+        .object => |object| object,
+        else => return error.MalformedFieldType,
+    };
+    try classifyRequiredString(object, "type");
+    const event_type = object.get("type").?.string;
+    const data_value: std.json.Value = object.get("data") orelse .{ .object = .empty };
+    const data = switch (data_value) {
+        .object => |data| data,
+        else => return error.MalformedFieldType,
+    };
+
+    if (std.mem.eql(u8, event_type, "assistant.message")) {
+        try classifyRequiredString(data, "content");
+        try classifyOptionalString(data, "messageId");
+    } else if (std.mem.eql(u8, event_type, "assistant.message_delta")) {
+        try classifyRequiredString(data, "deltaContent");
+        try classifyRequiredString(data, "messageId");
+    } else if (std.mem.eql(u8, event_type, "assistant.reasoning")) {
+        try classifyRequiredString(data, "reasoningId");
+        try classifyRequiredString(data, "content");
+        try classifyOptionalBool(data, "rte");
+    } else if (std.mem.eql(u8, event_type, "assistant.reasoning_delta")) {
+        try classifyRequiredString(data, "reasoningId");
+        try classifyRequiredString(data, "deltaContent");
+    } else if (std.mem.eql(u8, event_type, "session.idle")) {
+        try classifyOptionalBool(data, "aborted");
+        try classifyOptionalString(data, "mode");
+    } else if (std.mem.eql(u8, event_type, "session.error")) {
+        try classifyRequiredString(data, "message");
+    } else if (std.mem.eql(u8, event_type, "permission.requested")) {
+        try classifyRequiredString(data, "requestId");
+        const permission_request = data.get("permissionRequest") orelse
+            return error.MissingField;
+        const permission_object = switch (permission_request) {
+            .object => |permission_object| permission_object,
+            else => return error.MalformedFieldType,
+        };
+        if (permission_object.get("managedApprovalRequired")) |managed| {
+            if (managed != .bool) return error.MalformedFieldType;
+        }
+    } else if (std.mem.eql(u8, event_type, "external_tool.requested")) {
+        try classifyRequiredString(data, "requestId");
+        try classifyRequiredString(data, "toolCallId");
+        try classifyRequiredString(data, "toolName");
+    }
+}
+
+pub fn parseEventClassified(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) ClassifiedParseError!SessionEvent {
+    return session_events.parseEvent(allocator, value) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.InvalidSessionEvent => {
+            try classifyFocusedEvent(value);
+            return error.MalformedFieldType;
+        },
+    };
+}
 
 test "known and unknown events retain owned data" {
     const allocator = std.testing.allocator;
@@ -1390,10 +1453,58 @@ test "permission event rejects non-object request" {
     try std.testing.expectError(error.InvalidSessionEvent, parseEvent(allocator, parsed.value));
 }
 
+test "classified event parsing distinguishes missing fields from malformed types" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        json: []const u8,
+        classified_error: ClassifiedParseError,
+    }{
+        .{
+            .json =
+            \\{"type":"assistant.message","data":{}}
+            ,
+            .classified_error = error.MissingField,
+        },
+        .{
+            .json =
+            \\{"type":"assistant.message","data":{"content":7}}
+            ,
+            .classified_error = error.MalformedFieldType,
+        },
+        .{
+            .json =
+            \\{"type":"permission.requested","data":{"permissionRequest":{}}}
+            ,
+            .classified_error = error.MissingField,
+        },
+        .{
+            .json =
+            \\{"type":"permission.requested","data":{"requestId":7,"permissionRequest":{}}}
+            ,
+            .classified_error = error.MalformedFieldType,
+        },
+    };
+
+    for (cases) |case| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, case.json, .{});
+        defer parsed.deinit();
+        try std.testing.expectError(
+            case.classified_error,
+            parseEventClassified(allocator, parsed.value),
+        );
+        try std.testing.expectError(
+            error.InvalidSessionEvent,
+            parseEvent(allocator, parsed.value),
+        );
+    }
+}
+
 test "approveAll matches official permission semantics" {
+    var request_id_1 = "p1".*;
+    var request_json_1 = "{}".*;
     const ordinary = PermissionRequested{
-        .request_id = @constCast("p1"),
-        .permission_request_json = @constCast("{}"),
+        .request_id = &request_id_1,
+        .permission_request_json = &request_json_1,
     };
     try std.testing.expectEqual(
         PermissionDecision.approve_once,
@@ -1403,9 +1514,11 @@ test "approveAll matches official permission semantics" {
         }, null),
     );
 
+    var request_id_2 = "p2".*;
+    var request_json_2 = "{\"kind\":\"future-kind\"}".*;
     const unknown_kind = PermissionRequested{
-        .request_id = @constCast("p2"),
-        .permission_request_json = @constCast("{\"kind\":\"future-kind\"}"),
+        .request_id = &request_id_2,
+        .permission_request_json = &request_json_2,
     };
     try std.testing.expectEqual(
         PermissionDecision.approve_once,
@@ -1415,9 +1528,11 @@ test "approveAll matches official permission semantics" {
         }, null),
     );
 
+    var request_id_3 = "p3".*;
+    var request_json_3 = "{}".*;
     const managed = PermissionRequested{
-        .request_id = @constCast("p3"),
-        .permission_request_json = @constCast("{}"),
+        .request_id = &request_id_3,
+        .permission_request_json = &request_json_3,
         .managed_approval_required = true,
     };
     try std.testing.expectEqual(
@@ -1438,9 +1553,11 @@ test "approveAll matches official permission semantics" {
 }
 
 test "default join permission handler leaves requests pending" {
+    var request_id = "p1".*;
+    var request_json = "{}".*;
     const request = PermissionRequested{
-        .request_id = @constCast("p1"),
-        .permission_request_json = @constCast("{}"),
+        .request_id = &request_id,
+        .permission_request_json = &request_json,
     };
     try std.testing.expectEqual(
         PermissionDecision.no_result,

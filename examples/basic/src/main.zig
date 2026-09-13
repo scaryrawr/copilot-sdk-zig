@@ -27,7 +27,9 @@ pub fn main(init: std.process.Init) !void {
         .streaming = true,
         .on_permission_request = copilot.approveAll,
     });
-    defer session.disconnect() catch {};
+    defer session.disconnect() catch |err| {
+        std.log.err("session cleanup failed: {s}", .{@errorName(err)});
+    };
 
     const message_id = try session.send(.{ .prompt = "Explain this repository in one paragraph." });
     defer allocator.free(message_id);

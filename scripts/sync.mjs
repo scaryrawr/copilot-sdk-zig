@@ -17,6 +17,18 @@ import {
   writeSchemaSnapshot,
 } from "./schema-snapshot.mjs";
 import { generateSessionEvents } from "./generate-session-events.mjs";
+import {
+  exportedStringUnionValues,
+  inheritedInterfacePropertySignatures,
+  interfaceBase,
+  interfacePropertySignatures,
+  omitIntersectionAlias,
+  requireExactPropertySignatures,
+  requireSourceFragments,
+  sourceSection,
+  zigEnumValues,
+  zigStructFields,
+} from "./source-contract.mjs";
 
 const repository = "github/copilot-sdk";
 const ref = "main";
@@ -27,6 +39,8 @@ const schemaDirectory = join(vendorDirectory, "schemas");
 const metadataPath = join(vendorDirectory, "upstream.json");
 const generatedPath = join(root, "src", "protocol_version.zig");
 const zigSessionSource = readFileSync(join(root, "src", "session.zig"), "utf8");
+const zigClientSource = readFileSync(join(root, "src", "client.zig"), "utf8");
+const zigRuntimeSource = readFileSync(join(root, "src", "runtime.zig"), "utf8");
 const compatibilityPath = join(root, "sync", "compatibility.json");
 const publicRpcSurfacePath = join(root, "sync", "public-rpc-surface.json");
 const extensibilityContractPath = join(root, "sync", "extensibility-contract.json");
@@ -46,6 +60,182 @@ function digest(bytes) {
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+function parseTypeScript(source, owner) {
+  const parsed = ts.createSourceFile(
+    `${owner}.ts`,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  assert(parsed.parseDiagnostics.length === 0, `upstream ${owner} has TypeScript parse errors`);
+  return parsed;
+}
+
+function nodeName(node, sourceFile) {
+  if (!node.name) return null;
+  if (ts.isIdentifier(node.name) || ts.isStringLiteralLike(node.name)) return node.name.text;
+  return node.name.getText(sourceFile);
+}
+
+function findNamedNode(source, name, predicate, owner) {
+  const sourceFile = parseTypeScript(source, owner);
+  let found = null;
+  function visit(node) {
+    if (found === null && predicate(node) && nodeName(node, sourceFile) === name) found = node;
+    if (found === null) ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  assert(found !== null, `upstream ${owner} declaration is missing: ${name}`);
+  return { node: found, sourceFile };
+}
+
+function findFunctionLike(source, name, owner = name) {
+  return findNamedNode(
+    source,
+    name,
+    (node) => ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node),
+    owner,
+  );
+}
+
+function findTypeAlias(source, name, owner = name) {
+  return findNamedNode(source, name, ts.isTypeAliasDeclaration, owner);
+}
+
+function compactNode(node, sourceFile) {
+  return node.getText(sourceFile).replace(/\s+/g, "").replace(/;$/, "");
+}
+
+function requireAstNodes(root, sourceFile, fragments, owner) {
+  const available = new Set();
+  function visit(node) {
+    available.add(compactNode(node, sourceFile));
+    ts.forEachChild(node, visit);
+  }
+  visit(root);
+  for (const fragment of fragments) {
+    assert(
+      available.has(fragment.replace(/\s+/g, "").replace(/;$/, "")),
+      `upstream ${owner} AST is missing: ${fragment}`,
+    );
+  }
+}
+
+function requireStringLiterals(root, values, owner) {
+  const literals = new Set();
+  function visit(node) {
+    if (ts.isStringLiteralLike(node)) literals.add(node.text);
+    ts.forEachChild(node, visit);
+  }
+  visit(root);
+  for (const value of values) {
+    assert(literals.has(value), `upstream ${owner} string literal is missing: ${value}`);
+  }
+}
+
+function requireRegisteredStringArguments(root, sourceFile, values, owner) {
+  const registered = new Set();
+  function visit(node) {
+    if (ts.isCallExpression(node) && node.arguments.length > 0) {
+      const first = node.arguments[0];
+      if (ts.isStringLiteralLike(first)) registered.add(first.text);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(root);
+  for (const value of values) {
+    assert(registered.has(value), `upstream ${owner} registration is missing: ${value}`);
+  }
+}
+
+function requireCalls(root, sourceFile, callees, owner) {
+  const called = new Set();
+  function visit(node) {
+    if (ts.isCallExpression(node)) called.add(compactNode(node.expression, sourceFile));
+    ts.forEachChild(node, visit);
+  }
+  visit(root);
+  for (const callee of callees) {
+    assert(called.has(callee), `upstream ${owner} call is missing: ${callee}`);
+  }
+}
+
+function requireObjectAssignment(root, sourceFile, target, propertyName, callee, owner) {
+  let matched = false;
+  function visit(node) {
+    if (
+      !matched &&
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      compactNode(node.left, sourceFile) === target &&
+      ts.isObjectLiteralExpression(node.right)
+    ) {
+      const property = node.right.properties.find(
+        (candidate) =>
+          ts.isPropertyAssignment(candidate) &&
+          nodeName(candidate, sourceFile) === propertyName,
+      );
+      if (property && ts.isPropertyAssignment(property)) {
+        requireCalls(property.initializer, sourceFile, [callee], owner);
+        matched = true;
+      }
+    }
+    if (!matched) ts.forEachChild(node, visit);
+  }
+  visit(root);
+  assert(matched, `upstream ${owner} object assignment changed: ${target}.${propertyName}`);
+}
+
+function findSendRequestObject(root, sourceFile, method, owner) {
+  let found = null;
+  function visit(node) {
+    if (found === null && ts.isCallExpression(node) && node.arguments.length >= 2) {
+      const expression = node.expression;
+      const calledSendRequest =
+        (ts.isIdentifier(expression) && expression.text === "sendRequest") ||
+        (ts.isPropertyAccessExpression(expression) && expression.name.text === "sendRequest");
+      const methodArgument = node.arguments[0];
+      const paramsArgument = node.arguments[1];
+      if (
+        calledSendRequest &&
+        ts.isStringLiteralLike(methodArgument) &&
+        methodArgument.text === method &&
+        ts.isObjectLiteralExpression(paramsArgument)
+      ) {
+        found = paramsArgument;
+      }
+    }
+    if (found === null) ts.forEachChild(node, visit);
+  }
+  visit(root);
+  assert(found !== null, `upstream ${owner} does not call ${method} with an object request`);
+  return found;
+}
+
+function requestProperties(source, functionName, method, owner) {
+  const { node, sourceFile } = findFunctionLike(source, functionName, owner);
+  const object = findSendRequestObject(node, sourceFile, method, owner);
+  const properties = {};
+  const spreads = [];
+  for (const property of object.properties) {
+    if (ts.isSpreadAssignment(property)) {
+      spreads.push(`...${compactNode(property.expression, sourceFile)}`);
+      continue;
+    }
+    if (ts.isPropertyAssignment(property)) {
+      properties[nodeName(property, sourceFile)] = compactNode(property.initializer, sourceFile);
+      continue;
+    }
+    if (ts.isShorthandPropertyAssignment(property)) {
+      properties[property.name.text] = property.name.text;
+      continue;
+    }
+    throw new Error(`upstream ${owner} has an unsupported request property: ${property.getText(sourceFile)}`);
+  }
+  return { properties, spreads };
 }
 
 function validateMetadata(metadata) {
@@ -202,230 +392,6 @@ function expectedExtensibilityContract(upstreamCommit) {
   };
 }
 
-function sourceSection(source, startMarker, endMarker, owner) {
-  const start = source.indexOf(startMarker);
-  assert(start >= 0, `upstream ${owner} declaration is missing: ${startMarker}`);
-  const end = source.indexOf(endMarker, start + startMarker.length);
-  assert(end >= 0, `upstream ${owner} declaration has no boundary: ${endMarker}`);
-  return source.slice(start, end);
-}
-
-function parseTypeScript(source, owner) {
-  const parsed = ts.createSourceFile(
-    `${owner}.ts`,
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
-  assert(parsed.parseDiagnostics.length === 0, `upstream ${owner} has TypeScript parse errors`);
-  return parsed;
-}
-
-function nodeName(node, sourceFile) {
-  if (!node.name) return null;
-  if (ts.isIdentifier(node.name) || ts.isStringLiteralLike(node.name)) return node.name.text;
-  return node.name.getText(sourceFile);
-}
-
-function findNamedNode(source, name, predicate, owner) {
-  const sourceFile = parseTypeScript(source, owner);
-  let found = null;
-  function visit(node) {
-    if (found === null && predicate(node) && nodeName(node, sourceFile) === name) found = node;
-    if (found === null) ts.forEachChild(node, visit);
-  }
-  visit(sourceFile);
-  assert(found !== null, `upstream ${owner} declaration is missing: ${name}`);
-  return { node: found, sourceFile };
-}
-
-function findInterface(source, name, owner = name) {
-  return findNamedNode(source, name, ts.isInterfaceDeclaration, owner);
-}
-
-function findTypeAlias(source, name, owner = name) {
-  return findNamedNode(source, name, ts.isTypeAliasDeclaration, owner);
-}
-
-function findFunctionLike(source, name, owner = name) {
-  return findNamedNode(
-    source,
-    name,
-    (node) => ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node),
-    owner,
-  );
-}
-
-function findConstructor(source, owner) {
-  const sourceFile = parseTypeScript(source, owner);
-  let found = null;
-  function visit(node) {
-    if (found === null && ts.isConstructorDeclaration(node)) found = node;
-    if (found === null) ts.forEachChild(node, visit);
-  }
-  visit(sourceFile);
-  assert(found !== null, `upstream ${owner} constructor is missing`);
-  return { node: found, sourceFile };
-}
-
-function compactNode(node, sourceFile) {
-  return node.getText(sourceFile).replace(/\s+/g, "").replace(/;$/, "");
-}
-
-function requireAstNodes(root, sourceFile, fragments, owner) {
-  const available = new Set();
-  function visit(node) {
-    available.add(compactNode(node, sourceFile));
-    ts.forEachChild(node, visit);
-  }
-  visit(root);
-  for (const fragment of fragments) {
-    assert(
-      available.has(fragment.replace(/\s+/g, "").replace(/;$/, "")),
-      `upstream ${owner} AST is missing: ${fragment}`,
-    );
-  }
-}
-
-function requireStringLiterals(root, values, owner) {
-  const literals = new Set();
-  function visit(node) {
-    if (ts.isStringLiteralLike(node)) literals.add(node.text);
-    ts.forEachChild(node, visit);
-  }
-  visit(root);
-  for (const value of values) {
-    assert(literals.has(value), `upstream ${owner} string literal is missing: ${value}`);
-  }
-}
-
-function requireRegisteredStringArguments(root, sourceFile, values, owner) {
-  const registered = new Set();
-  function visit(node) {
-    if (ts.isCallExpression(node) && node.arguments.length > 0) {
-      const first = node.arguments[0];
-      if (ts.isStringLiteralLike(first)) registered.add(first.text);
-    }
-    ts.forEachChild(node, visit);
-  }
-  visit(root);
-  for (const value of values) {
-    assert(registered.has(value), `upstream ${owner} registration is missing: ${value}`);
-  }
-}
-
-function requireCalls(root, sourceFile, callees, owner) {
-  const called = new Set();
-  function visit(node) {
-    if (ts.isCallExpression(node)) called.add(compactNode(node.expression, sourceFile));
-    ts.forEachChild(node, visit);
-  }
-  visit(root);
-  for (const callee of callees) {
-    assert(called.has(callee), `upstream ${owner} call is missing: ${callee}`);
-  }
-}
-
-function requireObjectAssignment(root, sourceFile, target, propertyName, callee, owner) {
-  let matched = false;
-  function visit(node) {
-    if (
-      !matched &&
-      ts.isBinaryExpression(node) &&
-      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-      compactNode(node.left, sourceFile) === target &&
-      ts.isObjectLiteralExpression(node.right)
-    ) {
-      const property = node.right.properties.find(
-        (candidate) =>
-          ts.isPropertyAssignment(candidate) &&
-          nodeName(candidate, sourceFile) === propertyName,
-      );
-      if (property && ts.isPropertyAssignment(property)) {
-        requireCalls(property.initializer, sourceFile, [callee], owner);
-        matched = true;
-      }
-    }
-    if (!matched) ts.forEachChild(node, visit);
-  }
-  visit(root);
-  assert(matched, `upstream ${owner} object assignment changed: ${target}.${propertyName}`);
-}
-
-function findSendRequestObject(root, sourceFile, method, owner) {
-  let found = null;
-  function visit(node) {
-    if (found === null && ts.isCallExpression(node) && node.arguments.length >= 2) {
-      const expression = node.expression;
-      const calledSendRequest =
-        (ts.isIdentifier(expression) && expression.text === "sendRequest") ||
-        (ts.isPropertyAccessExpression(expression) && expression.name.text === "sendRequest");
-      const methodArgument = node.arguments[0];
-      const paramsArgument = node.arguments[1];
-      if (
-        calledSendRequest &&
-        ts.isStringLiteralLike(methodArgument) &&
-        methodArgument.text === method &&
-        ts.isObjectLiteralExpression(paramsArgument)
-      ) {
-        found = paramsArgument;
-      }
-    }
-    if (found === null) ts.forEachChild(node, visit);
-  }
-  visit(root);
-  assert(found !== null, `upstream ${owner} does not call ${method} with an object request`);
-  return found;
-}
-
-function requestProperties(source, functionName, method, owner) {
-  const { node, sourceFile } = findFunctionLike(source, functionName, owner);
-  const object = findSendRequestObject(node, sourceFile, method, owner);
-  const properties = {};
-  const spreads = [];
-  for (const property of object.properties) {
-    if (ts.isSpreadAssignment(property)) {
-      spreads.push(`...${compactNode(property.expression, sourceFile)}`);
-      continue;
-    }
-    if (ts.isPropertyAssignment(property)) {
-      properties[nodeName(property, sourceFile)] = compactNode(property.initializer, sourceFile);
-      continue;
-    }
-    if (ts.isShorthandPropertyAssignment(property)) {
-      properties[property.name.text] = property.name.text;
-      continue;
-    }
-    throw new Error(`upstream ${owner} has an unsupported request property: ${property.getText(sourceFile)}`);
-  }
-  return { properties, spreads };
-}
-
-function propertySignatures(members, sourceFile, owner) {
-  const result = {};
-  for (const member of members) {
-    assert(ts.isPropertySignature(member), `upstream ${owner} has a non-property member`);
-    const name = nodeName(member, sourceFile);
-    assert(name !== null && member.type, `upstream ${owner} has an unsupported property`);
-    result[name] =
-      `${member.questionToken ? "optional" : "required"}:${compactNode(member.type, sourceFile)}`;
-  }
-  return result;
-}
-
-function interfaceProperties(source, name, owner = name) {
-  const { node, sourceFile } = findInterface(source, name, owner);
-  return propertySignatures(node.members, sourceFile, owner);
-}
-
-function requireExactPropertySignatures(actual, expected, label) {
-  requireExactStrings(Object.keys(actual), Object.keys(expected), `${label} fields`);
-  for (const [name, signature] of Object.entries(expected)) {
-    assert(actual[name] === signature, `${label}.${name} changed`);
-  }
-}
-
 const expectedCustomAgentSourceContract = {
   customAgent: {
     name: "required:string",
@@ -472,59 +438,45 @@ const expectedCustomAgentSourceContract = {
   },
 };
 
-function interfaceBase(source, name) {
-  const { node, sourceFile } = findInterface(source, name);
-  const clauses = node.heritageClauses ?? [];
-  const bases = clauses
-    .filter((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword)
-    .flatMap((clause) => clause.types.map((type) => compactNode(type.expression, sourceFile)));
-  assert(bases.length === 1, `upstream ${name} inheritance changed`);
-  return bases[0];
-}
+const expectedStableSessionRuntimeFields = {
+  clientName: "optional:string",
+  reasoningEffort: "optional:ReasoningEffort",
+  reasoningSummary: "optional:ReasoningSummary",
+  enableExperimentalMode: "optional:boolean",
+  contextTier: "optional:ContextTier",
+  largeOutput: "optional:LargeToolOutputConfig",
+  configDirectory: "optional:string",
+  capi: "optional:CapiSessionOptions",
+  additionalDirectories: "optional:string[]",
+  infiniteSessions: "optional:InfiniteSessionConfig",
+  memory: "optional:MemoryConfiguration",
+  skipEmbeddingRetrieval: "optional:boolean",
+  embeddingCacheStorage: 'optional:"persistent"|"in-memory"',
+  organizationCustomInstructions: "optional:string",
+  enableFileHooks: "optional:boolean",
+  enableHostGitOperations: "optional:boolean",
+  enableSessionStore: "optional:boolean",
+};
 
-function omitIntersection(source, name) {
-  const { node, sourceFile } = findTypeAlias(source, name);
-  assert(ts.isIntersectionTypeNode(node.type), `upstream ${name} shape changed`);
-  const omit = node.type.types.find(
-    (type) =>
-      ts.isTypeReferenceNode(type) &&
-      ts.isIdentifier(type.typeName) &&
-      type.typeName.text === "Omit",
-  );
-  const additions = node.type.types.find(ts.isTypeLiteralNode);
-  assert(omit?.typeArguments?.length === 2 && additions, `upstream ${name} shape changed`);
-  const base = omit.typeArguments[0];
-  const excluded = omit.typeArguments[1];
-  assert(ts.isTypeReferenceNode(base), `upstream ${name} Omit base changed`);
-  const excludedTypes = ts.isUnionTypeNode(excluded) ? excluded.types : [excluded];
-  return {
-    base: compactNode(base.typeName, sourceFile),
-    excluded: excludedTypes.map((type) => {
-      assert(ts.isLiteralTypeNode(type) && ts.isStringLiteralLike(type.literal), `upstream ${name} Omit exclusions changed`);
-      return type.literal.text;
-    }),
-    properties: propertySignatures(additions.members, sourceFile, name),
-  };
-}
-
-function stringUnionValues(source, name) {
-  const { node } = findTypeAlias(source, name);
-  const types = ts.isUnionTypeNode(node.type) ? node.type.types : [node.type];
-  return types.map((type) => {
-    assert(ts.isLiteralTypeNode(type) && ts.isStringLiteralLike(type.literal), `upstream ${name} values changed`);
-    return type.literal.text;
-  });
-}
-
-function zigEnumValues(source, name) {
-  const declaration = sourceSection(
-    source,
-    `pub const ${name} = enum {`,
-    "};",
-    `Zig ${name}`,
-  );
-  return [...declaration.matchAll(/^\s*(\w+),\s*$/gm)].map((match) => match[1]);
-}
+const expectedStableSessionRuntimeZigFields = {
+  client_name: { type: "?[]const u8", default: "null" },
+  reasoning_effort: { type: "?ReasoningEffort", default: "null" },
+  reasoning_summary: { type: "?ReasoningSummary", default: "null" },
+  enable_experimental_mode: { type: "?bool", default: "null" },
+  context_tier: { type: "?ContextTier", default: "null" },
+  large_output: { type: "?LargeOutputConfig", default: "null" },
+  config_directory: { type: "?[]const u8", default: "null" },
+  capi: { type: "?CapiSessionOptions", default: "null" },
+  additional_directories: { type: "?[]const[]const u8", default: "null" },
+  infinite_sessions: { type: "?InfiniteSessionConfig", default: "null" },
+  memory: { type: "?MemoryConfiguration", default: "null" },
+  skip_embedding_retrieval: { type: "?bool", default: "null" },
+  embedding_cache_storage: { type: "?EmbeddingCacheStorage", default: "null" },
+  organization_custom_instructions: { type: "?[]const u8", default: "null" },
+  enable_file_hooks: { type: "?bool", default: "null" },
+  enable_host_git_operations: { type: "?bool", default: "null" },
+  enable_session_store: { type: "?bool", default: "null" },
+};
 
 function verifyCustomAgentSourceContract(
   clientSource,
@@ -534,18 +486,18 @@ function verifyCustomAgentSourceContract(
 ) {
   const expected = expectedCustomAgentSourceContract;
   requireExactPropertySignatures(
-    interfaceProperties(typesSource, "CustomAgentConfig"),
+    interfacePropertySignatures(typesSource, "CustomAgentConfig"),
     expected.customAgent,
     "CustomAgentConfig",
   );
 
   requireExactPropertySignatures(
-    interfaceProperties(typesSource, "DefaultAgentConfig"),
+    interfacePropertySignatures(typesSource, "DefaultAgentConfig"),
     expected.defaultAgent,
     "DefaultAgentConfig",
   );
   requireExactStrings(
-    stringUnionValues(typesSource, "ReasoningEffort"),
+    exportedStringUnionValues(typesSource, "ReasoningEffort"),
     expected.reasoningEffort,
     "upstream ReasoningEffort values",
   );
@@ -554,8 +506,7 @@ function verifyCustomAgentSourceContract(
     expected.reasoningEffort,
     "Zig ReasoningEffort values",
   );
-
-  const baseProperties = interfaceProperties(typesSource, "SessionConfigBase");
+  const baseProperties = interfacePropertySignatures(typesSource, "SessionConfigBase");
   for (const [name, signature] of Object.entries(expected.lifecycle.base)) {
     assert(baseProperties[name] === signature, `SessionConfigBase.${name} changed`);
   }
@@ -567,7 +518,7 @@ function verifyCustomAgentSourceContract(
     interfaceBase(typesSource, "ResumeSessionConfig") === expected.lifecycle.resumeExtends,
     "upstream ResumeSessionConfig inheritance changed",
   );
-  const joinShape = omitIntersection(extensionSource, "JoinSessionConfig");
+  const joinShape = omitIntersectionAlias(extensionSource, "JoinSessionConfig");
   assert(joinShape.base === expected.lifecycle.join.base, "JoinSessionConfig base changed");
   requireExactStrings(
     joinShape.excluded,
@@ -594,133 +545,264 @@ function verifyCustomAgentSourceContract(
     ],
     "toWireCustomAgents",
   );
-  for (const [owner, method] of [
-    ["createSession", "session.create"],
-    ["resumeSessionInternal", "session.resume"],
+  const create = sourceSection(
+    clientSource,
+    "    async createSession(",
+    "    async resumeSession(",
+    "createSession",
+  );
+  const resume = sourceSection(
+    clientSource,
+    "    private async resumeSessionInternal(",
+    "    async ping(",
+    "resumeSessionInternal",
+  );
+  for (const [owner, source] of [
+    ["createSession", create],
+    ["resumeSessionInternal", resume],
   ]) {
-    const request = requestProperties(clientSource, owner, method, owner);
-    for (const [name, value] of Object.entries(expected.lifecycle.lowering)) {
-      assert(
-        request.properties[name] === value.replace(/\s+/g, ""),
-        `upstream ${owner} ${name} lowering changed`,
-      );
-    }
+    requireSourceFragments(
+      source,
+      Object.entries(expected.lifecycle.lowering)
+        .map(([name, value]) => `${name}: ${value}`),
+      owner,
+    );
   }
 }
 
+function verifyStableSessionRuntimeSourceContract(clientSource, typesSource) {
+  const base = interfacePropertySignatures(typesSource, "SessionConfigBase");
+  for (const [name, signature] of Object.entries(expectedStableSessionRuntimeFields)) {
+    assert(base[name] === signature, `SessionConfigBase.${name} changed`);
+  }
+
+  for (const [name, fields] of [
+    ["LargeToolOutputConfig", {
+      enabled: "optional:boolean",
+      maxSizeBytes: "optional:number",
+      outputDirectory: "optional:string",
+    }],
+    ["InfiniteSessionConfig", {
+      enabled: "optional:boolean",
+      backgroundCompactionThreshold: "optional:number",
+      bufferExhaustionThreshold: "optional:number",
+    }],
+    ["MemoryConfiguration", { enabled: "required:boolean" }],
+    ["CapiSessionOptions", {
+      autoTier: "optional:AutoTier",
+      enableWebSocketResponses: "optional:boolean",
+    }],
+  ]) {
+    requireExactPropertySignatures(
+      interfacePropertySignatures(typesSource, name),
+      fields,
+      name,
+    );
+  }
+
+  for (const [owner, fields] of [
+    ["Zig CreateSessionConfig", zigStructFields(zigSessionSource, "CreateSessionConfig")],
+    ["Zig ResumeSessionConfig", zigStructFields(zigSessionSource, "ResumeSessionConfig")],
+    ["Zig JoinSessionConfig", zigStructFields(zigSessionSource, "JoinSessionConfig")],
+  ]) {
+    for (const [name, expected] of Object.entries(expectedStableSessionRuntimeZigFields)) {
+      assert(fields[name]?.type === expected.type, `${owner}.${name} type changed`);
+      assert(fields[name]?.default === expected.default, `${owner}.${name} default changed`);
+    }
+  }
+  requireExactStrings(
+    zigEnumValues(zigSessionSource, "EmbeddingCacheStorage"),
+    ["persistent", "in_memory"],
+    "Zig EmbeddingCacheStorage values",
+  );
+
+  for (const [owner, source] of [
+    [
+      "Zig buildPreparedCreateSessionRequest",
+      sourceSection(
+        zigClientSource,
+        "fn buildPreparedCreateSessionRequest(",
+        "fn buildResumeSessionRequest(",
+        "Zig buildPreparedCreateSessionRequest",
+      ),
+    ],
+    [
+      "Zig buildPreparedResumeSessionRequest",
+      sourceSection(
+        zigClientSource,
+        "fn buildPreparedResumeSessionRequest(",
+        "fn optionalSlice(",
+        "Zig buildPreparedResumeSessionRequest",
+      ),
+    ],
+  ]) {
+    requireSourceFragments(source, [
+      ".clientName = config.client_name",
+      ".reasoningEffort = config.reasoning_effort",
+      ".reasoningSummary = config.reasoning_summary",
+      ".contextTier = config.context_tier",
+      ".largeOutput = if (config.large_output)",
+      ".maxSizeBytes = value.max_size_bytes",
+      ".outputDir = value.output_directory",
+      ".configDir = config.config_directory",
+      ".capi = if (config.capi)",
+      ".autoTier = value.auto_tier",
+      ".enableWebSocketResponses = value.enable_websocket_responses",
+      ".additionalDirectories = config.additional_directories",
+      ".infiniteSessions = if (config.infinite_sessions)",
+      ".backgroundCompactionThreshold = value.background_compaction_threshold",
+      ".bufferExhaustionThreshold = value.buffer_exhaustion_threshold",
+      ".memory = if (config.memory)",
+      ".skipEmbeddingRetrieval = config.skip_embedding_retrieval",
+      ".embeddingCacheStorage = if (config.embedding_cache_storage)",
+      ".persistent => .persistent",
+      '.in_memory => .@"in-memory"',
+      ".organizationCustomInstructions = config.organization_custom_instructions",
+      ".enableFileHooks = config.enable_file_hooks",
+      ".enableHostGitOperations = config.enable_host_git_operations",
+      ".enableSessionStore = config.enable_session_store",
+    ], owner);
+  }
+
+  for (const [owner, source] of [
+    [
+      "createSession",
+      sourceSection(
+        clientSource,
+        "    async createSession(",
+        "    async resumeSession(",
+        "createSession",
+      ),
+    ],
+    [
+      "resumeSessionInternal",
+      sourceSection(
+        clientSource,
+        "    private async resumeSessionInternal(",
+        "    async ping(",
+        "resumeSessionInternal",
+      ),
+    ],
+  ]) {
+    requireSourceFragments(
+      source,
+      ["workspacePath", 'session["_workspacePath"] = workspacePath'],
+      owner,
+    );
+  }
+
+  requireSourceFragments(
+    zigClientSource,
+    [
+      "workspacePath: ?[]const u8 = null",
+      "self.prepareSessionCommit(returned_id, parsed.value.workspacePath) catch",
+      "self.prepareSessionCommit(runtime_session_id, parsed.value.workspacePath) catch",
+      "pub fn workspacePath(self: Session) !?[]const u8",
+    ],
+    "Zig workspacePath lifecycle",
+  );
+}
+
 function verifyLifecycleContract(contract, clientSource, typesSource, extensionSource) {
-  const baseProperties = interfaceProperties(typesSource, "SessionConfigBase");
-  const createProperties = interfaceProperties(typesSource, "SessionConfig");
-  const resumeProperties = interfaceProperties(typesSource, "ResumeSessionConfig");
-  const joinShape = omitIntersection(extensionSource, "JoinSessionConfig");
-  const extensionResume = requestProperties(
+  const base = interfacePropertySignatures(typesSource, "SessionConfigBase");
+  inheritedInterfacePropertySignatures(
+    typesSource,
+    "SessionConfig",
+    "SessionConfigBase",
+  );
+  const resume = inheritedInterfacePropertySignatures(
+    typesSource,
+    "ResumeSessionConfig",
+    "SessionConfigBase",
+  );
+  const join = omitIntersectionAlias(extensionSource, "JoinSessionConfig");
+  const extensionResume = sourceSection(
     clientSource,
-    "resumeSessionInternal",
-    "session.resume",
+    "    private async resumeSessionInternal(",
+    "    async ping(",
     "resumeSessionInternal",
   );
 
   const commonDeclarations = {
-    pluginDirectories: "pluginDirectories?: string[]",
-    skillDirectories: "skillDirectories?: string[]",
-    disabledSkills: "disabledSkills?: string[]",
-    includedBuiltinSkills: "includedBuiltinSkills?: string[]",
-    enableSkills: "enableSkills?: boolean",
-    hooks: "hooks?: SessionHooks",
-    mcpServers: "mcpServers?: Record<string, MCPServerConfig>",
-    mcpOAuthTokenStorage: 'mcpOAuthTokenStorage?: "persistent" | "in-memory"',
-    authClientIdMetadataUrl: "authClientIdMetadataUrl?: string",
-    disabledMcpServers: "disabledMcpServers?: string[]",
-    canvases: "canvases?: Canvas[]",
-    requestCanvasRenderer: "requestCanvasRenderer?: boolean",
-    requestExtensions: "requestExtensions?: boolean",
-    extensionSdkPath: "extensionSdkPath?: string",
-    extensionInfo: "extensionInfo?: ExtensionInfo",
-    canvasProvider: "canvasProvider?: CanvasProviderIdentity",
-    requestMcpApps: "enableMcpApps?: boolean",
+    pluginDirectories: ["pluginDirectories", "optional:string[]"],
+    skillDirectories: ["skillDirectories", "optional:string[]"],
+    disabledSkills: ["disabledSkills", "optional:string[]"],
+    includedBuiltinSkills: ["includedBuiltinSkills", "optional:string[]"],
+    enableSkills: ["enableSkills", "optional:boolean"],
+    hooks: ["hooks", "optional:SessionHooks"],
+    mcpServers: ["mcpServers", "optional:Record<string,MCPServerConfig>"],
+    mcpOAuthTokenStorage: ["mcpOAuthTokenStorage", 'optional:"persistent"|"in-memory"'],
+    authClientIdMetadataUrl: ["authClientIdMetadataUrl", "optional:string"],
+    disabledMcpServers: ["disabledMcpServers", "optional:string[]"],
+    canvases: ["canvases", "optional:Canvas[]"],
+    requestCanvasRenderer: ["requestCanvasRenderer", "optional:boolean"],
+    requestExtensions: ["requestExtensions", "optional:boolean"],
+    extensionSdkPath: ["extensionSdkPath", "optional:string"],
+    extensionInfo: ["extensionInfo", "optional:ExtensionInfo"],
+    canvasProvider: ["canvasProvider", "optional:CanvasProviderIdentity"],
+    requestMcpApps: ["enableMcpApps", "optional:boolean"],
   };
   const resumeDeclarations = {
-    openCanvases: "openCanvases?: OpenCanvasInstance[]",
-    disableResume: "suppressResumeEvent?: boolean",
-    continuePendingWork: "continuePendingWork?: boolean",
+    openCanvases: ["openCanvases", "optional:OpenCanvasInstance[]"],
+    disableResume: ["suppressResumeEvent", "optional:boolean"],
+    continuePendingWork: ["continuePendingWork", "optional:boolean"],
   };
   const assertFieldsOwnedBy = (fields, declarations, properties, owner) => {
     for (const field of fields) {
       const declaration = declarations[field];
       assert(declaration, `no upstream ${owner} declaration mapping for lifecycle field: ${field}`);
-      const [name, type] = declaration.split("?: ");
-      assert(
-        properties[name] === `optional:${type.replace(/\s+/g, "")}`,
-        `upstream ${owner}.${name} changed or moved`,
-      );
+      const [name, signature] = declaration;
+      assert(properties[name] === signature, `upstream ${owner}.${name} changed`);
     }
   };
 
   assert(
-    baseProperties.onMcpAuthRequest === "optional:McpAuthHandler",
-    "upstream SessionConfigBase.onMcpAuthRequest changed or moved",
+    base.onMcpAuthRequest === "optional:McpAuthHandler",
+    "upstream SessionConfigBase.onMcpAuthRequest changed",
   );
-  assertFieldsOwnedBy(
-    contract.lifecycle.create.fields,
-    commonDeclarations,
-    baseProperties,
-    "SessionConfigBase",
-  );
-  assert(interfaceBase(typesSource, "SessionConfig") === "SessionConfigBase", "upstream SessionConfig no longer extends SessionConfigBase");
+  assertFieldsOwnedBy(contract.lifecycle.create.fields, commonDeclarations, base, "SessionConfigBase");
   for (const field of contract.lifecycle.resume.fields) {
     if (commonDeclarations[field]) {
-      assertFieldsOwnedBy([field], commonDeclarations, baseProperties, "SessionConfigBase");
+      assertFieldsOwnedBy([field], commonDeclarations, base, "SessionConfigBase");
     } else {
-      assertFieldsOwnedBy([field], resumeDeclarations, resumeProperties, "ResumeSessionConfig");
+      assertFieldsOwnedBy([field], resumeDeclarations, resume, "ResumeSessionConfig");
     }
   }
-  assert(interfaceBase(typesSource, "ResumeSessionConfig") === "SessionConfigBase", "upstream ResumeSessionConfig no longer extends SessionConfigBase");
 
   assertFieldsOwnedBy(
     contract.lifecycle.extensionJoin.fields,
-    { requestedEnvironmentVariables: "requestedEnvironmentVariables?: string[]" },
-    joinShape.properties,
+    { requestedEnvironmentVariables: ["requestedEnvironmentVariables", "optional:string[]"] },
+    join.properties,
     "JoinSessionConfig",
   );
-  assert(
-    extensionResume.spreads.includes(
-      "...(extensionOptions?.requestedEnvironmentVariables?{requestedEnvironmentVariables:extensionOptions.requestedEnvironmentVariables,}:{})",
-    ),
-    "upstream resumeSessionInternal requestedEnvironmentVariables lowering changed",
-  );
-  const resumeFunction = findFunctionLike(
-    clientSource,
-    "resumeSessionInternal",
-    "resumeSessionInternal response",
-  );
-  requireAstNodes(
-    resumeFunction.node,
-    resumeFunction.sourceFile,
-    ["grantedEnvironmentVariables?: Record<string, string>"],
-    "resumeSessionInternal response",
-  );
+  for (const field of contract.lifecycle.extensionJoin.responseFields) {
+    assert(
+      field === "grantedEnvironmentVariables",
+      `no upstream response declaration mapping for lifecycle field: ${field}`,
+    );
+    requireSourceFragments(
+      extensionResume,
+      ["grantedEnvironmentVariables?: Record<string, string>"],
+      "resumeSessionInternal response",
+    );
+  }
   assertFieldsOwnedBy(
     contract.lifecycle.extensionJoin.redeclared,
-    { onPermissionRequest: "onPermissionRequest?: PermissionHandler" },
-    joinShape.properties,
+    { onPermissionRequest: ["onPermissionRequest", "optional:PermissionHandler"] },
+    join.properties,
     "JoinSessionConfig",
   );
-  for (const field of contract.lifecycle.extensionJoin.omitted) {
-    assert(field === "extensionSdkPath", `no upstream JoinSessionConfig omission check for: ${field}`);
-    requireExactStrings(
-      joinShape.excluded,
-      ["onPermissionRequest", "extensionSdkPath"],
-      "upstream JoinSessionConfig omissions",
-    );
-    assert(joinShape.properties.extensionSdkPath === undefined, "upstream JoinSessionConfig directly declares extensionSdkPath");
-  }
+  requireExactStrings(join.excluded, contract.lifecycle.extensionJoin.omitted.concat(
+    contract.lifecycle.extensionJoin.redeclared,
+  ), "JoinSessionConfig exclusions");
+  assert(
+    !Object.hasOwn(join.properties, "extensionSdkPath"),
+    "upstream JoinSessionConfig directly declares extensionSdkPath",
+  );
 }
 
 function verifyHookContract(contract, typesSource) {
-  const declarations = Object.fromEntries(
-    Object.entries(interfaceProperties(typesSource, "SessionHooks"))
-      .map(([name, signature]) => [name, signature.replace("optional:", "")]),
-  );
+  const declarations = interfacePropertySignatures(typesSource, "SessionHooks");
   const expected = contract.callbacks.hooks.handlers;
   requireExactStrings(
     Object.keys(declarations),
@@ -729,7 +811,7 @@ function verifyHookContract(contract, typesSource) {
   );
   for (const [name, handler] of Object.entries(expected)) {
     assert(
-      declarations[name] === handler,
+      declarations[name] === `optional:${handler}`,
       `SessionHooks.${name} changed from ${handler}`,
     );
   }
@@ -741,32 +823,60 @@ function verifyExtensibilitySourceContract(
   typesSource,
   extensionSource,
 ) {
+  const clientOptions = interfacePropertySignatures(typesSource, "CopilotClientOptions");
+  const clientConstructor = sourceSection(
+    clientSource,
+    "    constructor(options: CopilotClientOptions = {}) {",
+    "    private connectionExtraArgs: string[] = [];",
+    "CopilotClient constructor",
+  );
+  const clientStartup = sourceSection(
+    clientSource,
+    "    private async doStart(): Promise<void> {",
+    "    async stop(): Promise<Error[]> {",
+    "CopilotClient startup",
+  );
   assert(
-    interfaceProperties(typesSource, "CopilotClientOptions").builtinPluginDirectories ===
-      "optional:readonlystring[]",
+    clientOptions.builtinPluginDirectories === "optional:readonly string[]",
     "upstream CopilotClientOptions.builtinPluginDirectories changed",
   );
-  const clientConstructor = findConstructor(clientSource, "CopilotClient");
-  requireAstNodes(
-    clientConstructor.node,
-    clientConstructor.sourceFile,
+  requireSourceFragments(
+    clientConstructor,
     ["this.builtinPluginDirectories = [...options.builtinPluginDirectories]"],
     "CopilotClient constructor",
   );
-  const clientStartup = findFunctionLike(clientSource, "doStart", "CopilotClient startup");
-  findSendRequestObject(
-    clientStartup.node,
-    clientStartup.sourceFile,
-    "plugins.builtin.set",
+  requireSourceFragments(
+    clientStartup,
+    ['sendRequest("plugins.builtin.set"'],
     "CopilotClient startup",
   );
   verifyLifecycleContract(contract, clientSource, typesSource, extensionSource);
   verifyHookContract(contract, typesSource);
 }
 
+function verifyPinnedSourceContracts(
+  upstreamCommit,
+  clientSource,
+  typesSource,
+  extensionSource,
+) {
+  verifyCustomAgentSourceContract(
+    clientSource,
+    typesSource,
+    extensionSource,
+    zigSessionSource,
+  );
+  verifyStableSessionRuntimeSourceContract(clientSource, typesSource);
+  verifyExtensibilitySourceContract(
+    expectedExtensibilityContract(upstreamCommit),
+    clientSource,
+    typesSource,
+    extensionSource,
+  );
+}
+
 function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, extensionSource) {
   const contract = expectedExtensibilityContract(upstreamCommit);
-  verifyExtensibilitySourceContract(contract, clientSource, typesSource, extensionSource);
   writeFileSync(extensibilityContractPath, `${JSON.stringify(contract, null, 2)}\n`);
 }
 
@@ -838,19 +948,21 @@ function verifyStableParitySourceContract(
   extensionSource,
 ) {
   const contract = expectedStableParityContract(authority.commit);
-  const baseProperties = interfaceProperties(
+  const baseProperties = interfacePropertySignatures(
     typesSource,
     "SessionConfigBase",
     `${authority.name} SessionConfigBase`,
   );
-  const createProperties = interfaceProperties(
+  const createProperties = inheritedInterfacePropertySignatures(
     typesSource,
     "SessionConfig",
+    "SessionConfigBase",
     `${authority.name} SessionConfig`,
   );
-  const resumeProperties = interfaceProperties(
+  const resumeProperties = inheritedInterfacePropertySignatures(
     typesSource,
     "ResumeSessionConfig",
+    "SessionConfigBase",
     `${authority.name} ResumeSessionConfig`,
   );
   const stableBaseProperties = {
@@ -913,7 +1025,7 @@ function verifyStableParitySourceContract(
     `${authority.name} ResumeSessionConfig inheritance changed`,
   );
   requireExactStrings(
-    stringUnionValues(typesSource, "AskUserVariant"),
+    exportedStringUnionValues(typesSource, "AskUserVariant"),
     contract.enums.askUserVariant,
     `${authority.name} AskUserVariant values`,
   );
@@ -931,7 +1043,7 @@ function verifyStableParitySourceContract(
     `${authority.name} ExpFlagValue changed`,
   );
   requireExactPropertySignatures(
-    interfaceProperties(
+    interfacePropertySignatures(
       typesSource,
       "ExpConfigEntry",
       `${authority.name} ExpConfigEntry`,
@@ -943,7 +1055,7 @@ function verifyStableParitySourceContract(
     `${authority.name} ExpConfigEntry`,
   );
   requireExactPropertySignatures(
-    interfaceProperties(
+    interfacePropertySignatures(
       typesSource,
       "CopilotExpAssignmentResponse",
       `${authority.name} CopilotExpAssignmentResponse`,
@@ -960,7 +1072,7 @@ function verifyStableParitySourceContract(
     `${authority.name} CopilotExpAssignmentResponse`,
   );
 
-  const joinShape = omitIntersection(extensionSource, "JoinSessionConfig");
+  const joinShape = omitIntersectionAlias(extensionSource, "JoinSessionConfig");
   assert(
     joinShape.base === "ResumeSessionConfig",
     `${authority.name} JoinSessionConfig base changed`,
@@ -1403,6 +1515,67 @@ function verifyCompatibility(apiSchema, eventSchema) {
   const autoTiers = ["balance", "efficiency", "fast", "intelligence"];
   requireExactStrings(stringEnum(apiSchema, "AutoTier"), autoTiers, "API AutoTier enum");
   requireExactStrings(stringEnum(eventSchema, "AutoTier"), autoTiers, "event AutoTier enum");
+  for (const contract of [
+    {
+      schema: "SessionFsSetProviderConventions",
+      zig: "SessionFilesystemConventions",
+      tags: ["posix", "windows"],
+    },
+    {
+      schema: "SessionFsReaddirWithTypesEntryType",
+      zig: "SessionFilesystemEntryType",
+      tags: ["file", "directory"],
+    },
+    {
+      schema: "SessionFsSqliteQueryType",
+      zig: "SessionFilesystemSqliteQueryType",
+      tags: ["exec", "query", "run"],
+    },
+  ]) {
+    requireExactStrings(
+      stringEnum(apiSchema, contract.schema),
+      contract.tags,
+      `${contract.schema} values`,
+    );
+    requireExactStrings(
+      zigEnumValues(zigRuntimeSource, contract.zig),
+      contract.tags,
+      `Zig ${contract.zig} values`,
+    );
+  }
+  const remoteSessionModes = ["off", "export", "on"];
+  requireExactStrings(
+    stringEnum(apiSchema, "RemoteSessionMode"),
+    remoteSessionModes,
+    "RemoteSessionMode values",
+  );
+  requireExactStrings(
+    zigEnumValues(zigSessionSource, "RemoteSessionMode"),
+    remoteSessionModes,
+    "Zig RemoteSessionMode values",
+  );
+  requireExactStrings(
+    stringEnum(apiSchema, "SessionFsSqliteTransactionErrorClass"),
+    ["busyOrLocked", "fatal", "postCommitAmbiguous"],
+    "SessionFsSqliteTransactionErrorClass values",
+  );
+  requireExactStrings(
+    zigEnumValues(zigRuntimeSource, "SessionFilesystemSqliteTransactionErrorClass"),
+    ["busyOrLocked", "fatal", "postCommitAmbiguous"],
+    "Zig SessionFilesystemSqliteTransactionErrorClass values",
+  );
+  requireExactStrings(
+    stringEnum(apiSchema, "SessionFsErrorCode"),
+    ["ENOENT", "UNKNOWN"],
+    "SessionFsErrorCode values",
+  );
+  requireExactStrings(
+    zigEnumValues(clientSource, "SessionFilesystemErrorCode", {
+      visibility: "optional",
+    }),
+    ["ENOENT", "UNKNOWN"],
+    "Zig SessionFilesystemErrorCode values",
+  );
   const modelDiscountPercent =
     apiSchema.definitions?.ModelBilling?.properties?.discountPercent;
   assert(
@@ -1730,7 +1903,7 @@ async function synchronize(explicitCommit, ifPublished = false) {
     /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(cliPackageVersion),
     "upstream package manifest has no exact Copilot CLI version",
   );
-  verifyCustomAgentSourceContract(nodeClient, nodeTypes, nodeExtension, zigSessionSource);
+  verifyPinnedSourceContracts(commit, nodeClient, nodeTypes, nodeExtension);
   verifyStableParitySourceContract(
     { name: "protocol commit", commit },
     nodeClient,
@@ -1809,7 +1982,12 @@ if (args.includes("--check")) {
     fetchText(rawUrl(publicSdkCommit, "nodejs/src/types.ts")),
     fetchText(rawUrl(publicSdkCommit, "nodejs/src/extension.ts")),
   ]);
-  verifyCustomAgentSourceContract(nodeClient, nodeTypes, nodeExtension, zigSessionSource);
+  verifyPinnedSourceContracts(
+    metadata.upstreamCommit,
+    nodeClient,
+    nodeTypes,
+    nodeExtension,
+  );
   verifyStableParitySourceContract(
     { name: "protocol commit", commit: metadata.upstreamCommit },
     nodeClient,
@@ -1823,12 +2001,6 @@ if (args.includes("--check")) {
     publicSession,
     publicTypes,
     publicExtension,
-  );
-  verifyExtensibilitySourceContract(
-    expectedExtensibilityContract(metadata.upstreamCommit),
-    nodeClient,
-    nodeTypes,
-    nodeExtension,
   );
   verify();
 } else {
