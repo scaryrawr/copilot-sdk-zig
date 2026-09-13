@@ -1,5 +1,6 @@
 const std = @import("std");
 const provider = @import("provider.zig");
+const runtime = @import("runtime.zig");
 const ModelCapabilitiesOverride = @import("models.zig").CapabilitiesOverride;
 const extensibility = @import("extensibility.zig");
 const event_payloads = @import("session_event_payloads.zig");
@@ -37,6 +38,20 @@ pub const InitialAgent = union(enum) {
     custom_agent: []const u8,
 };
 
+pub const RemoteSessionMode = enum {
+    off,
+    @"export",
+    on,
+
+    pub fn wireValue(self: RemoteSessionMode) []const u8 {
+        return switch (self) {
+            .off => "off",
+            .@"export" => "export",
+            .on => "on",
+        };
+    }
+};
+
 pub const CreateSessionConfig = struct {
     session_id: ?[]const u8 = null,
     model: ?[]const u8 = null,
@@ -68,6 +83,8 @@ pub const CreateSessionConfig = struct {
     permission_context: ?*anyopaque = null,
     on_user_input_request: ?UserInputHandler = null,
     user_input_context: ?*anyopaque = null,
+    remote_session: ?RemoteSessionMode = null,
+    create_session_filesystem_provider: ?runtime.SessionFilesystemProviderFactory = null,
     extensions: extensibility.CreateExtensions = .{},
 };
 
@@ -103,6 +120,8 @@ pub const ResumeSessionConfig = struct {
     user_input_context: ?*anyopaque = null,
     suppress_resume_event: bool = false,
     continue_pending_work: bool = false,
+    remote_session: ?RemoteSessionMode = null,
+    create_session_filesystem_provider: ?runtime.SessionFilesystemProviderFactory = null,
     extensions: extensibility.ResumeExtensions = .{},
 };
 
@@ -138,6 +157,8 @@ pub const JoinSessionConfig = struct {
     user_input_context: ?*anyopaque = null,
     suppress_resume_event: bool = true,
     continue_pending_work: bool = false,
+    remote_session: ?RemoteSessionMode = null,
+    create_session_filesystem_provider: ?runtime.SessionFilesystemProviderFactory = null,
     extensions: extensibility.JoinExtensions = .{},
 };
 
