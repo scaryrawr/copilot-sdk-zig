@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub const json_rpc = @import("json_rpc.zig");
 pub const client = @import("client.zig");
 pub const session = @import("session.zig");
@@ -16,6 +18,7 @@ pub const ProcessExit = errors.ProcessExit;
 pub const ClientFailure = errors.ClientFailure;
 pub const ClientOperation = errors.ClientOperation;
 pub const ProtocolFailure = errors.ProtocolFailure;
+pub const SdkError = errors.SdkError;
 pub const EnvelopeViolation = errors.EnvelopeViolation;
 pub const ProtocolMismatch = errors.ProtocolMismatch;
 pub const RpcFailure = errors.RpcFailure;
@@ -92,11 +95,18 @@ pub const ModelWarningText = models.WarningText;
 pub const ModelMessage = models.Message;
 pub const ModelAdaptiveThinking = models.AdaptiveThinking;
 
-test {
+test "root declarations compile" {
     _ = json_rpc;
     _ = client;
     _ = session;
     _ = models;
     _ = errors;
     _ = provider;
+}
+
+test "parity census root SdkError export" {
+    const sdk_error: SdkError = error.ProtocolFailure;
+    const error_tag_fn: *const fn (*const Failure) SdkError = &Failure.errorTag;
+    try std.testing.expectEqual(errors.SdkError, @TypeOf(sdk_error));
+    _ = error_tag_fn;
 }

@@ -258,6 +258,8 @@ pub const EnvelopeViolation = enum {
     invalid_error_message,
     invalid_method,
     missing_params,
+    malformed_field_type,
+    invalid_session_status,
 };
 
 pub const ProtocolMismatch = union(enum) {

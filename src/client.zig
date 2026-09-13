@@ -153,6 +153,19 @@ fn recordProcessExit(
     } } });
 }
 
+fn recordProcessTerminate(
+    allocator: std.mem.Allocator,
+    exit: ?errors.ProcessExit,
+    cause: anyerror,
+) !errors.Failure {
+    const message = try allocator.dupe(u8, @errorName(cause));
+    return recordFailure(allocator, cause, .{ .process = .{ .terminate = .{
+        .exit = exit,
+        .message = message,
+        .cause = ownedCause(cause),
+    } } });
+}
+
 fn recordReentrant(
     allocator: std.mem.Allocator,
     method: []const u8,
@@ -210,22 +223,32 @@ fn recordInvalidJson(
     } } });
 }
 
-fn recordEnvelope(
+fn recordInvalidEnvelope(
     allocator: std.mem.Allocator,
+    native_error: anyerror,
     reason: errors.EnvelopeViolation,
-    body: []const u8,
+    offending_value: std.json.Value,
 ) !errors.Failure {
-    const native_error: anyerror = switch (reason) {
-        .missing_result_and_error => error.MissingResult,
-        else => error.InvalidJsonRpc,
-    };
-    const json = try allocator.dupe(u8, body);
+    const json = try std.json.Stringify.valueAlloc(allocator, offending_value, .{});
     return recordFailure(allocator, native_error, .{ .protocol = .{
         .invalid_envelope = .{
             .reason = reason,
             .message_json = json,
         },
     } });
+}
+
+fn recordEnvelope(
+    allocator: std.mem.Allocator,
+    reason: errors.EnvelopeViolation,
+    offending_value: std.json.Value,
+) !errors.Failure {
+    return recordInvalidEnvelope(
+        allocator,
+        envelopeError(reason),
+        reason,
+        offending_value,
+    );
 }
 
 fn envelopeError(reason: errors.EnvelopeViolation) anyerror {
@@ -251,21 +274,20 @@ fn recordUnexpectedResponse(
 
 fn recordInvalidEvent(
     allocator: std.mem.Allocator,
+    reason: errors.EnvelopeViolation,
     value: std.json.Value,
 ) !errors.Failure {
-    const json = try std.json.Stringify.valueAlloc(allocator, value, .{});
-    return recordFailure(allocator, error.InvalidSessionEvent, .{ .protocol = .{
-        .invalid_envelope = .{
-            .reason = .missing_params,
-            .message_json = json,
-        },
-    } });
+    return recordInvalidEnvelope(
+        allocator,
+        error.InvalidSessionEvent,
+        reason,
+        value,
+    );
 }
 
 fn parseInboundMessage(
     comptime failure_policy: FailurePolicy,
     allocator: std.mem.Allocator,
-    body: []const u8,
     value: std.json.Value,
 ) errors.DetailedError!PolicyResult(failure_policy, InboundMessage) {
     const object = switch (value) {
@@ -274,7 +296,7 @@ fn parseInboundMessage(
             failure_policy,
             envelopeError(.non_object),
             recordEnvelope,
-            .{ allocator, .non_object, body },
+            .{ allocator, .non_object, value },
         ) },
     };
     const version = object.get("jsonrpc") orelse
@@ -282,14 +304,14 @@ fn parseInboundMessage(
             failure_policy,
             envelopeError(.invalid_jsonrpc_version),
             recordEnvelope,
-            .{ allocator, .invalid_jsonrpc_version, body },
+            .{ allocator, .invalid_jsonrpc_version, value },
         ) };
     if (version != .string or !std.mem.eql(u8, version.string, "2.0"))
         return .{ .failure = try policyFailure(
             failure_policy,
             envelopeError(.invalid_jsonrpc_version),
             recordEnvelope,
-            .{ allocator, .invalid_jsonrpc_version, body },
+            .{ allocator, .invalid_jsonrpc_version, value },
         ) };
 
     if (object.get("method")) |method_value| {
@@ -299,7 +321,7 @@ fn parseInboundMessage(
                 failure_policy,
                 envelopeError(.invalid_method),
                 recordEnvelope,
-                .{ allocator, .invalid_method, body },
+                .{ allocator, .invalid_method, value },
             ) },
         };
         const params = object.get("params");
@@ -321,7 +343,7 @@ fn parseInboundMessage(
             failure_policy,
             envelopeError(.missing_id),
             recordEnvelope,
-            .{ allocator, .missing_id, body },
+            .{ allocator, .missing_id, value },
         ) };
     const id = switch (id_value) {
         .integer => |number| std.math.cast(u64, number) orelse
@@ -329,13 +351,13 @@ fn parseInboundMessage(
                 failure_policy,
                 envelopeError(.invalid_id),
                 recordEnvelope,
-                .{ allocator, .invalid_id, body },
+                .{ allocator, .invalid_id, value },
             ) },
         else => return .{ .failure = try policyFailure(
             failure_policy,
             envelopeError(.invalid_id),
             recordEnvelope,
-            .{ allocator, .invalid_id, body },
+            .{ allocator, .invalid_id, value },
         ) },
     };
     const result = object.get("result");
@@ -345,14 +367,14 @@ fn parseInboundMessage(
             failure_policy,
             envelopeError(.result_and_error),
             recordEnvelope,
-            .{ allocator, .result_and_error, body },
+            .{ allocator, .result_and_error, value },
         ) };
     if (result == null and rpc_error == null)
         return .{ .failure = try policyFailure(
             failure_policy,
             envelopeError(.missing_result_and_error),
             recordEnvelope,
-            .{ allocator, .missing_result_and_error, body },
+            .{ allocator, .missing_result_and_error, value },
         ) };
     return .{ .success = .{ .response = .{
         .id = id,
@@ -506,19 +528,19 @@ fn sessionFailureFromFrame(
     defer parsed.deinit();
     const object = switch (parsed.value) {
         .object => |value| value,
-        else => return recordEnvelope(allocator, .non_object, frame),
+        else => return recordEnvelope(allocator, .non_object, parsed.value),
     };
     const params = switch (object.get("params") orelse
-        return recordEnvelope(allocator, .missing_params, frame)) {
+        return recordEnvelope(allocator, .missing_params, parsed.value)) {
         .object => |value| value,
-        else => return recordEnvelope(allocator, .missing_params, frame),
+        else => return recordEnvelope(allocator, .missing_params, parsed.value),
     };
     const event = params.get("event") orelse
-        return recordEnvelope(allocator, .missing_params, frame);
-    const view = Client.sessionAgentWireView(event) catch
-        return recordInvalidEvent(allocator, event);
+        return recordEnvelope(allocator, .missing_params, parsed.value);
+    const view = Client.sessionAgentWireView(event) catch |err|
+        return recordInvalidEvent(allocator, sessionEventViolation(err), event);
     const agent = try ownSessionAgentFailure(allocator, session_id, view orelse
-        return recordInvalidEvent(allocator, event));
+        return recordInvalidEvent(allocator, .malformed_field_type, event));
     session_id_owned = false;
     return recordSessionAgentFailure(allocator, agent);
 }
@@ -680,34 +702,51 @@ fn dupeOptional(
     return if (value) |slice| try allocator.dupe(u8, slice) else null;
 }
 
-fn requiredWireString(object: std.json.ObjectMap, name: []const u8) ![]const u8 {
-    return switch (object.get(name) orelse return error.InvalidSessionEvent) {
-        .string => |value| value,
-        else => error.InvalidSessionEvent,
+const SessionEventWireError = error{
+    MissingField,
+    MalformedFieldType,
+    InvalidStatus,
+};
+
+fn sessionEventViolation(err: SessionEventWireError) errors.EnvelopeViolation {
+    return switch (err) {
+        error.MissingField => .missing_params,
+        error.MalformedFieldType => .malformed_field_type,
+        error.InvalidStatus => .invalid_session_status,
     };
 }
 
-fn optionalWireString(object: std.json.ObjectMap, name: []const u8) !?[]const u8 {
+fn requiredWireString(object: std.json.ObjectMap, name: []const u8) SessionEventWireError![]const u8 {
+    return switch (object.get(name) orelse return error.MissingField) {
+        .string => |value| value,
+        else => error.MalformedFieldType,
+    };
+}
+
+fn optionalWireString(object: std.json.ObjectMap, name: []const u8) SessionEventWireError!?[]const u8 {
     return switch (object.get(name) orelse return null) {
         .string => |value| value,
         .null => null,
-        else => error.InvalidSessionEvent,
+        else => error.MalformedFieldType,
     };
 }
 
-fn optionalWireBool(object: std.json.ObjectMap, name: []const u8) !?bool {
+fn optionalWireBool(object: std.json.ObjectMap, name: []const u8) SessionEventWireError!?bool {
     return switch (object.get(name) orelse return null) {
         .bool => |value| value,
         .null => null,
-        else => error.InvalidSessionEvent,
+        else => error.MalformedFieldType,
     };
 }
 
-fn optionalWireU16(object: std.json.ObjectMap, name: []const u8) !?u16 {
+fn optionalWireStatusCode(object: std.json.ObjectMap, name: []const u8) SessionEventWireError!?u16 {
     return switch (object.get(name) orelse return null) {
-        .integer => |value| std.math.cast(u16, value) orelse error.InvalidSessionEvent,
+        .integer => |value| if (value >= 0 and value <= 999)
+            @intCast(value)
+        else
+            error.InvalidStatus,
         .null => null,
-        else => error.InvalidSessionEvent,
+        else => error.MalformedFieldType,
     };
 }
 
@@ -1132,21 +1171,21 @@ const ShutdownCollector = struct {
                 .rpc = null,
                 .message = null,
             } } };
-        } else .{ .process = .{ .terminate = .{
-            .exit = null,
-            .message = self.allocator.dupe(u8, @errorName(native_error)) catch |err| switch (err) {
+        } else {
+            self.storage[self.count] = recordProcessTerminate(
+                self.allocator,
+                null,
+                native_error,
+            ) catch |err| switch (err) {
                 error.OutOfMemory => {
                     self.dropped += 1;
                     return;
                 },
-            },
-            .cause = .{ .code = native_error },
-        } } };
-        self.storage[self.count] = .{
-            .allocator = self.allocator,
-            .native_error = native_error,
-            .detail = detail,
+            };
+            self.count += 1;
+            return;
         };
+        self.storage[self.count] = recordFailure(self.allocator, native_error, detail);
         self.count += 1;
     }
 };
@@ -1328,8 +1367,15 @@ pub const Client = struct {
     }
 
     pub fn stopDetailed(self: *Client) errors.DetailedResult(void) {
+        return stopDetailedWithOps(self, real_shutdown_ops, self.child != null);
+    }
+
+    fn stopDetailedWithOps(
+        self: *Client,
+        ops: ShutdownOps,
+        child_attempted: bool,
+    ) errors.DetailedResult(void) {
         const session_count = self.session_ids.items.len;
-        const child_attempted = self.child != null;
         const storage: []errors.Failure = self.allocator.alloc(
             errors.Failure,
             session_count + @intFromBool(child_attempted),
@@ -1338,7 +1384,7 @@ pub const Client = struct {
             .allocator = self.allocator,
             .storage = storage,
         };
-        const native_error = runShutdown(self, real_shutdown_ops, .{
+        const native_error = runShutdown(self, ops, .{
             .context = &collector,
             .record = ShutdownCollector.record,
         }) orelse {
@@ -1714,7 +1760,6 @@ pub const Client = struct {
             const inbound = switch (try parseInboundMessage(
                 failure_policy,
                 self.allocator,
-                body,
                 value.value,
             )) {
                 .success => |message| message,
@@ -1748,9 +1793,14 @@ pub const Client = struct {
                             notification.params orelse
                                 return .{ .failure = try policyFailure(
                                     failure_policy,
-                                    envelopeError(.missing_params),
-                                    recordEnvelope,
-                                    .{ self.allocator, .missing_params, body },
+                                    error.InvalidJsonRpc,
+                                    recordInvalidEnvelope,
+                                    .{
+                                        self.allocator,
+                                        error.InvalidJsonRpc,
+                                        .missing_params,
+                                        value.value,
+                                    },
                                 ) },
                         )) {
                             .success => |retained| body_owned = !retained,
@@ -1779,7 +1829,7 @@ pub const Client = struct {
                                 failure_policy,
                                 envelopeError(reason),
                                 recordEnvelope,
-                                .{ self.allocator, reason, body },
+                                .{ self.allocator, reason, value.value },
                             ) },
                         };
                         return .{ .failure = try policyFailure(
@@ -1794,7 +1844,7 @@ pub const Client = struct {
                             failure_policy,
                             envelopeError(.missing_result_and_error),
                             recordEnvelope,
-                            .{ self.allocator, .missing_result_and_error, body },
+                            .{ self.allocator, .missing_result_and_error, value.value },
                         ) };
                     const result_json = try std.json.Stringify.valueAlloc(
                         self.allocator,
@@ -2001,27 +2051,27 @@ pub const Client = struct {
         try json_rpc.writeFrame(writer, response);
     }
 
-    fn sessionAgentWireView(event_value: std.json.Value) !?SessionAgentWireView {
+    fn sessionAgentWireView(event_value: std.json.Value) SessionEventWireError!?SessionAgentWireView {
         const event_object = switch (event_value) {
             .object => |object| object,
-            else => return error.InvalidSessionEvent,
+            else => return error.MalformedFieldType,
         };
         const event_type = switch (event_object.get("type") orelse
-            return error.InvalidSessionEvent) {
+            return error.MissingField) {
             .string => |value| value,
-            else => return error.InvalidSessionEvent,
+            else => return error.MalformedFieldType,
         };
         if (!std.mem.eql(u8, event_type, "session.error")) return null;
         const data = switch (event_object.get("data") orelse
-            return error.InvalidSessionEvent) {
+            return error.MissingField) {
             .object => |object| object,
-            else => return error.InvalidSessionEvent,
+            else => return error.MalformedFieldType,
         };
         return .{
             .error_type = try requiredWireString(data, "errorType"),
             .error_code = try optionalWireString(data, "errorCode"),
             .message = try requiredWireString(data, "message"),
-            .status_code = try optionalWireU16(data, "statusCode"),
+            .status_code = try optionalWireStatusCode(data, "statusCode"),
             .provider_call_id = try optionalWireString(data, "providerCallId"),
             .service_request_id = try optionalWireString(data, "serviceRequestId"),
             .remediation = data.get("remediation"),
@@ -2041,25 +2091,35 @@ pub const Client = struct {
             .object => |object| object,
             else => return .{ .failure = try policyFailure(
                 failure_policy,
-                envelopeError(.missing_params),
-                recordEnvelope,
-                .{ self.allocator, .missing_params, "invalid session event params" },
+                error.InvalidJsonRpc,
+                recordInvalidEnvelope,
+                .{
+                    self.allocator,
+                    error.InvalidJsonRpc,
+                    .malformed_field_type,
+                    params_value,
+                },
             ) },
         };
         const session_id_value = params.get("sessionId") orelse
             return .{ .failure = try policyFailure(
                 failure_policy,
-                envelopeError(.missing_params),
-                recordEnvelope,
-                .{ self.allocator, .missing_params, "session event missing sessionId" },
+                error.InvalidJsonRpc,
+                recordInvalidEnvelope,
+                .{ self.allocator, error.InvalidJsonRpc, .missing_params, params_value },
             ) };
         const session_id = switch (session_id_value) {
             .string => |id| id,
             else => return .{ .failure = try policyFailure(
                 failure_policy,
-                envelopeError(.missing_params),
-                recordEnvelope,
-                .{ self.allocator, .missing_params, "invalid sessionId" },
+                error.InvalidJsonRpc,
+                recordInvalidEnvelope,
+                .{
+                    self.allocator,
+                    error.InvalidJsonRpc,
+                    .malformed_field_type,
+                    params_value,
+                },
             ) },
         };
         if (self.events.items.len >= max_queued_events) {
@@ -2081,25 +2141,36 @@ pub const Client = struct {
         const event_value = params.get("event") orelse
             return .{ .failure = try policyFailure(
                 failure_policy,
-                envelopeError(.missing_params),
-                recordEnvelope,
-                .{ self.allocator, .missing_params, "session event missing event" },
+                error.InvalidJsonRpc,
+                recordInvalidEnvelope,
+                .{ self.allocator, error.InvalidJsonRpc, .missing_params, params_value },
             ) };
         const agent_view = sessionAgentWireView(event_value) catch |err|
             return .{ .failure = try policyFailure(
                 failure_policy,
-                err,
+                error.InvalidSessionEvent,
                 recordInvalidEvent,
-                .{ self.allocator, event_value },
+                .{ self.allocator, sessionEventViolation(err), event_value },
             ) };
-        var event = session_types.parseEvent(self.allocator, event_value) catch |err| {
-            if (err == error.OutOfMemory) return error.OutOfMemory;
-            return .{ .failure = try policyFailure(
-                failure_policy,
-                err,
-                recordInvalidEvent,
-                .{ self.allocator, event_value },
-            ) };
+        var event = session_types.parseEventClassified(self.allocator, event_value) catch |err| {
+            switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.MissingField, error.MalformedFieldType => return .{
+                    .failure = try policyFailure(
+                        failure_policy,
+                        error.InvalidSessionEvent,
+                        recordInvalidEvent,
+                        .{
+                            self.allocator,
+                            if (err == error.MissingField)
+                                errors.EnvelopeViolation.missing_params
+                            else
+                                errors.EnvelopeViolation.malformed_field_type,
+                            event_value,
+                        },
+                    ),
+                },
+            }
         };
         defer if (!transferred) event.deinit(self.allocator);
         const owned_session_id = try self.allocator.dupe(u8, session_id);
@@ -2314,7 +2385,6 @@ pub const Client = struct {
             const inbound = switch (try parseInboundMessage(
                 failure_policy,
                 self.allocator,
-                body,
                 value.value,
             )) {
                 .success => |message| message,
@@ -2347,9 +2417,14 @@ pub const Client = struct {
                             notification.params orelse
                                 return .{ .failure = try policyFailure(
                                     failure_policy,
-                                    envelopeError(.missing_params),
-                                    recordEnvelope,
-                                    .{ self.allocator, .missing_params, body },
+                                    error.InvalidJsonRpc,
+                                    recordInvalidEnvelope,
+                                    .{
+                                        self.allocator,
+                                        error.InvalidJsonRpc,
+                                        .missing_params,
+                                        value.value,
+                                    },
                                 ) },
                         )) {
                             .success => |retained| body_owned = !retained,
@@ -3658,6 +3733,120 @@ test "shutdown attempts every initial session and child after all injected failu
     }
 }
 
+test "stopDetailed aggregates owned failures and attempt counts" {
+    std.debug.print("\nCENSUS_PROBE shutdown_behavior\n", .{});
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.session_ids.items) |id| allocator.free(id);
+        client.session_ids.deinit(allocator);
+    }
+    for ([_][]const u8{ "s1", "s2", "s3" }) |id| {
+        try client.session_ids.append(allocator, try allocator.dupe(u8, id));
+    }
+
+    var operations = ShutdownProbe{
+        .disconnect_errors = .{ error.BrokenPipe, error.OutOfMemory, error.EndOfStream },
+        .terminate_error = error.AccessDenied,
+    };
+    var failure = switch (client.stopDetailedWithOps(.{
+        .context = &operations,
+        .disconnect_session_once = ShutdownProbe.disconnect,
+        .terminate_child_once = ShutdownProbe.terminate,
+    }, true)) {
+        .success => return error.TestExpectedShutdownFailure,
+        .failure => |failure| failure,
+    };
+    defer failure.deinit();
+
+    try std.testing.expectEqual(error.BrokenPipe, failure.native_error);
+    const shutdown = switch (failure.detail) {
+        .shutdown => |shutdown| shutdown,
+        else => return error.TestExpectedShutdownFailure,
+    };
+    try std.testing.expectEqual(@as(usize, 3), shutdown.sessions_attempted);
+    try std.testing.expect(shutdown.child_termination_attempted);
+    try std.testing.expectEqual(@as(usize, 4), shutdown.failure_count);
+    try std.testing.expectEqual(@as(usize, 0), shutdown.diagnostics_dropped);
+    try std.testing.expectEqual(@as(usize, 3), operations.attempt_count);
+    try std.testing.expectEqual(@as(usize, 1), operations.terminate_count);
+
+    switch (shutdown.failures()[0].detail) {
+        .session => |session_failure| switch (session_failure) {
+            .detach_failed => |detail| try std.testing.expectEqualStrings("s3", detail.session_id),
+            else => return error.TestExpectedDetachFailure,
+        },
+        else => return error.TestExpectedDetachFailure,
+    }
+    switch (shutdown.failures()[3].detail) {
+        .process => |process_failure| switch (process_failure) {
+            .terminate => |detail| {
+                try std.testing.expect(detail.exit == null);
+                try std.testing.expectEqualStrings("AccessDenied", detail.message);
+                try std.testing.expectEqual(error.AccessDenied, detail.cause.code);
+            },
+            else => return error.TestExpectedTerminateFailure,
+        },
+        else => return error.TestExpectedTerminateFailure,
+    }
+}
+
+test "stopDetailed reports allocation-free dropped diagnostics" {
+    std.debug.print("\nCENSUS_PROBE shutdown_dropped_behavior\n", .{});
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var client = Client{
+        .allocator = failing.allocator(),
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.session_ids.items) |id| allocator.free(id);
+        client.session_ids.deinit(allocator);
+    }
+    for ([_][]const u8{ "s1", "s2", "s3" }) |id| {
+        try client.session_ids.append(allocator, try allocator.dupe(u8, id));
+    }
+
+    var operations = ShutdownProbe{
+        .disconnect_errors = .{ error.BrokenPipe, error.EndOfStream, error.ConnectionResetByPeer },
+        .terminate_error = error.AccessDenied,
+    };
+    var failure = switch (client.stopDetailedWithOps(.{
+        .context = &operations,
+        .disconnect_session_once = ShutdownProbe.disconnect,
+        .terminate_child_once = ShutdownProbe.terminate,
+    }, true)) {
+        .success => return error.TestExpectedShutdownFailure,
+        .failure => |failure| failure,
+    };
+    defer failure.deinit();
+
+    const shutdown = switch (failure.detail) {
+        .shutdown => |shutdown| shutdown,
+        else => return error.TestExpectedShutdownFailure,
+    };
+    try std.testing.expectEqual(@as(usize, 3), shutdown.sessions_attempted);
+    try std.testing.expect(shutdown.child_termination_attempted);
+    try std.testing.expectEqual(@as(usize, 0), shutdown.failure_storage.len);
+    try std.testing.expectEqual(@as(usize, 0), shutdown.failure_count);
+    try std.testing.expectEqual(@as(usize, 4), shutdown.diagnostics_dropped);
+    try std.testing.expectEqual(@as(usize, 3), operations.attempt_count);
+    try std.testing.expectEqual(@as(usize, 1), operations.terminate_count);
+}
+
 test "RPC handler registration rejects duplicates and unregisters" {
     const allocator = std.testing.allocator;
     var client = Client{
@@ -3911,6 +4100,184 @@ test "inbound RPC dispatch writes success and error frames" {
     );
 }
 
+fn expectServerRequestResponse(
+    client: *Client,
+    id: i64,
+    method: []const u8,
+    params: ?std.json.Value,
+    expected_code: ?i64,
+    expected_message: ?[]const u8,
+) !void {
+    const allocator = std.testing.allocator;
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    var failure_operation: errors.ClientOperation = .callback;
+    try client.dispatchServerRequest(
+        &output.writer,
+        .{ .integer = id },
+        method,
+        params,
+        &failure_operation,
+    );
+    const body = try framedBody(allocator, output.written());
+    defer allocator.free(body);
+    const response = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer response.deinit();
+    try std.testing.expectEqual(id, response.value.object.get("id").?.integer);
+    if (expected_code) |code| {
+        const rpc_error = response.value.object.get("error").?.object;
+        try std.testing.expectEqual(code, rpc_error.get("code").?.integer);
+        try std.testing.expectEqualStrings(expected_message.?, rpc_error.get("message").?.string);
+    } else {
+        try std.testing.expect(response.value.object.get("result").?.object.get("accepted").?.bool);
+    }
+}
+
+test "server request response matrix preserves generic userInput.request fallback" {
+    std.debug.print("\nCENSUS_PROBE server_request_response_matrix\n", .{});
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.rpc_handlers.items) |handler| handler.deinit(allocator);
+        client.rpc_handlers.deinit(allocator);
+        client.user_input_handlers.deinit(allocator);
+    }
+    try client.registerRpcHandler("test.success", struct {
+        fn handle(inner_allocator: std.mem.Allocator, _: ?[]const u8, _: ?*anyopaque) ![]u8 {
+            return inner_allocator.dupe(u8, "{\"accepted\":true}");
+        }
+    }.handle, null);
+    try client.registerRpcHandler("test.failure", struct {
+        fn handle(_: std.mem.Allocator, _: ?[]const u8, _: ?*anyopaque) ![]u8 {
+            return error.HandlerFailed;
+        }
+    }.handle, null);
+    try client.registerRpcHandler("test.invalid", struct {
+        fn handle(inner_allocator: std.mem.Allocator, _: ?[]const u8, _: ?*anyopaque) ![]u8 {
+            return inner_allocator.dupe(u8, "not json");
+        }
+    }.handle, null);
+    var generic_user_input_called = false;
+    try client.registerRpcHandler("userInput.request", struct {
+        fn handle(
+            inner_allocator: std.mem.Allocator,
+            params_json: ?[]const u8,
+            context: ?*anyopaque,
+        ) ![]u8 {
+            const called: *bool = @ptrCast(@alignCast(context.?));
+            try std.testing.expect(params_json != null);
+            called.* = true;
+            return inner_allocator.dupe(u8, "{\"accepted\":true}");
+        }
+    }.handle, &generic_user_input_called);
+
+    try expectServerRequestResponse(&client, 1, "test.unknown", null, -32601, "method not found");
+    try expectServerRequestResponse(&client, 2, "test.success", null, null, null);
+    try expectServerRequestResponse(&client, 3, "test.failure", null, -32000, "HandlerFailed");
+    try expectServerRequestResponse(&client, 4, "test.invalid", null, -32603, "invalid handler result");
+
+    var user_input_params: std.json.ObjectMap = .empty;
+    defer user_input_params.deinit(allocator);
+    try user_input_params.put(allocator, "sessionId", .{ .string = "generic-session" });
+    try user_input_params.put(allocator, "question", .{ .string = "Continue?" });
+    try expectServerRequestResponse(
+        &client,
+        5,
+        "userInput.request",
+        .{ .object = user_input_params },
+        null,
+        null,
+    );
+    try std.testing.expect(generic_user_input_called);
+
+    var specialized_params: std.json.ObjectMap = .empty;
+    defer specialized_params.deinit(allocator);
+    try specialized_params.put(allocator, "sessionId", .{ .string = "specialized-session" });
+    try specialized_params.put(allocator, "question", .{ .string = "Continue?" });
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    var failure_operation: errors.ClientOperation = .callback;
+    try client.dispatchUserInputRequest(
+        &output.writer,
+        .{ .integer = 6 },
+        .{ .object = specialized_params },
+        &failure_operation,
+    );
+    const body = try framedBody(allocator, output.written());
+    defer allocator.free(body);
+    const response = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer response.deinit();
+    const rpc_error = response.value.object.get("error").?.object;
+    try std.testing.expectEqual(@as(i64, -32000), rpc_error.get("code").?.integer);
+    try std.testing.expectEqualStrings(
+        "user input handler not registered",
+        rpc_error.get("message").?.string,
+    );
+
+    try client.registerUserInputHandler("specialized-session", struct {
+        fn handle(
+            inner_allocator: std.mem.Allocator,
+            _: session_types.UserInputRequest,
+            _: ?*anyopaque,
+        ) !session_types.UserInputResponse {
+            return .{
+                .answer = try inner_allocator.dupe(u8, "unused"),
+                .was_freeform = false,
+            };
+        }
+    }.handle, null);
+    var invalid_specialized_params: std.json.ObjectMap = .empty;
+    defer invalid_specialized_params.deinit(allocator);
+    try invalid_specialized_params.put(
+        allocator,
+        "sessionId",
+        .{ .string = "specialized-session" },
+    );
+    try expectServerRequestResponse(
+        &client,
+        7,
+        "userInput.request",
+        .{ .object = invalid_specialized_params },
+        -32602,
+        "invalid user input request",
+    );
+}
+
+test "userInput.request without either handler is method not found" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer client.user_input_handlers.deinit(allocator);
+
+    var params: std.json.ObjectMap = .empty;
+    defer params.deinit(allocator);
+    try params.put(allocator, "sessionId", .{ .string = "missing-session" });
+    try params.put(allocator, "question", .{ .string = "Continue?" });
+    try expectServerRequestResponse(
+        &client,
+        8,
+        "userInput.request",
+        .{ .object = params },
+        -32601,
+        "method not found",
+    );
+}
+
 test "user input handler receives requests and returns responses" {
     const allocator = std.testing.allocator;
     var client = Client{
@@ -4116,6 +4483,7 @@ test "permission handler receives injected managed settings metadata" {
 }
 
 test "permission handler failures leave requests available for manual handling" {
+    std.debug.print("\nCENSUS_PROBE permission_handler_behavior\n", .{});
     const allocator = std.testing.allocator;
     var client = Client{
         .allocator = allocator,
@@ -5361,6 +5729,260 @@ fn exerciseFailureConstructors(allocator: std.mem.Allocator) !void {
     }
 }
 
+const CensusConstructorCase = enum {
+    process_spawn,
+    process_exit,
+    process_terminate,
+    client_io_read,
+    client_io_write,
+    client_json,
+    invalid_config,
+    connect_rejected,
+    reentrant,
+    invalid_envelope,
+    invalid_event,
+    unexpected_response,
+    protocol_mismatch,
+    invalid_protocol_version,
+    queue_full,
+    session_agent,
+    session_detach,
+    permission_invalid,
+    permission_handler,
+    permission_not_accepted,
+    tool_invalid,
+    tool_handler,
+    tool_not_accepted,
+    rpc_generic,
+    rpc_session_missing,
+    rpc_session,
+    rpc_queue,
+    rpc_permission,
+    rpc_tool,
+};
+
+fn recordRpcConstructorCase(
+    allocator: std.mem.Allocator,
+    context: OperationContext,
+    missing_session: bool,
+) !errors.Failure {
+    const body = if (missing_session)
+        \\{"code":-32001,"message":"missing","data":{"errorCode":"session_not_found"}}
+    else
+        \\{"code":-32077,"message":"rejected","data":{"errorCode":"rejected"}}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const view = switch (validateRpcFailure("test.method", 17, context, parsed.value)) {
+        .valid => |value| value,
+        .invalid => return error.TestExpectedRpcFailure,
+    };
+    return recordRpcFailure(allocator, view);
+}
+
+fn makeCensusFailure(
+    allocator: std.mem.Allocator,
+    case: CensusConstructorCase,
+) !errors.Failure {
+    return switch (case) {
+        .process_spawn => recordProcessSpawn(allocator, "copilot", error.FileNotFound),
+        .process_exit => recordProcessExit(allocator, .{ .exited = 7 }),
+        .process_terminate => recordProcessTerminate(
+            allocator,
+            .{ .signal = 15 },
+            error.AccessDenied,
+        ),
+        .client_io_read => recordClientIo(allocator, .read, error.ReadFailed),
+        .client_io_write => recordClientIo(allocator, .write, error.BrokenPipe),
+        .client_json => recordClientJson(allocator, .write, error.InvalidJson),
+        .invalid_config => recordInvalidConfig(allocator, "cli_path", error.InvalidArgument),
+        .connect_rejected => recordConnectRejected(allocator),
+        .reentrant => recordReentrant(allocator, "session.send"),
+        .invalid_envelope => blk: {
+            const parsed = try std.json.parseFromSlice(
+                std.json.Value,
+                allocator,
+                \\{"jsonrpc":"2.0","result":{}}
+            ,
+                .{},
+            );
+            defer parsed.deinit();
+            break :blk recordEnvelope(allocator, .missing_id, parsed.value);
+        },
+        .invalid_event => blk: {
+            const parsed = try std.json.parseFromSlice(
+                std.json.Value,
+                allocator,
+                \\{"jsonrpc":"2.0","method":"session.event"}
+            ,
+                .{},
+            );
+            defer parsed.deinit();
+            break :blk recordInvalidEnvelope(
+                allocator,
+                error.InvalidJsonRpc,
+                .missing_params,
+                parsed.value,
+            );
+        },
+        .unexpected_response => recordUnexpectedResponse(allocator, 17, .{ .integer = 18 }),
+        .protocol_mismatch => recordProtocolMismatch(allocator, 99),
+        .invalid_protocol_version => recordInvalidProtocolVersion(allocator, .{ .string = "bad" }),
+        .queue_full => recordQueueFull(allocator, "session-1", "session.idle", max_queued_events),
+        .session_agent => sessionFailureFromFrame(allocator, try allocator.dupe(u8, "session-1"),
+            \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"session-1","event":{"type":"session.error","data":{"errorType":"provider","message":"Try later","statusCode":429}}}}
+        ),
+        .session_detach => recordDetachFailure(allocator, "session-1", 2),
+        .permission_invalid => recordInvalidPermission(
+            allocator,
+            "session-1",
+            "request-1",
+            error.InvalidPermissionDecision,
+        ),
+        .permission_handler => recordPermissionHandlerFailure(
+            allocator,
+            "session-1",
+            "request-1",
+            error.HandlerFailed,
+        ),
+        .permission_not_accepted => recordPermissionNotAccepted(
+            allocator,
+            "session-1",
+            "request-1",
+        ),
+        .tool_invalid => recordInvalidToolResult(
+            allocator,
+            "session-1",
+            "request-1",
+            error.InvalidToolResult,
+        ),
+        .tool_handler => recordToolHandlerFailure(
+            allocator,
+            "session-1",
+            "request-1",
+            "call-1",
+            "lookup",
+            error.HandlerFailed,
+        ),
+        .tool_not_accepted => recordToolNotAccepted(allocator, "session-1", "request-1"),
+        .rpc_generic => recordRpcConstructorCase(allocator, .generic, false),
+        .rpc_session_missing => recordRpcConstructorCase(
+            allocator,
+            .{ .session = .{ .session_id = "session-1" } },
+            true,
+        ),
+        .rpc_session => recordRpcConstructorCase(
+            allocator,
+            .{ .session = .{ .session_id = "session-1" } },
+            false,
+        ),
+        .rpc_queue => recordRpcConstructorCase(
+            allocator,
+            .{ .queue = .{ .session_id = "session-1" } },
+            false,
+        ),
+        .rpc_permission => recordRpcConstructorCase(
+            allocator,
+            .{ .permission = .{
+                .session_id = "session-1",
+                .request_id = "request-1",
+            } },
+            false,
+        ),
+        .rpc_tool => recordRpcConstructorCase(
+            allocator,
+            .{ .tool = .{
+                .session_id = "session-1",
+                .request_id = "request-1",
+                .tool_call_id = "call-1",
+                .tool_name = "lookup",
+            } },
+            false,
+        ),
+    };
+}
+
+test "failure constructors classify owned literal fields and deinit" {
+    std.debug.print("\nCENSUS_PROBE failure_constructor_ownership\n", .{});
+    const cases = [_]struct {
+        case: CensusConstructorCase,
+        expected: errors.SdkError,
+    }{
+        .{ .case = .process_spawn, .expected = error.ClientFailure },
+        .{ .case = .process_exit, .expected = error.ProcessExited },
+        .{ .case = .process_terminate, .expected = error.ClientFailure },
+        .{ .case = .client_io_read, .expected = error.ClientFailure },
+        .{ .case = .client_io_write, .expected = error.ClientFailure },
+        .{ .case = .client_json, .expected = error.ClientFailure },
+        .{ .case = .invalid_config, .expected = error.ClientFailure },
+        .{ .case = .connect_rejected, .expected = error.ClientFailure },
+        .{ .case = .reentrant, .expected = error.ClientFailure },
+        .{ .case = .invalid_envelope, .expected = error.ProtocolFailure },
+        .{ .case = .invalid_event, .expected = error.ProtocolFailure },
+        .{ .case = .unexpected_response, .expected = error.ProtocolFailure },
+        .{ .case = .protocol_mismatch, .expected = error.ProtocolMismatch },
+        .{ .case = .invalid_protocol_version, .expected = error.ProtocolMismatch },
+        .{ .case = .queue_full, .expected = error.QueueFailure },
+        .{ .case = .session_agent, .expected = error.SessionFailure },
+        .{ .case = .session_detach, .expected = error.SessionFailure },
+        .{ .case = .permission_invalid, .expected = error.PermissionFailure },
+        .{ .case = .permission_handler, .expected = error.PermissionFailure },
+        .{ .case = .permission_not_accepted, .expected = error.PermissionFailure },
+        .{ .case = .tool_invalid, .expected = error.ToolFailure },
+        .{ .case = .tool_handler, .expected = error.ToolFailure },
+        .{ .case = .tool_not_accepted, .expected = error.ToolFailure },
+        .{ .case = .rpc_generic, .expected = error.RpcRejected },
+        .{ .case = .rpc_session_missing, .expected = error.SessionNotFound },
+        .{ .case = .rpc_session, .expected = error.RpcRejected },
+        .{ .case = .rpc_queue, .expected = error.QueueFailure },
+        .{ .case = .rpc_permission, .expected = error.PermissionFailure },
+        .{ .case = .rpc_tool, .expected = error.ToolFailure },
+    };
+    for (cases) |case| {
+        var failure = try makeCensusFailure(std.testing.allocator, case.case);
+        defer failure.deinit();
+        try std.testing.expectEqual(case.expected, failure.errorTag());
+    }
+}
+
+test "process terminate and client write constructors own fields and deinit" {
+    std.debug.print("\nCENSUS_PROBE process_write_ownership\n", .{});
+    var terminate = try recordProcessTerminate(
+        std.testing.allocator,
+        .{ .signal = 15 },
+        error.AccessDenied,
+    );
+    defer terminate.deinit();
+    switch (terminate.detail) {
+        .process => |process_failure| switch (process_failure) {
+            .terminate => |detail| {
+                try std.testing.expectEqualStrings("AccessDenied", detail.message);
+                try std.testing.expectEqual(error.AccessDenied, detail.cause.code);
+                switch (detail.exit.?) {
+                    .signal => |signal| try std.testing.expectEqual(@as(u32, 15), signal),
+                    else => return error.TestExpectedSignalExit,
+                }
+            },
+            else => return error.TestExpectedTerminateFailure,
+        },
+        else => return error.TestExpectedProcessFailure,
+    }
+
+    var write = try recordClientIo(std.testing.allocator, .write, error.BrokenPipe);
+    defer write.deinit();
+    switch (write.detail) {
+        .client => |client_failure| switch (client_failure) {
+            .io => |detail| {
+                try std.testing.expectEqual(errors.ClientOperation.write, detail.operation);
+                try std.testing.expectEqualStrings("BrokenPipe", detail.message);
+                try std.testing.expectEqual(error.BrokenPipe, detail.cause.code);
+            },
+            else => return error.TestExpectedIoFailure,
+        },
+        else => return error.TestExpectedClientFailure,
+    }
+}
+
 test "failure constructors roll back every allocation failure" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
@@ -5447,6 +6069,7 @@ test "legacy delivery preserves the public session error" {
 }
 
 test "connect validates the protocol version" {
+    std.debug.print("\nCENSUS_PROBE protocol_version_dispatch\n", .{});
     try validateConnectResult(true, protocol.sdk_protocol_version);
     try std.testing.expectError(
         error.ConnectRejected,
@@ -5456,6 +6079,70 @@ test "connect validates the protocol version" {
         error.ProtocolVersionMismatch,
         validateConnectResult(true, protocol.sdk_protocol_version + 1),
     );
+}
+
+test "connect rejection preserves legacy and detailed classification" {
+    std.debug.print("\nCENSUS_PROBE connect_rejection_dispatch\n", .{});
+    const allocator = std.testing.allocator;
+    const body =
+        \\{"jsonrpc":"2.0","id":1,"result":{"ok":false,"protocolVersion":1,"version":"test"}}
+    ;
+    const frame = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ body.len, body },
+    );
+    defer allocator.free(frame);
+
+    inline for (.{ FailurePolicy.legacy, FailurePolicy.detailed }) |policy| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = frame });
+        const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+        defer response_file.close(std.testing.io);
+        var reader_buffer: [512]u8 = undefined;
+        var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+        const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+        defer request_file.close(std.testing.io);
+        var writer_buffer: [512]u8 = undefined;
+        var writer = request_file.writer(std.testing.io, &writer_buffer);
+        var client = Client{
+            .allocator = allocator,
+            .io = std.testing.io,
+            .child = null,
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        };
+
+        if (policy == .legacy) {
+            switch (try client.connect(.legacy, null, null)) {
+                .success => return error.TestExpectedClientFailure,
+                .failure => |failure| try std.testing.expectEqual(
+                    error.ConnectRejected,
+                    failure.native_error,
+                ),
+            }
+        } else {
+            var failure = switch (try client.connect(.detailed, null, null)) {
+                .success => return error.TestExpectedClientFailure,
+                .failure => |value| value,
+            };
+            defer failure.deinit();
+            try std.testing.expectEqual(error.ConnectRejected, failure.native_error);
+            try std.testing.expectEqual(error.ClientFailure, failure.errorTag());
+            const invalid = switch (failure.detail) {
+                .client => |client_failure| switch (client_failure) {
+                    .invalid_config => |value| value,
+                    else => return error.TestExpectedInvalidConfig,
+                },
+                else => return error.TestExpectedClientFailure,
+            };
+            try std.testing.expect(invalid.field == null);
+            try std.testing.expectEqualStrings("Copilot CLI rejected the connection", invalid.message);
+        }
+    }
 }
 
 test "typed RPC results allow additional fields" {
@@ -5863,6 +6550,7 @@ fn detailedRpcFailureFromFrame(
 }
 
 test "detailed RPC and malformed frame failures own literal payloads" {
+    std.debug.print("\nCENSUS_PROBE unexpected_response_dispatch\n", .{});
     const allocator = std.testing.allocator;
     const response_body =
         \\{"jsonrpc":"2.0","id":1,"error":{"code":-32042,"message":"rejected","data":{"code":"denied"}}}
@@ -6046,6 +6734,7 @@ test "detailed failure ownership survives its source client" {
 }
 
 test "detailed permission and tool delivery failures retain operation context" {
+    std.debug.print("\nCENSUS_PROBE permission_tool_delivery_behavior\n", .{});
     const rpc_error =
         \\{"jsonrpc":"2.0","id":1,"error":{"code":-32042,"message":"delivery rejected","data":{"code":"delivery_denied"}}}
     ;
@@ -6209,6 +6898,7 @@ fn expectDetailedCallFailure(
 }
 
 test "public RPC captures malformed JSON and envelopes" {
+    std.debug.print("\nCENSUS_PROBE invalid_json_dispatch\n", .{});
     const allocator = std.testing.allocator;
     var invalid_json = try expectDetailedCallFailure(
         allocator,
@@ -6229,7 +6919,7 @@ test "public RPC captures malformed JSON and envelopes" {
 
     var invalid_envelope = try expectDetailedCallFailure(
         allocator,
-        \\{"jsonrpc":"2.0","id":1,"result":{},"error":{"code":-1,"message":"bad"}}
+        \\ { "jsonrpc": "2.0", "id": 1, "result": {}, "error": { "code": -1, "message": "bad" } }
     ,
         "test.invalidEnvelope",
     );
@@ -6246,10 +6936,115 @@ test "public RPC captures malformed JSON and envelopes" {
                     "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{},\"error\":{\"code\":-1,\"message\":\"bad\"}}",
                     failure.message_json.?,
                 );
+                const reparsed = try std.json.parseFromSlice(
+                    std.json.Value,
+                    allocator,
+                    failure.message_json.?,
+                    .{},
+                );
+                reparsed.deinit();
             },
             else => return error.TestExpectedInvalidEnvelope,
         },
         else => return error.TestExpectedProtocolFailure,
+    }
+}
+
+test "invalid envelope dispatch retains canonical parseable JSON" {
+    std.debug.print("\nCENSUS_PROBE invalid_envelope_dispatch\n", .{});
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        body: []const u8,
+        canonical: []const u8,
+        reason: errors.EnvelopeViolation,
+        native_error: anyerror = error.InvalidJsonRpc,
+    }{
+        .{ .body = " [] ", .canonical = "[]", .reason = .non_object },
+        .{
+            .body =
+            \\{"id":1,"result":{}}
+            ,
+            .canonical = "{\"id\":1,\"result\":{}}",
+            .reason = .invalid_jsonrpc_version,
+        },
+        .{
+            .body =
+            \\{"jsonrpc":"2.0","result":{}}
+            ,
+            .canonical = "{\"jsonrpc\":\"2.0\",\"result\":{}}",
+            .reason = .missing_id,
+        },
+        .{
+            .body =
+            \\{"jsonrpc":"2.0","id":-1,"result":{}}
+            ,
+            .canonical = "{\"jsonrpc\":\"2.0\",\"id\":-1,\"result\":{}}",
+            .reason = .invalid_id,
+        },
+        .{
+            .body =
+            \\{"jsonrpc":"2.0","id":1}
+            ,
+            .canonical = "{\"jsonrpc\":\"2.0\",\"id\":1}",
+            .reason = .missing_result_and_error,
+            .native_error = error.MissingResult,
+        },
+        .{
+            .body =
+            \\{"jsonrpc":"2.0","id":1,"result":{},"error":{"code":-1,"message":"bad"}}
+            ,
+            .canonical = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{},\"error\":{\"code\":-1,\"message\":\"bad\"}}",
+            .reason = .result_and_error,
+        },
+        .{
+            .body =
+            \\{"jsonrpc":"2.0","id":1,"error":null}
+            ,
+            .canonical = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":null}",
+            .reason = .invalid_error_object,
+        },
+        .{
+            .body =
+            \\{"jsonrpc":"2.0","id":1,"error":{"message":"bad"}}
+            ,
+            .canonical = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"message\":\"bad\"}}",
+            .reason = .invalid_error_code,
+        },
+        .{
+            .body =
+            \\{"jsonrpc":"2.0","id":1,"error":{"code":-1}}
+            ,
+            .canonical = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-1}}",
+            .reason = .invalid_error_message,
+        },
+        .{
+            .body =
+            \\{"jsonrpc":"2.0","id":7,"method":4}
+            ,
+            .canonical = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":4}",
+            .reason = .invalid_method,
+        },
+    };
+    for (cases) |case| {
+        var failure = try expectDetailedCallFailure(allocator, case.body, "test.envelope");
+        defer failure.deinit();
+        try std.testing.expectEqual(case.native_error, failure.native_error);
+        const invalid = switch (failure.detail) {
+            .protocol => |protocol_failure| switch (protocol_failure) {
+                .invalid_envelope => |value| value,
+                else => return error.TestExpectedInvalidEnvelope,
+            },
+            else => return error.TestExpectedProtocolFailure,
+        };
+        try std.testing.expectEqual(case.reason, invalid.reason);
+        try std.testing.expectEqualStrings(case.canonical, invalid.message_json.?);
+        const reparsed = try std.json.parseFromSlice(
+            std.json.Value,
+            allocator,
+            invalid.message_json.?,
+            .{},
+        );
+        reparsed.deinit();
     }
 }
 
@@ -6294,6 +7089,13 @@ test "malformed RPC error objects retain the inbound response" {
                 .invalid_envelope => |failure| {
                     try std.testing.expectEqual(case.reason, failure.reason);
                     try std.testing.expectEqualStrings(case.body, failure.message_json.?);
+                    const reparsed = try std.json.parseFromSlice(
+                        std.json.Value,
+                        allocator,
+                        failure.message_json.?,
+                        .{},
+                    );
+                    reparsed.deinit();
                 },
                 else => return error.TestExpectedInvalidEnvelope,
             },
@@ -6482,6 +7284,7 @@ test "interleaved request response write failure is captured" {
 }
 
 test "nextEventDetailed owns complete session diagnostics after frame teardown" {
+    std.debug.print("\nCENSUS_PROBE session_agent_delivery\n", .{});
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -6801,6 +7604,7 @@ fn runAutomaticToolFailure(
 }
 
 test "nextEventDetailed reports automatic tool handler failure" {
+    std.debug.print("\nCENSUS_PROBE tool_handler_behavior\n", .{});
     const allocator = std.testing.allocator;
     var failure = switch (try runAutomaticToolFailure(allocator,
         \\{"jsonrpc":"2.0","id":1,"result":{"success":true}}
@@ -6865,4 +7669,380 @@ test "nextEventDetailed reports automatic tool delivery failure" {
         },
         else => return error.TestExpectedToolFailure,
     }
+}
+
+fn expectInvalidSessionEventMapping(
+    allocator: std.mem.Allocator,
+    params_json: []const u8,
+    expected_native_error: anyerror,
+    expected_reason: errors.EnvelopeViolation,
+    expected_message_json: []const u8,
+) !void {
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.events.items) |*event| event.deinit(allocator);
+        client.events.deinit(allocator);
+        for (client.tools.items) |tool| tool.deinit(allocator);
+        client.tools.deinit(allocator);
+    }
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, params_json, .{});
+    defer parsed.deinit();
+
+    const detailed_frame = try allocator.dupe(u8, "{}");
+    defer allocator.free(detailed_frame);
+    var failure = switch (try client.queueSessionEvent(.detailed, detailed_frame, parsed.value)) {
+        .success => return error.TestExpectedProtocolFailure,
+        .failure => |value| value,
+    };
+    defer failure.deinit();
+    try std.testing.expectEqual(expected_native_error, failure.native_error);
+    switch (failure.detail) {
+        .protocol => |protocol_failure| switch (protocol_failure) {
+            .invalid_envelope => |invalid| {
+                try std.testing.expectEqual(expected_reason, invalid.reason);
+                try std.testing.expectEqualStrings(expected_message_json, invalid.message_json.?);
+                const reparsed = try std.json.parseFromSlice(
+                    std.json.Value,
+                    allocator,
+                    invalid.message_json.?,
+                    .{},
+                );
+                reparsed.deinit();
+            },
+            else => return error.TestExpectedInvalidEnvelope,
+        },
+        else => return error.TestExpectedProtocolFailure,
+    }
+
+    const legacy_frame = try allocator.dupe(u8, "{}");
+    defer allocator.free(legacy_frame);
+    switch (try client.queueSessionEvent(.legacy, legacy_frame, parsed.value)) {
+        .success => return error.TestExpectedProtocolFailure,
+        .failure => |legacy| try std.testing.expectEqual(
+            expected_native_error,
+            legacy.native_error,
+        ),
+    }
+}
+
+fn expectInvalidSessionEventEnvelope(
+    allocator: std.mem.Allocator,
+    body: []const u8,
+    expected_native_error: anyerror,
+    expected_reason: errors.EnvelopeViolation,
+    expected_message_json: []const u8,
+) !void {
+    const frame = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ body.len, body },
+    );
+    defer allocator.free(frame);
+
+    inline for (.{ FailurePolicy.legacy, FailurePolicy.detailed }) |policy| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = frame });
+        const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+        defer response_file.close(std.testing.io);
+        var reader_buffer: [512]u8 = undefined;
+        var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+        const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+        defer request_file.close(std.testing.io);
+        var writer_buffer: [128]u8 = undefined;
+        var writer = request_file.writer(std.testing.io, &writer_buffer);
+        var client = Client{
+            .allocator = allocator,
+            .io = std.testing.io,
+            .child = null,
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        };
+        defer client.events.deinit(allocator);
+
+        if (policy == .legacy) {
+            const result = client.callRpc(std.json.Value, "test.method", .{});
+            try std.testing.expectError(expected_native_error, result);
+        } else {
+            var failure = switch (try client.callRpcDetailed(
+                std.json.Value,
+                "test.method",
+                .{},
+            )) {
+                .success => |parsed| {
+                    parsed.deinit();
+                    return error.TestExpectedProtocolFailure;
+                },
+                .failure => |value| value,
+            };
+            defer failure.deinit();
+            try std.testing.expectEqual(expected_native_error, failure.native_error);
+            const invalid = switch (failure.detail) {
+                .protocol => |protocol_failure| switch (protocol_failure) {
+                    .invalid_envelope => |value| value,
+                    else => return error.TestExpectedInvalidEnvelope,
+                },
+                else => return error.TestExpectedProtocolFailure,
+            };
+            try std.testing.expectEqual(expected_reason, invalid.reason);
+            try std.testing.expectEqualStrings(expected_message_json, invalid.message_json.?);
+            const parsed = try std.json.parseFromSlice(
+                std.json.Value,
+                allocator,
+                invalid.message_json.?,
+                .{},
+            );
+            parsed.deinit();
+        }
+    }
+}
+
+test "session.event invalid envelope violation matrix" {
+    std.debug.print("\nCENSUS_PROBE session_event_violation_matrix\n", .{});
+    const allocator = std.testing.allocator;
+    try std.testing.expectEqual(
+        errors.EnvelopeViolation.missing_params,
+        sessionEventViolation(error.MissingField),
+    );
+    try std.testing.expectEqual(
+        errors.EnvelopeViolation.malformed_field_type,
+        sessionEventViolation(error.MalformedFieldType),
+    );
+    try expectInvalidSessionEventEnvelope(
+        allocator,
+        \\ { "jsonrpc": "2.0", "method": "session.event" }
+    ,
+        error.InvalidJsonRpc,
+        .missing_params,
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.event\"}",
+    );
+    try expectInvalidSessionEventEnvelope(
+        allocator,
+        \\{"jsonrpc":"2.0","method":"session.event","params":[]}
+    ,
+        error.InvalidJsonRpc,
+        .malformed_field_type,
+        "[]",
+    );
+    try expectInvalidSessionEventEnvelope(
+        allocator,
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"event":{}}}
+    ,
+        error.InvalidJsonRpc,
+        .missing_params,
+        "{\"event\":{}}",
+    );
+    try expectInvalidSessionEventEnvelope(
+        allocator,
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":7,"event":{}}}
+    ,
+        error.InvalidJsonRpc,
+        .malformed_field_type,
+        "{\"sessionId\":7,\"event\":{}}",
+    );
+    try expectInvalidSessionEventEnvelope(
+        allocator,
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"s1"}}
+    ,
+        error.InvalidJsonRpc,
+        .missing_params,
+        "{\"sessionId\":\"s1\"}",
+    );
+    try expectInvalidSessionEventEnvelope(
+        allocator,
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"s1","event":{"type":"session.error","data":{"errorType":"provider"}}}}
+    ,
+        error.InvalidSessionEvent,
+        .missing_params,
+        "{\"type\":\"session.error\",\"data\":{\"errorType\":\"provider\"}}",
+    );
+    try expectInvalidSessionEventEnvelope(
+        allocator,
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"s1","event":{"type":"session.error","data":{"errorType":"provider","message":7}}}}
+    ,
+        error.InvalidSessionEvent,
+        .malformed_field_type,
+        "{\"type\":\"session.error\",\"data\":{\"errorType\":\"provider\",\"message\":7}}",
+    );
+    try expectInvalidSessionEventEnvelope(
+        allocator,
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"s1","event":{"type":"assistant.message","data":{}}}}
+    ,
+        error.InvalidSessionEvent,
+        .missing_params,
+        "{\"type\":\"assistant.message\",\"data\":{}}",
+    );
+    try expectInvalidSessionEventEnvelope(
+        allocator,
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"s1","event":{"type":"assistant.message","data":{"content":7}}}}
+    ,
+        error.InvalidSessionEvent,
+        .malformed_field_type,
+        "{\"type\":\"assistant.message\",\"data\":{\"content\":7}}",
+    );
+    try expectInvalidSessionEventEnvelope(
+        allocator,
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"s1","event":{"type":"permission.requested","data":{"permissionRequest":{}}}}}
+    ,
+        error.InvalidSessionEvent,
+        .missing_params,
+        "{\"type\":\"permission.requested\",\"data\":{\"permissionRequest\":{}}}",
+    );
+    try expectInvalidSessionEventEnvelope(
+        allocator,
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"s1","event":{"type":"permission.requested","data":{"requestId":7,"permissionRequest":{}}}}}
+    ,
+        error.InvalidSessionEvent,
+        .malformed_field_type,
+        "{\"type\":\"permission.requested\",\"data\":{\"requestId\":7,\"permissionRequest\":{}}}",
+    );
+    try expectInvalidSessionEventEnvelope(
+        allocator,
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"s1","event":{"type":"session.error","data":{"errorType":"provider","message":"bad","statusCode":1000}}}}
+    ,
+        error.InvalidSessionEvent,
+        .invalid_session_status,
+        "{\"type\":\"session.error\",\"data\":{\"errorType\":\"provider\",\"message\":\"bad\",\"statusCode\":1000}}",
+    );
+    try expectInvalidSessionEventEnvelope(
+        allocator,
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"s1","event":{"type":"session.error","data":{"errorType":"provider","message":"bad","statusCode":-1}}}}
+    ,
+        error.InvalidSessionEvent,
+        .invalid_session_status,
+        "{\"type\":\"session.error\",\"data\":{\"errorType\":\"provider\",\"message\":\"bad\",\"statusCode\":-1}}",
+    );
+    const accepted_body =
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"s1","event":{"type":"session.error","data":{"errorType":"provider","message":"ok","statusCode":999}}}}
+    ;
+    var accepted_status = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"session.error","data":{"errorType":"provider","message":"ok","statusCode":999}}
+    ,
+        .{},
+    );
+    defer accepted_status.deinit();
+    const accepted_view = (try Client.sessionAgentWireView(accepted_status.value)).?;
+    try std.testing.expectEqual(@as(?u16, 999), accepted_view.status_code);
+    const accepted_frame = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ accepted_body.len, accepted_body },
+    );
+    defer allocator.free(accepted_frame);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = accepted_frame });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [512]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [128]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer client.events.deinit(allocator);
+    var delivery = switch (try client.nextEventImpl(.detailed, "s1")) {
+        .success => |value| value,
+        .failure => |failure| {
+            var owned = failure;
+            defer owned.deinit();
+            return error.TestExpectedSessionEvent;
+        },
+    };
+    defer delivery.deinit(allocator);
+    switch (delivery.payload) {
+        .session_error => {},
+        else => return error.TestExpectedSessionError,
+    }
+}
+
+test "parity production fixes preserve boundary behavior" {
+    const allocator = std.testing.allocator;
+
+    var reader_buffer: [64]u8 = undefined;
+    var fragmented: std.testing.Reader = .init(&reader_buffer, &.{
+        .{ .buffer = "Content-" },
+        .{ .buffer = "Length: 2\r" },
+        .{ .buffer = "\n\r\n{" },
+        .{ .buffer = "}" },
+    });
+    fragmented.artificial_limit = .limited(1);
+    const body = try json_rpc.readFrame(allocator, &fragmented.interface);
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings("{}", body);
+
+    try expectInvalidSessionEventMapping(
+        allocator,
+        "{}",
+        error.InvalidJsonRpc,
+        .missing_params,
+        "{}",
+    );
+    try expectInvalidSessionEventMapping(
+        allocator,
+        "{\"sessionId\":7,\"event\":{}}",
+        error.InvalidJsonRpc,
+        .malformed_field_type,
+        "{\"sessionId\":7,\"event\":{}}",
+    );
+    try expectInvalidSessionEventMapping(
+        allocator,
+        "{\"sessionId\":\"s1\",\"event\":{\"type\":\"session.error\",\"data\":{\"errorType\":\"provider\",\"message\":\"bad\",\"statusCode\":1000}}}",
+        error.InvalidSessionEvent,
+        .invalid_session_status,
+        "{\"type\":\"session.error\",\"data\":{\"errorType\":\"provider\",\"message\":\"bad\",\"statusCode\":1000}}",
+    );
+    try expectInvalidSessionEventMapping(
+        allocator,
+        "{\"sessionId\":\"s1\",\"event\":{\"type\":\"session.error\",\"data\":{\"errorType\":\"provider\",\"message\":\"bad\",\"statusCode\":-1}}}",
+        error.InvalidSessionEvent,
+        .invalid_session_status,
+        "{\"type\":\"session.error\",\"data\":{\"errorType\":\"provider\",\"message\":\"bad\",\"statusCode\":-1}}",
+    );
+
+    const canonical_source = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        " { \"params\" : null } ",
+        .{},
+    );
+    defer canonical_source.deinit();
+    var canonical_envelope = try recordEnvelope(
+        allocator,
+        .missing_params,
+        canonical_source.value,
+    );
+    defer canonical_envelope.deinit();
+    const message_json = switch (canonical_envelope.detail) {
+        .protocol => |protocol_failure| switch (protocol_failure) {
+            .invalid_envelope => |envelope| envelope.message_json,
+            else => unreachable,
+        },
+        else => unreachable,
+    };
+    try std.testing.expectEqualStrings("{\"params\":null}", message_json.?);
+    const parsed_message = try std.json.parseFromSlice(std.json.Value, allocator, message_json.?, .{});
+    parsed_message.deinit();
 }

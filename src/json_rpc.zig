@@ -195,13 +195,18 @@ fn readFrameImpl(
     }
 
     const body = try allocator.alloc(u8, length);
-    const received = reader.readSliceShort(body) catch |cause| {
-        allocator.free(body);
-        return .{ .failure = if (comptime policy == .legacy)
-            cause
-        else
-            try ioFailure(allocator, cause) };
-    };
+    var received: usize = 0;
+    while (received < length) {
+        const count = reader.readSliceShort(body[received..]) catch |cause| {
+            allocator.free(body);
+            return .{ .failure = if (comptime policy == .legacy)
+                cause
+            else
+                try ioFailure(allocator, cause) };
+        };
+        if (count == 0) break;
+        received += count;
+    }
     if (received != length) {
         allocator.free(body);
         if (comptime policy == .legacy)
@@ -274,7 +279,57 @@ test "Content-Length framing round trips" {
     try std.testing.expectEqualStrings("{\"ok\":true}", body);
 }
 
+test "fragmented Content-Length framing reads complete body" {
+    std.debug.print("\nCENSUS_PROBE fragmented_frame_behavior\n", .{});
+    const allocator = std.testing.allocator;
+    var reader_buffer: [64]u8 = undefined;
+    var reader: std.testing.Reader = .init(&reader_buffer, &.{
+        .{ .buffer = "Content-" },
+        .{ .buffer = "Length: 11\r" },
+        .{ .buffer = "\n\r\nhello " },
+        .{ .buffer = "world" },
+    });
+    reader.artificial_limit = .limited(1);
+
+    const body = try readFrame(allocator, &reader.interface);
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings("hello world", body);
+}
+
+test "fragmented framing reports actual EOF after partial body" {
+    const allocator = std.testing.allocator;
+    var reader_buffer: [64]u8 = undefined;
+    var reader: std.testing.Reader = .init(&reader_buffer, &.{
+        .{ .buffer = "Content-Len" },
+        .{ .buffer = "gth: 5\r\n\r\n" },
+        .{ .buffer = "ab" },
+        .{ .buffer = "c" },
+    });
+    reader.artificial_limit = .limited(1);
+
+    var failure = switch (try readFrameDetailed(allocator, &reader.interface)) {
+        .success => |body| {
+            allocator.free(body);
+            return error.TestExpectedFailure;
+        },
+        .failure => |value| value,
+    };
+    defer failure.deinit();
+    try std.testing.expectEqual(error.TruncatedFrame, failure.native_error);
+    switch (failure.detail) {
+        .protocol => |protocol_failure| switch (protocol_failure) {
+            .truncated_frame => |truncated| {
+                try std.testing.expectEqual(@as(usize, 5), truncated.declared);
+                try std.testing.expectEqual(@as(usize, 3), truncated.received);
+            },
+            else => return error.TestExpectedTruncatedFrame,
+        },
+        else => return error.TestExpectedProtocolFailure,
+    }
+}
+
 test "captured framing failures retain literal input and lengths" {
+    std.debug.print("\nCENSUS_PROBE framing_failure_ownership\n", .{});
     const allocator = std.testing.allocator;
 
     var invalid_reader = std.Io.Reader.fixed("Content-Length: nope\r\n\r\n");
