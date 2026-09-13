@@ -5642,7 +5642,11 @@ pub const Client = struct {
                 body,
                 .{},
             ) catch |err| {
-                self.finishPumpNative(err);
+                const failure = recordInvalidJson(self.allocator, err) catch {
+                    self.finishPumpWithoutDetail(err);
+                    return;
+                };
+                self.finishPumpFailure(failure);
                 return;
             };
             defer {
@@ -5779,6 +5783,14 @@ pub const Client = struct {
         self.event_logs_mutex.lockUncancelable(self.io);
         defer self.event_logs_mutex.unlock(self.io);
         for (self.event_logs.items) |log| log.fail(err);
+    }
+
+    fn takePumpFailure(self: *Client) ?errors.Failure {
+        self.pending_mutex.lockUncancelable(self.io);
+        defer self.pending_mutex.unlock(self.io);
+        const failure = self.pump_failure orelse return null;
+        self.pump_failure = null;
+        return failure;
     }
 
     fn startSendOperation(
@@ -10295,6 +10307,8 @@ pub const Session = struct {
             ) catch |err| {
                 if (try lease.log.detailedFailure()) |failure|
                     return .{ .failure = failure };
+                if (self.client.takePumpFailure()) |failure|
+                    return .{ .failure = failure };
                 return .{ .failure = try recordClientIo(
                     self.client.allocator,
                     .read,
@@ -10368,6 +10382,8 @@ pub const Session = struct {
             null,
         ) catch |err| {
             if (try lease.log.detailedFailure()) |failure|
+                return .{ .failure = failure };
+            if (self.client.takePumpFailure()) |failure|
                 return .{ .failure = failure };
             return .{ .failure = try recordClientIo(
                 self.client.allocator,
@@ -24289,6 +24305,66 @@ test "nextEventDetailed owns complete session diagnostics after frame teardown" 
             else => return error.TestExpectedAgentFailure,
         },
         else => return error.TestExpectedSessionFailure,
+    }
+}
+
+test "nextEventDetailed preserves pumped protocol diagnostics" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const malformed = "{";
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ malformed.len, malformed },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = responses });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        deinitTestMessaging(&client);
+        client.events.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    const active_session = try addTestSession(&client, "session-1");
+    var observer = try active_session.subscribe();
+    defer observer.deinit();
+
+    var failure = switch (try active_session.nextEventDetailed()) {
+        .success => |event_value| {
+            var event = event_value;
+            event.deinit(allocator);
+            return error.TestExpectedProtocolFailure;
+        },
+        .failure => |value| value,
+    };
+    defer failure.deinit();
+    try std.testing.expectEqual(error.UnexpectedEndOfInput, failure.native_error);
+    switch (failure.detail) {
+        .protocol => |protocol_failure| switch (protocol_failure) {
+            .invalid_json => |detail| {
+                try std.testing.expectEqual(error.UnexpectedEndOfInput, detail.cause.code);
+            },
+            else => return error.TestExpectedInvalidJson,
+        },
+        else => return error.TestExpectedProtocolFailure,
     }
 }
 
