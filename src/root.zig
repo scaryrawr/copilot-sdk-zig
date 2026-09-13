@@ -1,11 +1,35 @@
+const std = @import("std");
+
 pub const json_rpc = @import("json_rpc.zig");
 pub const client = @import("client.zig");
 pub const session = @import("session.zig");
 pub const extensibility = @import("extensibility.zig");
 pub const models = @import("models.zig");
+const errors = @import("errors.zig");
 const provider = @import("provider.zig");
 
 pub const Client = client.Client;
+pub const DetailedError = errors.DetailedError;
+pub const DetailedResult = errors.DetailedResult;
+pub const Failure = errors.Failure;
+pub const FailureDetail = errors.FailureDetail;
+pub const Cause = errors.Cause;
+pub const ProcessFailure = errors.ProcessFailure;
+pub const ProcessExit = errors.ProcessExit;
+pub const ClientFailure = errors.ClientFailure;
+pub const ClientOperation = errors.ClientOperation;
+pub const ProtocolFailure = errors.ProtocolFailure;
+pub const SdkError = errors.SdkError;
+pub const EnvelopeViolation = errors.EnvelopeViolation;
+pub const ProtocolMismatch = errors.ProtocolMismatch;
+pub const RpcFailure = errors.RpcFailure;
+pub const RpcOperationContext = errors.RpcOperationContext;
+pub const SessionFailure = errors.SessionFailure;
+pub const SessionAgentFailure = errors.SessionAgentFailure;
+pub const QueueFailure = errors.QueueFailure;
+pub const PermissionFailure = errors.PermissionFailure;
+pub const ToolFailure = errors.ToolFailure;
+pub const ShutdownFailure = errors.ShutdownFailure;
 pub const ClientInfo = client.ClientInfo;
 pub const ClientOptions = client.ClientOptions;
 pub const RpcHandler = client.RpcHandler;
@@ -123,11 +147,12 @@ pub const ModelWarningText = models.WarningText;
 pub const ModelMessage = models.Message;
 pub const ModelAdaptiveThinking = models.AdaptiveThinking;
 
-test {
+test "root declarations compile" {
     _ = json_rpc;
     _ = client;
     _ = session;
     _ = models;
+    _ = errors;
     _ = provider;
     _ = extensibility;
     _ = CustomAgentConfig;
@@ -142,4 +167,11 @@ test {
     _ = NamedProviderConfig;
     _ = ProviderModelConfig;
     _ = Attachment;
+}
+
+test "parity census root SdkError export" {
+    const sdk_error: SdkError = error.ProtocolFailure;
+    const error_tag_fn: *const fn (*const Failure) SdkError = &Failure.errorTag;
+    try std.testing.expectEqual(errors.SdkError, @TypeOf(sdk_error));
+    _ = error_tag_fn;
 }
