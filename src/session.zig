@@ -495,6 +495,52 @@ test "generated integers accept full u64 range and raw data keeps future fields"
     );
 }
 
+test "generated string bounds count code points and numbers accept large integer tokens" {
+    const allocator = std.testing.allocator;
+
+    var preview: [512]u8 = undefined;
+    for (0..256) |index| {
+        @memcpy(preview[index * 2 ..][0..2], "\xc3\xa9");
+    }
+    const notification_json = try std.fmt.allocPrint(
+        allocator,
+        \\{{"type":"system.notification","data":{{"content":"","kind":{{"type":"factory_completed","runId":"run-1","factoryName":"factory","status":"completed","consumedSubagents":0,"elapsedMs":0,"consumedNanoAiu":0,"attempt":1,"resultPreview":"{s}"}}}}}}
+    ,
+        .{preview},
+    );
+    defer allocator.free(notification_json);
+    const parsed_notification = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        notification_json,
+        .{},
+    );
+    defer parsed_notification.deinit();
+    var notification = try parseEvent(allocator, parsed_notification.value);
+    defer notification.deinit(allocator);
+
+    try std.testing.expectEqual(
+        @as(usize, 512),
+        notification.system_notification.data.kind.factory_completed.result_preview.?.len,
+    );
+
+    const parsed_usage = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"session.usage_checkpoint","data":{"totalNanoAiu":9223372036854775808}}
+    ,
+        .{},
+    );
+    defer parsed_usage.deinit();
+    var usage = try parseEvent(allocator, parsed_usage.value);
+    defer usage.deinit(allocator);
+
+    try std.testing.expectEqual(
+        @as(f64, 9_223_372_036_854_775_808),
+        usage.session_usage_checkpoint.data.total_nano_aiu,
+    );
+}
+
 test "failed generated parsing wipes initialized fields" {
     const source_allocator = std.testing.allocator;
     const parsed = try std.json.parseFromSlice(

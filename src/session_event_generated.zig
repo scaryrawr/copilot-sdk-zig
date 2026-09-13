@@ -4469,8 +4469,10 @@ fn parseString(
     maximum: ?usize,
 ) ![]const u8 {
     const string = try valueString(value);
-    if (minimum) |bound| if (string.len < bound) return error.InvalidSessionEvent;
-    if (maximum) |bound| if (string.len > bound) return error.InvalidSessionEvent;
+    const length = std.unicode.utf8CountCodepoints(string) catch
+        return error.InvalidSessionEvent;
+    if (minimum) |bound| if (length < bound) return error.InvalidSessionEvent;
+    if (maximum) |bound| if (length > bound) return error.InvalidSessionEvent;
     return allocator.dupe(u8, string);
 }
 
@@ -4519,6 +4521,8 @@ fn parseNumber(
     const number: f64 = switch (value) {
         .integer => |integer| @floatFromInt(integer),
         .float => |float| float,
+        .number_string => |encoded| std.fmt.parseFloat(f64, encoded) catch
+            return error.InvalidSessionEvent,
         else => return error.InvalidSessionEvent,
     };
     if (minimum) |bound| if (number < bound) return error.InvalidSessionEvent;
