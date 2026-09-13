@@ -1,5 +1,6 @@
 const std = @import("std");
 const errors = @import("errors.zig");
+const evidence_registry = @import("parity_evidence.zig");
 
 const manifest_spec = @import("parity_requirements");
 const requirements_manifest = manifest_spec.data;
@@ -126,27 +127,7 @@ pub const Outcome = union(enum) {
     server_response: i64,
 };
 
-pub const Evidence = enum {
-    fragmented_frame_behavior,
-    framing_failure_ownership,
-    invalid_json_dispatch,
-    invalid_envelope_dispatch,
-    session_event_violation_matrix,
-    session_agent_delivery,
-    failure_constructor_ownership,
-    unexpected_response_dispatch,
-    server_request_response_matrix,
-    permission_tool_delivery_behavior,
-    permission_handler_behavior,
-    tool_handler_behavior,
-    process_write_ownership,
-    shutdown_behavior,
-    shutdown_dropped_behavior,
-    connect_rejection_dispatch,
-    client_operation_rejection,
-    protocol_version_dispatch,
-    root_export_compile,
-};
+pub const Evidence = evidence_registry.Evidence;
 
 pub const Row = struct {
     id: CaseId,
@@ -162,42 +143,8 @@ pub const Row = struct {
     evidence: Evidence,
 };
 
-const EvidenceSpec = struct {
-    id: Evidence,
-    source_file: []const u8,
-    test_filter: []const u8,
-    kind: EvidenceKind,
-    package_root: ?[]const u8 = null,
-};
-
-const EvidenceKind = enum {
-    behavior,
-    detailed_behavior,
-    ownership,
-    compile,
-};
-
-const executable_evidence = [_]EvidenceSpec{
-    .{ .id = .fragmented_frame_behavior, .source_file = "src/json_rpc.zig", .test_filter = "fragmented Content-Length framing reads complete body", .kind = .behavior },
-    .{ .id = .framing_failure_ownership, .source_file = "src/json_rpc.zig", .test_filter = "captured framing failures retain literal input and lengths", .kind = .ownership },
-    .{ .id = .invalid_json_dispatch, .source_file = "src/client.zig", .test_filter = "public RPC captures malformed JSON and envelopes", .kind = .detailed_behavior },
-    .{ .id = .invalid_envelope_dispatch, .source_file = "src/client.zig", .test_filter = "invalid envelope dispatch retains canonical parseable JSON", .kind = .detailed_behavior },
-    .{ .id = .session_event_violation_matrix, .source_file = "src/client.zig", .test_filter = "session.event invalid envelope violation matrix", .kind = .detailed_behavior },
-    .{ .id = .session_agent_delivery, .source_file = "src/client.zig", .test_filter = "nextEventDetailed owns complete session diagnostics after frame teardown", .kind = .detailed_behavior },
-    .{ .id = .failure_constructor_ownership, .source_file = "src/client.zig", .test_filter = "failure constructors classify owned literal fields and deinit", .kind = .ownership },
-    .{ .id = .unexpected_response_dispatch, .source_file = "src/client.zig", .test_filter = "detailed RPC and malformed frame failures own literal payloads", .kind = .detailed_behavior },
-    .{ .id = .server_request_response_matrix, .source_file = "src/client.zig", .test_filter = "server request response matrix preserves generic userInput.request fallback", .kind = .behavior },
-    .{ .id = .permission_tool_delivery_behavior, .source_file = "src/client.zig", .test_filter = "detailed permission and tool delivery failures retain operation context", .kind = .detailed_behavior },
-    .{ .id = .permission_handler_behavior, .source_file = "src/client.zig", .test_filter = "permission handler failures leave requests available for manual handling", .kind = .detailed_behavior },
-    .{ .id = .tool_handler_behavior, .source_file = "src/client.zig", .test_filter = "nextEventDetailed reports automatic tool handler failure", .kind = .detailed_behavior },
-    .{ .id = .process_write_ownership, .source_file = "src/client.zig", .test_filter = "process terminate and client write constructors own fields and deinit", .kind = .ownership },
-    .{ .id = .shutdown_behavior, .source_file = "src/client.zig", .test_filter = "stopDetailed retains detach RPC failure details and completes cleanup", .kind = .detailed_behavior },
-    .{ .id = .shutdown_dropped_behavior, .source_file = "src/client.zig", .test_filter = "stopDetailed reports allocation-free dropped diagnostics", .kind = .detailed_behavior },
-    .{ .id = .connect_rejection_dispatch, .source_file = "src/client.zig", .test_filter = "connect rejection preserves legacy and detailed classification", .kind = .detailed_behavior },
-    .{ .id = .protocol_version_dispatch, .source_file = "src/client.zig", .test_filter = "connect validates the protocol version", .kind = .detailed_behavior },
-    .{ .id = .client_operation_rejection, .source_file = "src/client.zig", .test_filter = "session operation rejection is owned and legacy methods collapse it", .kind = .detailed_behavior },
-    .{ .id = .root_export_compile, .source_file = "testdata/root_export_consumer.zig", .test_filter = "external consumer imports root SdkError export", .kind = .compile, .package_root = "src/root.zig" },
-};
+pub const executable_evidence = evidence_registry.registry;
+const EvidenceSpec = evidence_registry.Spec;
 
 const TaxonomyStatus = union(enum) {
     emitted: []const u8,
@@ -367,7 +314,7 @@ pub const rows = [_]Row{
     .{ .id = .tool_not_accepted, .boundary = .tools, .operation = "deliver tool result", .trigger = "server returns accepted=false", .legacy = "ToolResultNotAccepted", .detailed = "tool.not_accepted", .violation = "not_accepted", .retained = "session id, request id, optional tool id, message", .cleanup = "Failure.deinit frees owned fields", .outcome = .{ .failure = .tool_not_accepted }, .evidence = .permission_tool_delivery_behavior },
 
     .{ .id = .process_spawn, .boundary = .process_lifecycle, .operation = "spawn CLI", .trigger = "process spawn fails", .legacy = "spawn error", .detailed = "process.spawn", .violation = "spawn", .retained = "executable, message, cause", .cleanup = "Failure.deinit frees owned fields", .outcome = .{ .failure = .process_spawn }, .evidence = .failure_constructor_ownership },
-    .{ .id = .process_exit, .boundary = .process_lifecycle, .operation = "read CLI output", .trigger = "child exits before another frame", .legacy = "EndOfStream", .detailed = "process.exited", .violation = "exited", .retained = "exit kind, code, message", .cleanup = "Failure.deinit frees message", .outcome = .{ .failure = .process_exited }, .evidence = .failure_constructor_ownership },
+    .{ .id = .process_exit, .boundary = .process_lifecycle, .operation = "read CLI output", .trigger = "child exits before another frame", .legacy = "MissingContentLength on clean EOF", .detailed = "process.exited with native EndOfStream", .violation = "exited", .retained = "exit kind, code, message", .cleanup = "Failure.deinit frees message", .outcome = .{ .failure = .process_exited }, .evidence = .process_exit_dispatch },
     .{ .id = .process_terminate, .boundary = .process_lifecycle, .operation = "stop client", .trigger = "child termination fails", .legacy = "termination error", .detailed = "process.terminate inside shutdown", .violation = "terminate", .retained = "optional exit, message, cause", .cleanup = "Failure.deinit frees owned message", .outcome = .{ .failure = .process_terminate }, .evidence = .process_write_ownership },
     .{ .id = .transport_read, .boundary = .process_lifecycle, .operation = "read CLI output", .trigger = "transport read fails while child remains live", .legacy = "read error", .detailed = "client.io", .violation = "io", .retained = "read operation, message, cause", .cleanup = "Failure.deinit frees message", .outcome = .{ .failure = .client_io }, .evidence = .failure_constructor_ownership },
     .{ .id = .transport_write, .boundary = .process_lifecycle, .operation = "write CLI input", .trigger = "transport write fails", .legacy = "write error", .detailed = "client.io", .violation = "io", .retained = "write operation, message, cause", .cleanup = "Failure.deinit frees message", .outcome = .{ .failure = .client_io }, .evidence = .process_write_ownership },
@@ -718,6 +665,80 @@ pub fn stats() !Stats {
     return result;
 }
 
+const Checksums = struct {
+    case_ids: [std.crypto.hash.sha2.Sha256.digest_length * 2]u8,
+    mapping: [std.crypto.hash.sha2.Sha256.digest_length * 2]u8,
+};
+
+fn lessThanString(_: void, lhs: []const u8, rhs: []const u8) bool {
+    return std.mem.lessThan(u8, lhs, rhs);
+}
+
+fn updateMappingHash(hasher: *std.crypto.hash.sha2.Sha256, row: Row) void {
+    const fields = .{
+        @tagName(row.id),
+        @tagName(row.boundary),
+        row.operation,
+        row.trigger,
+        row.legacy,
+        row.detailed,
+        row.violation,
+        row.retained,
+        row.cleanup,
+    };
+    inline for (fields, 0..) |field, index| {
+        if (index != 0) hasher.update("\t");
+        hasher.update(field);
+    }
+    hasher.update("\t");
+    var outcome_buffer: [64]u8 = undefined;
+    const outcome = switch (row.outcome) {
+        .success => |value| std.fmt.bufPrint(
+            &outcome_buffer,
+            "success.{s}\n",
+            .{@tagName(value)},
+        ) catch unreachable,
+        .failure => |value| std.fmt.bufPrint(
+            &outcome_buffer,
+            "failure.{s}\n",
+            .{@tagName(value)},
+        ) catch unreachable,
+        .server_response => |value| std.fmt.bufPrint(
+            &outcome_buffer,
+            "server_response.{d}\n",
+            .{value},
+        ) catch unreachable,
+    };
+    hasher.update(outcome);
+}
+
+fn checksums() !Checksums {
+    var requirement_storage: [256]Requirement = undefined;
+    const requirements = try parseRequirements(requirements_manifest, &requirement_storage);
+    var ids: [256][]const u8 = undefined;
+    for (requirements, 0..) |requirement, index| ids[index] = requirement.id;
+    const sorted_ids = ids[0..requirements.len];
+    std.mem.sort([]const u8, sorted_ids, {}, lessThanString);
+
+    var case_id_hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    for (sorted_ids) |id| {
+        case_id_hasher.update(id);
+        case_id_hasher.update("\n");
+    }
+    var case_id_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    case_id_hasher.final(&case_id_digest);
+
+    var mapping_hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    for (rows) |row| updateMappingHash(&mapping_hasher, row);
+    var mapping_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    mapping_hasher.final(&mapping_digest);
+
+    return .{
+        .case_ids = std.fmt.bytesToHex(case_id_digest, .lower),
+        .mapping = std.fmt.bytesToHex(mapping_digest, .lower),
+    };
+}
+
 pub fn validateRows() !void {
     var requirement_storage: [256]Requirement = undefined;
     const requirements = try parseRequirements(requirements_manifest, &requirement_storage);
@@ -733,6 +754,17 @@ pub fn validateRows() !void {
     if (result.fabricated != 0) return error.CensusFabricatedCase;
     if (result.integrity_errors != 0) return error.CensusIntegrityError;
     if (result.row_probe_references != rows.len) return error.CensusProbeReferenceGap;
+    if (result.taxonomy_emitted != manifest_spec.expected_taxonomy_emitted or
+        result.taxonomy_declared_not_emitted != manifest_spec.expected_taxonomy_declared_not_emitted or
+        result.taxonomy_triples != manifest_spec.expected_taxonomy_triples)
+    {
+        return error.CensusTaxonomyAnchorChanged;
+    }
+    const actual_checksums = try checksums();
+    if (!std.mem.eql(u8, &actual_checksums.case_ids, manifest_spec.expected_case_id_sha256))
+        return error.CensusCaseIdAnchorChanged;
+    if (!std.mem.eql(u8, &actual_checksums.mapping, manifest_spec.expected_mapping_sha256))
+        return error.CensusMappingAnchorChanged;
 }
 
 pub fn printReport(writer: *std.Io.Writer) !void {
@@ -808,6 +840,7 @@ pub fn printReport(writer: *std.Io.Writer) !void {
 }
 
 test "parity census manifest and taxonomy accounting are valid" {
+    try std.testing.expect(evidence_registry.registryIsExhaustive());
     try validateRows();
 }
 

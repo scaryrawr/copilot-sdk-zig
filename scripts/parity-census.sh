@@ -6,12 +6,31 @@ executed=0
 seen_ids=$'\n'
 seen_commands=$'\n'
 expected_required_rows=56
-expected_unique_evidence_commands=19
+expected_unique_evidence_commands=20
 expected_case_id_checksum=34c86b9aaf4188369160d5d9f1e9dc2a280affd673af3633f13b26d893a1c9d3
-expected_mapping_checksum=af4a47f46947cf252fb241b95ca324f86abd97c6e243072493650bf4be9cb844
+expected_mapping_checksum=ba1c666964c718e1a7164cde81378f7614e10f70e02e3cb348cee5132ab6a093
 expected_taxonomy_emitted=72
 expected_taxonomy_declared_not_emitted=7
 expected_taxonomy_triples=148
+
+if command -v shasum >/dev/null 2>&1; then
+  sha256_tool=shasum
+elif command -v sha256sum >/dev/null 2>&1; then
+  sha256_tool=sha256sum
+elif command -v openssl >/dev/null 2>&1; then
+  sha256_tool=openssl
+else
+  printf 'CENSUS_SHA256_TOOL_MISSING requires shasum, sha256sum, or openssl\n' >&2
+  exit 1
+fi
+
+sha256_stdin() {
+  case "$sha256_tool" in
+    shasum) shasum -a 256 | awk '{print $1}' ;;
+    sha256sum) sha256sum | awk '{print $1}' ;;
+    openssl) openssl dgst -sha256 | awk '{print $NF}' ;;
+  esac
+}
 
 run_test() {
   evidence_id=$1
@@ -64,14 +83,12 @@ case_id_checksum=$(
   tail -n +2 testdata/protocol-parity-requirements.tsv |
     cut -f1 |
     LC_ALL=C sort |
-    shasum -a 256 |
-    awk '{print $1}'
+    sha256_stdin
 )
 mapping_checksum=$(
   grep $'^CENSUS_MAPPING\t' <<<"$census_output" |
     cut -f2- |
-    shasum -a 256 |
-    awk '{print $1}'
+    sha256_stdin
 )
 printf 'CENSUS_CASE_ID_SHA256 %s\n' "$case_id_checksum"
 printf 'CENSUS_MAPPING_SHA256 %s\n' "$mapping_checksum"

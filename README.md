@@ -700,7 +700,7 @@ returns `error.EventQueueFull` when callers leave other sessions undrained.
 Run the checks from the repository root:
 
 ```sh
-zig fmt --check build.zig src examples
+zig fmt --check build.zig src examples scripts/parity_census_runner.zig
 zig build test
 zig build
 for example in basic custom-tools external-tools permissions prompt-customization send-and-wait join-session; do

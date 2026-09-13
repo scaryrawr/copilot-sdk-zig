@@ -1558,7 +1558,11 @@ fn disconnectDetailedForShutdown(
 }
 
 fn terminateForShutdown(_: ?*anyopaque, client: *Client) !void {
-    if (client.child) |*child| child.kill(client.io);
+    client.transport_closed = true;
+    client.child_wait = null;
+    if (client.child) |*child| {
+        if (child.id != null) child.kill(client.io);
+    }
 }
 
 const real_shutdown_ops = ShutdownOps{
@@ -1571,6 +1575,22 @@ const real_detailed_shutdown_ops = DetailedShutdownOps{
     .context = null,
     .disconnect_session_once = disconnectDetailedForShutdown,
     .terminate_child_once = terminateForShutdown,
+};
+
+const ChildWaitOperation = struct {
+    context: ?*anyopaque,
+    wait: *const fn (?*anyopaque, *Client) anyerror!std.process.Child.Term,
+};
+
+fn waitForChild(_: ?*anyopaque, client: *Client) !std.process.Child.Term {
+    const child = &(client.child orelse return error.ProcessNotFound);
+    if (child.id == null) return error.ProcessNotFound;
+    return child.wait(client.io);
+}
+
+const real_child_wait = ChildWaitOperation{
+    .context = null,
+    .wait = waitForChild,
 };
 
 const ShutdownCollector = struct {
@@ -1647,7 +1667,9 @@ pub const Client = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     child: ?std.process.Child,
+    child_wait: ?ChildWaitOperation = null,
     last_exit: ?errors.ProcessExit = null,
+    transport_closed: bool = false,
     reader: *std.Io.File.Reader,
     writer: *std.Io.File.Writer,
     reader_buffer: []u8,
@@ -1805,6 +1827,7 @@ pub const Client = struct {
             .allocator = allocator,
             .io = io,
             .child = child,
+            .child_wait = real_child_wait,
             .reader = reader,
             .writer = writer,
             .reader_buffer = reader_buffer,
@@ -1844,7 +1867,9 @@ pub const Client = struct {
         self.rpc_handlers.deinit(self.allocator);
         for (self.session_ids.items) |id| self.allocator.free(id);
         self.session_ids.deinit(self.allocator);
-        if (self.child) |*child| child.kill(self.io);
+        if (self.child) |*child| {
+            if (child.id != null) child.kill(self.io);
+        }
         self.allocator.destroy(self.reader);
         self.allocator.destroy(self.writer);
         self.wipeTransportBuffers();
@@ -1858,7 +1883,11 @@ pub const Client = struct {
     }
 
     pub fn stopDetailed(self: *Client) errors.DetailedResult(void) {
-        return stopDetailedWithOps(self, real_detailed_shutdown_ops, self.child != null);
+        return stopDetailedWithOps(
+            self,
+            real_detailed_shutdown_ops,
+            if (self.child) |child| child.id != null else false,
+        );
     }
 
     fn stopDetailedWithOps(
@@ -1898,18 +1927,70 @@ pub const Client = struct {
     ) errors.DetailedError!errors.Failure {
         if (cause == error.OutOfMemory) return error.OutOfMemory;
         if (cause == error.EndOfStream) {
-            if (self.last_exit) |exit| return recordProcessExit(self.allocator, exit);
-            if (self.child) |*child| {
-                if (child.id != null) {
-                    const term = child.wait(self.io) catch |wait_error|
-                        return recordClientIo(self.allocator, .read, wait_error);
-                    const exit = processExit(term);
-                    self.last_exit = exit;
-                    return recordProcessExit(self.allocator, exit);
-                }
+            self.transport_closed = true;
+            if (self.last_exit) |exit| {
+                return recordProcessExit(self.allocator, exit);
+            }
+            if (self.child_wait) |operation| {
+                self.child_wait = null;
+                const term = operation.wait(operation.context, self) catch |wait_error| {
+                    return recordClientIo(self.allocator, .read, wait_error);
+                };
+                const exit = processExit(term);
+                self.last_exit = exit;
+                return recordProcessExit(self.allocator, exit);
             }
         }
         return recordClientIo(self.allocator, .read, cause);
+    }
+
+    fn handleLegacyTransportEof(self: *Client) void {
+        var failure = self.recordReadFailure(error.EndOfStream) catch return;
+        failure.deinit();
+    }
+
+    fn readTransportFrame(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+    ) errors.DetailedError!PolicyResult(failure_policy, []u8) {
+        if (comptime failure_policy == .legacy) {
+            return switch (try json_rpc.readFrameTransport(
+                self.allocator,
+                &self.reader.interface,
+            )) {
+                .success => |body| .{ .success = body },
+                .clean_eof => {
+                    self.handleLegacyTransportEof();
+                    return .{ .failure = .{ .native_error = error.MissingContentLength } };
+                },
+                .failure => |native_error| .{ .failure = .{ .native_error = native_error } },
+            };
+        }
+        return switch (try json_rpc.readFrameDetailedTransport(
+            self.allocator,
+            &self.reader.interface,
+        )) {
+            .success => |body| .{ .success = body },
+            .failure => |failure_value| {
+                var frame_failure = failure_value;
+                if (isTransportEndOfStream(&frame_failure)) {
+                    frame_failure.deinit();
+                    return .{ .failure = try self.recordReadFailure(error.EndOfStream) };
+                }
+                return .{ .failure = frame_failure };
+            },
+        };
+    }
+
+    fn closedTransportFailure(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+    ) errors.DetailedError!PolicyFailure(failure_policy) {
+        if (comptime failure_policy == .legacy) {
+            return .{ .native_error = error.MissingContentLength };
+        }
+        if (self.last_exit) |exit| return recordProcessExit(self.allocator, exit);
+        return recordClientIo(self.allocator, .read, error.EndOfStream);
     }
 
     fn wipeTransportBuffers(self: *Client) void {
@@ -3149,6 +3230,8 @@ pub const Client = struct {
                 recordReentrant,
                 .{ self.allocator, method },
             ) };
+        if (self.transport_closed)
+            return .{ .failure = try self.closedTransportFailure(failure_policy) };
         const id = self.next_request_id;
         self.next_request_id += 1;
 
@@ -3174,22 +3257,9 @@ pub const Client = struct {
             ) };
 
         while (true) {
-            const body = if (comptime failure_policy == .legacy)
-                json_rpc.readFrame(self.allocator, &self.reader.interface) catch |err|
-                    return .{ .failure = .{ .native_error = err } }
-            else switch (try json_rpc.readFrameDetailed(
-                self.allocator,
-                &self.reader.interface,
-            )) {
+            const body = switch (try self.readTransportFrame(failure_policy)) {
                 .success => |value| value,
-                .failure => |failure_value| {
-                    var frame_failure = failure_value;
-                    if (isTransportEndOfStream(&frame_failure)) {
-                        frame_failure.deinit();
-                        return .{ .failure = try self.recordReadFailure(error.EndOfStream) };
-                    }
-                    return .{ .failure = frame_failure };
-                },
+                .failure => |failure| return .{ .failure = failure },
             };
             var body_owned = true;
             defer if (body_owned) {
@@ -4810,23 +4880,12 @@ pub const Client = struct {
                     return .{ .success = self.events.orderedRemove(index) };
                 }
             }
+            if (self.transport_closed)
+                return .{ .failure = try self.closedTransportFailure(failure_policy) };
 
-            const body = if (comptime failure_policy == .legacy)
-                json_rpc.readFrame(self.allocator, &self.reader.interface) catch |err|
-                    return .{ .failure = .{ .native_error = err } }
-            else switch (try json_rpc.readFrameDetailed(
-                self.allocator,
-                &self.reader.interface,
-            )) {
+            const body = switch (try self.readTransportFrame(failure_policy)) {
                 .success => |value| value,
-                .failure => |failure_value| {
-                    var frame_failure = failure_value;
-                    if (isTransportEndOfStream(&frame_failure)) {
-                        frame_failure.deinit();
-                        return .{ .failure = try self.recordReadFailure(error.EndOfStream) };
-                    }
-                    return .{ .failure = frame_failure };
-                },
+                .failure => |failure| return .{ .failure = failure },
             };
             var body_owned = true;
             defer if (body_owned) {
@@ -13203,39 +13262,75 @@ test "nextEvent preserves native framing error when diagnostics cannot allocate"
     );
 }
 
-test "nextEventDetailed owns the child process exit status" {
+const ChildWaitProbe = struct {
+    calls: usize = 0,
+    exit_code: u8 = 0,
+    wait_error: ?anyerror = null,
+
+    fn wait(context: ?*anyopaque, _: *Client) !std.process.Child.Term {
+        const self: *ChildWaitProbe = @ptrCast(@alignCast(context.?));
+        self.calls += 1;
+        if (self.wait_error) |wait_error| return wait_error;
+        return .{ .exited = self.exit_code };
+    }
+};
+
+test "high-level clean EOF preserves legacy framing and detailed process exit" {
+    std.debug.print("\nCENSUS_PROBE process_exit_dispatch\n", .{});
     const allocator = std.testing.allocator;
-    var child = try std.process.spawn(std.testing.io, .{
-        .argv = &.{ "/bin/sh", "-c", "exit 7" },
-        .stdin = .pipe,
-        .stdout = .pipe,
-        .stderr = .inherit,
-    });
-    const reader_buffer = try allocator.alloc(u8, 256);
-    const writer_buffer = try allocator.alloc(u8, 256);
-    const reader = try allocator.create(std.Io.File.Reader);
-    const writer = try allocator.create(std.Io.File.Writer);
-    reader.* = child.stdout.?.readerStreaming(std.testing.io, reader_buffer);
-    writer.* = child.stdin.?.writerStreaming(std.testing.io, writer_buffer);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const created_response_file = try tmp.dir.createFile(std.testing.io, "response", .{});
+    created_response_file.close(std.testing.io);
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var wait_probe = ChildWaitProbe{ .exit_code = 7 };
     var client = Client{
         .allocator = allocator,
         .io = std.testing.io,
-        .child = child,
-        .reader = reader,
-        .writer = writer,
-        .reader_buffer = reader_buffer,
-        .writer_buffer = writer_buffer,
+        .child = null,
+        .child_wait = .{
+            .context = &wait_probe,
+            .wait = ChildWaitProbe.wait,
+        },
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
     };
-    defer client.deinit();
+    defer {
+        for (client.session_ids.items) |id| allocator.free(id);
+        client.session_ids.deinit(allocator);
+        client.events.deinit(allocator);
+    }
+    try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
     const session = Session{ .client = &client, .id = "session-1" };
-    var failure = switch (try session.nextEventDetailed()) {
+    try std.testing.expectError(error.MissingContentLength, session.nextEvent());
+    try std.testing.expect(client.transport_closed);
+    try std.testing.expectEqual(@as(usize, 1), wait_probe.calls);
+    switch (client.last_exit.?) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 7), code),
+        else => return error.TestExpectedExitCode,
+    }
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "response",
+        .data = "X-Test: unread\r\n\r\n",
+    });
+
+    var event_failure = switch (try session.nextEventDetailed()) {
         .success => return error.TestExpectedProcessFailure,
         .failure => |failure| failure,
     };
-    defer failure.deinit();
-    try std.testing.expectEqual(error.EndOfStream, failure.native_error);
-    try std.testing.expect(failure.isTransportFailure());
-    switch (failure.detail) {
+    defer event_failure.deinit();
+    try std.testing.expectEqual(error.EndOfStream, event_failure.native_error);
+    try std.testing.expect(event_failure.isTransportFailure());
+    switch (event_failure.detail) {
         .process => |process_failure| switch (process_failure) {
             .exited => |exited| switch (exited.exit) {
                 .exited => |code| try std.testing.expectEqual(@as(u8, 7), code),
@@ -13245,6 +13340,154 @@ test "nextEventDetailed owns the child process exit status" {
         },
         else => return error.TestExpectedProcessFailure,
     }
+
+    try std.testing.expectError(
+        error.MissingContentLength,
+        client.callRpc(std.json.Value, "test.closed", .{}),
+    );
+    try std.testing.expectEqual(@as(u64, 1), client.next_request_id);
+    try std.testing.expectEqual(@as(usize, 0), writer.interface.end);
+
+    try std.testing.expectError(
+        error.MissingContentLength,
+        session.disconnect(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), writer.interface.end);
+
+    var shutdown_failure = switch (client.stopDetailed()) {
+        .success => return error.TestExpectedShutdownFailure,
+        .failure => |failure| failure,
+    };
+    defer shutdown_failure.deinit();
+    try std.testing.expectEqual(error.EndOfStream, shutdown_failure.native_error);
+    const shutdown = switch (shutdown_failure.detail) {
+        .shutdown => |value| value,
+        else => return error.TestExpectedShutdownFailure,
+    };
+    try std.testing.expectEqual(@as(usize, 1), shutdown.sessions_attempted);
+    try std.testing.expect(!shutdown.child_termination_attempted);
+    try std.testing.expectEqual(@as(usize, 1), shutdown.failure_count);
+    try std.testing.expectEqual(@as(usize, 0), shutdown.diagnostics_dropped);
+    for (shutdown.failures()) |failure| {
+        try std.testing.expectEqual(error.EndOfStream, failure.native_error);
+        switch (failure.detail) {
+            .process => |process_failure| switch (process_failure) {
+                .exited => {},
+                else => return error.TestExpectedProcessExit,
+            },
+            else => return error.TestExpectedProcessFailure,
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), writer.interface.end);
+    const stat = try request_file.stat(std.testing.io);
+    try std.testing.expectEqual(@as(u64, 0), stat.size);
+    try std.testing.expectEqual(@as(usize, 1), wait_probe.calls);
+}
+
+test "child wait error still closes transport and blocks later writes" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const response_file = try tmp.dir.createFile(std.testing.io, "response", .{ .read = true });
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{ .read = true });
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [256]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var wait_probe = ChildWaitProbe{ .wait_error = error.AccessDenied };
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .child_wait = .{
+            .context = &wait_probe,
+            .wait = ChildWaitProbe.wait,
+        },
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer client.events.deinit(allocator);
+    const session = Session{ .client = &client, .id = "session-1" };
+
+    var failure = switch (try session.nextEventDetailed()) {
+        .success => return error.TestExpectedClientFailure,
+        .failure => |failure| failure,
+    };
+    defer failure.deinit();
+    try std.testing.expectEqual(error.AccessDenied, failure.native_error);
+    try std.testing.expect(client.transport_closed);
+    try std.testing.expectEqual(@as(usize, 1), wait_probe.calls);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "response",
+        .data = "X-Test: unread\r\n\r\n",
+    });
+
+    const size_before_retry = (try request_file.stat(std.testing.io)).size;
+    var retry_failure = switch (try client.callRpcDetailed(
+        std.json.Value,
+        "test.closed",
+        .{},
+    )) {
+        .success => |parsed| {
+            parsed.deinit();
+            return error.TestExpectedClientFailure;
+        },
+        .failure => |retry_failure| retry_failure,
+    };
+    defer retry_failure.deinit();
+    try std.testing.expectEqual(error.EndOfStream, retry_failure.native_error);
+    var event_retry_failure = switch (try session.nextEventDetailed()) {
+        .success => return error.TestExpectedClientFailure,
+        .failure => |event_retry_failure| event_retry_failure,
+    };
+    defer event_retry_failure.deinit();
+    try std.testing.expectEqual(error.EndOfStream, event_retry_failure.native_error);
+    try std.testing.expectEqual(size_before_retry, (try request_file.stat(std.testing.io)).size);
+    try std.testing.expectEqual(@as(usize, 1), wait_probe.calls);
+}
+
+test "childless initParent EOF closes state and blocks connect retry" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const response_file = try tmp.dir.createFile(std.testing.io, "response", .{ .read = true });
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{ .read = true });
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [512]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+
+    var failure = switch (try client.connect(.detailed, null, null)) {
+        .success => return error.TestExpectedClientFailure,
+        .failure => |failure| failure,
+    };
+    defer failure.deinit();
+    try std.testing.expectEqual(error.EndOfStream, failure.native_error);
+    try std.testing.expect(client.transport_closed);
+
+    const size_after_eof = (try request_file.stat(std.testing.io)).size;
+    var retry_failure = switch (try client.connect(.detailed, null, null)) {
+        .success => return error.TestExpectedClientFailure,
+        .failure => |retry_failure| retry_failure,
+    };
+    defer retry_failure.deinit();
+    try std.testing.expectEqual(error.EndOfStream, retry_failure.native_error);
+    try std.testing.expectEqual(size_after_eof, (try request_file.stat(std.testing.io)).size);
 }
 
 fn runAutomaticToolFailure(

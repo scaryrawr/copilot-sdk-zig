@@ -113,30 +113,54 @@ const FailurePolicy = enum {
     detailed,
 };
 
+const EmptyStreamPolicy = enum {
+    protocol,
+    transport,
+};
+
 fn FrameResult(comptime policy: FailurePolicy) type {
     if (policy == .detailed) return errors.DetailedResult([]u8);
     return union(enum) {
         success: []u8,
+        clean_eof,
         failure: anyerror,
     };
 }
 
 pub fn readFrame(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]u8 {
-    return switch (try readFrameImpl(.legacy, allocator, reader)) {
+    return switch (try readFrameImpl(.legacy, .protocol, allocator, reader)) {
         .success => |body| body,
+        .clean_eof => error.MissingContentLength,
         .failure => |native_error| native_error,
     };
+}
+
+pub const TransportFrameResult = FrameResult(.legacy);
+
+pub fn readFrameTransport(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+) !TransportFrameResult {
+    return readFrameImpl(.legacy, .transport, allocator, reader);
 }
 
 pub fn readFrameDetailed(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
 ) errors.DetailedError!errors.DetailedResult([]u8) {
-    return readFrameImpl(.detailed, allocator, reader);
+    return readFrameImpl(.detailed, .protocol, allocator, reader);
+}
+
+pub fn readFrameDetailedTransport(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+) errors.DetailedError!errors.DetailedResult([]u8) {
+    return readFrameImpl(.detailed, .transport, allocator, reader);
 }
 
 fn readFrameImpl(
     comptime policy: FailurePolicy,
+    comptime empty_stream_policy: EmptyStreamPolicy,
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
 ) errors.DetailedError!FrameResult(policy) {
@@ -158,8 +182,8 @@ fn readFrameImpl(
                 content_length = std.fmt.parseUnsigned(usize, value, 10) catch |cause|
                     return .{ .failure = cause };
             } else {
-                const owned_value = try allocator.dupe(u8, value);
-                content_length = std.fmt.parseUnsigned(usize, owned_value, 10) catch |cause| {
+                content_length = std.fmt.parseUnsigned(usize, value, 10) catch |cause| {
+                    const owned_value = try allocator.dupe(u8, value);
                     return .{ .failure = .{
                         .allocator = allocator,
                         .native_error = cause,
@@ -168,15 +192,24 @@ fn readFrameImpl(
                         } } },
                     } };
                 };
-                allocator.free(owned_value);
             }
         }
     }
 
-    if (!saw_line) return .{ .failure = if (comptime policy == .legacy)
-        error.MissingContentLength
-    else
-        try ioFailure(allocator, error.EndOfStream) };
+    if (!saw_line) {
+        if (comptime policy == .legacy) {
+            if (comptime empty_stream_policy == .transport)
+                return .clean_eof;
+            return .{ .failure = error.MissingContentLength };
+        }
+        if (comptime empty_stream_policy == .transport)
+            return .{ .failure = try ioFailure(allocator, error.EndOfStream) };
+        return .{ .failure = .{
+            .allocator = allocator,
+            .native_error = error.MissingContentLength,
+            .detail = .{ .protocol = .missing_content_length },
+        } };
+    }
     const length = content_length orelse {
         if (comptime policy == .legacy)
             return .{ .failure = error.MissingContentLength };
@@ -333,9 +366,61 @@ test "fragmented framing reports actual EOF after partial body" {
     }
 }
 
-test "captured framing failures retain literal input and lengths" {
+test "public detailed empty stream matches legacy framing semantics" {
+    const allocator = std.testing.allocator;
+
+    var legacy_reader = std.Io.Reader.fixed("");
+    try std.testing.expectError(
+        error.MissingContentLength,
+        readFrame(allocator, &legacy_reader),
+    );
+
+    var detailed_reader = std.Io.Reader.fixed("");
+    var failure = switch (try readFrameDetailed(allocator, &detailed_reader)) {
+        .success => |body| {
+            allocator.free(body);
+            return error.TestExpectedFailure;
+        },
+        .failure => |value| value,
+    };
+    defer failure.deinit();
+    try std.testing.expectEqual(error.MissingContentLength, failure.native_error);
+    switch (failure.detail) {
+        .protocol => |protocol_failure| switch (protocol_failure) {
+            .missing_content_length => {},
+            else => return error.TestExpectedMissingContentLength,
+        },
+        else => return error.TestExpectedProtocolFailure,
+    }
+}
+
+test "empty and malformed framing preserve legacy and detailed diagnostics" {
     std.debug.print("\nCENSUS_PROBE framing_failure_ownership\n", .{});
     const allocator = std.testing.allocator;
+
+    var empty_plain_reader = std.Io.Reader.fixed("");
+    try std.testing.expectError(
+        error.MissingContentLength,
+        readFrame(allocator, &empty_plain_reader),
+    );
+
+    var empty_detailed_reader = std.Io.Reader.fixed("");
+    var empty_failure = switch (try readFrameDetailed(allocator, &empty_detailed_reader)) {
+        .success => |body| {
+            allocator.free(body);
+            return error.TestExpectedFailure;
+        },
+        .failure => |failure| failure,
+    };
+    defer empty_failure.deinit();
+    try std.testing.expectEqual(error.MissingContentLength, empty_failure.native_error);
+    switch (empty_failure.detail) {
+        .protocol => |protocol_failure| switch (protocol_failure) {
+            .missing_content_length => {},
+            else => return error.TestExpectedMissingContentLength,
+        },
+        else => return error.TestExpectedProtocolFailure,
+    }
 
     var invalid_reader = std.Io.Reader.fixed("Content-Length: nope\r\n\r\n");
     var invalid_failure = switch (try readFrameDetailed(allocator, &invalid_reader)) {
@@ -377,6 +462,81 @@ test "captured framing failures retain literal input and lengths" {
         },
         else => return error.TestExpectedProtocolFailure,
     }
+}
+
+test "transport framing classifies only an empty stream as EOF" {
+    const allocator = std.testing.allocator;
+
+    var empty_legacy_reader = std.Io.Reader.fixed("");
+    switch (try readFrameTransport(allocator, &empty_legacy_reader)) {
+        .clean_eof => {},
+        .success => |body| {
+            allocator.free(body);
+            return error.TestExpectedCleanEof;
+        },
+        .failure => return error.TestExpectedCleanEof,
+    }
+
+    var empty_reader = std.Io.Reader.fixed("");
+    var empty_failure = switch (try readFrameDetailedTransport(allocator, &empty_reader)) {
+        .success => |body| {
+            allocator.free(body);
+            return error.TestExpectedFailure;
+        },
+        .failure => |failure| failure,
+    };
+    defer empty_failure.deinit();
+    try std.testing.expectEqual(error.EndOfStream, empty_failure.native_error);
+    switch (empty_failure.detail) {
+        .client => |client_failure| switch (client_failure) {
+            .io => |io_failure| {
+                try std.testing.expectEqual(errors.ClientOperation.read, io_failure.operation);
+                try std.testing.expectEqual(error.EndOfStream, io_failure.cause.code);
+            },
+            else => return error.TestExpectedIoFailure,
+        },
+        else => return error.TestExpectedClientFailure,
+    }
+
+    var malformed_reader = std.Io.Reader.fixed("X-Test: value\r\n\r\n");
+    var malformed_failure = switch (try readFrameDetailedTransport(
+        allocator,
+        &malformed_reader,
+    )) {
+        .success => |body| {
+            allocator.free(body);
+            return error.TestExpectedFailure;
+        },
+        .failure => |failure| failure,
+    };
+    defer malformed_failure.deinit();
+    try std.testing.expectEqual(error.MissingContentLength, malformed_failure.native_error);
+    switch (malformed_failure.detail) {
+        .protocol => |protocol_failure| switch (protocol_failure) {
+            .missing_content_length => {},
+            else => return error.TestExpectedMissingContentLength,
+        },
+        else => return error.TestExpectedProtocolFailure,
+    }
+}
+
+test "valid detailed Content-Length only allocates the body" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = 1,
+    });
+    const allocator = failing.allocator();
+    var reader = std.Io.Reader.fixed("Content-Length: 1\r\n\r\nx");
+
+    const body = switch (try readFrameDetailed(allocator, &reader)) {
+        .success => |value| value,
+        .failure => |failure| {
+            var owned_failure = failure;
+            defer owned_failure.deinit();
+            return error.TestExpectedSuccess;
+        },
+    };
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings("x", body);
 }
 
 test "truncated frames preserve legacy error and detailed diagnostics" {
