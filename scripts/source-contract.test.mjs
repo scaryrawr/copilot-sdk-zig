@@ -8,10 +8,51 @@ import {
   omitIntersectionAlias,
   requireExactPropertySignatures,
   requireSourceFragments,
+  schemaValidationShape,
   sourceSection,
   zigEnumValues,
   zigStructFields,
 } from "./source-contract.mjs";
+
+test("schema validation shapes ignore annotations but retain constraints", () => {
+  const base = {
+    title: "Token",
+    description: "annotation",
+    anyOf: [
+      {
+        type: "object",
+        properties: {
+          kind: { type: "string", const: "token", description: "annotation" },
+          accessToken: { type: "string" },
+        },
+        required: ["kind", "accessToken"],
+      },
+      {
+        type: "object",
+        properties: {
+          kind: { type: "string", const: "cancelled" },
+        },
+        required: ["kind"],
+      },
+    ],
+  };
+  const reordered = {
+    ...base,
+    anyOf: [...base.anyOf].reverse(),
+    description: "changed annotation",
+  };
+  assert.deepEqual(
+    schemaValidationShape(base),
+    schemaValidationShape(reordered),
+  );
+
+  const constrained = structuredClone(base);
+  constrained.anyOf[0].properties.accessToken.minLength = 1;
+  assert.notDeepEqual(
+    schemaValidationShape(base),
+    schemaValidationShape(constrained),
+  );
+});
 
 test("interface properties retain complete nested object types", () => {
   const source = `

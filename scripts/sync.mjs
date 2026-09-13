@@ -25,10 +25,18 @@ import {
   omitIntersectionAlias,
   requireExactPropertySignatures,
   requireSourceFragments,
+  schemaValidationShape,
   sourceSection,
   zigEnumValues,
   zigStructFields,
 } from "./source-contract.mjs";
+import {
+  eventTypeBranch,
+  namedClassConstructor,
+  requireCallbackReturnsCall,
+  requireCallOutsideNestedFunctions,
+  registeredStringCallbacks,
+} from "./typescript-contract.mjs";
 
 const repository = "github/copilot-sdk";
 const ref = "main";
@@ -133,21 +141,6 @@ function requireStringLiterals(root, values, owner) {
   visit(root);
   for (const value of values) {
     assert(literals.has(value), `upstream ${owner} string literal is missing: ${value}`);
-  }
-}
-
-function requireRegisteredStringArguments(root, sourceFile, values, owner) {
-  const registered = new Set();
-  function visit(node) {
-    if (ts.isCallExpression(node) && node.arguments.length > 0) {
-      const first = node.arguments[0];
-      if (ts.isStringLiteralLike(first)) registered.add(first.text);
-    }
-    ts.forEachChild(node, visit);
-  }
-  visit(root);
-  for (const value of values) {
-    assert(registered.has(value), `upstream ${owner} registration is missing: ${value}`);
   }
 }
 
@@ -824,10 +817,9 @@ function verifyExtensibilitySourceContract(
   extensionSource,
 ) {
   const clientOptions = interfacePropertySignatures(typesSource, "CopilotClientOptions");
-  const clientConstructor = sourceSection(
+  const clientConstructor = namedClassConstructor(
     clientSource,
-    "    constructor(options: CopilotClientOptions = {}) {",
-    "    private connectionExtraArgs: string[] = [];",
+    "CopilotClient",
     "CopilotClient constructor",
   );
   const clientStartup = sourceSection(
@@ -840,8 +832,17 @@ function verifyExtensibilitySourceContract(
     clientOptions.builtinPluginDirectories === "optional:readonly string[]",
     "upstream CopilotClientOptions.builtinPluginDirectories changed",
   );
-  requireSourceFragments(
-    clientConstructor,
+  const constructorParameters = clientConstructor.node.parameters;
+  assert(
+    constructorParameters.length === 1 &&
+      constructorParameters[0].name.getText(clientConstructor.sourceFile) === "options" &&
+      constructorParameters[0].type?.getText(clientConstructor.sourceFile) === "CopilotClientOptions" &&
+      constructorParameters[0].initializer?.getText(clientConstructor.sourceFile) === "{}",
+    "upstream CopilotClient constructor signature changed",
+  );
+  requireAstNodes(
+    clientConstructor.node,
+    clientConstructor.sourceFile,
     ["this.builtinPluginDirectories = [...options.builtinPluginDirectories]"],
     "CopilotClient constructor",
   );
@@ -1235,16 +1236,29 @@ function verifyStableParitySourceContract(
     "attachConnectionHandlers",
     `${authority.name} direct callback setup`,
   );
-  requireAstNodes(directCallbacks.node, directCallbacks.sourceFile, [
-    "this.handleExitPlanModeRequest(params)",
-    "this.handleAutoModeSwitchRequest(params)",
-  ], `${authority.name} direct callback setup`);
-  requireRegisteredStringArguments(
+  const directRegistrations = registeredStringCallbacks(
     directCallbacks.node,
     directCallbacks.sourceFile,
-    ["exitPlanMode.request", "autoModeSwitch.request"],
+    "this.connection.onRequest",
     `${authority.name} direct callback setup`,
   );
+  for (const [method, callee] of [
+    ["exitPlanMode.request", "this.handleExitPlanModeRequest"],
+    ["autoModeSwitch.request", "this.handleAutoModeSwitchRequest"],
+  ]) {
+    const callback = directRegistrations.get(method);
+    assert(
+      callback !== undefined,
+      `upstream ${authority.name} direct callback setup is missing ${method}`,
+    );
+    requireCallbackReturnsCall(
+      callback,
+      directCallbacks.sourceFile,
+      callee,
+      "params",
+      `${authority.name} ${method} callback`,
+    );
+  }
   const broadcastCallbacks = findFunctionLike(
     sessionSource,
     "_handleBroadcastEvent",
@@ -1253,9 +1267,26 @@ function verifyStableParitySourceContract(
   requireAstNodes(broadcastCallbacks.node, broadcastCallbacks.sourceFile, [
     "this._executeCommandAndRespond(requestId, commandName, command, args)",
   ], `${authority.name} session event callback setup`);
+  const elicitationBranch = eventTypeBranch(
+    broadcastCallbacks.node,
+    broadcastCallbacks.sourceFile,
+    "elicitation.requested",
+    `${authority.name} elicitation event dispatch`,
+  );
+  const elicitationCall = requireCallOutsideNestedFunctions(
+    elicitationBranch,
+    broadcastCallbacks.sourceFile,
+    "this._handleElicitationRequest",
+    `${authority.name} elicitation event dispatch`,
+  );
+  assert(
+    compactNode(elicitationCall, broadcastCallbacks.sourceFile) ===
+      'this._handleElicitationRequest({sessionId:this.sessionId,message,requestedSchema:requestedSchemaasElicitationContext["requestedSchema"],mode,elicitationSource,url,},requestId)',
+    `upstream ${authority.name} elicitation event dispatch arguments changed`,
+  );
   requireStringLiterals(
     broadcastCallbacks.node,
-    ["command.execute", "elicitation.requested"],
+    ["command.execute"],
     `${authority.name} session event callback setup`,
   );
   const commandResponder = findFunctionLike(
@@ -1345,10 +1376,32 @@ function verifyStableParitySchema(schema, eventsSchema) {
     "GitHubTokenAcquireReason",
   );
   const tokenResult = schema.definitions?.GitHubTokenAcquireResult;
-  const tokenVariant = tokenResult?.anyOf?.find(
-    (variant) => variant.properties?.kind?.const === "token",
+  assert(
+    JSON.stringify(schemaValidationShape(tokenResult)) === JSON.stringify(
+      schemaValidationShape({
+        anyOf: [
+          {
+            type: "object",
+            properties: {
+              accessToken: { type: "string" },
+              tokenType: { type: "string" },
+              expiresIn: { type: "integer", minimum: 3601 },
+              kind: { type: "string", const: "token" },
+            },
+            required: ["kind", "accessToken", "expiresIn"],
+          },
+          {
+            type: "object",
+            properties: {
+              kind: { type: "string", const: "cancelled" },
+            },
+            required: ["kind"],
+          },
+        ],
+      }),
+    ),
+    "GitHubTokenAcquireResult validation contract changed",
   );
-  assert(tokenVariant?.properties?.expiresIn?.minimum === 3601, "GitHub token minimum lifetime changed");
   const events = eventDiscriminators(eventsSchema);
   for (const event of [
     "command.execute",
@@ -1543,17 +1596,34 @@ function verifyCompatibility(apiSchema, eventSchema) {
       `Zig ${contract.zig} values`,
     );
   }
-  const remoteSessionModes = ["off", "export", "on"];
-  requireExactStrings(
-    stringEnum(apiSchema, "RemoteSessionMode"),
-    remoteSessionModes,
-    "RemoteSessionMode values",
-  );
-  requireExactStrings(
-    zigEnumValues(zigSessionSource, "RemoteSessionMode"),
-    remoteSessionModes,
-    "Zig RemoteSessionMode values",
-  );
+  for (const contract of [
+    {
+      schema: "RemoteSessionMode",
+      zig: "RemoteSessionMode",
+      tags: ["off", "export", "on"],
+    },
+    {
+      schema: "UIAutoModeSwitchResponse",
+      zig: "AutoModeSwitchResponse",
+      tags: ["yes", "yes_always", "no"],
+    },
+    {
+      schema: "UIExitPlanModeAction",
+      zig: "ExitPlanModeAction",
+      tags: ["exit_only", "interactive", "autopilot", "autopilot_fleet"],
+    },
+  ]) {
+    requireExactStrings(
+      stringEnum(apiSchema, contract.schema),
+      contract.tags,
+      `${contract.schema} values`,
+    );
+    requireExactStrings(
+      zigEnumValues(zigSessionSource, contract.zig),
+      contract.tags,
+      `Zig ${contract.zig} values`,
+    );
+  }
   requireExactStrings(
     stringEnum(apiSchema, "SessionFsSqliteTransactionErrorClass"),
     ["busyOrLocked", "fatal", "postCommitAmbiguous"],
