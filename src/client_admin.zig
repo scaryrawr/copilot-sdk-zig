@@ -226,6 +226,12 @@ pub const EmptyParams = struct {};
 const StrictU64 = struct {
     value: u64,
 
+    fn parse(value: []const u8) !StrictU64 {
+        const parsed = try std.fmt.parseInt(u64, value, 10);
+        if (parsed == 0) return error.InvalidNumber;
+        return .{ .value = parsed };
+    }
+
     pub fn jsonParse(
         allocator: std.mem.Allocator,
         source: anytype,
@@ -237,10 +243,10 @@ const StrictU64 = struct {
             options.max_value_len.?,
         );
         return switch (token) {
-            .number => |value| .{ .value = try std.fmt.parseInt(u64, value, 10) },
+            .number => |value| parse(value),
             .allocated_number => |value| result: {
                 defer allocator.free(value);
-                break :result .{ .value = try std.fmt.parseInt(u64, value, 10) };
+                break :result parse(value);
             },
             .allocated_string => |value| {
                 allocator.free(value);
