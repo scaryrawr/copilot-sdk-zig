@@ -432,6 +432,11 @@ function verifyStableSessionRuntimeSourceContract(clientSource, typesSource) {
       assert(fields[name]?.default === expected.default, `${owner}.${name} default changed`);
     }
   }
+  requireExactStrings(
+    zigEnumValues(zigSessionSource, "EmbeddingCacheStorage"),
+    ["persistent", "in_memory"],
+    "Zig EmbeddingCacheStorage values",
+  );
 
   for (const [owner, source] of [
     [
@@ -472,6 +477,7 @@ function verifyStableSessionRuntimeSourceContract(clientSource, typesSource) {
       ".memory = if (config.memory)",
       ".skipEmbeddingRetrieval = config.skip_embedding_retrieval",
       ".embeddingCacheStorage = if (config.embedding_cache_storage)",
+      ".persistent => .persistent",
       '.in_memory => .@"in-memory"',
       ".organizationCustomInstructions = config.organization_custom_instructions",
       ".enableFileHooks = config.enable_file_hooks",
