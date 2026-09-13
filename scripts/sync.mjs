@@ -24,6 +24,7 @@ const vendorDirectory = join(root, "vendor", "copilot");
 const schemaDirectory = join(vendorDirectory, "schemas");
 const metadataPath = join(vendorDirectory, "upstream.json");
 const generatedPath = join(root, "src", "protocol_version.zig");
+const zigSessionSource = readFileSync(join(root, "src", "session.zig"), "utf8");
 const compatibilityPath = join(root, "sync", "compatibility.json");
 const publicRpcSurfacePath = join(root, "sync", "public-rpc-surface.json");
 const extensibilityContractPath = join(root, "sync", "extensibility-contract.json");
@@ -208,6 +209,224 @@ function sourceSection(source, startMarker, endMarker, owner) {
 function requireSourceFragments(source, fragments, owner) {
   for (const fragment of fragments) {
     assert(source.includes(fragment), `upstream ${owner} declaration is missing: ${fragment}`);
+  }
+}
+
+function normalizedPropertySignatures(source) {
+  const declarations = source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "");
+  return Object.fromEntries(
+    [...declarations.matchAll(/^\s*(?:readonly\s+)?(\w+)(\?)?\s*:\s*([^;]+);/gm)]
+      .map((match) => [
+        match[1],
+        `${match[2] === "?" ? "optional" : "required"}:${match[3].replace(/\s+/g, "")}`,
+      ]),
+  );
+}
+
+function requireExactPropertySignatures(actual, expected, label) {
+  requireExactStrings(Object.keys(actual), Object.keys(expected), `${label} fields`);
+  for (const [name, signature] of Object.entries(expected)) {
+    assert(actual[name] === signature, `${label}.${name} changed`);
+  }
+}
+
+const expectedCustomAgentSourceContract = {
+  customAgent: {
+    name: "required:string",
+    displayName: "optional:string",
+    description: "optional:string",
+    tools: "optional:string[]|null",
+    prompt: "required:string",
+    mcpServers: "optional:Record<string,MCPServerConfig>",
+    infer: "optional:boolean",
+    skills: "optional:string[]",
+    model: "optional:string",
+    reasoningEffort: "optional:ReasoningEffort",
+  },
+  defaultAgent: {
+    excludedTools: "optional:string[]",
+  },
+  reasoningEffort: ["low", "medium", "high", "xhigh", "max"],
+  lifecycle: {
+    base: {
+      customAgents: "optional:CustomAgentConfig[]",
+      defaultAgent: "optional:DefaultAgentConfig",
+      agent: "optional:string",
+      customAgentsLocalOnly: "optional:boolean",
+      excludedBuiltinAgents: "optional:string[]",
+    },
+    createExtends: "SessionConfigBase",
+    resumeExtends: "SessionConfigBase",
+    lowering: {
+      customAgents: "toWireCustomAgents(config.customAgents)",
+      defaultAgent: "config.defaultAgent",
+      agent: "config.agent",
+      customAgentsLocalOnly: "config.customAgentsLocalOnly",
+      excludedBuiltinAgents: "config.excludedBuiltinAgents",
+    },
+    join: {
+      base: "ResumeSessionConfig",
+      excluded: ["onPermissionRequest", "extensionSdkPath"],
+      properties: {
+        onPermissionRequest: "optional:PermissionHandler",
+        requestedEnvironmentVariables: "optional:string[]",
+        factories: "optional:FactoryHandle[]",
+      },
+    },
+  },
+};
+
+function interfaceBase(source, name) {
+  const match = source.match(new RegExp(`export interface ${name} extends (\\w+) \\{`));
+  assert(match, `upstream ${name} inheritance changed`);
+  return match[1];
+}
+
+function omitIntersection(source, name) {
+  const match = source.match(
+    new RegExp(`export type ${name} = Omit<\\s*(\\w+)\\s*,([\\s\\S]*?)>\\s*&\\s*\\{([\\s\\S]*?)\\n\\};`),
+  );
+  assert(match, `upstream ${name} shape changed`);
+  return {
+    base: match[1],
+    excluded: [...match[2].matchAll(/"([^"]+)"/g)].map((item) => item[1]),
+    properties: normalizedPropertySignatures(match[3]),
+  };
+}
+
+function stringUnionValues(source, name) {
+  const match = source.match(new RegExp(`export type ${name}\\s*=\\s*([^;]+);`));
+  assert(match, `upstream ${name} declaration changed`);
+  return [...match[1].matchAll(/"([^"]+)"/g)].map((item) => item[1]);
+}
+
+function zigEnumValues(source, name) {
+  const declaration = sourceSection(
+    source,
+    `pub const ${name} = enum {`,
+    "};",
+    `Zig ${name}`,
+  );
+  return [...declaration.matchAll(/^\s*(\w+),\s*$/gm)].map((match) => match[1]);
+}
+
+function verifyCustomAgentSourceContract(
+  clientSource,
+  typesSource,
+  extensionSource,
+  zigSessionSource,
+) {
+  const expected = expectedCustomAgentSourceContract;
+  const customAgent = sourceSection(
+    typesSource,
+    "export interface CustomAgentConfig {",
+    "export interface DefaultAgentConfig {",
+    "CustomAgentConfig",
+  );
+  requireExactPropertySignatures(
+    normalizedPropertySignatures(customAgent),
+    expected.customAgent,
+    "CustomAgentConfig",
+  );
+
+  const defaultAgent = sourceSection(
+    typesSource,
+    "export interface DefaultAgentConfig {",
+    "export interface InfiniteSessionConfig {",
+    "DefaultAgentConfig",
+  );
+  requireExactPropertySignatures(
+    normalizedPropertySignatures(defaultAgent),
+    expected.defaultAgent,
+    "DefaultAgentConfig",
+  );
+  requireExactStrings(
+    stringUnionValues(typesSource, "ReasoningEffort"),
+    expected.reasoningEffort,
+    "upstream ReasoningEffort values",
+  );
+  requireExactStrings(
+    zigEnumValues(zigSessionSource, "ReasoningEffort"),
+    expected.reasoningEffort,
+    "Zig ReasoningEffort values",
+  );
+
+  const base = sourceSection(
+    typesSource,
+    "export interface SessionConfigBase {",
+    "export interface SessionConfig extends SessionConfigBase {",
+    "SessionConfigBase",
+  );
+  const baseProperties = normalizedPropertySignatures(base);
+  for (const [name, signature] of Object.entries(expected.lifecycle.base)) {
+    assert(baseProperties[name] === signature, `SessionConfigBase.${name} changed`);
+  }
+  assert(
+    interfaceBase(typesSource, "SessionConfig") === expected.lifecycle.createExtends,
+    "upstream SessionConfig inheritance changed",
+  );
+  assert(
+    interfaceBase(typesSource, "ResumeSessionConfig") === expected.lifecycle.resumeExtends,
+    "upstream ResumeSessionConfig inheritance changed",
+  );
+  const join = sourceSection(
+    extensionSource,
+    "export type JoinSessionConfig = Omit<",
+    "export async function joinSession",
+    "JoinSessionConfig",
+  );
+  const joinShape = omitIntersection(join, "JoinSessionConfig");
+  assert(joinShape.base === expected.lifecycle.join.base, "JoinSessionConfig base changed");
+  requireExactStrings(
+    joinShape.excluded,
+    expected.lifecycle.join.excluded,
+    "JoinSessionConfig exclusions",
+  );
+  requireExactPropertySignatures(
+    joinShape.properties,
+    expected.lifecycle.join.properties,
+    "JoinSessionConfig",
+  );
+
+  const customAgentLowering = sourceSection(
+    clientSource,
+    "function toWireCustomAgents(",
+    "function clientInfoToWire(",
+    "toWireCustomAgents",
+  );
+  requireSourceFragments(
+    customAgentLowering,
+    [
+      "if (!agents) return undefined",
+      "if (!agent.mcpServers) return agent",
+      "return { ...rest, mcpServers: toWireMcpServers(mcpServers) }",
+    ],
+    "toWireCustomAgents",
+  );
+  const create = sourceSection(
+    clientSource,
+    "    async createSession(",
+    "    async resumeSession(",
+    "createSession",
+  );
+  const resume = sourceSection(
+    clientSource,
+    "    private async resumeSessionInternal(",
+    "    async ping(",
+    "resumeSessionInternal",
+  );
+  for (const [owner, source] of [
+    ["createSession", create],
+    ["resumeSessionInternal", resume],
+  ]) {
+    requireSourceFragments(
+      source,
+      Object.entries(expected.lifecycle.lowering)
+        .map(([name, value]) => `${name}: ${value}`),
+      owner,
+    );
   }
 }
 
@@ -838,6 +1057,7 @@ async function synchronize(explicitCommit, ifPublished = false) {
     /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(cliPackageVersion),
     "upstream package manifest has no exact Copilot CLI version",
   );
+  verifyCustomAgentSourceContract(nodeClient, nodeTypes, nodeExtension, zigSessionSource);
 
   try {
     const schemaPackage = await installSchemaPackage(cliPackageVersion, ifPublished);
@@ -876,6 +1096,14 @@ async function synchronize(explicitCommit, ifPublished = false) {
 const args = process.argv.slice(2);
 if (args.includes("--check")) {
   assert(args.length === 1, "--check does not accept other arguments");
+  const metadata = parseJson(metadataPath);
+  validateMetadata(metadata);
+  const [nodeClient, nodeTypes, nodeExtension] = await Promise.all([
+    fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/client.ts")),
+    fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/types.ts")),
+    fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/extension.ts")),
+  ]);
+  verifyCustomAgentSourceContract(nodeClient, nodeTypes, nodeExtension, zigSessionSource);
   verify();
 } else {
   const commitIndex = args.indexOf("--commit");

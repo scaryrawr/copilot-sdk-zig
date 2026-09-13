@@ -488,9 +488,30 @@ pub const JoinExtensions = struct {
 pub fn validate(features: SessionFeatures) !void {
     try uniqueNonEmpty(features.plugin_directories, error.DuplicatePluginDirectory);
     try uniqueNonEmpty(features.skills.directories, error.DuplicateSkillDirectory);
-    for (features.mcp.servers, 0..) |server, index| {
+    try validateMcpServers(features.mcp.servers);
+    for (features.canvases, 0..) |canvas, index| {
+        if (canvas.declaration.id.len == 0) return error.InvalidCanvas;
+        for (features.canvases[0..index]) |previous| {
+            if (std.mem.eql(u8, previous.declaration.id, canvas.declaration.id))
+                return error.DuplicateCanvasId;
+        }
+        if (canvas.declaration.input_schema_json) |json| try validateJsonSchema(json);
+        for (canvas.actions, 0..) |action, action_index| {
+            if (action.name.len == 0 or std.mem.startsWith(u8, action.name, "canvas."))
+                return error.ReservedCanvasActionName;
+            for (canvas.actions[0..action_index]) |previous| {
+                if (std.mem.eql(u8, previous.name, action.name))
+                    return error.DuplicateCanvasAction;
+            }
+            if (action.input_schema_json) |json| try validateJsonSchema(json);
+        }
+    }
+}
+
+pub fn validateMcpServers(servers: []const McpServer) !void {
+    for (servers, 0..) |server, index| {
         if (server.name.len == 0) return error.InvalidMcpServer;
-        for (features.mcp.servers[0..index]) |previous| {
+        for (servers[0..index]) |previous| {
             if (std.mem.eql(u8, previous.name, server.name)) return error.DuplicateMcpServerName;
         }
         switch (server.config) {
@@ -511,23 +532,6 @@ pub fn validate(features: SessionFeatures) !void {
                     }
                 }
             },
-        }
-    }
-    for (features.canvases, 0..) |canvas, index| {
-        if (canvas.declaration.id.len == 0) return error.InvalidCanvas;
-        for (features.canvases[0..index]) |previous| {
-            if (std.mem.eql(u8, previous.declaration.id, canvas.declaration.id))
-                return error.DuplicateCanvasId;
-        }
-        if (canvas.declaration.input_schema_json) |json| try validateJsonSchema(json);
-        for (canvas.actions, 0..) |action, action_index| {
-            if (action.name.len == 0 or std.mem.startsWith(u8, action.name, "canvas."))
-                return error.ReservedCanvasActionName;
-            for (canvas.actions[0..action_index]) |previous| {
-                if (std.mem.eql(u8, previous.name, action.name))
-                    return error.DuplicateCanvasAction;
-            }
-            if (action.input_schema_json) |json| try validateJsonSchema(json);
         }
     }
 }

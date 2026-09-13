@@ -3,6 +3,36 @@ const ProviderConfig = @import("provider.zig").ProviderConfig;
 const ModelCapabilitiesOverride = @import("models.zig").CapabilitiesOverride;
 const extensibility = @import("extensibility.zig");
 
+pub const ReasoningEffort = enum {
+    low,
+    medium,
+    high,
+    xhigh,
+    max,
+};
+
+pub const CustomAgentConfig = struct {
+    name: []const u8,
+    display_name: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+    tools: ?[]const []const u8 = null,
+    prompt: []const u8,
+    mcp_servers: ?[]const extensibility.McpServer = null,
+    infer: ?bool = null,
+    skills: ?[]const []const u8 = null,
+    model: ?[]const u8 = null,
+    reasoning_effort: ?ReasoningEffort = null,
+};
+
+pub const DefaultAgentConfig = struct {
+    excluded_tools: ?[]const []const u8 = null,
+};
+
+pub const InitialAgent = union(enum) {
+    default_agent,
+    custom_agent: []const u8,
+};
+
 pub const CreateSessionConfig = struct {
     session_id: ?[]const u8 = null,
     model: ?[]const u8 = null,
@@ -13,6 +43,11 @@ pub const CreateSessionConfig = struct {
     tools: []const Tool = &.{},
     available_tools: ?[]const []const u8 = null,
     excluded_tools: ?[]const []const u8 = null,
+    custom_agents: ?[]const CustomAgentConfig = null,
+    default_agent: ?DefaultAgentConfig = null,
+    agent: InitialAgent = .default_agent,
+    custom_agents_local_only: ?bool = null,
+    excluded_builtin_agents: ?[]const []const u8 = null,
     system_message: ?SystemMessageConfig = null,
     request_permission: bool = false,
     enable_config_discovery: ?bool = null,
@@ -39,6 +74,11 @@ pub const ResumeSessionConfig = struct {
     tools: []const Tool = &.{},
     available_tools: ?[]const []const u8 = null,
     excluded_tools: ?[]const []const u8 = null,
+    custom_agents: ?[]const CustomAgentConfig = null,
+    default_agent: ?DefaultAgentConfig = null,
+    agent: InitialAgent = .default_agent,
+    custom_agents_local_only: ?bool = null,
+    excluded_builtin_agents: ?[]const []const u8 = null,
     system_message: ?SystemMessageConfig = null,
     request_permission: bool = false,
     enable_config_discovery: ?bool = null,
@@ -67,6 +107,11 @@ pub const JoinSessionConfig = struct {
     tools: []const Tool = &.{},
     available_tools: ?[]const []const u8 = null,
     excluded_tools: ?[]const []const u8 = null,
+    custom_agents: ?[]const CustomAgentConfig = null,
+    default_agent: ?DefaultAgentConfig = null,
+    agent: InitialAgent = .default_agent,
+    custom_agents_local_only: ?bool = null,
+    excluded_builtin_agents: ?[]const []const u8 = null,
     system_message: ?SystemMessageConfig = null,
     request_permission: bool = false,
     enable_config_discovery: ?bool = null,

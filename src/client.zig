@@ -24,6 +24,18 @@ fn wipeJsonStrings(value: std.json.Value) void {
     }
 }
 
+fn writeFrameAndWipe(
+    writer: *std.Io.Writer,
+    writer_buffer: []u8,
+    body: []const u8,
+) !void {
+    defer {
+        wipeSecret(writer_buffer);
+        writer.end = 0;
+    }
+    try json_rpc.writeFrame(writer, body);
+}
+
 pub const ClientOptions = struct {
     cli_path: []const u8 = "copilot",
     working_directory: ?[]const u8 = null,
@@ -419,7 +431,12 @@ pub const Client = struct {
         self: *Client,
         config: session_types.CreateSessionConfig,
     ) !Session {
+        try validateCustomAgents(config.custom_agents, config.agent);
         try ext.validate(config.extensions.common);
+        try validateCustomAgentMcpServers(config.custom_agents);
+        var extension_values = ExtensionWireValues.init(self.allocator);
+        defer extension_values.deinit();
+        try extension_values.lowerCustomAgents(config.custom_agents);
         var parsed_parameters: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty;
         defer {
             for (parsed_parameters.items) |parsed| parsed.deinit();
@@ -431,8 +448,6 @@ pub const Client = struct {
         try self.beginExtensionRuntime(null, config, &.{});
         errdefer self.rollbackExtensionRuntime();
 
-        var extension_values = ExtensionWireValues.init(self.allocator);
-        defer extension_values.deinit();
         try extension_values.lower(config.extensions.common);
         const request = try buildCreateSessionRequest(config, tools.items, &extension_values);
         const parsed = try self.call(
@@ -483,7 +498,12 @@ pub const Client = struct {
         config: session_types.ResumeSessionConfig,
         requested_environment_variables: []const []const u8,
     ) !Session {
+        try validateCustomAgents(config.custom_agents, config.agent);
         try ext.validate(config.extensions.common);
+        try validateCustomAgentMcpServers(config.custom_agents);
+        var extension_values = ExtensionWireValues.init(self.allocator);
+        defer extension_values.deinit();
+        try extension_values.lowerCustomAgents(config.custom_agents);
         const existing_session_id = self.findSessionId(session_id);
         var parsed_parameters: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty;
         defer {
@@ -500,8 +520,6 @@ pub const Client = struct {
         );
         errdefer self.rollbackExtensionRuntime();
 
-        var extension_values = ExtensionWireValues.init(self.allocator);
-        defer extension_values.deinit();
         try extension_values.lower(config.extensions.common);
         const request = try buildResumeSessionRequest(
             session_id,
@@ -802,8 +820,7 @@ pub const Client = struct {
             wipeSecret(request);
             self.allocator.free(request);
         }
-        try json_rpc.writeFrame(&self.writer.interface, request);
-        wipeSecret(self.writer_buffer);
+        try writeFrameAndWipe(&self.writer.interface, self.writer_buffer, request);
 
         while (true) {
             const body = try json_rpc.readFrame(self.allocator, &self.reader.interface);
@@ -2831,6 +2848,52 @@ fn upsertOpenCanvas(
     try runtime.open_canvases.append(allocator, canvas);
 }
 
+fn validateCustomAgents(
+    custom_agents: ?[]const session_types.CustomAgentConfig,
+    initial_agent: session_types.InitialAgent,
+) !void {
+    const agents = custom_agents orelse &.{};
+    for (agents, 0..) |agent, index| {
+        for (agents[0..index]) |previous| {
+            if (std.mem.eql(u8, previous.name, agent.name))
+                return error.DuplicateCustomAgentName;
+        }
+    }
+    const selected_name = switch (initial_agent) {
+        .default_agent => return,
+        .custom_agent => |name| name,
+    };
+    for (agents) |agent| {
+        if (std.mem.eql(u8, agent.name, selected_name)) return;
+    }
+    return error.UnknownCustomAgent;
+}
+
+fn validateCustomAgentMcpServers(
+    custom_agents: ?[]const session_types.CustomAgentConfig,
+) !void {
+    for (custom_agents orelse &.{}) |agent| {
+        if (agent.mcp_servers) |servers| try ext.validateMcpServers(servers);
+    }
+}
+
+const WireCustomAgent = struct {
+    name: []const u8,
+    displayName: ?[]const u8,
+    description: ?[]const u8,
+    tools: ?[]const []const u8,
+    prompt: []const u8,
+    mcpServers: ?std.json.Value,
+    infer: ?bool,
+    skills: ?[]const []const u8,
+    model: ?[]const u8,
+    reasoningEffort: ?session_types.ReasoningEffort,
+};
+
+const WireDefaultAgent = struct {
+    excludedTools: ?[]const []const u8,
+};
+
 const ExtensionWireValues = struct {
     allocator: std.mem.Allocator,
     json_values: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty,
@@ -2839,12 +2902,18 @@ const ExtensionWireValues = struct {
     open_canvases: std.ArrayList(WireOpenCanvas) = .empty,
     mcp_object: std.json.ObjectMap = .empty,
     mcp_servers: ?std.json.Value = null,
+    custom_agents_present: bool = false,
+    custom_agents: std.ArrayList(WireCustomAgent) = .empty,
+    custom_agent_mcp_objects: std.ArrayList(std.json.ObjectMap) = .empty,
 
     fn init(allocator: std.mem.Allocator) ExtensionWireValues {
         return .{ .allocator = allocator };
     }
 
     fn deinit(self: *ExtensionWireValues) void {
+        for (self.custom_agent_mcp_objects.items) |*object| object.deinit(self.allocator);
+        self.custom_agent_mcp_objects.deinit(self.allocator);
+        self.custom_agents.deinit(self.allocator);
         self.mcp_object.deinit(self.allocator);
         for (self.json_values.items) |value| {
             wipeJsonStrings(value.value);
@@ -2867,6 +2936,57 @@ const ExtensionWireValues = struct {
         const value = parsed.value;
         try self.json_values.append(self.allocator, parsed);
         return value;
+    }
+
+    fn lowerCustomAgentMcpServers(
+        self: *ExtensionWireValues,
+        servers: []const ext.McpServer,
+    ) !std.json.Value {
+        var object: std.json.ObjectMap = .empty;
+        errdefer object.deinit(self.allocator);
+        for (servers) |server| {
+            const json = switch (server.config) {
+                .stdio => |config| try lowerStdioMcp(self.allocator, config),
+                .http => |config| try lowerHttpMcp(self.allocator, config),
+            };
+            defer {
+                wipeSecret(json);
+                self.allocator.free(json);
+            }
+            try object.put(self.allocator, server.name, try self.parseJson(json));
+        }
+        try self.custom_agent_mcp_objects.append(self.allocator, object);
+        return .{ .object = object };
+    }
+
+    fn lowerCustomAgents(
+        self: *ExtensionWireValues,
+        custom_agents: ?[]const session_types.CustomAgentConfig,
+    ) !void {
+        const agents = custom_agents orelse return;
+        self.custom_agents_present = true;
+        try self.custom_agents.ensureTotalCapacity(self.allocator, agents.len);
+        for (agents) |agent| {
+            try self.custom_agents.append(self.allocator, .{
+                .name = agent.name,
+                .displayName = agent.display_name,
+                .description = agent.description,
+                .tools = agent.tools,
+                .prompt = agent.prompt,
+                .mcpServers = if (agent.mcp_servers) |servers|
+                    try self.lowerCustomAgentMcpServers(servers)
+                else
+                    null,
+                .infer = agent.infer,
+                .skills = agent.skills,
+                .model = agent.model,
+                .reasoningEffort = agent.reasoning_effort,
+            });
+        }
+    }
+
+    fn wireCustomAgents(self: *const ExtensionWireValues) ?[]const WireCustomAgent {
+        return if (self.custom_agents_present) self.custom_agents.items else null;
     }
 
     fn lower(self: *ExtensionWireValues, features: ext.SessionFeatures) !void {
@@ -2963,6 +3083,11 @@ const CreateSessionRequest = struct {
     tools: []const WireTool,
     availableTools: ?[]const []const u8,
     excludedTools: ?[]const []const u8,
+    customAgents: ?[]const WireCustomAgent,
+    defaultAgent: ?WireDefaultAgent,
+    agent: ?[]const u8,
+    customAgentsLocalOnly: ?bool,
+    excludedBuiltinAgents: ?[]const []const u8,
     toolFilterPrecedence: ToolFilterPrecedence = .excluded,
     systemMessage: ?session_types.SystemMessageConfig,
     requestPermission: bool,
@@ -3002,6 +3127,11 @@ const ResumeSessionRequest = struct {
     tools: []const WireTool,
     availableTools: ?[]const []const u8,
     excludedTools: ?[]const []const u8,
+    customAgents: ?[]const WireCustomAgent,
+    defaultAgent: ?WireDefaultAgent,
+    agent: ?[]const u8,
+    customAgentsLocalOnly: ?bool,
+    excludedBuiltinAgents: ?[]const []const u8,
     toolFilterPrecedence: ToolFilterPrecedence = .excluded,
     systemMessage: ?session_types.SystemMessageConfig,
     requestPermission: bool,
@@ -3064,6 +3194,11 @@ fn resumeConfigFromCreate(config: session_types.CreateSessionConfig) session_typ
         .tools = config.tools,
         .available_tools = config.available_tools,
         .excluded_tools = config.excluded_tools,
+        .custom_agents = config.custom_agents,
+        .default_agent = config.default_agent,
+        .agent = config.agent,
+        .custom_agents_local_only = config.custom_agents_local_only,
+        .excluded_builtin_agents = config.excluded_builtin_agents,
         .system_message = config.system_message,
         .request_permission = config.request_permission,
         .enable_config_discovery = config.enable_config_discovery,
@@ -3097,6 +3232,11 @@ fn resumeConfigFromJoin(config: session_types.JoinSessionConfig) session_types.R
         .tools = config.tools,
         .available_tools = config.available_tools,
         .excluded_tools = config.excluded_tools,
+        .custom_agents = config.custom_agents,
+        .default_agent = config.default_agent,
+        .agent = config.agent,
+        .custom_agents_local_only = config.custom_agents_local_only,
+        .excluded_builtin_agents = config.excluded_builtin_agents,
         .system_message = config.system_message,
         .request_permission = config.request_permission,
         .enable_config_discovery = config.enable_config_discovery,
@@ -3136,6 +3276,18 @@ fn lowerManagedSettings(
     };
 }
 
+fn lowerInitialAgent(initial_agent: session_types.InitialAgent) ?[]const u8 {
+    return switch (initial_agent) {
+        .default_agent => null,
+        .custom_agent => |name| name,
+    };
+}
+
+fn lowerDefaultAgent(config: ?session_types.DefaultAgentConfig) ?WireDefaultAgent {
+    const value = config orelse return null;
+    return .{ .excludedTools = value.excluded_tools };
+}
+
 fn lowerModelCapabilities(
     capabilities: ?models.CapabilitiesOverride,
 ) !?models.CapabilitiesOverride {
@@ -3165,6 +3317,11 @@ fn buildCreateSessionRequest(
         .tools = tools,
         .availableTools = config.available_tools,
         .excludedTools = config.excluded_tools,
+        .customAgents = values.wireCustomAgents(),
+        .defaultAgent = lowerDefaultAgent(config.default_agent),
+        .agent = lowerInitialAgent(config.agent),
+        .customAgentsLocalOnly = config.custom_agents_local_only,
+        .excludedBuiltinAgents = config.excluded_builtin_agents,
         .systemMessage = config.system_message,
         .requestPermission = config.request_permission or config.on_permission_request != null,
         .requestUserInput = config.on_user_input_request != null,
@@ -3243,6 +3400,11 @@ fn buildResumeSessionRequest(
         .tools = tools,
         .availableTools = config.available_tools,
         .excludedTools = config.excluded_tools,
+        .customAgents = values.wireCustomAgents(),
+        .defaultAgent = lowerDefaultAgent(config.default_agent),
+        .agent = lowerInitialAgent(config.agent),
+        .customAgentsLocalOnly = config.custom_agents_local_only,
+        .excludedBuiltinAgents = config.excluded_builtin_agents,
         .systemMessage = config.system_message,
         .requestPermission = config.request_permission or config.on_permission_request != null,
         .requestUserInput = config.on_user_input_request != null,
@@ -5530,6 +5692,25 @@ test "failed resident resume preserves committed runtime and session id" {
     try std.testing.expect(client.findSessionId("s1").?.ptr == session_id.ptr);
 }
 
+test "failed frame writes wipe the transport buffer" {
+    const secret = "transport-secret";
+    var writer_buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer{
+        .vtable = &.{ .drain = std.Io.Writer.failingDrain },
+        .buffer = &writer_buffer,
+    };
+
+    try std.testing.expectError(
+        error.WriteFailed,
+        writeFrameAndWipe(&writer, &writer_buffer, secret),
+    );
+    try std.testing.expectEqual(@as(usize, 0), writer.end);
+    try std.testing.expect(std.mem.indexOf(u8, &writer_buffer, secret) == null);
+    for (writer_buffer) |byte| {
+        try std.testing.expectEqual(@as(u8, 0), byte);
+    }
+}
+
 test "MCP OAuth event interest is retained and released" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -6090,4 +6271,353 @@ test "session event queue has a fixed bound" {
     defer parsed.deinit();
 
     try std.testing.expectError(error.EventQueueFull, client.queueSessionEvent(parsed.value));
+}
+
+test "create resume and parent join lower custom agents to literal lifecycle JSON" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const create_response = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"sessionId\":\"created\"}}";
+    const resume_response = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}";
+    const join_response = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}";
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            create_response.len,
+            create_response,
+            resume_response.len,
+            resume_response,
+            join_response.len,
+            join_response,
+        },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = responses });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [4096]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+    };
+    defer {
+        for (client.session_ids.items) |id| allocator.free(id);
+        client.session_ids.deinit(allocator);
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+    }
+
+    const created = try client.createSession(.{
+        .custom_agents = &.{.{
+            .name = "reviewer",
+            .display_name = "Code reviewer",
+            .description = "Reviews code.",
+            .tools = &.{"read"},
+            .prompt = "Review.",
+            .mcp_servers = &.{.{
+                .name = "docs",
+                .config = .{ .stdio = .{
+                    .command = "docs-mcp",
+                    .args = &.{"--stdio"},
+                    .env = &.{.{ .name = "TOKEN", .value = "secret" }},
+                    .working_directory = "/repo",
+                    .tools = &.{"lookup"},
+                    .timeout_ms = 25,
+                } },
+            }},
+            .infer = false,
+            .skills = &.{"review"},
+            .model = "gpt-5.4",
+            .reasoning_effort = .xhigh,
+        }},
+        .default_agent = .{ .excluded_tools = &.{"deploy"} },
+        .agent = .{ .custom_agent = "reviewer" },
+        .custom_agents_local_only = true,
+        .excluded_builtin_agents = &.{"explore"},
+    });
+    try std.testing.expectEqualStrings("created", created.id);
+    const resumed = try client.resumeSession("session-1", .{
+        .custom_agents = &.{.{
+            .name = "docs",
+            .prompt = "Answer from docs.",
+            .mcp_servers = &.{.{
+                .name = "search",
+                .config = .{ .http = .{
+                    .transport = .sse,
+                    .url = "https://example.test/mcp",
+                    .headers = &.{.{ .name = "Authorization", .value = "secret" }},
+                    .tools = &.{"search"},
+                    .timeout_ms = 50,
+                } },
+            }},
+        }},
+        .agent = .{ .custom_agent = "docs" },
+    });
+    try std.testing.expectEqualStrings("session-1", resumed.id);
+    var joined = try client.joinParentSession("parent-session", .{
+        .custom_agents = &.{.{
+            .name = "parent-reviewer",
+            .display_name = "Parent reviewer",
+            .description = "Reviews the parent session.",
+            .tools = &.{"read"},
+            .prompt = "Review the parent.",
+            .mcp_servers = &.{.{
+                .name = "parent-docs",
+                .config = .{ .stdio = .{
+                    .command = "parent-mcp",
+                    .args = &.{"--stdio"},
+                    .env = &.{.{ .name = "TOKEN", .value = "secret" }},
+                    .working_directory = "/parent",
+                    .tools = &.{"lookup"},
+                    .timeout_ms = 75,
+                } },
+            }},
+            .infer = true,
+            .skills = &.{"review"},
+            .model = "gpt-5.4",
+            .reasoning_effort = .max,
+        }},
+        .default_agent = .{ .excluded_tools = &.{"write"} },
+        .agent = .{ .custom_agent = "parent-reviewer" },
+        .custom_agents_local_only = false,
+        .excluded_builtin_agents = &.{"task"},
+    });
+    defer joined.deinit();
+    try std.testing.expectEqualStrings("parent-session", joined.session.id);
+
+    const requests = try tmp.dir.readFileAlloc(std.testing.io, "requests", allocator, .limited(8192));
+    defer allocator.free(requests);
+    var frames = std.Io.Reader.fixed(requests);
+    const create_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(create_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":1,"method":"session.create","params":{"streaming":false,"tools":[],"customAgents":[{"name":"reviewer","displayName":"Code reviewer","description":"Reviews code.","tools":["read"],"prompt":"Review.","mcpServers":{"docs":{"type":"stdio","command":"docs-mcp","args":["--stdio"],"env":{"TOKEN":"secret"},"cwd":"/repo","tools":["lookup"],"timeout":25}},"infer":false,"skills":["review"],"model":"gpt-5.4","reasoningEffort":"xhigh"}],"defaultAgent":{"excludedTools":["deploy"]},"agent":"reviewer","customAgentsLocalOnly":true,"excludedBuiltinAgents":["explore"],"toolFilterPrecedence":"excluded","requestPermission":false,"requestUserInput":false,"enableManagedSettings":false}}
+    , create_body);
+    const resume_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(resume_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":2,"method":"session.resume","params":{"sessionId":"session-1","streaming":false,"tools":[],"customAgents":[{"name":"docs","prompt":"Answer from docs.","mcpServers":{"search":{"type":"sse","url":"https://example.test/mcp","headers":{"Authorization":"secret"},"tools":["search"],"timeout":50}}}],"agent":"docs","toolFilterPrecedence":"excluded","requestPermission":false,"requestUserInput":false,"enableManagedSettings":false}}
+    , resume_body);
+    const join_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(join_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":3,"method":"session.resume","params":{"sessionId":"parent-session","streaming":false,"tools":[],"customAgents":[{"name":"parent-reviewer","displayName":"Parent reviewer","description":"Reviews the parent session.","tools":["read"],"prompt":"Review the parent.","mcpServers":{"parent-docs":{"type":"stdio","command":"parent-mcp","args":["--stdio"],"env":{"TOKEN":"secret"},"cwd":"/parent","tools":["lookup"],"timeout":75}},"infer":true,"skills":["review"],"model":"gpt-5.4","reasoningEffort":"max"}],"defaultAgent":{"excludedTools":["write"]},"agent":"parent-reviewer","customAgentsLocalOnly":false,"excludedBuiltinAgents":["task"],"toolFilterPrecedence":"excluded","requestPermission":true,"requestUserInput":false,"enableManagedSettings":false,"disableResume":true}}
+    , join_body);
+    try std.testing.expectEqualStrings("", frames.buffered());
+}
+
+test "custom agent optional slices preserve omitted and empty values" {
+    const allocator = std.testing.allocator;
+
+    var omitted_values = ExtensionWireValues.init(allocator);
+    defer omitted_values.deinit();
+    const omitted_request = try buildCreateSessionRequest(.{}, &.{}, &omitted_values);
+    const omitted_encoded = try json_rpc.encodeRequest(
+        allocator,
+        33,
+        "session.create",
+        omitted_request,
+    );
+    defer allocator.free(omitted_encoded);
+    const omitted = try std.json.parseFromSlice(std.json.Value, allocator, omitted_encoded, .{});
+    defer omitted.deinit();
+    const omitted_params = omitted.value.object.get("params").?.object;
+    try std.testing.expect(!omitted_params.contains("customAgents"));
+    try std.testing.expect(!omitted_params.contains("defaultAgent"));
+    try std.testing.expect(!omitted_params.contains("agent"));
+    try std.testing.expect(!omitted_params.contains("customAgentsLocalOnly"));
+    try std.testing.expect(!omitted_params.contains("excludedBuiltinAgents"));
+
+    var empty_agents_values = ExtensionWireValues.init(allocator);
+    defer empty_agents_values.deinit();
+    try empty_agents_values.lowerCustomAgents(&.{});
+    const empty_agents_request = try buildCreateSessionRequest(
+        .{
+            .custom_agents = &.{},
+            .default_agent = .{},
+        },
+        &.{},
+        &empty_agents_values,
+    );
+    const empty_agents_encoded = try json_rpc.encodeRequest(
+        allocator,
+        34,
+        "session.create",
+        empty_agents_request,
+    );
+    defer allocator.free(empty_agents_encoded);
+    const empty_agents = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        empty_agents_encoded,
+        .{},
+    );
+    defer empty_agents.deinit();
+    const empty_agents_params = empty_agents.value.object.get("params").?.object;
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        empty_agents_params.get("customAgents").?.array.items.len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        empty_agents_params.get("defaultAgent").?.object.count(),
+    );
+
+    const config = session_types.CreateSessionConfig{
+        .custom_agents = &.{
+            .{ .name = "inherit", .prompt = "Inherit." },
+            .{
+                .name = "empty",
+                .prompt = "Empty.",
+                .tools = &.{},
+                .mcp_servers = &.{},
+                .skills = &.{},
+            },
+        },
+        .default_agent = .{ .excluded_tools = &.{} },
+        .excluded_builtin_agents = &.{},
+    };
+    var empty_values = ExtensionWireValues.init(allocator);
+    defer empty_values.deinit();
+    try empty_values.lowerCustomAgents(config.custom_agents);
+    const empty_request = try buildCreateSessionRequest(config, &.{}, &empty_values);
+    const empty_encoded = try json_rpc.encodeRequest(allocator, 35, "session.create", empty_request);
+    defer allocator.free(empty_encoded);
+    const empty = try std.json.parseFromSlice(std.json.Value, allocator, empty_encoded, .{});
+    defer empty.deinit();
+    const params = empty.value.object.get("params").?.object;
+    const agents = params.get("customAgents").?.array.items;
+    try std.testing.expect(!agents[0].object.contains("tools"));
+    try std.testing.expect(!agents[0].object.contains("mcpServers"));
+    try std.testing.expect(!agents[0].object.contains("skills"));
+    try std.testing.expectEqual(@as(usize, 0), agents[1].object.get("tools").?.array.items.len);
+    try std.testing.expectEqual(@as(usize, 0), agents[1].object.get("mcpServers").?.object.count());
+    try std.testing.expectEqual(@as(usize, 0), agents[1].object.get("skills").?.array.items.len);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        params.get("defaultAgent").?.object.get("excludedTools").?.array.items.len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        params.get("excludedBuiltinAgents").?.array.items.len,
+    );
+}
+
+test "custom agent validation precedes lifecycle state and RPC writes" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    const duplicate = &.{
+        session_types.CustomAgentConfig{ .name = "same", .prompt = "One." },
+        session_types.CustomAgentConfig{ .name = "same", .prompt = "Two." },
+    };
+    const unknown = &.{
+        session_types.CustomAgentConfig{ .name = "known", .prompt = "Known." },
+    };
+
+    try std.testing.expectError(
+        error.DuplicateCustomAgentName,
+        client.createSession(.{ .custom_agents = duplicate }),
+    );
+    try std.testing.expectError(
+        error.DuplicateCustomAgentName,
+        client.resumeSession("s1", .{ .custom_agents = duplicate }),
+    );
+    try std.testing.expectError(
+        error.UnknownCustomAgent,
+        client.createSession(.{
+            .custom_agents = unknown,
+            .agent = .{ .custom_agent = "missing" },
+        }),
+    );
+    try std.testing.expectError(
+        error.UnknownCustomAgent,
+        client.resumeSession("s1", .{
+            .custom_agents = unknown,
+            .agent = .{ .custom_agent = "missing" },
+        }),
+    );
+    try std.testing.expectError(
+        error.UnknownCustomAgent,
+        client.joinSession("s1", .{
+            .custom_agents = unknown,
+            .agent = .{ .custom_agent = "missing" },
+        }),
+    );
+    try std.testing.expectError(
+        error.UnknownCustomAgent,
+        client.joinParentSession("s1", .{
+            .custom_agents = unknown,
+            .agent = .{ .custom_agent = "missing" },
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidMcpServer,
+        client.createSession(.{
+            .custom_agents = &.{.{
+                .name = "broken",
+                .prompt = "Broken.",
+                .mcp_servers = &.{.{
+                    .name = "server",
+                    .config = .{ .stdio = .{ .command = "" } },
+                }},
+            }},
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 1), client.next_request_id);
+    try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.extension_runtimes.items.len);
+    try std.testing.expect(client.pending_extension_runtime == null);
+}
+
+test "create and join mappings preserve custom agent configuration" {
+    const agents = &.{
+        session_types.CustomAgentConfig{ .name = "reviewer", .prompt = "Review." },
+    };
+    const create = resumeConfigFromCreate(.{
+        .custom_agents = agents,
+        .default_agent = .{ .excluded_tools = &.{"deploy"} },
+        .agent = .{ .custom_agent = "reviewer" },
+        .custom_agents_local_only = false,
+        .excluded_builtin_agents = &.{"explore"},
+    });
+    const joined = resumeConfigFromJoin(.{
+        .custom_agents = agents,
+        .default_agent = .{ .excluded_tools = &.{"deploy"} },
+        .agent = .{ .custom_agent = "reviewer" },
+        .custom_agents_local_only = false,
+        .excluded_builtin_agents = &.{"explore"},
+    });
+
+    for ([_]session_types.ResumeSessionConfig{ create, joined }) |mapped| {
+        try std.testing.expectEqualStrings("reviewer", mapped.custom_agents.?[0].name);
+        try std.testing.expectEqualStrings(
+            "deploy",
+            mapped.default_agent.?.excluded_tools.?[0],
+        );
+        switch (mapped.agent) {
+            .custom_agent => |name| try std.testing.expectEqualStrings("reviewer", name),
+            .default_agent => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectEqual(false, mapped.custom_agents_local_only.?);
+        try std.testing.expectEqualStrings("explore", mapped.excluded_builtin_agents.?[0]);
+    }
 }
