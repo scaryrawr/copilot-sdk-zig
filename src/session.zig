@@ -2,6 +2,10 @@ const std = @import("std");
 const ProviderConfig = @import("provider.zig").ProviderConfig;
 const ModelCapabilitiesOverride = @import("models.zig").CapabilitiesOverride;
 const extensibility = @import("extensibility.zig");
+const event_payloads = @import("session_event_payloads.zig");
+const session_events = @import("session_event_generated.zig");
+
+pub const SessionEventTypes = session_events;
 
 pub const ReasoningEffort = enum {
     low,
@@ -455,89 +459,17 @@ pub const ManagedSettingsPermissions = struct {
     allow: ?[]const []const u8 = null,
 };
 
-pub const AssistantMessage = struct {
-    content: []u8,
-    message_id: ?[]u8,
-
-    pub fn deinit(self: AssistantMessage, allocator: std.mem.Allocator) void {
-        allocator.free(self.content);
-        if (self.message_id) |message_id| allocator.free(message_id);
-    }
-};
-
-pub const AssistantMessageDelta = struct {
-    delta_content: []u8,
-    message_id: []u8,
-};
-
-pub const AssistantReasoning = struct {
-    reasoning_id: []u8,
-    content: []u8,
-    rte: ?bool = null,
-};
-
-pub const AssistantReasoningDelta = struct {
-    reasoning_id: []u8,
-    delta_content: []u8,
-};
-
-pub const SessionError = struct {
-    message: []u8,
-};
-
-pub const SessionIdle = struct {
-    aborted: ?bool = null,
-    mode: ?[]u8 = null,
-
-    pub fn deinit(self: SessionIdle, allocator: std.mem.Allocator) void {
-        if (self.mode) |mode| allocator.free(mode);
-    }
-};
+pub const AssistantMessage = session_events.AssistantMessage;
+pub const AssistantMessageDelta = session_events.AssistantMessageDelta;
+pub const AssistantReasoning = session_events.AssistantReasoning;
+pub const AssistantReasoningDelta = session_events.AssistantReasoningDelta;
+pub const SessionError = session_events.SessionError;
+pub const SessionIdle = session_events.SessionIdle;
 
 /// Result of automatic permission handling before `Session.nextEvent` returns
 /// the permission event.
-pub const AutomaticPermissionHandling = union(enum) {
-    /// No automatic permission handler was configured.
-    not_configured,
-    /// The handler's decision was accepted by the runtime.
-    handled,
-    /// The handler deliberately left the request pending for manual handling.
-    no_result,
-    /// The handler failed before a response was attempted.
-    handler_failed: anyerror,
-    /// Preparing or delivering the response failed. Callers must not blindly
-    /// retry because the runtime may already have received the decision.
-    delivery_failed: anyerror,
-};
-
-pub const PermissionRequested = struct {
-    request_id: []u8,
-    permission_request_json: []u8,
-    managed_approval_required: bool = false,
-    automatic_handling: AutomaticPermissionHandling = .not_configured,
-
-    pub fn kind(self: PermissionRequested) !PermissionRequestKind {
-        const parsed = try std.json.parseFromSlice(
-            struct { kind: []const u8 },
-            std.heap.page_allocator,
-            self.permission_request_json,
-            .{ .ignore_unknown_fields = true },
-        );
-        defer parsed.deinit();
-        return PermissionRequestKind.fromString(parsed.value.kind);
-    }
-
-    pub fn parseRequest(
-        self: PermissionRequested,
-        comptime T: type,
-        allocator: std.mem.Allocator,
-    ) !std.json.Parsed(T) {
-        return std.json.parseFromSlice(T, allocator, self.permission_request_json, .{
-            .allocate = .alloc_always,
-            .ignore_unknown_fields = true,
-        });
-    }
-};
+pub const AutomaticPermissionHandling = event_payloads.AutomaticPermissionHandling;
+pub const PermissionRequested = session_events.PermissionRequested;
 
 pub const PermissionDecision = union(enum) {
     approve_once,
@@ -582,250 +514,13 @@ pub fn defaultJoinSessionPermissionHandler(
     return .no_result;
 }
 
-pub const ExternalToolRequested = struct {
-    request_id: []u8,
-    tool_call_id: []u8,
-    tool_name: []u8,
-    arguments_json: []u8,
-
-    pub fn parseArguments(
-        self: ExternalToolRequested,
-        comptime T: type,
-        allocator: std.mem.Allocator,
-    ) !std.json.Parsed(T) {
-        return std.json.parseFromSlice(T, allocator, self.arguments_json, .{
-            .allocate = .alloc_always,
-            .ignore_unknown_fields = true,
-        });
-    }
-};
-
-pub const PermissionRequestKind = enum {
-    shell,
-    write,
-    read,
-    path,
-    mcp,
-    url,
-    memory,
-    custom_tool,
-    hook,
-    extension_management,
-    factory,
-    extension_permission_access,
-    extension_env_access,
-    unknown,
-
-    pub fn fromString(value: []const u8) PermissionRequestKind {
-        const mappings = .{
-            .{ "shell", PermissionRequestKind.shell },
-            .{ "write", PermissionRequestKind.write },
-            .{ "read", PermissionRequestKind.read },
-            .{ "path", PermissionRequestKind.path },
-            .{ "mcp", PermissionRequestKind.mcp },
-            .{ "url", PermissionRequestKind.url },
-            .{ "memory", PermissionRequestKind.memory },
-            .{ "custom-tool", PermissionRequestKind.custom_tool },
-            .{ "hook", PermissionRequestKind.hook },
-            .{ "extension-management", PermissionRequestKind.extension_management },
-            .{ "factory", PermissionRequestKind.factory },
-            .{ "extension-permission-access", PermissionRequestKind.extension_permission_access },
-            .{ "extension-env-access", PermissionRequestKind.extension_env_access },
-        };
-        inline for (mappings) |mapping| {
-            if (std.mem.eql(u8, value, mapping[0])) return mapping[1];
-        }
-        return .unknown;
-    }
-};
-
-pub const UnknownEvent = struct {
-    event_type: []u8,
-    data_json: []u8,
-};
-
-pub const SessionEvent = union(enum) {
-    assistant_message: AssistantMessage,
-    assistant_message_delta: AssistantMessageDelta,
-    assistant_reasoning: AssistantReasoning,
-    assistant_reasoning_delta: AssistantReasoningDelta,
-    session_idle: SessionIdle,
-    session_error: SessionError,
-    permission_requested: PermissionRequested,
-    external_tool_requested: ExternalToolRequested,
-    unknown: UnknownEvent,
-
-    pub fn deinit(self: *SessionEvent, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .assistant_message => |value| value.deinit(allocator),
-            .assistant_message_delta => |value| {
-                allocator.free(value.delta_content);
-                allocator.free(value.message_id);
-            },
-            .assistant_reasoning => |value| {
-                allocator.free(value.reasoning_id);
-                allocator.free(value.content);
-            },
-            .assistant_reasoning_delta => |value| {
-                allocator.free(value.reasoning_id);
-                allocator.free(value.delta_content);
-            },
-            .session_idle => |value| value.deinit(allocator),
-            .session_error => |value| allocator.free(value.message),
-            .permission_requested => |value| {
-                allocator.free(value.request_id);
-                allocator.free(value.permission_request_json);
-            },
-            .external_tool_requested => |value| {
-                allocator.free(value.request_id);
-                allocator.free(value.tool_call_id);
-                allocator.free(value.tool_name);
-                allocator.free(value.arguments_json);
-            },
-            .unknown => |value| {
-                allocator.free(value.event_type);
-                @memset(value.data_json, 0);
-                allocator.free(value.data_json);
-            },
-        }
-    }
-};
-
-fn requiredString(object: std.json.ObjectMap, name: []const u8) ![]const u8 {
-    const value = object.get(name) orelse return error.InvalidSessionEvent;
-    return switch (value) {
-        .string => |string| string,
-        else => error.InvalidSessionEvent,
-    };
-}
-
-fn optionalString(object: std.json.ObjectMap, name: []const u8) !?[]const u8 {
-    const value = object.get(name) orelse return null;
-    return switch (value) {
-        .string => |string| string,
-        .null => null,
-        else => error.InvalidSessionEvent,
-    };
-}
-
-fn optionalBool(object: std.json.ObjectMap, name: []const u8) !?bool {
-    const value = object.get(name) orelse return null;
-    return switch (value) {
-        .bool => |boolean| boolean,
-        .null => null,
-        else => error.InvalidSessionEvent,
-    };
-}
-
-pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionEvent {
-    const object = switch (value) {
-        .object => |object| object,
-        else => return error.InvalidSessionEvent,
-    };
-    const event_type = try requiredString(object, "type");
-    const data_value: std.json.Value = object.get("data") orelse .{ .object = .empty };
-    const data = switch (data_value) {
-        .object => |data| data,
-        else => return error.InvalidSessionEvent,
-    };
-
-    if (std.mem.eql(u8, event_type, "assistant.message")) {
-        const content = try allocator.dupe(u8, try requiredString(data, "content"));
-        errdefer allocator.free(content);
-        const raw_message_id = try optionalString(data, "messageId");
-        return .{ .assistant_message = .{
-            .content = content,
-            .message_id = if (raw_message_id) |id| try allocator.dupe(u8, id) else null,
-        } };
-    }
-    if (std.mem.eql(u8, event_type, "assistant.message_delta")) {
-        const delta_content = try allocator.dupe(u8, try requiredString(data, "deltaContent"));
-        errdefer allocator.free(delta_content);
-        return .{ .assistant_message_delta = .{
-            .delta_content = delta_content,
-            .message_id = try allocator.dupe(u8, try requiredString(data, "messageId")),
-        } };
-    }
-    if (std.mem.eql(u8, event_type, "assistant.reasoning")) {
-        const reasoning_id = try allocator.dupe(u8, try requiredString(data, "reasoningId"));
-        errdefer allocator.free(reasoning_id);
-        return .{ .assistant_reasoning = .{
-            .reasoning_id = reasoning_id,
-            .content = try allocator.dupe(u8, try requiredString(data, "content")),
-            .rte = try optionalBool(data, "rte"),
-        } };
-    }
-    if (std.mem.eql(u8, event_type, "assistant.reasoning_delta")) {
-        const reasoning_id = try allocator.dupe(u8, try requiredString(data, "reasoningId"));
-        errdefer allocator.free(reasoning_id);
-        return .{ .assistant_reasoning_delta = .{
-            .reasoning_id = reasoning_id,
-            .delta_content = try allocator.dupe(u8, try requiredString(data, "deltaContent")),
-        } };
-    }
-    if (std.mem.eql(u8, event_type, "session.idle")) {
-        const raw_mode = try optionalString(data, "mode");
-        return .{ .session_idle = .{
-            .aborted = try optionalBool(data, "aborted"),
-            .mode = if (raw_mode) |mode| try allocator.dupe(u8, mode) else null,
-        } };
-    }
-    if (std.mem.eql(u8, event_type, "session.error")) {
-        return .{ .session_error = .{
-            .message = try allocator.dupe(u8, try requiredString(data, "message")),
-        } };
-    }
-    if (std.mem.eql(u8, event_type, "permission.requested")) {
-        const permission_request = data.get("permissionRequest") orelse
-            return error.InvalidSessionEvent;
-        const permission_request_object = switch (permission_request) {
-            .object => |request_object| request_object,
-            else => return error.InvalidSessionEvent,
-        };
-        const managed_approval_required = if (permission_request_object.get(
-            "managedApprovalRequired",
-        )) |managed_value| switch (managed_value) {
-            .bool => |boolean| boolean,
-            else => return error.InvalidSessionEvent,
-        } else false;
-        const request_id = try allocator.dupe(u8, try requiredString(data, "requestId"));
-        errdefer allocator.free(request_id);
-        return .{ .permission_requested = .{
-            .request_id = request_id,
-            .managed_approval_required = managed_approval_required,
-            .permission_request_json = try std.json.Stringify.valueAlloc(
-                allocator,
-                permission_request,
-                .{},
-            ),
-        } };
-    }
-    if (std.mem.eql(u8, event_type, "external_tool.requested")) {
-        const request_id = try allocator.dupe(u8, try requiredString(data, "requestId"));
-        errdefer allocator.free(request_id);
-        const tool_call_id = try allocator.dupe(u8, try requiredString(data, "toolCallId"));
-        errdefer allocator.free(tool_call_id);
-        const tool_name = try allocator.dupe(u8, try requiredString(data, "toolName"));
-        errdefer allocator.free(tool_name);
-        return .{ .external_tool_requested = .{
-            .request_id = request_id,
-            .tool_call_id = tool_call_id,
-            .tool_name = tool_name,
-            .arguments_json = try std.json.Stringify.valueAlloc(
-                allocator,
-                data.get("arguments") orelse .null,
-                .{},
-            ),
-        } };
-    }
-
-    const owned_event_type = try allocator.dupe(u8, event_type);
-    errdefer allocator.free(owned_event_type);
-    return .{ .unknown = .{
-        .event_type = owned_event_type,
-        .data_json = try std.json.Stringify.valueAlloc(allocator, data_value, .{}),
-    } };
-}
+pub const ExternalToolRequested = session_events.ExternalToolRequested;
+pub const PermissionRequestKind = event_payloads.PermissionRequestKind;
+pub const RawEvent = event_payloads.RawEvent;
+pub const UnknownEvent = event_payloads.UnknownEvent;
+pub const SessionEvent = session_events.SessionEvent;
+pub const SessionEventTag = session_events.SessionEventTag;
+pub const parseEvent = session_events.parseEvent;
 
 test "known and unknown events retain owned data" {
     const allocator = std.testing.allocator;
@@ -891,6 +586,335 @@ test "known and unknown events retain owned data" {
     try std.testing.expectEqualStrings("{\"answer\":42}", unknown.unknown.data_json);
 }
 
+test "raw rich and unknown events outlive the source JSON tree" {
+    const allocator = std.testing.allocator;
+
+    var raw_json = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"session.start","data":{"sessionId":"s1","version":1,"producer":"test","copilotVersion":"1.0","startTime":"2026-01-01T00:00:00Z","selectedModel":"raw-secret","contextTier":null}}
+    ,
+        .{},
+    );
+    var raw = try parseEvent(allocator, raw_json.value);
+    raw_json.deinit();
+    defer raw.deinit(allocator);
+    try std.testing.expectEqual(.session_start, std.meta.activeTag(raw));
+    try std.testing.expectEqualStrings("s1", raw.session_start.data.session_id);
+    try std.testing.expectEqual(@as(u64, 1), raw.session_start.data.version);
+    try std.testing.expectEqualStrings("raw-secret", raw.session_start.data.selected_model.?);
+    try std.testing.expectEqual(null, raw.session_start.data.context_tier);
+    try std.testing.expectEqualStrings(
+        "{\"sessionId\":\"s1\",\"version\":1,\"producer\":\"test\",\"copilotVersion\":\"1.0\",\"startTime\":\"2026-01-01T00:00:00Z\",\"selectedModel\":\"raw-secret\",\"contextTier\":null}",
+        raw.rawData(),
+    );
+
+    var rich_json = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"assistant.message","data":{"content":"owned","messageId":"m1"}}
+    ,
+        .{},
+    );
+    var rich = try parseEvent(allocator, rich_json.value);
+    rich_json.deinit();
+    defer rich.deinit(allocator);
+    try std.testing.expectEqual(.assistant_message, std.meta.activeTag(rich));
+    try std.testing.expectEqualStrings("owned", rich.assistant_message.content);
+    try std.testing.expectEqualStrings(
+        "{\"content\":\"owned\",\"messageId\":\"m1\"}",
+        rich.rawData(),
+    );
+
+    var future_json = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"future.event","data":{"answer":42}}
+    ,
+        .{},
+    );
+    var future = try parseEvent(allocator, future_json.value);
+    future_json.deinit();
+    defer future.deinit(allocator);
+    try std.testing.expectEqual(.unknown, std.meta.activeTag(future));
+    try std.testing.expectEqualStrings("future.event", future.unknown.event_type);
+    try std.testing.expectEqualStrings("{\"answer\":42}", future.rawData());
+}
+
+test "generated payloads expose nested arrays enums unions and opaque values" {
+    const allocator = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"tool.execution_complete","data":{"toolCallId":"tool-1","success":true,"model":"gpt-test","result":{"content":"done","binaryResultsForLlm":[{"type":"image","assetId":"sha256:abc","mimeType":"image/png","byteLength":4,"metadata":{"trace":{"id":"abc"}}}],"structuredContent":{"answer":42}}}}
+    ,
+        .{},
+    );
+    var event = try parseEvent(allocator, parsed.value);
+    parsed.deinit();
+    defer event.deinit(allocator);
+
+    const payload = event.tool_execution_complete.data;
+    try std.testing.expectEqualStrings("tool-1", payload.tool_call_id);
+    try std.testing.expect(payload.success);
+    try std.testing.expectEqualStrings("gpt-test", payload.model.?);
+    const result = payload.result.?;
+    try std.testing.expectEqualStrings("done", result.content);
+    try std.testing.expectEqual(@as(usize, 1), result.binary_results_for_llm.?.len);
+    switch (result.binary_results_for_llm.?[0]) {
+        .asset_id => |asset| {
+            try std.testing.expectEqual(
+                SessionEventTypes.BinaryAssetReferenceType.image,
+                asset.type,
+            );
+            try std.testing.expectEqualStrings("sha256:abc", asset.asset_id);
+            try std.testing.expectEqual(@as(u64, 4), asset.byte_length);
+            try std.testing.expectEqualStrings(
+                "abc",
+                asset.metadata.?.map.get("trace").?.object.get("id").?.string,
+            );
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(
+        @as(i64, 42),
+        result.structured_content.?.object.get("answer").?.integer,
+    );
+}
+
+test "generated integers accept full u64 range and raw data keeps future fields" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"session.start","data":{"sessionId":"s1","version":9223372036854775808,"producer":"test","copilotVersion":"1.0","startTime":"2026-01-01T00:00:00Z","futureField":{"enabled":true}}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    var event = try parseEvent(allocator, parsed.value);
+    defer event.deinit(allocator);
+
+    try std.testing.expectEqual(
+        @as(u64, 9_223_372_036_854_775_808),
+        event.session_start.data.version,
+    );
+    try std.testing.expectEqualStrings(
+        "{\"sessionId\":\"s1\",\"version\":9223372036854775808,\"producer\":\"test\",\"copilotVersion\":\"1.0\",\"startTime\":\"2026-01-01T00:00:00Z\",\"futureField\":{\"enabled\":true}}",
+        event.rawData(),
+    );
+}
+
+test "generated string bounds count code points and numbers accept large integer tokens" {
+    const allocator = std.testing.allocator;
+
+    var preview: [512]u8 = undefined;
+    for (0..256) |index| {
+        @memcpy(preview[index * 2 ..][0..2], "\xc3\xa9");
+    }
+    const notification_json = try std.fmt.allocPrint(
+        allocator,
+        \\{{"type":"system.notification","data":{{"content":"","kind":{{"type":"factory_completed","runId":"run-1","factoryName":"factory","status":"completed","consumedSubagents":0,"elapsedMs":0,"consumedNanoAiu":0,"attempt":1,"resultPreview":"{s}"}}}}}}
+    ,
+        .{preview},
+    );
+    defer allocator.free(notification_json);
+    const parsed_notification = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        notification_json,
+        .{},
+    );
+    defer parsed_notification.deinit();
+    var notification = try parseEvent(allocator, parsed_notification.value);
+    defer notification.deinit(allocator);
+
+    try std.testing.expectEqual(
+        @as(usize, 512),
+        notification.system_notification.data.kind.factory_completed.result_preview.?.len,
+    );
+
+    const parsed_usage = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"session.usage_checkpoint","data":{"totalNanoAiu":9223372036854775808}}
+    ,
+        .{},
+    );
+    defer parsed_usage.deinit();
+    var usage = try parseEvent(allocator, parsed_usage.value);
+    defer usage.deinit(allocator);
+
+    try std.testing.expectEqual(
+        @as(f64, 9_223_372_036_854_775_808),
+        usage.session_usage_checkpoint.data.total_nano_aiu,
+    );
+}
+
+test "failed generated parsing wipes initialized fields" {
+    const source_allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        source_allocator,
+        \\{"type":"session.start","data":{"sessionId":"s1","version":1,"producer":"test","copilotVersion":"1.0","startTime":"2026-01-01T00:00:00Z","selectedModel":"wipe-me","reasoningSummary":"invalid"}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+
+    var storage = [_]u8{0xaa} ** 16_384;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    try std.testing.expectError(
+        error.InvalidSessionEvent,
+        parseEvent(fixed.allocator(), parsed.value),
+    );
+    try std.testing.expectEqual(
+        null,
+        std.mem.indexOf(u8, &storage, "wipe-me"),
+    );
+}
+
+fn rejectGeneratedEventForAllocationFailures(allocator: std.mem.Allocator) !void {
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"session.start","data":{"sessionId":"s1","version":1,"producer":"test","copilotVersion":"1.0","startTime":"2026-01-01T00:00:00Z","selectedModel":"wipe-me","reasoningSummary":"invalid"}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    if (parseEvent(allocator, parsed.value)) |event_value| {
+        var event = event_value;
+        event.deinit(allocator);
+        return error.TestUnexpectedResult;
+    } else |err| switch (err) {
+        error.InvalidSessionEvent => {},
+        else => return err,
+    }
+}
+
+test "failed generated parsing handles every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        rejectGeneratedEventForAllocationFailures,
+        .{},
+    );
+}
+
+test "focused payloads include schema required fields" {
+    const allocator = std.testing.allocator;
+    const error_json = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"session.error","data":{"errorType":"authentication","message":"sign in"}}
+    ,
+        .{},
+    );
+    defer error_json.deinit();
+    var session_error = try parseEvent(allocator, error_json.value);
+    defer session_error.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "authentication",
+        session_error.session_error.error_type,
+    );
+
+    const tool_json = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"external_tool.requested","data":{"requestId":"r1","sessionId":"session-7","toolCallId":"t1","toolName":"lookup","arguments":{"id":"alpha"}}}
+    ,
+        .{},
+    );
+    defer tool_json.deinit();
+    var tool = try parseEvent(allocator, tool_json.value);
+    defer tool.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "session-7",
+        tool.external_tool_requested.session_id,
+    );
+}
+
+test "malformed known rich events return an error" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"assistant.message","data":{"messageId":"m1"}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    try std.testing.expectError(
+        error.InvalidSessionEvent,
+        parseEvent(allocator, parsed.value),
+    );
+}
+
+test "schema-required generated and focused fields reject malformed events" {
+    const allocator = std.testing.allocator;
+    const samples = [_][]const u8{
+        \\{"type":"session.start","data":{"version":1,"producer":"test","copilotVersion":"1.0","startTime":"2026-01-01T00:00:00Z"}}
+        ,
+        \\{"type":"session.error","data":{"message":"missing category"}}
+        ,
+        \\{"type":"external_tool.requested","data":{"requestId":"r1","toolCallId":"t1","toolName":"lookup"}}
+        ,
+    };
+    for (samples) |sample| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, sample, .{});
+        defer parsed.deinit();
+        try std.testing.expectError(error.InvalidSessionEvent, parseEvent(allocator, parsed.value));
+    }
+}
+
+fn parseAndDeinitForAllocationFailures(
+    allocator: std.mem.Allocator,
+    json: []const u8,
+    expected_tag: SessionEventTag,
+) !void {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    var event = try parseEvent(allocator, parsed.value);
+    defer event.deinit(allocator);
+    try std.testing.expectEqual(expected_tag, std.meta.activeTag(event));
+}
+
+test "generated event ownership handles every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        parseAndDeinitForAllocationFailures,
+        .{
+            \\{"type":"session.start","data":{"sessionId":"s1","version":1,"producer":"test","copilotVersion":"1.0","startTime":"2026-01-01T00:00:00Z","selectedModel":"raw-secret"}}
+            ,
+            SessionEventTag.session_start,
+        },
+    );
+}
+
+test "rich event ownership handles every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        parseAndDeinitForAllocationFailures,
+        .{
+            \\{"type":"assistant.message","data":{"content":"owned","messageId":"m1"}}
+            ,
+            SessionEventTag.assistant_message,
+        },
+    );
+}
+
+test "unknown event ownership handles every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        parseAndDeinitForAllocationFailures,
+        .{
+            \\{"type":"future.event","data":{"answer":42}}
+            ,
+            SessionEventTag.unknown,
+        },
+    );
+}
+
 test "session idle retains autopilot mode" {
     const allocator = std.testing.allocator;
     const parsed = try std.json.parseFromSlice(
@@ -913,7 +937,7 @@ test "permission and external tool events retain opaque payloads" {
     const permission_json = try std.json.parseFromSlice(
         std.json.Value,
         allocator,
-        \\{"type":"permission.requested","data":{"requestId":"p1","permissionRequest":{"kind":"shell","fullCommandText":"pwd"}}}
+        \\{"type":"permission.requested","data":{"requestId":"p1","permissionRequest":{"kind":"shell","fullCommandText":"pwd","intention":"show directory","commands":[],"possiblePaths":[],"possibleUrls":[],"hasWriteFileRedirection":false,"canOfferSessionApproval":false}}}
     ,
         .{},
     );
@@ -927,14 +951,21 @@ test "permission and external tool events retain opaque payloads" {
         permission.permission_requested.automatic_handling == .not_configured,
     );
     try std.testing.expectEqualStrings(
-        "{\"kind\":\"shell\",\"fullCommandText\":\"pwd\"}",
+        "{\"kind\":\"shell\",\"fullCommandText\":\"pwd\",\"intention\":\"show directory\",\"commands\":[],\"possiblePaths\":[],\"possibleUrls\":[],\"hasWriteFileRedirection\":false,\"canOfferSessionApproval\":false}",
         permission.permission_requested.permission_request_json,
     );
+    switch (permission.permission_requested.permission_request.?) {
+        .shell => |request| {
+            try std.testing.expectEqualStrings("pwd", request.full_command_text);
+            try std.testing.expectEqual(@as(usize, 0), request.commands.len);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 
     const tool_json = try std.json.parseFromSlice(
         std.json.Value,
         allocator,
-        \\{"type":"external_tool.requested","data":{"requestId":"r1","toolCallId":"t1","toolName":"lookup","arguments":{"id":"alpha"}}}
+        \\{"type":"external_tool.requested","data":{"requestId":"r1","sessionId":"s1","toolCallId":"t1","toolName":"lookup","arguments":{"id":"alpha"}}}
     ,
         .{},
     );

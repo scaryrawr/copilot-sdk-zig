@@ -1713,7 +1713,6 @@ pub const Client = struct {
             else => return error.InvalidSessionEvent,
         };
         const event_value = params.get("event") orelse return error.InvalidSessionEvent;
-        self.applyExtensionEvent(session_id, event_value);
         var queued = QueuedEvent{
             .session_id = try self.allocator.dupe(u8, session_id),
             .event = undefined,
@@ -1724,6 +1723,7 @@ pub const Client = struct {
             event_value,
         );
         errdefer queued.event.deinit(self.allocator);
+        try self.applyExtensionEvent(session_id, &queued.event);
         try self.events.append(self.allocator, queued);
     }
 
@@ -1747,61 +1747,32 @@ pub const Client = struct {
     fn applyExtensionEvent(
         self: *Client,
         session_id: []const u8,
-        event_value: std.json.Value,
-    ) void {
+        event: *const session_types.SessionEvent,
+    ) !void {
         const runtime = self.findExtensionRuntime(session_id) orelse return;
-        const event = switch (event_value) {
-            .object => |value| value,
-            else => return,
-        };
-        const event_type = switch (event.get("type") orelse return) {
-            .string => |value| value,
-            else => return,
-        };
-        const data = switch (event.get("data") orelse return) {
-            .object => |value| value,
-            else => return,
-        };
-        if (std.mem.eql(u8, event_type, "capabilities.changed")) {
-            const ui = switch (data.get("ui") orelse return) {
-                .object => |value| value,
-                else => return,
-            };
-            if (ui.get("canvases")) |value| {
-                if (value == .bool) runtime.capabilities.canvases =
-                    capabilityState(value.bool);
-            }
-            if (ui.get("mcpApps")) |value| {
-                if (value == .bool) runtime.capabilities.mcp_apps =
-                    capabilityState(value.bool);
-            }
-            return;
-        }
-        if (std.mem.eql(u8, event_type, "session.canvas.closed")) {
-            const instance_id = switch (data.get("instanceId") orelse return) {
-                .string => |value| value,
-                else => return,
-            };
-            removeOpenCanvas(runtime, self.allocator, instance_id);
-            return;
-        }
-        if (std.mem.eql(u8, event_type, "session.canvas.opened")) {
-            const json = std.json.Stringify.valueAlloc(
-                self.allocator,
-                std.json.Value{ .object = data },
-                .{},
-            ) catch return;
-            defer self.allocator.free(json);
-            const parsed = std.json.parseFromSlice(
-                WireOpenCanvas,
-                self.allocator,
-                json,
-                .{ .allocate = .alloc_always, .ignore_unknown_fields = true },
-            ) catch return;
-            defer parsed.deinit();
-            const canvas = cloneWireOpenCanvas(self.allocator, parsed.value) catch return;
-            upsertOpenCanvas(runtime, self.allocator, canvas) catch
-                ext.freeOpenCanvas(self.allocator, canvas);
+        switch (event.*) {
+            .capabilities_changed => |payload| {
+                if (payload.data.ui) |ui| {
+                    if (ui.canvases) |canvases| {
+                        runtime.capabilities.canvases = capabilityState(canvases);
+                    }
+                    if (ui.mcp_apps) |mcp_apps| {
+                        runtime.capabilities.mcp_apps = capabilityState(mcp_apps);
+                    }
+                }
+            },
+            .session_canvas_closed => |payload| {
+                removeOpenCanvas(runtime, self.allocator, payload.data.instance_id);
+            },
+            .session_canvas_opened => |payload| {
+                const canvas = try cloneTypedOpenCanvas(
+                    self.allocator,
+                    payload.data,
+                );
+                errdefer ext.freeOpenCanvas(self.allocator, canvas);
+                try upsertOpenCanvas(runtime, self.allocator, canvas);
+            },
+            else => {},
         }
     }
 
@@ -2088,10 +2059,8 @@ pub const Session = struct {
     pub fn nextEvent(self: Session) !session_types.SessionEvent {
         var event = try self.client.nextEvent(self.id);
         errdefer event.deinit(self.client.allocator);
-        if (event == .unknown and
-            std.mem.eql(u8, event.unknown.event_type, "mcp.oauth_required"))
-        {
-            try self.handleMcpAuthEvent(event.unknown.data_json);
+        if (event == .mcp_oauth_required) {
+            try self.handleMcpAuthEvent(event.mcp_oauth_required.data_json);
         }
         if (event == .external_tool_requested) {
             const request = event.external_tool_requested;
@@ -3019,6 +2988,30 @@ fn cloneWireOpenCanvas(
         .extension_id = value.extensionId,
         .extension_name = value.extensionName,
         .canvas_id = value.canvasId,
+        .icon = value.icon,
+        .title = value.title,
+        .status = value.status,
+        .url = value.url,
+        .input_json = input_json,
+    });
+    if (input_json) |item| allocator.free(item);
+    return result;
+}
+
+fn cloneTypedOpenCanvas(
+    allocator: std.mem.Allocator,
+    value: session_types.SessionEventTypes.CanvasOpenedData,
+) !ext.OpenCanvas {
+    const input_json = if (value.input) |input|
+        try std.json.Stringify.valueAlloc(allocator, input, .{})
+    else
+        null;
+    errdefer if (input_json) |item| allocator.free(item);
+    const result = try cloneOpenCanvas(allocator, .{
+        .instance_id = value.instance_id,
+        .extension_id = value.extension_id,
+        .extension_name = value.extension_name,
+        .canvas_id = value.canvas_id,
         .icon = value.icon,
         .title = value.title,
         .status = value.status,
@@ -4041,7 +4034,7 @@ test "permission handler receives events and can leave requests pending" {
             try std.testing.expectEqualStrings("session-1", invocation.session_id);
             try std.testing.expect(!invocation.managed_settings_enabled);
             try std.testing.expectEqualStrings(
-                "{\"kind\":\"shell\",\"fullCommandText\":\"pwd\"}",
+                "{\"kind\":\"shell\",\"fullCommandText\":\"pwd\",\"intention\":\"show directory\",\"commands\":[],\"possiblePaths\":[],\"possibleUrls\":[],\"hasWriteFileRedirection\":false,\"canOfferSessionApproval\":false}",
                 request.permission_request_json,
             );
             did_call.* = true;
@@ -4056,7 +4049,7 @@ test "permission handler receives events and can leave requests pending" {
     const parsed_event = try std.json.parseFromSlice(
         std.json.Value,
         allocator,
-        \\{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"shell","fullCommandText":"pwd"}}}
+        \\{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"shell","fullCommandText":"pwd","intention":"show directory","commands":[],"possiblePaths":[],"possibleUrls":[],"hasWriteFileRedirection":false,"canOfferSessionApproval":false}}}
     ,
         .{},
     );
@@ -4178,7 +4171,7 @@ test "permission handler failures leave requests available for manual handling" 
     const parsed_event = try std.json.parseFromSlice(
         std.json.Value,
         allocator,
-        \\{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"shell","fullCommandText":"pwd"}}}
+        \\{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"shell","fullCommandText":"pwd","intention":"show directory","commands":[],"possiblePaths":[],"possibleUrls":[],"hasWriteFileRedirection":false,"canOfferSessionApproval":false}}}
     ,
         .{},
     );
@@ -4232,7 +4225,7 @@ test "approveAll leaves managed permission events observable" {
     const managed_session_event = try std.json.parseFromSlice(
         std.json.Value,
         allocator,
-        \\{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"read"}}}
+        \\{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"read","intention":"inspect file","path":"README.md"}}}
     ,
         .{},
     );
@@ -4346,7 +4339,7 @@ fn runAutomaticPermissionRpc(
     const parsed_event = try std.json.parseFromSlice(
         std.json.Value,
         allocator,
-        \\{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"shell","fullCommandText":"pwd"}}}
+        \\{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"shell","fullCommandText":"pwd","intention":"show directory","commands":[],"possiblePaths":[],"possibleUrls":[],"hasWriteFileRedirection":false,"canOfferSessionApproval":false}}}
     ,
         .{},
     );
@@ -4465,7 +4458,7 @@ test "permission response delivery failures are explicit" {
     const parsed_event = try std.json.parseFromSlice(
         std.json.Value,
         allocator,
-        \\{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"shell","fullCommandText":"pwd"}}}
+        \\{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"shell","fullCommandText":"pwd","intention":"show directory","commands":[],"possiblePaths":[],"possibleUrls":[],"hasWriteFileRedirection":false,"canOfferSessionApproval":false}}}
     ,
         .{},
     );
@@ -5974,7 +5967,9 @@ test "capability updates are tri-state and canvas state is defensive" {
         .{},
     );
     defer event.deinit();
-    client.applyExtensionEvent("s1", event.value);
+    var session_event = try session_types.parseEvent(allocator, event.value);
+    defer session_event.deinit(allocator);
+    try client.applyExtensionEvent("s1", &session_event);
     try std.testing.expectEqual(ext.CapabilityState.unsupported, session.capabilities().canvases);
     _ = try session.experimental(.mcp_apps);
 
@@ -5988,6 +5983,29 @@ test "capability updates are tri-state and canvas state is defensive" {
     try std.testing.expectEqualStrings(
         "i1",
         client.findExtensionRuntime("s1").?.open_canvases.items[0].instance_id,
+    );
+
+    const opened = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"session.canvas.opened","data":{"instanceId":"i2","extensionId":"e1","canvasId":"c1"}}
+    ,
+        .{},
+    );
+    defer opened.deinit();
+    var opened_event = try session_types.parseEvent(allocator, opened.value);
+    defer opened_event.deinit(allocator);
+    var empty_buffer: [0]u8 = .{};
+    var failing_allocator = std.heap.FixedBufferAllocator.init(&empty_buffer);
+    client.allocator = failing_allocator.allocator();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        client.applyExtensionEvent("s1", &opened_event),
+    );
+    client.allocator = allocator;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        client.findExtensionRuntime("s1").?.open_canvases.items.len,
     );
 }
 
