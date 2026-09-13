@@ -562,7 +562,12 @@ function verifyHookContract(contract, typesSource) {
   }
 }
 
-function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, extensionSource) {
+function verifyExtensibilitySourceContract(
+  contract,
+  clientSource,
+  typesSource,
+  extensionSource,
+) {
   const clientOptions = sourceSection(
     typesSource,
     "export interface CopilotClientOptions {",
@@ -581,7 +586,6 @@ function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, e
     "    async stop(): Promise<Error[]> {",
     "CopilotClient startup",
   );
-  const contract = expectedExtensibilityContract(upstreamCommit);
   requireSourceFragments(
     clientOptions,
     ["builtinPluginDirectories?: readonly string[]"],
@@ -599,6 +603,11 @@ function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, e
   );
   verifyLifecycleContract(contract, clientSource, typesSource, extensionSource);
   verifyHookContract(contract, typesSource);
+}
+
+function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, extensionSource) {
+  const contract = expectedExtensibilityContract(upstreamCommit);
+  verifyExtensibilitySourceContract(contract, clientSource, typesSource, extensionSource);
   writeFileSync(extensibilityContractPath, `${JSON.stringify(contract, null, 2)}\n`);
 }
 
@@ -1104,6 +1113,12 @@ if (args.includes("--check")) {
     fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/extension.ts")),
   ]);
   verifyCustomAgentSourceContract(nodeClient, nodeTypes, nodeExtension, zigSessionSource);
+  verifyExtensibilitySourceContract(
+    expectedExtensibilityContract(metadata.upstreamCommit),
+    nodeClient,
+    nodeTypes,
+    nodeExtension,
+  );
   verify();
 } else {
   const commitIndex = args.indexOf("--commit");

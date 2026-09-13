@@ -2405,6 +2405,18 @@ pub const Session = struct {
     }
 
     pub fn disconnect(self: Session) !void {
+        var released_oauth_interest = false;
+        if (self.client.findExtensionRuntime(self.id)) |runtime| {
+            released_oauth_interest = runtime.mcp_oauth_interest_handle != null;
+            try self.client.releaseMcpOAuthInterest(runtime);
+        }
+        errdefer if (released_oauth_interest) {
+            if (self.client.findExtensionRuntime(self.id)) |runtime| {
+                if (runtime.mcp_auth_handler != null) {
+                    self.client.registerMcpOAuthInterest(runtime) catch {};
+                }
+            }
+        };
         for (0..2) |_| {
             const parsed = try self.client.call(struct {
                 success: bool,
@@ -2414,9 +2426,6 @@ pub const Session = struct {
             });
             defer parsed.deinit();
             if (parsed.value.success) {
-                if (self.client.findExtensionRuntime(self.id)) |runtime| {
-                    try self.client.releaseMcpOAuthInterest(runtime);
-                }
                 self.client.removeSession(self.id);
                 return;
             }
@@ -6506,6 +6515,118 @@ test "MCP OAuth event interest is retained and released" {
             release_body,
             "\"method\":\"session.eventLog.releaseInterest\"",
         ) != null,
+    );
+}
+
+test "disconnect releases OAuth interest before detaching" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const register_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"handle":"interest-1"}}
+    ;
+    const release_response =
+        \\{"jsonrpc":"2.0","id":2,"result":{"success":true}}
+    ;
+    const detach_response =
+        \\{"jsonrpc":"2.0","id":3,"result":{"success":true}}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            register_response.len,
+            register_response,
+            release_response.len,
+            release_response,
+            detach_response.len,
+            detach_response,
+        },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "responses",
+        .data = responses,
+    });
+    const response_file = try tmp.dir.openFile(
+        std.testing.io,
+        "responses",
+        .{ .mode = .read_only },
+    );
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+    };
+    defer {
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+        for (client.session_ids.items) |id| allocator.free(id);
+        client.session_ids.deinit(allocator);
+    }
+    const handler = struct {
+        fn handle(
+            _: std.mem.Allocator,
+            _: ext.McpAuthRequest,
+            _: ?*anyopaque,
+        ) !ext.McpAuthResult {
+            return .cancelled;
+        }
+    }.handle;
+    try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
+        .extensions = .{ .common = .{ .mcp = .{
+            .on_auth_request = handler,
+        } } },
+    }, &.{});
+    try client.commitExtensionRuntime("s1", .{}, &.{});
+    const session_id = try allocator.dupe(u8, "s1");
+    try client.session_ids.append(allocator, session_id);
+
+    try (Session{ .client = &client, .id = session_id }).disconnect();
+    try std.testing.expect(client.findExtensionRuntime("s1") == null);
+    try std.testing.expect(client.findSessionId("s1") == null);
+
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "requests",
+        allocator,
+        .limited(4096),
+    );
+    defer allocator.free(requests);
+    var frames = std.Io.Reader.fixed(requests);
+    const register_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(register_body);
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            register_body,
+            "\"method\":\"session.eventLog.registerInterest\"",
+        ) != null,
+    );
+    const release_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(release_body);
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            release_body,
+            "\"method\":\"session.eventLog.releaseInterest\"",
+        ) != null,
+    );
+    const detach_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(detach_body);
+    try std.testing.expect(
+        std.mem.indexOf(u8, detach_body, "\"method\":\"session.detach\"") != null,
     );
 }
 
