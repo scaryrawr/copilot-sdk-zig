@@ -61,9 +61,7 @@ pub fn main(init: std.process.Init) !void {
                 try stdout.flush();
                 return error.CopilotSessionError;
             },
-            .permission_requested => {},
-            .external_tool_requested => {},
-            .unknown => {},
+            else => {},
         }
     }
     try stdout.flush();

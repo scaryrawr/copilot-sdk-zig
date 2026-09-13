@@ -98,6 +98,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
             .session_idle => break,
             .session_error => return error.CopilotSessionError,
             .unknown => {},
+            else => {},
         }
     }
 }
@@ -129,6 +130,55 @@ in use. `SessionEvent` values and the message ID from `send` own memory from the
 client allocator. `Session.disconnect` releases the client-side session
 resources while preserving the session state so it can be resumed later.
 
+## Configure extensions
+
+Trusted built-in plugins are installed transactionally after `connect` and
+before `Client.init` returns:
+
+```zig
+var client = try copilot.Client.init(allocator, io, .{
+    .builtin_plugin_directories = &.{"/opt/acme/copilot-plugins"},
+});
+```
+
+Create, resume, and extension-child join use distinct configuration types.
+Their `.extensions.common` bundle supports plugin directories, skill
+directories and disabled/built-in skill names, typed hooks, stdio/HTTP/SSE MCP
+servers, runtime-managed MCP OAuth, canvas declarations, extension identity,
+and the MCP Apps opt-in. Each lifecycle-specific `.extensions` config exposes
+`canvas_provider` as a sibling of `.common`; resume and join also expose restored
+canvas state. Configuration is validated before a lifecycle RPC.
+
+MCP OAuth uses the pinned runtime's real flow: set
+`mcp.on_auth_request`, receive `mcp.oauth_required`, and return an allocated
+token or cancellation. Select `.oauth_token_storage = .persistent` to request
+OS-keychain storage; the default is runtime-owned in-memory storage.
+
+Canvas and MCP Apps methods fail closed until the create/resume response
+advertises their capability. Capability state is `unknown`, `unsupported`, or
+`supported`, and live `capabilities.changed` events update it. Use
+`snapshotOpenCanvases` for an owned, defensive resume snapshot:
+
+```zig
+if (session.capabilities().supports(.canvases)) {
+    var opened = try session.openCanvas(allocator, .{
+        .canvas_id = "review",
+        .instance_id = "review:main",
+    });
+    defer opened.deinit();
+}
+
+const apps = try session.experimental(.mcp_apps);
+var tools = try apps.listTools(allocator, "tickets", "tickets");
+defer tools.deinit();
+```
+
+MCP Apps results are intentionally returned as owned JSON while the pinned
+protocol remains experimental. Extension-management acknowledgement and
+host-owned OAuth token-store callbacks are not present in the pinned contract;
+see `sync/extensibility-contract.json` for the reproducible compatibility
+classification.
+
 Use `SessionConfig.available_tools` and `SessionConfig.excluded_tools` to
 constrain the model-visible tool set for each created or resumed session. Tool
 filters use source-qualified names such as `builtin:ask_user`, `custom:*`, and
@@ -155,6 +205,39 @@ ambient config discovery. Set `.enable_skills = true` to activate skill loading
 from the explicit directories. All three fields are omitted when left as
 `null`.
 
+### Configure custom agents
+
+Define custom agents on create, resume, or join. Select the initial agent with
+`.agent` while keeping the built-in agent policy in `.default_agent`:
+
+```zig
+const session = try client.createSession(.{
+    .tools = &.{ read_tool, search_tool, deploy_tool },
+    .custom_agents = &.{.{
+        .name = "reviewer",
+        .display_name = "Code reviewer",
+        .description = "Reviews changes without deploying them.",
+        .tools = &.{ "read", "search" },
+        .prompt = "Review the change and report concrete defects.",
+        .skills = &.{"code-review"},
+        .model = "claude-sonnet-5",
+        .reasoning_effort = .high,
+    }},
+    .default_agent = .{
+        .excluded_tools = &.{"deploy"},
+    },
+    .agent = .{ .custom_agent = "reviewer" },
+    .excluded_builtin_agents = &.{"explore"},
+});
+defer session.disconnect() catch {};
+```
+
+A null custom-agent `tools` field inherits the session tools. An empty slice
+grants no tools. Null optional slices omit their wire fields, while explicit
+empty slices remain empty arrays or maps. The SDK rejects duplicate custom
+agent names and an initial custom-agent name that is not in `custom_agents`
+before it changes local session state or sends a lifecycle request.
+
 ## List available models
 
 `Client.listModels` calls the authenticated `models.list` RPC. The result
@@ -176,7 +259,7 @@ Pass `selection_id` to use an account returned by the upstream account APIs, or
 
 ## Use a custom provider
 
-Set `SessionConfig.provider` for one custom provider:
+Set `CreateSessionConfig.provider` for a static custom provider:
 
 ```zig
 const session = try client.createSession(.{
@@ -271,7 +354,7 @@ rejects duplicate provider names and duplicate qualified model IDs.
 Named OpenAI and Azure Responses providers select `.http` or `.websockets`
 through their protocol's `responses` value.
 
-Set `SessionConfig.model_capabilities` when a custom model needs capability
+Set `CreateSessionConfig.model_capabilities` when a custom model needs capability
 overrides, for example to enable image input for a local vision model:
 
 ```zig
@@ -287,7 +370,14 @@ const session = try client.createSession(.{
 });
 ```
 
-`Client.joinSession` accepts the same configuration for `session.resume`.
+Use `Client.resumeSession(session_id, config)` to resume an existing host
+session. The former ID-based `joinSession` name was misleading and has been
+replaced. Extensions connected with `Client.initParent` use
+`joinParentSession(session_id, config)`; its `JoinSessionConfig` deliberately
+cannot set `extension_sdk_path`. It returns a `JoinedSession`; its owned
+`grants` exposes only approved requested environment values and must be
+deinitialized. The deprecated `joinSession(session_id, SessionConfig)` wrapper
+remains available for source compatibility and delegates to `resumeSession`.
 `ModelCapabilitiesOverride` is a typed deep-partial override: every nested field
 is optional. Null fields are omitted so the runtime keeps its defaults; explicit
 `false` disables a capability. Overrides do not change the model ID or wire model.
@@ -307,7 +397,7 @@ event variants are deferred.
 
 ## Handle legacy ask_user requests
 
-Set `SessionConfig.on_user_input_request` to enable Copilot's legacy
+Set `CreateSessionConfig.on_user_input_request` to enable Copilot's legacy
 question-and-answer `ask_user` tool. The handler receives the session ID,
 question, optional choices, and optional freeform setting. Its answer must be
 allocated with the provided allocator; the SDK frees it after responding.
@@ -339,7 +429,7 @@ when this handler is configured, then synchronously dispatches inbound
 
 ## Handle permission requests automatically
 
-Set `SessionConfig.on_permission_request` to handle `permission.requested`
+Set `CreateSessionConfig.on_permission_request` to handle `permission.requested`
 events while they are read. Use the prebuilt `copilot.approveAll` handler to
 approve ordinary requests without manually responding from the event loop:
 
@@ -449,6 +539,7 @@ tests verify protocol behavior without requiring Copilot credentials.
 The SDK supports only the stdio transport. Typed high-level methods implement:
 
 - `connect`
+- `plugins.builtin.set`
 - `session.create`
 - `session.resume`
 - `session.send`
@@ -459,6 +550,19 @@ The SDK supports only the stdio transport. Typed high-level methods implement:
 - `session.log`
 - `session.detach`
 - `session.event`
+- `hooks.invoke`
+- `canvas.open`
+- `canvas.close`
+- `canvas.action.invoke`
+- `session.canvas.open`
+- `session.canvas.close`
+- `session.canvas.action.invoke`
+- `session.eventLog.registerInterest`
+- `session.eventLog.releaseInterest`
+- `session.mcp.oauth.handlePendingRequest`
+- `session.mcp.apps.listTools`
+- `session.mcp.apps.callTool`
+- `session.mcp.apps.readResource`
 - `session.permissions.handlePendingPermissionRequest`
 - `session.tools.handlePendingToolCall`
 
@@ -474,7 +578,10 @@ call the same client; re-entry returns `error.ReentrantRpcCall`. A successful
 handler returns JSON allocated with the allocator passed to it.
 The handler receives `null` when the request omitted `params`.
 
-It recognizes these session events:
+It parses every event discriminator in the pinned schema into an explicit
+`SessionEvent` tag with schema-generated public fields. The generated payload
+types are available through `SessionEventTypes`. These events retain focused
+helpers and compatibility fields:
 
 - `assistant.message`
 - `assistant.message_delta`
@@ -485,11 +592,18 @@ It recognizes these session events:
 - `permission.requested`
 - `external_tool.requested`
 
-Other session events use the `unknown` variant. The SDK does not support an
-external CLI server URL. `sync/schema-snapshot.json` records every method by
-direction and scope. `sync/public-rpc-surface.json` separately records direct
-RPC calls made by the pinned upstream Node client and session implementations.
-The sync checks fail if either inventory is stale or unclassified.
+Use `event.rawData()` to read the additional owned canonical `data` JSON for
+every parsed event. The `unknown` variant is only for discriminators that are
+absent from the pinned schema. Keep an `else` branch in a switch that must
+compile after a schema sync adds event tags.
+
+The SDK does not support an external CLI server URL.
+`sync/schema-snapshot.json` records every method by direction and scope.
+`sync/public-rpc-surface.json` separately records direct RPC calls made by the
+pinned upstream Node client and session implementations. The sync checks fail
+if either inventory is stale or unclassified. The checks also regenerate the
+event registry in memory and reject drift in the union, parser, or cleanup
+mapping.
 
 The client stores at most 1,024 queued session events. An RPC call or event read
 returns `error.EventQueueFull` when callers leave other sessions undrained.
