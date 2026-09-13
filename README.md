@@ -247,6 +247,8 @@ A named model's selectable ID is `provider/id`, such as
 Each model must reference one provider in the same configuration. The SDK
 rejects duplicate provider names and duplicate qualified model IDs.
 `provider` cannot be combined with `providers` or `models`.
+Named OpenAI and Azure Responses providers select `.http` or `.websockets`
+through their protocol's `responses` value.
 
 Set `SessionConfig.model_capabilities` when a custom model needs capability
 overrides, for example to enable image input for a local vision model:

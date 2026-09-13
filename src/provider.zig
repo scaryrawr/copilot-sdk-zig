@@ -83,19 +83,24 @@ pub const NamedProviderConfig = struct {
     headers: []const ProviderHeader = &.{},
 
     pub const Protocol = union(enum) {
-        openai: Api,
+        openai: OpenAI,
         azure: Azure,
         anthropic,
     };
 
-    pub const Api = enum {
+    pub const OpenAI = union(enum) {
         completions,
-        responses,
+        responses: Transport,
     };
 
     pub const Azure = struct {
-        api: Api = .completions,
+        api: OpenAI = .completions,
         api_version: ?[]const u8 = null,
+    };
+
+    pub const Transport = enum {
+        http,
+        websockets,
     };
 };
 
@@ -172,6 +177,7 @@ pub const WireNamedProvider = struct {
     name: []const u8,
     type: WireProviderType,
     wireApi: ?WireApi = null,
+    transport: ?WireTransport = null,
     baseUrl: []const u8,
     apiKey: ?[]const u8 = null,
     bearerToken: ?[]const u8 = null,
@@ -343,11 +349,11 @@ fn lowerNamedProvider(config: NamedProviderConfig) !WireNamedProvider {
     switch (config.protocol) {
         .openai => |api| {
             wire.type = .openai;
-            wire.wireApi = @enumFromInt(@intFromEnum(api));
+            lowerNamedOpenAI(api, &wire);
         },
         .azure => |azure| {
             wire.type = .azure;
-            wire.wireApi = @enumFromInt(@intFromEnum(azure.api));
+            lowerNamedOpenAI(azure.api, &wire);
             if (azure.api_version) |api_version| {
                 wire.azure = .{ .apiVersion = api_version };
             }
@@ -368,6 +374,16 @@ fn lowerAuthentication(authentication: ProviderAuthentication) LoweredAuthentica
             .bearer_token = credentials.bearer_token,
         },
     };
+}
+
+fn lowerNamedOpenAI(api: NamedProviderConfig.OpenAI, wire: *WireNamedProvider) void {
+    switch (api) {
+        .completions => wire.wireApi = .completions,
+        .responses => |transport| {
+            wire.wireApi = .responses;
+            wire.transport = @enumFromInt(@intFromEnum(transport));
+        },
+    }
 }
 
 fn lowerOpenAI(api: ProviderConfig.OpenAI, wire: *WireProvider) void {
@@ -510,7 +526,7 @@ test "named providers and models lower to exact wire JSON" {
                 .name = "azure",
                 .base_url = "https://example.openai.azure.com",
                 .protocol = .{ .azure = .{
-                    .api = .responses,
+                    .api = .{ .responses = .websockets },
                     .api_version = "2025-04-01-preview",
                 } },
                 .authentication = .{ .api_key_and_bearer_token = .{
@@ -542,7 +558,7 @@ test "named providers and models lower to exact wire JSON" {
     }, .{ .emit_null_optional_fields = false });
     defer std.testing.allocator.free(encoded);
     try std.testing.expectEqualStrings(
-        "{\"providers\":[{\"name\":\"azure\",\"type\":\"azure\",\"wireApi\":\"responses\",\"baseUrl\":\"https://example.openai.azure.com\",\"apiKey\":\"key\",\"bearerToken\":\"token\",\"azure\":{\"apiVersion\":\"2025-04-01-preview\"},\"headers\":{\"X-Tenant\":\"acme\"}}],\"models\":[{\"id\":\"reasoner\",\"provider\":\"azure\",\"wireModel\":\"deployment\",\"modelId\":\"gpt-4.1\",\"name\":\"Reasoner\",\"maxPromptTokens\":100,\"maxContextWindowTokens\":200,\"maxOutputTokens\":50,\"capabilities\":{\"supports\":{\"reasoningEffort\":true}}}]}",
+        "{\"providers\":[{\"name\":\"azure\",\"type\":\"azure\",\"wireApi\":\"responses\",\"transport\":\"websockets\",\"baseUrl\":\"https://example.openai.azure.com\",\"apiKey\":\"key\",\"bearerToken\":\"token\",\"azure\":{\"apiVersion\":\"2025-04-01-preview\"},\"headers\":{\"X-Tenant\":\"acme\"}}],\"models\":[{\"id\":\"reasoner\",\"provider\":\"azure\",\"wireModel\":\"deployment\",\"modelId\":\"gpt-4.1\",\"name\":\"Reasoner\",\"maxPromptTokens\":100,\"maxContextWindowTokens\":200,\"maxOutputTokens\":50,\"capabilities\":{\"supports\":{\"reasoningEffort\":true}}}]}",
         encoded,
     );
 }
