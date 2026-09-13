@@ -15254,45 +15254,7 @@ fn expectRequestBodies(
     try std.testing.expectEqualStrings("", request_reader.buffered());
 }
 
-test "delete session sends delete as the first request" {
-    const allocator = std.testing.allocator;
-    var frames: std.ArrayList(u8) = .empty;
-    defer frames.deinit(allocator);
-    try appendTestFrame(
-        allocator,
-        &frames,
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"success\":true}}",
-    );
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
-    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
-    defer response_file.close(std.testing.io);
-    var reader_buffer: [2048]u8 = undefined;
-    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
-    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
-    defer request_file.close(std.testing.io);
-    var writer_buffer: [2048]u8 = undefined;
-    var writer = request_file.writer(std.testing.io, &writer_buffer);
-    var client = Client{
-        .allocator = allocator,
-        .io = std.testing.io,
-        .child = null,
-        .reader = &reader,
-        .writer = &writer,
-        .reader_buffer = &.{},
-        .writer_buffer = &.{},
-    };
-    defer deinitTestClientRegistries(&client);
-    try client.deleteSession("delete-session");
-
-    try writer.interface.flush();
-    try expectRequestBodies(allocator, &tmp, &.{
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.delete\",\"params\":{\"sessionId\":\"delete-session\"}}",
-    });
-}
-
-test "delete session with OAuth interest succeeds without a release RPC" {
+test "delete session with OAuth interest sends delete first and succeeds" {
     const allocator = std.testing.allocator;
     var frames: std.ArrayList(u8) = .empty;
     defer frames.deinit(allocator);
