@@ -152,7 +152,11 @@ canvas state. Configuration is validated before a lifecycle RPC.
 MCP OAuth uses the pinned runtime's real flow: set
 `mcp.on_auth_request`, receive `mcp.oauth_required`, and return an allocated
 token or cancellation. Select `.oauth_token_storage = .persistent` to request
-OS-keychain storage; the default is runtime-owned in-memory storage.
+OS-keychain storage; the default is runtime-owned in-memory storage. The SDK
+handles the event on receipt and keeps it queued. Its `automatic_handling`
+field distinguishes handler failure, invalid token output, and response
+delivery failure. Only an explicit `.cancelled` callback result sends the
+protocol cancellation response.
 
 Canvas and MCP Apps methods fail closed until the create/resume response
 advertises their capability. Capability state is `unknown`, `unsupported`, or
@@ -427,6 +431,91 @@ The SDK sends `requestUserInput: true` for session creation and resumption
 when this handler is configured, then synchronously dispatches inbound
 `userInput.request` RPCs to it.
 
+## Commands, elicitation, and session UI
+
+Register slash commands with `commands`. Command handlers run when
+`command.execute` arrives, and the SDK resolves the pending command immediately.
+The event remains queued for `Session.nextEvent`. Its `automatic_handling` field
+reports whether the handler or response delivery failed.
+
+```zig
+const session = try client.createSession(.{
+    .commands = &.{.{
+        .name = "deploy",
+        .description = "Deploy the current project",
+        .handler = deployCommand,
+    }},
+    .tool_search = .{ .enabled = true, .defer_threshold = 20 },
+});
+```
+
+Set `ask_user_variant` to `.legacy` or `.elicitation`. The structured
+elicitation handler receives the requested schema as JSON and must return owned
+`content_json` when it accepts. Handler failures and invalid JSON remain visible
+in the event's `automatic_handling` field. The SDK sends `cancel` only when the
+handler returns `.cancel`.
+
+```zig
+const session = try client.createSession(.{
+    .ask_user_variant = .elicitation,
+    .on_elicitation_request = handleElicitation,
+    .on_exit_plan_mode_request = handleExitPlanMode,
+    .on_auto_mode_switch_request = handleAutoModeSwitch,
+});
+```
+
+When `session.capabilities().supports(.elicitation)` is true, `session.ui()`
+provides `elicitation`, `confirm`, `select`, and `input`. `select` and `input`
+return caller-owned strings that must be freed with the client allocator.
+`input` validates defaults and accepted values against the configured character
+limits and the `email`, `uri`, `date`, or `date-time` format. Email validation
+uses an ASCII dot-atom local part and DNS-style domain labels. Quoted addresses,
+Unicode addresses, local parts over 64 bytes, labels over 63 bytes, domains over
+253 bytes, and complete addresses over 254 bytes are rejected.
+
+## GitHub authentication and remote sessions
+
+Use either `git_hub_token` or `git_hub_token_provider`, never both. A token
+provider receives a typed `.initial` or `.refresh` reason and returns either
+`.cancelled` or an owned token. Token bytes and an optional token type must be
+allocated with the callback allocator; the SDK wipes and frees both after every
+outcome. `expires_in_seconds` must be at least 3601.
+
+Before a server-assigned cloud session ID exists, `gitHubToken.getToken` may
+omit `sessionId` and is routed only by its opaque registration ID. After the
+runtime is bound, both the registration ID and exact session ID are required.
+
+```zig
+const session = try client.createSession(.{
+    .git_hub_token_provider = .{ .callback = acquireGitHubToken },
+    .github_mcp_tool_config = .{
+        .additional_toolsets = &.{"repos"},
+    },
+    .remote_session = .on,
+});
+```
+
+Cloud creation is create-only. Omit `session_id` to use a server-assigned ID:
+
+```zig
+const session = try client.createSession(.{
+    .cloud = .{ .repository = .{
+        .owner = "octo-org",
+        .name = "project",
+        .branch = "main",
+    } },
+});
+```
+
+Set `session_id` to reserve and send an exact caller-assigned cloud ID. The
+create response must return the same ID.
+
+Session creation, resumption, and extension join also support
+`enable_session_telemetry`, `enable_file_change_tracking`,
+`include_subagent_streaming_events`, `feature_flags`, and `exp_assignments`.
+`coauthor_enabled` and `manage_schedule_enabled` are applied through the
+post-lifecycle session options update.
+
 ## Handle permission requests automatically
 
 Set `CreateSessionConfig.on_permission_request` to handle `permission.requested`
@@ -605,8 +694,13 @@ if either inventory is stale or unclassified. The checks also regenerate the
 event registry in memory and reject drift in the union, parser, or cleanup
 mapping.
 
-The client stores at most 1,024 queued session events. An RPC call or event read
-returns `error.EventQueueFull` when callers leave other sessions undrained.
+The client stores at most 1,024 queued events per session. One session cannot
+evict another session's events. If a session exceeds its limit, the client keeps
+the admitted events, rejects new permission and external tool requests through
+their protocol response methods, and continues to run automatic callbacks
+exactly once. After the admitted events drain, `nextEvent` reports the session's
+sticky delivery failure as `error.EventQueueFull`,
+`error.EventQueueAllocationFailed`, or `error.EventQueueRejectionFailed`.
 
 ## Develop
 

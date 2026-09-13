@@ -37,8 +37,262 @@ pub const InitialAgent = union(enum) {
     custom_agent: []const u8,
 };
 
+pub const ToolSearchConfig = struct {
+    enabled: ?bool = null,
+    defer_threshold: ?u64 = null,
+};
+
+pub const CommandContext = struct {
+    session_id: []const u8,
+    command: []const u8,
+    command_name: []const u8,
+    args: []const u8,
+};
+
+pub const CommandHandler = *const fn (
+    request: CommandContext,
+    context: ?*anyopaque,
+) anyerror!void;
+
+pub const CommandDefinition = struct {
+    name: []const u8,
+    description: ?[]const u8 = null,
+    handler: CommandHandler,
+    context: ?*anyopaque = null,
+};
+
+pub const AskUserVariant = enum {
+    legacy,
+    elicitation,
+};
+
+pub const GitHubMcpToolConfig = struct {
+    enable_all_tools: ?bool = null,
+    additional_toolsets: ?[]const []const u8 = null,
+    additional_tools: ?[]const []const u8 = null,
+    enable_insiders_mode: ?bool = null,
+    disable_form_deferral: ?bool = null,
+};
+
+pub const RemoteSessionMode = enum {
+    off,
+    @"export",
+    on,
+};
+
+pub const CloudSessionRepository = struct {
+    owner: []const u8,
+    name: []const u8,
+    branch: ?[]const u8 = null,
+};
+
+pub const CloudSessionOptions = struct {
+    repository: ?CloudSessionRepository = null,
+};
+
+pub const FeatureFlag = struct {
+    name: []const u8,
+    enabled: bool,
+};
+
+pub const ExpFlagValue = union(enum) {
+    string: []const u8,
+    number: f64,
+    boolean: bool,
+    null,
+};
+
+pub const ExpParameter = struct {
+    name: []const u8,
+    value: ExpFlagValue,
+};
+
+pub const ExpFlight = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+pub const ExpConfigEntry = struct {
+    id: []const u8,
+    parameters: []const ExpParameter,
+};
+
+pub const CopilotExpAssignmentResponse = struct {
+    features: []const []const u8,
+    flights: []const ExpFlight,
+    configs: []const ExpConfigEntry,
+    parameter_groups: ?std.json.Value = null,
+    flighting_version: ?f64 = null,
+    impression_id: ?[]const u8 = null,
+    assignment_context: []const u8,
+};
+
+pub const GitHubTokenReason = enum {
+    initial,
+    refresh,
+};
+
+pub const GitHubTokenRequest = struct {
+    host: []const u8,
+    session_id: ?[]const u8,
+    reason: GitHubTokenReason,
+};
+
+pub const GitHubToken = struct {
+    access_token: []u8,
+    token_type: ?[]u8 = null,
+    expires_in_seconds: u64,
+
+    pub fn deinitSecure(self: *GitHubToken, allocator: std.mem.Allocator) void {
+        @memset(self.access_token, 0);
+        allocator.free(self.access_token);
+        if (self.token_type) |value| {
+            @memset(value, 0);
+            allocator.free(value);
+        }
+        self.* = undefined;
+    }
+};
+
+pub const GitHubTokenResult = union(enum) {
+    token: GitHubToken,
+    cancelled,
+};
+
+pub const GitHubTokenCallback = *const fn (
+    allocator: std.mem.Allocator,
+    request: GitHubTokenRequest,
+    context: ?*anyopaque,
+) anyerror!GitHubTokenResult;
+
+pub const GitHubTokenProvider = struct {
+    callback: GitHubTokenCallback,
+    context: ?*anyopaque = null,
+};
+
+pub const GitHubTokenProviderArgs = GitHubTokenRequest;
+pub const GitHubTokenProviderResult = GitHubTokenResult;
+pub const GitHubTokenAcquireReason = GitHubTokenReason;
+pub const GitHubTokenAcquireResult = GitHubTokenResult;
+
+pub const ElicitationAction = enum {
+    accept,
+    decline,
+    cancel,
+};
+
+pub const ElicitationRequest = struct {
+    session_id: []const u8,
+    message: []const u8,
+    requested_schema_json: ?[]const u8 = null,
+    mode: ?SessionEventTypes.ElicitationRequestedMode = null,
+    elicitation_source: ?[]const u8 = null,
+    url: ?[]const u8 = null,
+};
+
+pub const ElicitationResult = struct {
+    action: ElicitationAction,
+    content_json: ?[]u8 = null,
+
+    pub fn deinit(self: *ElicitationResult, allocator: std.mem.Allocator) void {
+        if (self.content_json) |value| {
+            @memset(value, 0);
+            allocator.free(value);
+        }
+        self.* = undefined;
+    }
+};
+
+pub const ElicitationHandler = *const fn (
+    allocator: std.mem.Allocator,
+    request: ElicitationRequest,
+    context: ?*anyopaque,
+) anyerror!ElicitationResult;
+
+pub const ExitPlanModeAction = enum {
+    exit_only,
+    interactive,
+    autopilot,
+    autopilot_fleet,
+};
+
+pub const ExitPlanModeRequest = struct {
+    session_id: []const u8,
+    summary: []const u8,
+    plan_content: ?[]const u8,
+    actions: []const ExitPlanModeAction,
+    recommended_action: ExitPlanModeAction,
+};
+
+pub const ExitPlanModeResult = struct {
+    approved: bool,
+    selected_action: ?ExitPlanModeAction = null,
+    feedback: ?[]const u8 = null,
+};
+
+pub const ExitPlanModeHandler = *const fn (
+    request: ExitPlanModeRequest,
+    context: ?*anyopaque,
+) anyerror!ExitPlanModeResult;
+
+pub const AutoModeSwitchRequest = struct {
+    session_id: []const u8,
+    error_code: ?[]const u8 = null,
+    retry_after_seconds: ?u64 = null,
+};
+
+pub const AutoModeSwitchResponse = enum {
+    yes,
+    yes_always,
+    no,
+};
+
+pub const AutoModeSwitchHandler = *const fn (
+    request: AutoModeSwitchRequest,
+    context: ?*anyopaque,
+) anyerror!AutoModeSwitchResponse;
+
+pub const UiInputFormat = enum {
+    email,
+    uri,
+    date,
+    @"date-time",
+};
+
+pub const UiInputOptions = struct {
+    title: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+    min_length: ?u64 = null,
+    max_length: ?u64 = null,
+    format: ?UiInputFormat = null,
+    default: ?[]const u8 = null,
+};
+
+pub const UiElicitationParams = struct {
+    message: []const u8,
+    requested_schema_json: []const u8,
+};
+
+pub const ElicitationContext = ElicitationRequest;
+pub const ElicitationParams = UiElicitationParams;
+
+pub const UiElicitationResult = struct {
+    allocator: std.mem.Allocator,
+    action: ElicitationAction,
+    content_json: ?[]u8 = null,
+
+    pub fn deinit(self: *UiElicitationResult) void {
+        if (self.content_json) |value| {
+            @memset(value, 0);
+            self.allocator.free(value);
+        }
+        self.* = undefined;
+    }
+};
+
 pub const CreateSessionConfig = struct {
     session_id: ?[]const u8 = null,
+    cloud: ?CloudSessionOptions = null,
     model: ?[]const u8 = null,
     provider: ?provider.ProviderConfig = null,
     providers: []const provider.NamedProviderConfig = &.{},
@@ -46,7 +300,10 @@ pub const CreateSessionConfig = struct {
     model_capabilities: ?ModelCapabilitiesOverride = null,
     working_directory: ?[]const u8 = null,
     streaming: bool = false,
+    include_subagent_streaming_events: bool = true,
     tools: []const Tool = &.{},
+    commands: []const CommandDefinition = &.{},
+    tool_search: ?ToolSearchConfig = null,
     available_tools: ?[]const []const u8 = null,
     excluded_tools: ?[]const []const u8 = null,
     custom_agents: ?[]const CustomAgentConfig = null,
@@ -55,6 +312,10 @@ pub const CreateSessionConfig = struct {
     custom_agents_local_only: ?bool = null,
     excluded_builtin_agents: ?[]const []const u8 = null,
     system_message: ?SystemMessageConfig = null,
+    enable_session_telemetry: ?bool = null,
+    enable_file_change_tracking: ?bool = null,
+    coauthor_enabled: ?bool = null,
+    manage_schedule_enabled: ?bool = null,
     request_permission: bool = false,
     enable_config_discovery: ?bool = null,
     skill_directories: ?[]const []const u8 = null,
@@ -68,6 +329,19 @@ pub const CreateSessionConfig = struct {
     permission_context: ?*anyopaque = null,
     on_user_input_request: ?UserInputHandler = null,
     user_input_context: ?*anyopaque = null,
+    ask_user_variant: ?AskUserVariant = null,
+    on_elicitation_request: ?ElicitationHandler = null,
+    elicitation_context: ?*anyopaque = null,
+    github_mcp_tool_config: ?GitHubMcpToolConfig = null,
+    on_exit_plan_mode_request: ?ExitPlanModeHandler = null,
+    exit_plan_mode_context: ?*anyopaque = null,
+    on_auto_mode_switch_request: ?AutoModeSwitchHandler = null,
+    auto_mode_switch_context: ?*anyopaque = null,
+    git_hub_token: ?[]const u8 = null,
+    git_hub_token_provider: ?GitHubTokenProvider = null,
+    remote_session: ?RemoteSessionMode = null,
+    feature_flags: ?[]const FeatureFlag = null,
+    exp_assignments: ?CopilotExpAssignmentResponse = null,
     extensions: extensibility.CreateExtensions = .{},
 };
 
@@ -79,7 +353,10 @@ pub const ResumeSessionConfig = struct {
     model_capabilities: ?ModelCapabilitiesOverride = null,
     working_directory: ?[]const u8 = null,
     streaming: bool = false,
+    include_subagent_streaming_events: bool = true,
     tools: []const Tool = &.{},
+    commands: []const CommandDefinition = &.{},
+    tool_search: ?ToolSearchConfig = null,
     available_tools: ?[]const []const u8 = null,
     excluded_tools: ?[]const []const u8 = null,
     custom_agents: ?[]const CustomAgentConfig = null,
@@ -88,6 +365,10 @@ pub const ResumeSessionConfig = struct {
     custom_agents_local_only: ?bool = null,
     excluded_builtin_agents: ?[]const []const u8 = null,
     system_message: ?SystemMessageConfig = null,
+    enable_session_telemetry: ?bool = null,
+    enable_file_change_tracking: ?bool = null,
+    coauthor_enabled: ?bool = null,
+    manage_schedule_enabled: ?bool = null,
     request_permission: bool = false,
     enable_config_discovery: ?bool = null,
     skill_directories: ?[]const []const u8 = null,
@@ -101,6 +382,19 @@ pub const ResumeSessionConfig = struct {
     permission_context: ?*anyopaque = null,
     on_user_input_request: ?UserInputHandler = null,
     user_input_context: ?*anyopaque = null,
+    ask_user_variant: ?AskUserVariant = null,
+    on_elicitation_request: ?ElicitationHandler = null,
+    elicitation_context: ?*anyopaque = null,
+    github_mcp_tool_config: ?GitHubMcpToolConfig = null,
+    on_exit_plan_mode_request: ?ExitPlanModeHandler = null,
+    exit_plan_mode_context: ?*anyopaque = null,
+    on_auto_mode_switch_request: ?AutoModeSwitchHandler = null,
+    auto_mode_switch_context: ?*anyopaque = null,
+    git_hub_token: ?[]const u8 = null,
+    git_hub_token_provider: ?GitHubTokenProvider = null,
+    remote_session: ?RemoteSessionMode = null,
+    feature_flags: ?[]const FeatureFlag = null,
+    exp_assignments: ?CopilotExpAssignmentResponse = null,
     suppress_resume_event: bool = false,
     continue_pending_work: bool = false,
     extensions: extensibility.ResumeExtensions = .{},
@@ -114,7 +408,10 @@ pub const JoinSessionConfig = struct {
     model_capabilities: ?ModelCapabilitiesOverride = null,
     working_directory: ?[]const u8 = null,
     streaming: bool = false,
+    include_subagent_streaming_events: bool = true,
     tools: []const Tool = &.{},
+    commands: []const CommandDefinition = &.{},
+    tool_search: ?ToolSearchConfig = null,
     available_tools: ?[]const []const u8 = null,
     excluded_tools: ?[]const []const u8 = null,
     custom_agents: ?[]const CustomAgentConfig = null,
@@ -123,6 +420,10 @@ pub const JoinSessionConfig = struct {
     custom_agents_local_only: ?bool = null,
     excluded_builtin_agents: ?[]const []const u8 = null,
     system_message: ?SystemMessageConfig = null,
+    enable_session_telemetry: ?bool = null,
+    enable_file_change_tracking: ?bool = null,
+    coauthor_enabled: ?bool = null,
+    manage_schedule_enabled: ?bool = null,
     request_permission: bool = false,
     enable_config_discovery: ?bool = null,
     skill_directories: ?[]const []const u8 = null,
@@ -136,10 +437,54 @@ pub const JoinSessionConfig = struct {
     permission_context: ?*anyopaque = null,
     on_user_input_request: ?UserInputHandler = null,
     user_input_context: ?*anyopaque = null,
+    ask_user_variant: ?AskUserVariant = null,
+    on_elicitation_request: ?ElicitationHandler = null,
+    elicitation_context: ?*anyopaque = null,
+    github_mcp_tool_config: ?GitHubMcpToolConfig = null,
+    on_exit_plan_mode_request: ?ExitPlanModeHandler = null,
+    exit_plan_mode_context: ?*anyopaque = null,
+    on_auto_mode_switch_request: ?AutoModeSwitchHandler = null,
+    auto_mode_switch_context: ?*anyopaque = null,
+    git_hub_token: ?[]const u8 = null,
+    git_hub_token_provider: ?GitHubTokenProvider = null,
+    remote_session: ?RemoteSessionMode = null,
+    feature_flags: ?[]const FeatureFlag = null,
+    exp_assignments: ?CopilotExpAssignmentResponse = null,
     suppress_resume_event: bool = true,
     continue_pending_work: bool = false,
     extensions: extensibility.JoinExtensions = .{},
 };
+
+test "stable session configuration applicability matches public lifecycle types" {
+    const shared_fields = [_][]const u8{
+        "commands",
+        "tool_search",
+        "ask_user_variant",
+        "on_elicitation_request",
+        "github_mcp_tool_config",
+        "on_exit_plan_mode_request",
+        "on_auto_mode_switch_request",
+        "git_hub_token",
+        "git_hub_token_provider",
+        "remote_session",
+        "enable_session_telemetry",
+        "enable_file_change_tracking",
+        "coauthor_enabled",
+        "manage_schedule_enabled",
+        "include_subagent_streaming_events",
+        "feature_flags",
+        "exp_assignments",
+    };
+    inline for (shared_fields) |field| {
+        try std.testing.expect(@hasField(CreateSessionConfig, field));
+        try std.testing.expect(@hasField(ResumeSessionConfig, field));
+        try std.testing.expect(@hasField(JoinSessionConfig, field));
+    }
+    try std.testing.expect(@hasField(CreateSessionConfig, "cloud"));
+    try std.testing.expect(!@hasField(ResumeSessionConfig, "cloud"));
+    try std.testing.expect(!@hasField(JoinSessionConfig, "cloud"));
+    try std.testing.expect(!@hasField(JoinSessionConfig, "session_id"));
+}
 
 /// Compatibility alias for callers constructing create-session options.
 /// Use `CreateSessionConfig` in new code.
@@ -475,6 +820,7 @@ pub const SessionIdle = session_events.SessionIdle;
 /// Result of automatic permission handling before `Session.nextEvent` returns
 /// the permission event.
 pub const AutomaticPermissionHandling = event_payloads.AutomaticPermissionHandling;
+pub const AutomaticInteractionHandling = event_payloads.AutomaticInteractionHandling;
 pub const PermissionRequested = session_events.PermissionRequested;
 
 pub const PermissionDecision = union(enum) {
