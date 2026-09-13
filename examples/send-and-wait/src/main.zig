@@ -12,7 +12,12 @@ pub fn main(init: std.process.Init) !void {
     const session = try client.createSession(.{
         .model = "gpt-5.6-luna",
     });
-    defer session.disconnect() catch {};
+    var session_connected = true;
+    defer if (session_connected) {
+        session.disconnect() catch |err| {
+            std.log.err("failed to disconnect Copilot session: {s}", .{@errorName(err)});
+        };
+    };
 
     const response = try session.sendAndWaitWithOptions(
         .{ .prompt = "Explain Zig error unions in one sentence." },
@@ -24,6 +29,9 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     try stdout_writer.interface.print("{s}\n", .{response.content});
     try stdout_writer.interface.flush();
+    try session.disconnect();
+    session_connected = false;
+    try client.shutdown();
 }
 
 fn printHelp(io: std.Io) !void {

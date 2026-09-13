@@ -79,7 +79,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
     defer client.deinit();
 
     const session = try client.createSession(.{ .streaming = true });
-    defer session.disconnect() catch {};
+    var session_connected = true;
+    defer if (session_connected) {
+        session.disconnect() catch |err| {
+            std.log.err("failed to disconnect Copilot session: {s}", .{@errorName(err)});
+        };
+    };
 
     const message_id = try session.send(.{ .prompt = "Explain this repository." });
     defer allocator.free(message_id);
@@ -101,8 +106,17 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
             else => {},
         }
     }
+
+    try session.disconnect();
+    session_connected = false;
+    try client.shutdown();
 }
 ```
+
+Call `Client.shutdown` before `Client.deinit` to observe lifecycle cleanup
+failures. A failed shutdown retains pending detach and OAuth cleanup state, so
+you can call `shutdown` again. `deinit` performs a best-effort shutdown when
+the caller has not completed one, then releases local memory.
 
 Attach files or other typed context to a message:
 
@@ -189,6 +203,9 @@ private retained-event limit, then resumes at the oldest retained event.
 in use. `SessionEvent` values and the message ID from `send` own memory from the
 client allocator. `Session.disconnect` releases the client-side session
 resources while preserving the session state so it can be resumed later.
+If create, resume, or OAuth registration reports a cleanup failure,
+`Client.retryPendingCleanup` retries the retained remote session ID or interest
+handle. `Client.deinit` also attempts this cleanup before shutting down.
 
 ## Configure extensions
 
@@ -289,7 +306,9 @@ const session = try client.createSession(.{
     .agent = .{ .custom_agent = "reviewer" },
     .excluded_builtin_agents = &.{"explore"},
 });
-defer session.disconnect() catch {};
+defer session.disconnect() catch |err| {
+    std.log.err("failed to disconnect Copilot session: {s}", .{@errorName(err)});
+};
 ```
 
 A null custom-agent `tools` field inherits the session tools. An empty slice

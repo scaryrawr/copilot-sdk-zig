@@ -477,6 +477,12 @@ test "conflicting raw turn correlation releases its receipt" {
     defer conflicting.deinit(std.testing.allocator);
     try tracker.observe(conflicting);
 
-    _ = try tracker.reserve(.raw);
-    _ = try tracker.reserve(.raw);
+    const first_reused = try tracker.reserve(.raw);
+    const second_reused = try tracker.reserve(.raw);
+    try std.testing.expectError(
+        error.TooManyOutstandingTurns,
+        tracker.reserve(.raw),
+    );
+    tracker.abandon(first_reused);
+    tracker.abandon(second_reused);
 }

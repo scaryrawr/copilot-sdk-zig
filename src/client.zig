@@ -13,6 +13,7 @@ const event_subscriber_limit: usize = 16;
 const retained_log_limit: usize = 128;
 const event_ingress_limit: usize = 256;
 const detached_send_limit: usize = 64;
+const pending_remote_cleanup_limit: usize = 64;
 
 fn wipeSecret(value: []const u8) void {
     @memset(@constCast(value), 0);
@@ -129,7 +130,7 @@ const SendOperation = struct {
     owner: SendOperationOwner = .waiter,
     completed: std.Io.Event = .unset,
     failure: ?anyerror = null,
-    future: ?std.Io.Future(anyerror!void) = null,
+    future: ?std.Io.Future(void) = null,
 };
 
 const SessionRemoval = struct {
@@ -138,7 +139,7 @@ const SessionRemoval = struct {
     log_lease: EventLogLease,
     owner: SendOperationOwner = .waiter,
     completed: std.Io.Event = .unset,
-    future: ?std.Io.Future(anyerror!void) = null,
+    future: ?std.Io.Future(void) = null,
 };
 
 const RegisteredTool = struct {
@@ -198,7 +199,96 @@ const RuntimeTool = struct {
     context: ?*anyopaque,
 };
 
+const McpOAuthInterestRegistration = struct {
+    handle: []const u8,
+};
+
+const RetainedMcpOAuthInterest = struct {
+    response: std.json.Parsed(McpOAuthInterestRegistration),
+    failure: anyerror,
+
+    fn deinit(self: *RetainedMcpOAuthInterest) void {
+        self.response.deinit();
+        self.* = undefined;
+    }
+};
+
+const McpOAuthRegistrationResult = union(enum) {
+    owned: []u8,
+    retained: RetainedMcpOAuthInterest,
+};
+
+const McpOAuthInterest = union(enum) {
+    owned: []u8,
+    retained: RetainedMcpOAuthInterest,
+
+    fn handle(self: *const McpOAuthInterest) []const u8 {
+        return switch (self.*) {
+            .owned => |value| value,
+            .retained => |value| value.response.value.handle,
+        };
+    }
+
+    fn deinit(self: *McpOAuthInterest, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .owned => |value| allocator.free(value),
+            .retained => |*value| value.deinit(),
+        }
+        self.* = undefined;
+    }
+};
+
+const RemoteSessionId = union(enum) {
+    owned: []u8,
+    lifecycle_result: std.json.Parsed(std.json.Value),
+
+    fn value(self: *const RemoteSessionId) []const u8 {
+        return switch (self.*) {
+            .owned => |session_id| session_id,
+            .lifecycle_result => |response| rawLifecycleSessionId(response.value) orelse
+                @panic("retained lifecycle result has no session id"),
+        };
+    }
+
+    fn deinit(self: *RemoteSessionId, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .owned => |session_id| allocator.free(session_id),
+            .lifecycle_result => |*response| {
+                wipeJsonStrings(response.value);
+                response.deinit();
+            },
+        }
+        self.* = undefined;
+    }
+};
+
+const PendingRemoteCleanup = struct {
+    remote_session_id: RemoteSessionId,
+    local_session_id: ?[]u8 = null,
+    oauth_interest: ?McpOAuthInterest = null,
+    detach_required: bool = false,
+    detach_requires_inactive_session: bool = false,
+    release_pending_lifecycle_interest: bool = false,
+    discard_pending_lifecycle: bool = false,
+    remove_local_session: bool = false,
+    active: bool = false,
+    shutdown_attempted: bool = false,
+
+    fn deinit(self: *PendingRemoteCleanup, allocator: std.mem.Allocator) void {
+        self.remote_session_id.deinit(allocator);
+        if (self.local_session_id) |value| allocator.free(value);
+        if (self.oauth_interest) |*interest| interest.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+const LifecycleSessionAdmission = struct {
+    session_id: []u8,
+    added: bool,
+};
+
 const SessionExtensionRuntime = struct {
+    runtime_id: u64 = 0,
     session_id: ?[]u8 = null,
     generation: u64 = 0,
     accepting_callbacks: bool = true,
@@ -216,7 +306,7 @@ const SessionExtensionRuntime = struct {
     user_input_handler: ?session_types.UserInputHandler,
     user_input_context: ?*anyopaque,
     granted_environment_variables: std.ArrayList(ext.EnvironmentGrant) = .empty,
-    mcp_oauth_interest_handle: ?[]u8 = null,
+    mcp_oauth_interest: ?McpOAuthInterest = null,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -313,7 +403,7 @@ const SessionExtensionRuntime = struct {
             allocator.free(grant.value);
         }
         self.granted_environment_variables.deinit(allocator);
-        if (self.mcp_oauth_interest_handle) |handle| allocator.free(handle);
+        if (self.mcp_oauth_interest) |*interest| interest.deinit(allocator);
     }
 };
 
@@ -499,32 +589,47 @@ pub const Client = struct {
     event_logs_mutex: std.Io.Mutex = .init,
     registry_mutex: std.Io.Mutex = .init,
     registry_teardown_mutex: std.Io.Mutex = .init,
+    registry_transition_done: std.Io.Event = .is_set,
+    registry_transition_active: bool = false,
     accepting_callbacks: bool = true,
     active_callbacks: usize = 0,
     callbacks_drained: std.Io.Event = .is_set,
     event_queue_mutex: std.Io.Mutex = .init,
     event_queue_ready: std.Io.Event = .unset,
     event_queue: std.ArrayList(QueuedSessionEvent) = .empty,
-    event_processor_future: ?std.Io.Future(anyerror!void) = null,
+    event_processor_future: ?std.Io.Future(void) = null,
     event_processor_closing: bool = false,
     send_operations_mutex: std.Io.Mutex = .init,
     send_operations: std.ArrayList(*SendOperation) = .empty,
     send_reaper_ready: std.Io.Event = .unset,
-    send_reaper_future: ?std.Io.Future(anyerror!void) = null,
+    send_reaper_future: ?std.Io.Future(void) = null,
     send_reaper_closing: bool = false,
     session_removals_mutex: std.Io.Mutex = .init,
     session_removals: std.ArrayList(*SessionRemoval) = .empty,
     session_removal_reaper_ready: std.Io.Event = .unset,
-    session_removal_reaper_future: ?std.Io.Future(anyerror!void) = null,
+    session_removal_reaper_future: ?std.Io.Future(void) = null,
     session_removal_reaper_closing: bool = false,
-    pump_future: ?std.Io.Future(anyerror!void) = null,
+    pump_future: ?std.Io.Future(void) = null,
     pump_failure: ?anyerror = null,
     ignore_eof: bool = false,
+    synchronize_test_responses: bool = true,
+    fail_mcp_oauth_handle_copy: bool = false,
     tools: std.ArrayList(RegisteredTool) = .empty,
     user_input_handlers: std.ArrayList(RegisteredUserInputHandler) = .empty,
     permission_handlers: std.ArrayList(RegisteredPermissionHandler) = .empty,
     extension_runtimes: std.ArrayList(SessionExtensionRuntime) = .empty,
     pending_extension_runtime: ?SessionExtensionRuntime = null,
+    next_extension_runtime_id: u64 = 1,
+    remote_cleanup_mutex: std.Io.Mutex = .init,
+    remote_cleanup_changed: std.Io.Event = .unset,
+    remote_cleanup_closing: bool = false,
+    lifecycle_admission_closed: std.Io.Event = .unset,
+    active_lifecycle_operations: usize = 0,
+    active_rpc_operations: usize = 0,
+    active_event_operations: usize = 0,
+    shutdown_prepared: bool = false,
+    shutdown_complete: bool = false,
+    pending_remote_cleanups: std.ArrayList(*PendingRemoteCleanup) = .empty,
     provider_tokens: std.ArrayList(RegisteredProviderTokens) = .empty,
     pending_provider_tokens: ?RegisteredProviderTokens = null,
     rpc_handlers: std.ArrayList(RegisteredRpcHandler) = .empty,
@@ -617,27 +722,7 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
-        self.event_logs_mutex.lockUncancelable(self.io);
-        for (self.event_logs.items) |log| log.beginClose();
-        self.event_logs_mutex.unlock(self.io);
-        self.stopEventProcessor();
-        self.stopSessionRemovalReaper();
-        self.finishSessionRemovals();
-        self.registry_mutex.lockUncancelable(self.io);
-        self.accepting_callbacks = false;
-        self.registry_mutex.unlock(self.io);
-        self.waitCallbacksDrained();
-        if (self.pending_extension_runtime) |*runtime| {
-            self.releaseMcpOAuthInterest(runtime) catch {};
-        }
-        for (self.extension_runtimes.items) |*runtime| {
-            self.releaseMcpOAuthInterest(runtime) catch {};
-        }
-        if (self.pump_future) |*pump| {
-            _ = pump.cancel(self.io) catch {};
-        }
-        self.stopSendReaper();
-        self.finishSendOperations();
+        self.shutdown() catch |err| self.shutdownBestEffort(err);
         for (self.pending_calls.items) |pending| {
             if (pending.response) |response| {
                 wipeSecret(response);
@@ -669,6 +754,11 @@ pub const Client = struct {
         self.provider_tokens.deinit(self.allocator);
         for (self.rpc_handlers.items) |handler| handler.deinit(self.allocator);
         self.rpc_handlers.deinit(self.allocator);
+        for (self.pending_remote_cleanups.items) |cleanup| {
+            cleanup.deinit(self.allocator);
+            self.allocator.destroy(cleanup);
+        }
+        self.pending_remote_cleanups.deinit(self.allocator);
         for (self.session_ids.items) |id| self.allocator.free(id);
         self.session_ids.deinit(self.allocator);
         if (self.child) |*child| child.kill(self.io);
@@ -678,6 +768,105 @@ pub const Client = struct {
         self.allocator.free(self.reader_buffer);
         self.allocator.free(self.writer_buffer);
         self.* = undefined;
+    }
+
+    /// Stops client work and reports lifecycle cleanup failures. A failed call
+    /// retains pending cleanup state so the caller may call `shutdown` again.
+    /// Call `deinit` afterward to release local memory.
+    pub fn shutdown(self: *Client) !void {
+        if (self.shutdown_complete) return;
+        try self.prepareShutdown();
+        try self.retryPendingCleanupForShutdown();
+        if (self.releaseAllMcpOAuthInterests()) |err| return err;
+        try self.retryPendingCleanupForShutdown();
+        if (self.releaseAllMcpOAuthInterests()) |err| return err;
+        self.completeShutdownTransport();
+    }
+
+    fn prepareShutdown(self: *Client) !void {
+        if (self.shutdown_prepared) return;
+        const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
+            .raw = std.Io.Duration.fromMilliseconds(5000),
+            .clock = .awake,
+        });
+        self.remote_cleanup_mutex.lockUncancelable(self.io);
+        self.remote_cleanup_closing = true;
+        self.remote_cleanup_mutex.unlock(self.io);
+        self.lifecycle_admission_closed.set(self.io);
+        if (!try self.waitForRemoteCleanupOwners(deadline, false))
+            return error.Timeout;
+        self.event_logs_mutex.lockUncancelable(self.io);
+        for (self.event_logs.items) |log| log.beginClose();
+        self.event_logs_mutex.unlock(self.io);
+        self.stopEventProcessor();
+        self.event_logs_mutex.lockUncancelable(self.io);
+        for (self.event_logs.items) |log| {
+            log.waitIngressDrainedUncancelable();
+            log.close();
+        }
+        self.event_logs_mutex.unlock(self.io);
+        if (!try self.waitForRemoteCleanupOwners(deadline, true))
+            return error.Timeout;
+        self.stopSessionRemovalReaper();
+        self.finishSessionRemovals();
+        self.registry_mutex.lockUncancelable(self.io);
+        self.accepting_callbacks = false;
+        self.registry_mutex.unlock(self.io);
+        self.waitCallbacksDrained();
+        self.shutdown_prepared = true;
+    }
+
+    fn releaseAllMcpOAuthInterests(self: *Client) ?anyerror {
+        var first_error: ?anyerror = null;
+        if (self.pending_extension_runtime) |*runtime| {
+            self.releaseMcpOAuthInterest(runtime) catch |err| {
+                first_error = err;
+            };
+        }
+        for (self.extension_runtimes.items) |*runtime| {
+            self.releaseMcpOAuthInterest(runtime) catch |err| {
+                if (first_error == null) first_error = err;
+            };
+        }
+        return first_error;
+    }
+
+    fn completeShutdownTransport(self: *Client) void {
+        if (self.shutdown_complete) return;
+        if (self.pump_future) |*pump| {
+            pump.cancel(self.io);
+            self.pump_future = null;
+        }
+        self.stopSendReaper();
+        self.finishSendOperations();
+        self.shutdown_complete = true;
+    }
+
+    fn shutdownBestEffort(self: *Client, cause: anyerror) void {
+        self.finishPump(cause);
+        if (!self.shutdown_prepared) {
+            self.remote_cleanup_mutex.lockUncancelable(self.io);
+            self.remote_cleanup_closing = true;
+            self.remote_cleanup_mutex.unlock(self.io);
+            self.lifecycle_admission_closed.set(self.io);
+            const drained = self.waitForRemoteCleanupOwners(null, true) catch |err| drained: {
+                self.finishPump(err);
+                break :drained false;
+            };
+            std.debug.assert(drained);
+            self.event_logs_mutex.lockUncancelable(self.io);
+            for (self.event_logs.items) |log| log.beginClose();
+            self.event_logs_mutex.unlock(self.io);
+            self.stopEventProcessor();
+            self.stopSessionRemovalReaper();
+            self.finishSessionRemovals();
+            self.registry_mutex.lockUncancelable(self.io);
+            self.accepting_callbacks = false;
+            self.registry_mutex.unlock(self.io);
+            self.waitCallbacksDrained();
+            self.shutdown_prepared = true;
+        }
+        self.completeShutdownTransport();
     }
 
     fn wipeTransportBuffers(self: *Client) void {
@@ -723,6 +912,8 @@ pub const Client = struct {
         self: *Client,
         config: session_types.CreateSessionConfig,
     ) !Session {
+        try self.beginLifecycleOperation();
+        defer self.endLifecycleOperation();
         try validateCustomAgents(config.custom_agents, config.agent);
         try ext.validate(config.extensions.common);
         try validateCustomAgentMcpServers(config.custom_agents);
@@ -740,15 +931,9 @@ pub const Client = struct {
             try self.allocator.dupe(u8, requested)
         else
             try generateSessionId(self.allocator, self.io);
-        if (self.hasSession(owned_session_id)) {
-            self.allocator.free(owned_session_id);
-            return error.SessionAlreadyActive;
-        }
-        self.session_ids.append(self.allocator, owned_session_id) catch |err| {
-            self.allocator.free(owned_session_id);
-            return err;
-        };
-        errdefer self.removeSession(owned_session_id);
+        try self.admitOwnedSessionIdForLifecycle(owned_session_id);
+        var rollback_local_on_error = true;
+        errdefer if (rollback_local_on_error) self.removeSession(owned_session_id);
         const session_log = try self.ensureEventLog(owned_session_id);
 
         var extension_values = ExtensionWireValues.init(self.allocator);
@@ -764,9 +949,9 @@ pub const Client = struct {
         try appendWireTools(self.allocator, config.tools, &parsed_parameters, &tools);
         try extension_values.lower(config.extensions.common);
         try self.beginProviderTokens(owned_session_id, prepared_providers.token_bindings);
-        errdefer self.rollbackProviderTokens();
+        errdefer if (rollback_local_on_error) self.rollbackProviderTokens();
         try self.beginExtensionRuntime(owned_session_id, config, &.{});
-        errdefer self.rollbackExtensionRuntime();
+        errdefer if (rollback_local_on_error) self.rollbackExtensionRuntimeAfterFailure();
 
         const request = try buildPreparedCreateSessionRequest(
             owned_session_id,
@@ -775,26 +960,75 @@ pub const Client = struct {
             &extension_values,
             prepared_providers,
         );
-        const parsed = try self.call(
-            WireSessionLifecycleResponse,
+        const remote_cleanup = try self.prepareLifecycleRemoteCleanup(owned_session_id, true);
+        var discard_remote_cleanup = true;
+        defer if (discard_remote_cleanup) self.discardRemoteCleanup(remote_cleanup);
+        var raw_response = try self.call(
+            std.json.Value,
             "session.create",
             request,
         );
+        var raw_response_owned = true;
+        defer if (raw_response_owned) {
+            wipeJsonStrings(raw_response.value);
+            raw_response.deinit();
+        };
+        remote_cleanup.detach_required = true;
+        remote_cleanup.discard_pending_lifecycle = true;
+        remote_cleanup.remove_local_session = true;
+        if (rawLifecycleSessionId(raw_response.value)) |remote_session_id| {
+            if (!std.mem.eql(u8, owned_session_id, remote_session_id)) {
+                self.retainRawLifecycleSessionId(remote_cleanup, raw_response, true);
+                raw_response_owned = false;
+            }
+        }
+        var parsed = self.parseLifecycleResult(raw_response.value) catch |parse_err| {
+            rollback_local_on_error = false;
+            discard_remote_cleanup = false;
+            self.rollbackAttachedLifecycle(
+                remote_cleanup,
+                owned_session_id,
+                true,
+            ) catch |cleanup_err| return cleanup_err;
+            return parse_err;
+        };
         defer {
             wipeLifecycleResponseSecrets(parsed.value);
             parsed.deinit();
         }
-        const returned_id = parsed.value.sessionId orelse return error.MissingSessionId;
+        const returned_id = parsed.value.sessionId orelse {
+            rollback_local_on_error = false;
+            discard_remote_cleanup = false;
+            try self.rollbackAttachedLifecycle(
+                remote_cleanup,
+                owned_session_id,
+                true,
+            );
+            return error.MissingSessionId;
+        };
         if (!std.mem.eql(u8, owned_session_id, returned_id)) {
-            if (!self.hasSession(returned_id)) {
-                self.detachSessionBestEffort(returned_id);
-            }
+            rollback_local_on_error = false;
+            discard_remote_cleanup = false;
+            try self.rollbackAttachedLifecycle(
+                remote_cleanup,
+                owned_session_id,
+                true,
+            );
             return error.SessionIdMismatch;
         }
-        errdefer self.detachSessionBestEffort(returned_id);
-
-        try self.commitExtensionRuntime(returned_id, parsed.value, &.{});
+        rollback_local_on_error = false;
+        self.commitExtensionRuntime(returned_id, parsed.value, &.{}) catch |processing_err| {
+            discard_remote_cleanup = false;
+            self.rollbackAttachedLifecycle(
+                remote_cleanup,
+                owned_session_id,
+                true,
+            ) catch |cleanup_err| return cleanup_err;
+            return processing_err;
+        };
         self.commitProviderTokens();
+        self.discardRemoteCleanup(remote_cleanup);
+        discard_remote_cleanup = false;
         return .{
             .client = self,
             .id = owned_session_id,
@@ -825,6 +1059,8 @@ pub const Client = struct {
         config: session_types.ResumeSessionConfig,
         requested_environment_variables: []const []const u8,
     ) !Session {
+        try self.beginLifecycleOperation();
+        defer self.endLifecycleOperation();
         try validateCustomAgents(config.custom_agents, config.agent);
         try ext.validate(config.extensions.common);
         try validateCustomAgentMcpServers(config.custom_agents);
@@ -838,16 +1074,15 @@ pub const Client = struct {
         );
         defer prepared_providers.deinit(self.allocator);
 
-        const existing_session_id = self.findSessionId(session_id);
-        const runtime_session_id = existing_session_id orelse id: {
-            const copy = try self.allocator.dupe(u8, session_id);
-            self.session_ids.append(self.allocator, copy) catch |err| {
-                self.allocator.free(copy);
-                return err;
-            };
-            break :id copy;
-        };
-        errdefer if (existing_session_id == null) self.removeSession(runtime_session_id);
+        const lifecycle_session = try self.admitLifecycleSession(session_id);
+        const existing_session_id = if (lifecycle_session.added)
+            null
+        else
+            lifecycle_session.session_id;
+        const runtime_session_id = lifecycle_session.session_id;
+        var rollback_local_on_error = true;
+        errdefer if (rollback_local_on_error and existing_session_id == null)
+            self.removeSession(runtime_session_id);
         const session_log = try self.ensureEventLog(runtime_session_id);
 
         var extension_values = ExtensionWireValues.init(self.allocator);
@@ -864,13 +1099,13 @@ pub const Client = struct {
         try extension_values.lower(config.extensions.common);
 
         try self.beginProviderTokens(runtime_session_id, prepared_providers.token_bindings);
-        errdefer self.rollbackProviderTokens();
+        errdefer if (rollback_local_on_error) self.rollbackProviderTokens();
         try self.beginExtensionRuntime(
             runtime_session_id,
             config,
             config.extensions.open_canvases orelse &.{},
         );
-        errdefer self.rollbackExtensionRuntime();
+        errdefer if (rollback_local_on_error) self.rollbackExtensionRuntimeAfterFailure();
 
         const request = try buildPreparedResumeSessionRequest(
             runtime_session_id,
@@ -880,26 +1115,92 @@ pub const Client = struct {
             requested_environment_variables,
             prepared_providers,
         );
-        const parsed = try self.call(WireSessionLifecycleResponse, "session.resume", request);
+        const remote_cleanup = try self.prepareLifecycleRemoteCleanup(runtime_session_id, true);
+        var discard_remote_cleanup = true;
+        defer if (discard_remote_cleanup) self.discardRemoteCleanup(remote_cleanup);
+        var raw_response = try self.call(std.json.Value, "session.resume", request);
+        var raw_response_owned = true;
+        defer if (raw_response_owned) {
+            wipeJsonStrings(raw_response.value);
+            raw_response.deinit();
+        };
+        remote_cleanup.detach_required = existing_session_id == null;
+        remote_cleanup.discard_pending_lifecycle = true;
+        remote_cleanup.remove_local_session = existing_session_id == null;
+        if (rawLifecycleSessionId(raw_response.value)) |remote_session_id| {
+            if (!std.mem.eql(u8, runtime_session_id, remote_session_id)) {
+                self.retainRawLifecycleSessionId(remote_cleanup, raw_response, true);
+                raw_response_owned = false;
+                remote_cleanup.detach_required = true;
+            }
+        }
+        var parsed = self.parseLifecycleResult(raw_response.value) catch |parse_err| {
+            rollback_local_on_error = false;
+            discard_remote_cleanup = false;
+            self.rollbackAttachedLifecycle(
+                remote_cleanup,
+                runtime_session_id,
+                existing_session_id == null,
+            ) catch |cleanup_err| return cleanup_err;
+            return parse_err;
+        };
         defer {
             wipeLifecycleResponseSecrets(parsed.value);
             parsed.deinit();
         }
-        const returned_id = parsed.value.sessionId orelse return error.MissingSessionId;
+        const returned_id = parsed.value.sessionId orelse {
+            rollback_local_on_error = false;
+            discard_remote_cleanup = false;
+            try self.rollbackAttachedLifecycle(
+                remote_cleanup,
+                runtime_session_id,
+                existing_session_id == null,
+            );
+            return error.MissingSessionId;
+        };
         if (!std.mem.eql(u8, runtime_session_id, returned_id)) {
-            if (!self.hasSession(returned_id)) {
-                self.detachSessionBestEffort(returned_id);
-            }
+            rollback_local_on_error = false;
+            discard_remote_cleanup = false;
+            try self.rollbackAttachedLifecycle(
+                remote_cleanup,
+                runtime_session_id,
+                existing_session_id == null,
+            );
             return error.SessionIdMismatch;
         }
-        errdefer if (existing_session_id == null) self.detachSessionBestEffort(returned_id);
-
-        try self.commitExtensionRuntime(
+        if (existing_session_id != null) {
+            try self.commitExtensionRuntime(
+                runtime_session_id,
+                parsed.value,
+                requested_environment_variables,
+            );
+            self.commitProviderTokens();
+            rollback_local_on_error = false;
+            self.discardRemoteCleanup(remote_cleanup);
+            discard_remote_cleanup = false;
+            return .{
+                .client = self,
+                .id = runtime_session_id,
+                .generation = session_log.generation,
+            };
+        }
+        rollback_local_on_error = false;
+        self.commitExtensionRuntime(
             runtime_session_id,
             parsed.value,
             requested_environment_variables,
-        );
+        ) catch |processing_err| {
+            discard_remote_cleanup = false;
+            self.rollbackAttachedLifecycle(
+                remote_cleanup,
+                runtime_session_id,
+                true,
+            ) catch |cleanup_err| return cleanup_err;
+            return processing_err;
+        };
         self.commitProviderTokens();
+        self.discardRemoteCleanup(remote_cleanup);
+        discard_remote_cleanup = false;
         return .{
             .client = self,
             .id = runtime_session_id,
@@ -907,14 +1208,321 @@ pub const Client = struct {
         };
     }
 
-    fn detachSessionBestEffort(self: *Client, session_id: []const u8) void {
-        const parsed = self.call(struct {
-            success: bool,
-            @"error": ?[]const u8 = null,
-        }, "session.detach", .{
-            .sessionId = session_id,
-        }) catch return;
-        parsed.deinit();
+    fn rollbackAttachedLifecycle(
+        self: *Client,
+        cleanup: *PendingRemoteCleanup,
+        local_session_id: []const u8,
+        remove_local_session: bool,
+    ) !void {
+        cleanup.release_pending_lifecycle_interest = true;
+        self.releasePendingExtensionRuntimeInterest() catch |err| {
+            self.makeRemoteCleanupRetryable(cleanup);
+            return err;
+        };
+        cleanup.release_pending_lifecycle_interest = false;
+        self.performRemoteCleanup(cleanup) catch |err| {
+            self.makeRemoteCleanupRetryable(cleanup);
+            return err;
+        };
+        self.discardPendingExtensionRuntime();
+        self.rollbackProviderTokens();
+        if (remove_local_session) self.removeSession(local_session_id);
+        self.discardRemoteCleanup(cleanup);
+    }
+
+    fn prepareRemoteCleanup(
+        self: *Client,
+        session_id: []const u8,
+        retain_local_session_id: bool,
+    ) !*PendingRemoteCleanup {
+        return self.prepareRemoteCleanupOwned(
+            session_id,
+            retain_local_session_id,
+            false,
+        );
+    }
+
+    fn prepareLifecycleRemoteCleanup(
+        self: *Client,
+        session_id: []const u8,
+        retain_local_session_id: bool,
+    ) !*PendingRemoteCleanup {
+        return self.prepareRemoteCleanupOwned(
+            session_id,
+            retain_local_session_id,
+            true,
+        );
+    }
+
+    fn prepareRemoteCleanupOwned(
+        self: *Client,
+        session_id: []const u8,
+        retain_local_session_id: bool,
+        lifecycle_admitted: bool,
+    ) !*PendingRemoteCleanup {
+        const cleanup = try self.allocator.create(PendingRemoteCleanup);
+        errdefer self.allocator.destroy(cleanup);
+        const owned_session_id = try self.allocator.dupe(u8, session_id);
+        errdefer self.allocator.free(owned_session_id);
+        const local_session_id = if (retain_local_session_id)
+            try self.allocator.dupe(u8, session_id)
+        else
+            null;
+        errdefer if (local_session_id) |value| self.allocator.free(value);
+        self.remote_cleanup_mutex.lockUncancelable(self.io);
+        defer self.remote_cleanup_mutex.unlock(self.io);
+        if (self.remote_cleanup_closing and !lifecycle_admitted)
+            return error.ClientDeinitialized;
+        if (self.pending_remote_cleanups.items.len >= pending_remote_cleanup_limit)
+            return error.TooManyPendingRemoteCleanups;
+        try self.pending_remote_cleanups.append(self.allocator, cleanup);
+        cleanup.* = .{
+            .remote_session_id = .{ .owned = owned_session_id },
+            .local_session_id = local_session_id,
+            .active = true,
+        };
+        return cleanup;
+    }
+
+    fn retainRawLifecycleSessionId(
+        self: *Client,
+        cleanup: *PendingRemoteCleanup,
+        parsed: std.json.Parsed(std.json.Value),
+        require_inactive_session: bool,
+    ) void {
+        self.remote_cleanup_mutex.lockUncancelable(self.io);
+        defer self.remote_cleanup_mutex.unlock(self.io);
+        cleanup.remote_session_id.deinit(self.allocator);
+        cleanup.remote_session_id = .{ .lifecycle_result = parsed };
+        cleanup.detach_requires_inactive_session = require_inactive_session;
+    }
+
+    fn discardRemoteCleanup(
+        self: *Client,
+        cleanup: *PendingRemoteCleanup,
+    ) void {
+        self.remote_cleanup_mutex.lockUncancelable(self.io);
+        for (self.pending_remote_cleanups.items, 0..) |candidate, index| {
+            if (candidate != cleanup) continue;
+            _ = self.pending_remote_cleanups.orderedRemove(index);
+            break;
+        } else unreachable;
+        self.remote_cleanup_mutex.unlock(self.io);
+        cleanup.deinit(self.allocator);
+        self.allocator.destroy(cleanup);
+        self.remote_cleanup_changed.set(self.io);
+    }
+
+    fn makeRemoteCleanupRetryable(
+        self: *Client,
+        cleanup: *PendingRemoteCleanup,
+    ) void {
+        self.remote_cleanup_mutex.lockUncancelable(self.io);
+        cleanup.active = false;
+        self.remote_cleanup_mutex.unlock(self.io);
+        self.remote_cleanup_changed.set(self.io);
+    }
+
+    fn waitForRemoteCleanupOwners(
+        self: *Client,
+        deadline: ?std.Io.Clock.Timestamp,
+        include_event_operations: bool,
+    ) !bool {
+        while (true) {
+            self.remote_cleanup_mutex.lockUncancelable(self.io);
+            var active = self.active_lifecycle_operations != 0 or
+                self.active_rpc_operations != 0;
+            if (include_event_operations and self.active_event_operations != 0)
+                active = true;
+            for (self.pending_remote_cleanups.items) |cleanup| {
+                if (!cleanup.active) continue;
+                active = true;
+                break;
+            }
+            if (!active) {
+                self.remote_cleanup_mutex.unlock(self.io);
+                return true;
+            }
+            self.remote_cleanup_changed.reset();
+            self.remote_cleanup_mutex.unlock(self.io);
+            const limit = deadline orelse {
+                self.remote_cleanup_changed.waitUncancelable(self.io);
+                continue;
+            };
+            const WaitResult = union(enum) {
+                changed: anyerror!void,
+                timeout: anyerror!void,
+            };
+            const result = result: {
+                var results: [2]WaitResult = undefined;
+                var select = std.Io.Select(WaitResult).init(self.io, &results);
+                select.async(
+                    .changed,
+                    waitForEvent,
+                    .{ &self.remote_cleanup_changed, self.io },
+                );
+                select.async(.timeout, waitForDeadline, .{ limit, self.io });
+                defer select.cancelDiscard();
+                break :result try select.await();
+            };
+            switch (result) {
+                .changed => |wait_result| try wait_result,
+                .timeout => |wait_result| {
+                    try wait_result;
+                    return false;
+                },
+            }
+        }
+    }
+
+    fn performRemoteCleanup(
+        self: *Client,
+        cleanup: *PendingRemoteCleanup,
+    ) !void {
+        if (cleanup.oauth_interest) |*interest| {
+            try self.releaseMcpOAuthHandle(
+                cleanup.remote_session_id.value(),
+                interest.handle(),
+            );
+            interest.deinit(self.allocator);
+            cleanup.oauth_interest = null;
+        }
+        if (cleanup.detach_required) {
+            self.registry_mutex.lockUncancelable(self.io);
+            const active = self.hasSession(cleanup.remote_session_id.value());
+            self.registry_mutex.unlock(self.io);
+            if (cleanup.detach_requires_inactive_session and active) {
+                return error.RemoteSessionIdAlreadyActive;
+            }
+            try self.detachSession(cleanup.remote_session_id.value());
+            self.remote_cleanup_mutex.lockUncancelable(self.io);
+            cleanup.detach_required = false;
+            self.remote_cleanup_mutex.unlock(self.io);
+        }
+    }
+
+    pub fn retryPendingCleanup(self: *Client) !void {
+        while (true) {
+            self.remote_cleanup_mutex.lockUncancelable(self.io);
+            if (self.remote_cleanup_closing) {
+                self.remote_cleanup_mutex.unlock(self.io);
+                return error.ClientDeinitialized;
+            }
+            var cleanup: ?*PendingRemoteCleanup = null;
+            for (self.pending_remote_cleanups.items) |candidate| {
+                if (candidate.active) continue;
+                candidate.active = true;
+                cleanup = candidate;
+                break;
+            }
+            self.remote_cleanup_mutex.unlock(self.io);
+            const pending = cleanup orelse return;
+
+            if (pending.release_pending_lifecycle_interest) {
+                self.releasePendingExtensionRuntimeInterest() catch |err| {
+                    self.makeRemoteCleanupRetryable(pending);
+                    return err;
+                };
+                pending.release_pending_lifecycle_interest = false;
+            }
+            self.performRemoteCleanup(pending) catch |err| {
+                self.makeRemoteCleanupRetryable(pending);
+                return err;
+            };
+            if (pending.discard_pending_lifecycle) {
+                self.discardPendingExtensionRuntime();
+                self.rollbackProviderTokens();
+                if (pending.remove_local_session) {
+                    self.removeSession(pending.local_session_id.?);
+                }
+            }
+            self.discardRemoteCleanup(pending);
+        }
+    }
+
+    fn retryPendingCleanupForShutdown(self: *Client) !void {
+        self.remote_cleanup_mutex.lockUncancelable(self.io);
+        for (self.pending_remote_cleanups.items) |cleanup| {
+            cleanup.shutdown_attempted = false;
+        }
+        const attempts = self.pending_remote_cleanups.items.len;
+        self.remote_cleanup_mutex.unlock(self.io);
+        var first_error: ?anyerror = null;
+        for (0..attempts) |_| {
+            self.retryOnePendingCleanup() catch |err| {
+                if (first_error == null) first_error = err;
+            };
+        }
+        if (first_error) |err| return err;
+    }
+
+    fn retryOnePendingCleanup(self: *Client) !void {
+        self.remote_cleanup_mutex.lockUncancelable(self.io);
+        var cleanup: ?*PendingRemoteCleanup = null;
+        for (self.pending_remote_cleanups.items) |candidate| {
+            if (candidate.active or candidate.shutdown_attempted) continue;
+            candidate.active = true;
+            candidate.shutdown_attempted = true;
+            cleanup = candidate;
+            break;
+        }
+        self.remote_cleanup_mutex.unlock(self.io);
+        const pending = cleanup orelse return;
+        if (pending.release_pending_lifecycle_interest) {
+            self.releasePendingExtensionRuntimeInterest() catch |err| {
+                self.makeRemoteCleanupRetryable(pending);
+                return err;
+            };
+            pending.release_pending_lifecycle_interest = false;
+        }
+        self.performRemoteCleanup(pending) catch |err| {
+            self.makeRemoteCleanupRetryable(pending);
+            return err;
+        };
+        if (pending.discard_pending_lifecycle) {
+            self.discardPendingExtensionRuntime();
+            self.rollbackProviderTokens();
+            if (pending.remove_local_session) {
+                self.removeSession(pending.local_session_id.?);
+            }
+        }
+        self.discardRemoteCleanup(pending);
+    }
+
+    fn detachSession(self: *Client, session_id: []const u8) !void {
+        for (0..2) |_| {
+            const parsed = try self.callDuringShutdown(struct {
+                success: bool,
+                @"error": ?[]const u8 = null,
+            }, "session.detach", .{
+                .sessionId = session_id,
+            });
+            defer parsed.deinit();
+            if (parsed.value.success) return;
+        }
+        return error.SessionDetachFailed;
+    }
+
+    fn beginRegistryTransition(self: *Client) void {
+        while (true) {
+            self.registry_teardown_mutex.lockUncancelable(self.io);
+            if (!self.registry_transition_active) {
+                self.registry_transition_active = true;
+                self.registry_transition_done.reset();
+                self.registry_teardown_mutex.unlock(self.io);
+                return;
+            }
+            self.registry_teardown_mutex.unlock(self.io);
+            self.registry_transition_done.waitUncancelable(self.io);
+        }
+    }
+
+    fn endRegistryTransition(self: *Client) void {
+        self.registry_teardown_mutex.lockUncancelable(self.io);
+        std.debug.assert(self.registry_transition_active);
+        self.registry_transition_active = false;
+        self.registry_transition_done.set(self.io);
+        self.registry_teardown_mutex.unlock(self.io);
     }
 
     fn beginExtensionRuntime(
@@ -923,6 +1531,8 @@ pub const Client = struct {
         config: anytype,
         open_canvases: []const ext.OpenCanvas,
     ) !void {
+        self.beginRegistryTransition();
+        defer self.endRegistryTransition();
         try self.registry_mutex.lock(self.io);
         defer self.registry_mutex.unlock(self.io);
         if (self.pending_extension_runtime != null)
@@ -933,27 +1543,72 @@ pub const Client = struct {
             config,
             open_canvases,
         );
+        self.pending_extension_runtime.?.runtime_id = self.next_extension_runtime_id;
+        self.next_extension_runtime_id +%= 1;
+        if (self.next_extension_runtime_id == 0) self.next_extension_runtime_id = 1;
         if (session_id) |id| {
             self.pending_extension_runtime.?.generation = self.activeGeneration(id);
         }
     }
 
-    fn rollbackExtensionRuntime(self: *Client) void {
-        self.registry_teardown_mutex.lockUncancelable(self.io);
-        defer self.registry_teardown_mutex.unlock(self.io);
+    fn rollbackExtensionRuntimeAfterFailure(self: *Client) void {
+        self.rollbackExtensionRuntime() catch |err| self.finishPump(err);
+    }
+
+    fn rollbackExtensionRuntime(self: *Client) !void {
+        self.beginRegistryTransition();
+        defer self.endRegistryTransition();
+        try self.releasePendingExtensionRuntimeInterestAssumeTransition();
+        self.discardPendingExtensionRuntimeAssumeTransition();
+    }
+
+    fn releasePendingExtensionRuntimeInterest(self: *Client) !void {
+        self.beginRegistryTransition();
+        defer self.endRegistryTransition();
+        return self.releasePendingExtensionRuntimeInterestAssumeTransition();
+    }
+
+    fn releasePendingExtensionRuntimeInterestAssumeTransition(self: *Client) !void {
         self.registry_mutex.lockUncancelable(self.io);
-        self.accepting_callbacks = false;
-        self.registry_mutex.unlock(self.io);
-        self.waitCallbacksDrained();
-        self.registry_mutex.lockUncancelable(self.io);
-        var runtime = self.pending_extension_runtime;
+        var runtime = self.pending_extension_runtime orelse {
+            self.registry_mutex.unlock(self.io);
+            return;
+        };
         self.pending_extension_runtime = null;
-        self.accepting_callbacks = true;
         self.registry_mutex.unlock(self.io);
-        if (runtime) |*value| {
-            self.releaseMcpOAuthInterest(value) catch {};
-            value.deinit(self.allocator);
+        self.releaseMcpOAuthInterest(&runtime) catch |err| {
+            self.registry_mutex.lockUncancelable(self.io);
+            std.debug.assert(self.pending_extension_runtime == null);
+            self.pending_extension_runtime = runtime;
+            self.registry_mutex.unlock(self.io);
+            return err;
+        };
+        self.registry_mutex.lockUncancelable(self.io);
+        std.debug.assert(self.pending_extension_runtime == null);
+        self.pending_extension_runtime = runtime;
+        self.registry_mutex.unlock(self.io);
+    }
+
+    fn discardPendingExtensionRuntime(self: *Client) void {
+        self.beginRegistryTransition();
+        defer self.endRegistryTransition();
+        self.discardPendingExtensionRuntimeAssumeTransition();
+    }
+
+    fn discardPendingExtensionRuntimeAssumeTransition(self: *Client) void {
+        self.registry_mutex.lockUncancelable(self.io);
+        var runtime = self.pending_extension_runtime orelse {
+            self.registry_mutex.unlock(self.io);
+            return;
+        };
+        self.pending_extension_runtime = null;
+        self.registry_mutex.unlock(self.io);
+        if (runtime.session_id) |id| {
+            if (self.findEventLogGeneration(id, runtime.generation)) |log| {
+                log.waitCallbacksDrainedUncancelable();
+            }
         }
+        runtime.deinit(self.allocator);
     }
 
     fn commitExtensionRuntime(
@@ -962,8 +1617,8 @@ pub const Client = struct {
         response: WireSessionLifecycleResponse,
         requested_environment_variables: []const []const u8,
     ) !void {
-        self.registry_teardown_mutex.lockUncancelable(self.io);
-        defer self.registry_teardown_mutex.unlock(self.io);
+        self.beginRegistryTransition();
+        defer self.endRegistryTransition();
         var register_session_id: ?[]u8 = null;
         defer if (register_session_id) |value| self.allocator.free(value);
         var release_session_id: ?[]u8 = null;
@@ -1037,14 +1692,14 @@ pub const Client = struct {
                     continue;
                 }
                 replacing = true;
-                if (existing.mcp_oauth_interest_handle == null and
+                if (existing.mcp_oauth_interest == null and
                     runtime.mcp_auth_handler != null)
                 {
                     register_session_id = try self.allocator.dupe(u8, session_id);
-                } else if (existing.mcp_oauth_interest_handle) |handle| {
+                } else if (existing.mcp_oauth_interest) |*interest| {
                     if (runtime.mcp_auth_handler == null) {
                         release_session_id = try self.allocator.dupe(u8, session_id);
-                        release_handle = try self.allocator.dupe(u8, handle);
+                        release_handle = try self.allocator.dupe(u8, interest.handle());
                     }
                 }
                 break;
@@ -1057,13 +1712,9 @@ pub const Client = struct {
             }
         }
 
-        var registered_handle: ?[]u8 = null;
-        errdefer if (registered_handle) |value| {
-            self.releaseMcpOAuthHandle(session_id, value) catch {};
-            self.allocator.free(value);
-        };
         if (register_session_id) |id| {
-            registered_handle = try self.registerMcpOAuthHandle(id);
+            const registration = try self.registerMcpOAuthHandle(id);
+            try self.installPendingMcpOAuthRegistration(registration);
         }
         if (release_session_id) |id| {
             try self.releaseMcpOAuthHandle(id, release_handle.?);
@@ -1095,12 +1746,8 @@ pub const Client = struct {
         const runtime = if (self.pending_extension_runtime) |*value|
             value
         else
-            return error.MissingExtensionRuntime;
+            @panic("extension runtime disappeared during commit");
         runtime.accepting_callbacks = true;
-        if (registered_handle) |handle| {
-            runtime.mcp_oauth_interest_handle = handle;
-            registered_handle = null;
-        }
         for (self.extension_runtimes.items, 0..) |*existing, index| {
             if (existing.session_id == null or
                 !std.mem.eql(u8, existing.session_id.?, session_id) or
@@ -1108,12 +1755,11 @@ pub const Client = struct {
             {
                 continue;
             }
-            if (existing.mcp_oauth_interest_handle != null and
+            if (existing.mcp_oauth_interest != null and
                 runtime.mcp_auth_handler != null)
             {
-                runtime.mcp_oauth_interest_handle =
-                    existing.mcp_oauth_interest_handle;
-                existing.mcp_oauth_interest_handle = null;
+                runtime.mcp_oauth_interest = existing.mcp_oauth_interest;
+                existing.mcp_oauth_interest = null;
             }
             const replacement = self.pending_extension_runtime.?;
             self.pending_extension_runtime = null;
@@ -1126,48 +1772,82 @@ pub const Client = struct {
         self.extension_runtimes.appendAssumeCapacity(committed);
     }
 
-    fn registerMcpOAuthInterest(
-        self: *Client,
-        runtime: *SessionExtensionRuntime,
-    ) !void {
-        if (runtime.mcp_oauth_interest_handle != null) return;
-        const session_id = runtime.session_id orelse return error.MissingSessionId;
-        runtime.mcp_oauth_interest_handle = try self.registerMcpOAuthHandle(session_id);
-    }
-
     fn registerMcpOAuthHandle(
         self: *Client,
         session_id: []const u8,
-    ) ![]u8 {
-        const parsed = try self.call(struct {
-            handle: []const u8,
-        }, "session.eventLog.registerInterest", .{
+    ) !McpOAuthRegistrationResult {
+        const parsed = try self.callDuringShutdown(McpOAuthInterestRegistration, "session.eventLog.registerInterest", .{
             .sessionId = session_id,
             .eventType = "mcp.oauth_required",
         });
-        defer parsed.deinit();
-        return self.allocator.dupe(u8, parsed.value.handle) catch |err| {
-            const released = self.call(struct {
+        const handle_copy = if (self.fail_mcp_oauth_handle_copy)
+            error.OutOfMemory
+        else
+            self.allocator.dupe(u8, parsed.value.handle);
+        const owned_handle = handle_copy catch |allocation_err| {
+            const released = self.callDuringShutdown(struct {
                 success: bool,
             }, "session.eventLog.releaseInterest", .{
                 .sessionId = session_id,
                 .handle = parsed.value.handle,
-            }) catch return err;
-            released.deinit();
-            return err;
+            }) catch |release_err| {
+                return .{ .retained = .{
+                    .response = parsed,
+                    .failure = release_err,
+                } };
+            };
+            defer released.deinit();
+            if (!released.value.success) {
+                return .{ .retained = .{
+                    .response = parsed,
+                    .failure = error.EventInterestNotReleased,
+                } };
+            }
+            parsed.deinit();
+            return allocation_err;
         };
+        parsed.deinit();
+        return .{ .owned = owned_handle };
+    }
+
+    fn installPendingMcpOAuthRegistration(
+        self: *Client,
+        registration: McpOAuthRegistrationResult,
+    ) !void {
+        self.registry_mutex.lockUncancelable(self.io);
+        defer self.registry_mutex.unlock(self.io);
+        const runtime = if (self.pending_extension_runtime) |*value|
+            value
+        else
+            @panic("OAuth registration lost its pending runtime");
+        try installMcpOAuthRegistration(runtime, registration);
+    }
+
+    fn installMcpOAuthRegistration(
+        runtime: *SessionExtensionRuntime,
+        registration: McpOAuthRegistrationResult,
+    ) !void {
+        std.debug.assert(runtime.mcp_oauth_interest == null);
+        switch (registration) {
+            .owned => |handle| runtime.mcp_oauth_interest = .{ .owned = handle },
+            .retained => |interest| {
+                const failure = interest.failure;
+                runtime.mcp_oauth_interest = .{ .retained = interest };
+                return failure;
+            },
+        }
     }
 
     fn releaseMcpOAuthInterest(
         self: *Client,
         runtime: *SessionExtensionRuntime,
     ) !void {
-        const handle = runtime.mcp_oauth_interest_handle orelse return;
+        const interest = if (runtime.mcp_oauth_interest) |*value| value else return;
         const session_id = runtime.session_id orelse
             return error.MissingSessionId;
-        try self.releaseMcpOAuthHandle(session_id, handle);
-        self.allocator.free(handle);
-        runtime.mcp_oauth_interest_handle = null;
+        try self.releaseMcpOAuthHandle(session_id, interest.handle());
+        interest.deinit(self.allocator);
+        runtime.mcp_oauth_interest = null;
     }
 
     fn releaseMcpOAuthHandle(
@@ -1175,7 +1855,7 @@ pub const Client = struct {
         session_id: []const u8,
         handle: []const u8,
     ) !void {
-        const parsed = try self.call(struct {
+        const parsed = try self.callDuringShutdown(struct {
             success: bool,
         }, "session.eventLog.releaseInterest", .{
             .sessionId = session_id,
@@ -1190,6 +1870,9 @@ pub const Client = struct {
         session_id: []const u8,
         generation: u64,
     ) !bool {
+        const cleanup = try self.prepareRemoteCleanup(session_id, false);
+        var discard_cleanup = true;
+        defer if (discard_cleanup) self.discardRemoteCleanup(cleanup);
         self.registry_mutex.lockUncancelable(self.io);
         const runtime = self.findExtensionRuntimeGenerationLocked(
             session_id,
@@ -1198,54 +1881,44 @@ pub const Client = struct {
             self.registry_mutex.unlock(self.io);
             return false;
         };
-        const handle = runtime.mcp_oauth_interest_handle orelse {
+        const runtime_id = runtime.runtime_id;
+        var interest = runtime.mcp_oauth_interest orelse {
             self.registry_mutex.unlock(self.io);
             return false;
         };
-        runtime.mcp_oauth_interest_handle = null;
+        runtime.mcp_oauth_interest = null;
         const owned_session_id = self.allocator.dupe(u8, session_id) catch |err| {
-            runtime.mcp_oauth_interest_handle = handle;
+            runtime.mcp_oauth_interest = interest;
             self.registry_mutex.unlock(self.io);
             return err;
         };
         self.registry_mutex.unlock(self.io);
         defer self.allocator.free(owned_session_id);
 
-        const parsed = self.call(struct {
-            success: bool,
-        }, "session.eventLog.releaseInterest", .{
-            .sessionId = owned_session_id,
-            .handle = handle,
-        }) catch |err| {
-            self.restoreMcpOAuthInterest(owned_session_id, generation, handle);
+        self.releaseMcpOAuthHandle(
+            owned_session_id,
+            interest.handle(),
+        ) catch |err| {
+            self.registry_mutex.lockUncancelable(self.io);
+            const current = self.findExtensionRuntimeIdLocked(
+                owned_session_id,
+                runtime_id,
+            );
+            if (current) |value| {
+                if (value.mcp_oauth_interest == null) {
+                    value.mcp_oauth_interest = interest;
+                    self.registry_mutex.unlock(self.io);
+                    return err;
+                }
+            }
+            self.registry_mutex.unlock(self.io);
+            cleanup.oauth_interest = interest;
+            discard_cleanup = false;
+            self.makeRemoteCleanupRetryable(cleanup);
             return err;
         };
-        defer parsed.deinit();
-        if (!parsed.value.success) {
-            self.restoreMcpOAuthInterest(owned_session_id, generation, handle);
-            return error.EventInterestNotReleased;
-        }
-        self.allocator.free(handle);
+        interest.deinit(self.allocator);
         return true;
-    }
-
-    fn restoreMcpOAuthInterest(
-        self: *Client,
-        session_id: []const u8,
-        generation: u64,
-        handle: []u8,
-    ) void {
-        self.registry_mutex.lockUncancelable(self.io);
-        defer self.registry_mutex.unlock(self.io);
-        if (self.findExtensionRuntimeGenerationLocked(session_id, generation)) |runtime| {
-            if (runtime.mcp_auth_handler != null and
-                runtime.mcp_oauth_interest_handle == null)
-            {
-                runtime.mcp_oauth_interest_handle = handle;
-                return;
-            }
-        }
-        self.allocator.free(handle);
     }
 
     fn registerMcpOAuthInterestForSession(
@@ -1254,43 +1927,62 @@ pub const Client = struct {
         generation: u64,
     ) !void {
         self.registry_mutex.lockUncancelable(self.io);
-        const should_register = if (self.findExtensionRuntimeGenerationLocked(
+        const runtime_id = if (self.findExtensionRuntimeGenerationLocked(
             session_id,
             generation,
         )) |runtime|
-            runtime.mcp_auth_handler != null and runtime.mcp_oauth_interest_handle == null
+            if (runtime.mcp_auth_handler != null and runtime.mcp_oauth_interest == null)
+                runtime.runtime_id
+            else
+                null
         else
-            false;
+            null;
         self.registry_mutex.unlock(self.io);
-        if (!should_register) return;
+        const expected_runtime_id = runtime_id orelse return;
 
-        const parsed = try self.call(struct {
-            handle: []const u8,
-        }, "session.eventLog.registerInterest", .{
-            .sessionId = session_id,
-            .eventType = "mcp.oauth_required",
-        });
-        defer parsed.deinit();
-        const handle = try self.allocator.dupe(u8, parsed.value.handle);
+        const cleanup = try self.prepareRemoteCleanup(session_id, false);
+        var discard_cleanup = true;
+        defer if (discard_cleanup) self.discardRemoteCleanup(cleanup);
+        const registration = try self.registerMcpOAuthHandle(session_id);
         self.registry_mutex.lockUncancelable(self.io);
-        if (self.findExtensionRuntimeGenerationLocked(session_id, generation)) |runtime| {
-            if (runtime.mcp_auth_handler != null and
-                runtime.mcp_oauth_interest_handle == null)
+        const runtime = self.findExtensionRuntimeIdLocked(
+            session_id,
+            expected_runtime_id,
+        );
+        if (runtime) |value| {
+            if (value.mcp_auth_handler != null and
+                value.mcp_oauth_interest == null)
             {
-                runtime.mcp_oauth_interest_handle = handle;
+                const install_result = installMcpOAuthRegistration(value, registration);
                 self.registry_mutex.unlock(self.io);
-                return;
+                self.discardRemoteCleanup(cleanup);
+                discard_cleanup = false;
+                return install_result;
             }
         }
         self.registry_mutex.unlock(self.io);
-        defer self.allocator.free(handle);
-        const released = try self.call(struct {
-            success: bool,
-        }, "session.eventLog.releaseInterest", .{
-            .sessionId = session_id,
-            .handle = handle,
-        });
-        released.deinit();
+
+        const retained_failure: ?anyerror = switch (registration) {
+            .owned => |handle| blk: {
+                cleanup.oauth_interest = .{ .owned = handle };
+                break :blk null;
+            },
+            .retained => |interest| blk: {
+                const failure = interest.failure;
+                cleanup.oauth_interest = .{ .retained = interest };
+                break :blk failure;
+            },
+        };
+        discard_cleanup = false;
+        if (retained_failure) |err| {
+            self.makeRemoteCleanupRetryable(cleanup);
+            return err;
+        }
+        self.performRemoteCleanup(cleanup) catch |err| {
+            self.makeRemoteCleanupRetryable(cleanup);
+            return err;
+        };
+        self.discardRemoteCleanup(cleanup);
     }
 
     /// Joins a parent-selected extension session. The session id is injected by
@@ -1301,6 +1993,8 @@ pub const Client = struct {
         session_id: []const u8,
         config: session_types.JoinSessionConfig,
     ) !JoinedSession {
+        try self.beginLifecycleOperation();
+        defer self.endLifecycleOperation();
         const resume_config = resumeConfigFromJoin(config);
         const session = try self.resumeSessionWithEnvironment(
             session_id,
@@ -1308,14 +2002,7 @@ pub const Client = struct {
             config.extensions.requested_environment_variables,
         );
         const grants = session.snapshotEnvironmentGrants(self.allocator) catch |err| {
-            session.disconnect() catch |cleanup_err| {
-                _ = self.releaseMcpOAuthInterestForSession(
-                    session.id,
-                    session.generation,
-                ) catch false;
-                self.removeSession(session.id);
-                return cleanup_err;
-            };
+            session.disconnect() catch |cleanup_err| return cleanup_err;
             return err;
         };
         return .{
@@ -1355,6 +2042,8 @@ pub const Client = struct {
         handler: RpcHandler,
         context: ?*anyopaque,
     ) !void {
+        try self.beginRpcOperation();
+        defer self.endRpcOperation();
         if (method.len == 0) return error.InvalidRpcMethod;
         if (self.findRpcHandler(method) != null) return error.RpcHandlerAlreadyRegistered;
         const owned_method = try self.allocator.dupe(u8, method);
@@ -1383,6 +2072,26 @@ pub const Client = struct {
         method: []const u8,
         params: anytype,
     ) !std.json.Parsed(Result) {
+        try self.beginRpcOperation();
+        defer self.endRpcOperation();
+        return self.callAdmitted(Result, method, params);
+    }
+
+    fn callDuringShutdown(
+        self: *Client,
+        comptime Result: type,
+        method: []const u8,
+        params: anytype,
+    ) !std.json.Parsed(Result) {
+        return self.callAdmitted(Result, method, params);
+    }
+
+    fn callAdmitted(
+        self: *Client,
+        comptime Result: type,
+        method: []const u8,
+        params: anytype,
+    ) !std.json.Parsed(Result) {
         if (self.dispatching_rpc_handler) return error.ReentrantRpcCall;
         const id = try self.nextRequestId();
         const request = try json_rpc.encodeRequest(self.allocator, id, method, params);
@@ -1390,10 +2099,21 @@ pub const Client = struct {
             wipeSecret(request);
             self.allocator.free(request);
         }
-        return self.callEncoded(Result, id, request);
+        return self.callEncodedAdmitted(Result, id, request);
     }
 
     fn callEncoded(
+        self: *Client,
+        comptime Result: type,
+        id: u64,
+        request: []const u8,
+    ) !std.json.Parsed(Result) {
+        try self.beginRpcOperation();
+        defer self.endRpcOperation();
+        return self.callEncodedAdmitted(Result, id, request);
+    }
+
+    fn callEncodedAdmitted(
         self: *Client,
         comptime Result: type,
         id: u64,
@@ -1498,7 +2218,7 @@ pub const Client = struct {
         return operation;
     }
 
-    fn sendOperationMain(operation: *SendOperation) anyerror!void {
+    fn sendOperationMain(operation: *SendOperation) void {
         defer {
             wipeSecret(operation.request);
             operation.client.allocator.free(operation.request);
@@ -1526,11 +2246,18 @@ pub const Client = struct {
     }
 
     fn destroyClaimedSendOperation(self: *Client, operation: *SendOperation) !void {
-        if (operation.future) |*future| try future.await(self.io);
+        if (operation.future) |*future| future.await(self.io);
         const failure = operation.failure;
         operation.log_lease.deinit();
         self.allocator.destroy(operation);
         if (failure) |err| return err;
+    }
+
+    fn destroyDetachedSendOperation(self: *Client, operation: *SendOperation) void {
+        if (operation.future) |*future| future.await(self.io);
+        if (operation.failure) |err| operation.log_lease.log.fail(err);
+        operation.log_lease.deinit();
+        self.allocator.destroy(operation);
     }
 
     fn claimCompletedSendOperation(
@@ -1589,11 +2316,11 @@ pub const Client = struct {
             }
             self.send_operations_mutex.unlock(self.io);
             const operation = completed orelse return;
-            self.destroyClaimedSendOperation(operation) catch {};
+            self.destroyDetachedSendOperation(operation);
         }
     }
 
-    fn sendReaperMain(self: *Client) anyerror!void {
+    fn sendReaperMain(self: *Client) void {
         while (true) {
             self.send_operations_mutex.lockUncancelable(self.io);
             if (self.send_reaper_closing) {
@@ -1603,7 +2330,7 @@ pub const Client = struct {
             self.send_reaper_ready.reset();
             self.send_operations_mutex.unlock(self.io);
             self.reapSendOperations();
-            try self.send_reaper_ready.wait(self.io);
+            self.send_reaper_ready.waitUncancelable(self.io);
         }
     }
 
@@ -1614,7 +2341,7 @@ pub const Client = struct {
         self.send_reaper_ready.set(self.io);
         self.send_operations_mutex.unlock(self.io);
         if (self.send_reaper_future) |*future| {
-            _ = future.await(self.io) catch {};
+            future.await(self.io);
             self.send_reaper_future = null;
         }
     }
@@ -1632,7 +2359,7 @@ pub const Client = struct {
                 self.send_operations.orderedRemove(0);
             self.send_operations_mutex.unlock(self.io);
             const value = operation orelse break;
-            self.destroyClaimedSendOperation(value) catch {};
+            self.destroyDetachedSendOperation(value);
         }
         self.send_operations.deinit(self.allocator);
     }
@@ -1655,7 +2382,7 @@ pub const Client = struct {
             true,
         ) catch |err| switch (err) {
             error.SessionDisconnected => if (generation == 0) blk: {
-                _ = try self.ensureEventLog(session_id);
+                try self.ensureEventLogExists(session_id);
                 break :blk try self.acquireEventLog(session_id, 0, true);
             } else return err,
         };
@@ -1709,13 +2436,13 @@ pub const Client = struct {
             break;
         } else unreachable;
         self.session_removals_mutex.unlock(self.io);
-        if (removal.future) |*future| _ = future.await(self.io) catch {};
+        if (removal.future) |*future| future.await(self.io);
         removal.log_lease.deinit();
         self.allocator.free(removal.session_id);
         self.allocator.destroy(removal);
     }
 
-    fn sessionRemovalMain(removal: *SessionRemoval) anyerror!void {
+    fn sessionRemovalMain(removal: *SessionRemoval) void {
         defer {
             removal.completed.set(removal.client.io);
             removal.client.session_removal_reaper_ready.set(removal.client.io);
@@ -1743,13 +2470,13 @@ pub const Client = struct {
             }
             self.session_removals_mutex.unlock(self.io);
             const removal = completed orelse return;
-            if (removal.future) |*future| _ = future.await(self.io) catch {};
+            if (removal.future) |*future| future.await(self.io);
             self.allocator.free(removal.session_id);
             self.allocator.destroy(removal);
         }
     }
 
-    fn sessionRemovalReaperMain(self: *Client) anyerror!void {
+    fn sessionRemovalReaperMain(self: *Client) void {
         while (true) {
             self.session_removals_mutex.lockUncancelable(self.io);
             if (self.session_removal_reaper_closing) {
@@ -1759,7 +2486,7 @@ pub const Client = struct {
             self.session_removal_reaper_ready.reset();
             self.session_removals_mutex.unlock(self.io);
             self.reapSessionRemovals();
-            try self.session_removal_reaper_ready.wait(self.io);
+            self.session_removal_reaper_ready.waitUncancelable(self.io);
         }
     }
 
@@ -1770,7 +2497,7 @@ pub const Client = struct {
         self.session_removal_reaper_ready.set(self.io);
         self.session_removals_mutex.unlock(self.io);
         if (self.session_removal_reaper_future) |*future| {
-            _ = future.await(self.io) catch {};
+            future.await(self.io);
             self.session_removal_reaper_future = null;
         }
     }
@@ -1784,7 +2511,7 @@ pub const Client = struct {
                 self.session_removals.orderedRemove(0);
             self.session_removals_mutex.unlock(self.io);
             const value = removal orelse break;
-            if (value.future) |*future| _ = future.await(self.io) catch {};
+            if (value.future) |*future| future.await(self.io);
             value.log_lease.deinit();
             self.allocator.free(value.session_id);
             self.allocator.destroy(value);
@@ -1845,7 +2572,27 @@ pub const Client = struct {
         });
     }
 
-    fn pumpMain(self: *Client) anyerror!void {
+    fn parseLifecycleResult(
+        self: *Client,
+        value: std.json.Value,
+    ) !std.json.Parsed(WireSessionLifecycleResponse) {
+        const result_json = try std.json.Stringify.valueAlloc(self.allocator, value, .{});
+        defer {
+            wipeSecret(result_json);
+            self.allocator.free(result_json);
+        }
+        return std.json.parseFromSlice(
+            WireSessionLifecycleResponse,
+            self.allocator,
+            result_json,
+            .{
+                .allocate = .alloc_always,
+                .ignore_unknown_fields = true,
+            },
+        );
+    }
+
+    fn pumpMain(self: *Client) void {
         while (true) {
             const body = json_rpc.readFrame(
                 self.allocator,
@@ -1860,31 +2607,66 @@ pub const Client = struct {
                         .awake,
                     ) catch |sleep_err| {
                         self.finishPump(sleep_err);
-                        return sleep_err;
+                        return;
                     };
                     continue;
                 }
                 self.finishPump(err);
-                return err;
+                return;
             };
             defer {
                 wipeSecret(body);
                 self.allocator.free(body);
             }
-            self.routeFrame(body) catch |err| {
-                self.finishPump(err);
-                return err;
-            };
-            if (self.ignore_eof) {
-                std.Io.sleep(
-                    self.io,
-                    std.Io.Duration.fromMilliseconds(10),
-                    .awake,
-                ) catch |err| {
+            if (self.ignore_eof and self.synchronize_test_responses) {
+                self.waitForTestResponseRegistration(body) catch |err| {
                     self.finishPump(err);
-                    return err;
+                    return;
                 };
             }
+            self.routeFrame(body) catch |err| {
+                self.finishPump(err);
+                return;
+            };
+        }
+    }
+
+    fn waitForTestResponseRegistration(self: *Client, body: []const u8) !void {
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, body, .{});
+        defer parsed.deinit();
+        const object = switch (parsed.value) {
+            .object => |value| value,
+            else => return,
+        };
+        if (object.get("method") != null) return;
+        const id_value = object.get("id") orelse return;
+        const id = switch (id_value) {
+            .integer => |value| std.math.cast(u64, value) orelse return,
+            else => return,
+        };
+        const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
+            .raw = std.Io.Duration.fromMilliseconds(5000),
+            .clock = .awake,
+        });
+        while (true) {
+            self.pending_mutex.lockUncancelable(self.io);
+            var registered = false;
+            for (self.pending_calls.items) |pending| {
+                if (pending.id == id) {
+                    registered = true;
+                    break;
+                }
+            }
+            self.pending_mutex.unlock(self.io);
+            if (registered) return;
+            const now = std.Io.Clock.Timestamp.now(self.io, .awake);
+            if (now.raw.nanoseconds >= deadline.raw.nanoseconds)
+                return error.UnregisteredTestResponse;
+            try std.Io.sleep(
+                self.io,
+                std.Io.Duration.fromMilliseconds(1),
+                .awake,
+            );
         }
     }
 
@@ -2774,9 +3556,13 @@ pub const Client = struct {
         return log;
     }
 
-    fn eventProcessorMain(self: *Client) anyerror!void {
+    fn ensureEventLogExists(self: *Client, session_id: []const u8) !void {
+        _ = try self.ensureEventLog(session_id);
+    }
+
+    fn eventProcessorMain(self: *Client) void {
         while (true) {
-            try self.event_queue_mutex.lock(self.io);
+            self.event_queue_mutex.lockUncancelable(self.io);
             if (self.event_queue.items.len == 0) {
                 if (self.event_processor_closing) {
                     self.event_queue_mutex.unlock(self.io);
@@ -2784,14 +3570,14 @@ pub const Client = struct {
                 }
                 self.event_queue_ready.reset();
                 self.event_queue_mutex.unlock(self.io);
-                try self.event_queue_ready.wait(self.io);
+                self.event_queue_ready.waitUncancelable(self.io);
                 continue;
             }
             var work = self.event_queue.orderedRemove(0);
             self.event_queue_mutex.unlock(self.io);
             defer work.log.finishIngress();
 
-            try work.log.processing_mutex.lock(self.io);
+            work.log.processing_mutex.lockUncancelable(self.io);
             defer work.log.processing_mutex.unlock(self.io);
             self.applyExtensionEvent(
                 work.log.session_id,
@@ -2825,13 +3611,12 @@ pub const Client = struct {
     }
 
     fn stopEventProcessor(self: *Client) void {
-        if (self.event_processor_future == null) return;
         self.event_queue_mutex.lockUncancelable(self.io);
         self.event_processor_closing = true;
         self.event_queue_ready.set(self.io);
         self.event_queue_mutex.unlock(self.io);
         if (self.event_processor_future) |*future| {
-            _ = future.await(self.io) catch {};
+            future.await(self.io);
             self.event_processor_future = null;
         }
     }
@@ -2965,6 +3750,28 @@ pub const Client = struct {
             if (runtime.session_id) |id| {
                 if (std.mem.eql(u8, id, session_id) and
                     generationsMatch(runtime.generation, generation)) return runtime;
+            }
+        }
+        return null;
+    }
+
+    fn findExtensionRuntimeIdLocked(
+        self: *Client,
+        session_id: []const u8,
+        runtime_id: u64,
+    ) ?*SessionExtensionRuntime {
+        if (self.pending_extension_runtime) |*runtime| {
+            if (runtime.runtime_id == runtime_id and runtime.session_id != null and
+                std.mem.eql(u8, runtime.session_id.?, session_id))
+            {
+                return runtime;
+            }
+        }
+        for (self.extension_runtimes.items) |*runtime| {
+            if (runtime.runtime_id == runtime_id and runtime.session_id != null and
+                std.mem.eql(u8, runtime.session_id.?, session_id))
+            {
+                return runtime;
             }
         }
         return null;
@@ -3104,8 +3911,8 @@ pub const Client = struct {
         }
         self.registry_mutex.unlock(self.io);
         if (closing_log) |log| log.waitCallbacksDrainedUncancelable();
-        self.registry_teardown_mutex.lockUncancelable(self.io);
-        defer self.registry_teardown_mutex.unlock(self.io);
+        self.beginRegistryTransition();
+        defer self.endRegistryTransition();
         self.registry_mutex.lockUncancelable(self.io);
         defer self.registry_mutex.unlock(self.io);
 
@@ -3169,6 +3976,115 @@ pub const Client = struct {
         return null;
     }
 
+    fn admitOwnedSessionId(self: *Client, owned_session_id: []u8) !void {
+        errdefer self.allocator.free(owned_session_id);
+        self.registry_mutex.lockUncancelable(self.io);
+        defer self.registry_mutex.unlock(self.io);
+        self.remote_cleanup_mutex.lockUncancelable(self.io);
+        defer self.remote_cleanup_mutex.unlock(self.io);
+        if (self.remote_cleanup_closing) return error.ClientDeinitialized;
+        try self.admitOwnedSessionIdLocked(owned_session_id);
+    }
+
+    fn admitOwnedSessionIdForLifecycle(
+        self: *Client,
+        owned_session_id: []u8,
+    ) !void {
+        errdefer self.allocator.free(owned_session_id);
+        self.registry_mutex.lockUncancelable(self.io);
+        defer self.registry_mutex.unlock(self.io);
+        self.remote_cleanup_mutex.lockUncancelable(self.io);
+        defer self.remote_cleanup_mutex.unlock(self.io);
+        try self.admitOwnedSessionIdLocked(owned_session_id);
+    }
+
+    fn admitLifecycleSession(
+        self: *Client,
+        session_id: []const u8,
+    ) !LifecycleSessionAdmission {
+        const copy = try self.allocator.dupe(u8, session_id);
+        var copy_owned = true;
+        defer if (copy_owned) self.allocator.free(copy);
+        self.registry_mutex.lockUncancelable(self.io);
+        defer self.registry_mutex.unlock(self.io);
+        self.remote_cleanup_mutex.lockUncancelable(self.io);
+        defer self.remote_cleanup_mutex.unlock(self.io);
+        if (self.findSessionId(session_id)) |existing| {
+            return .{ .session_id = existing, .added = false };
+        }
+        try self.admitOwnedSessionIdLocked(copy);
+        copy_owned = false;
+        return .{ .session_id = copy, .added = true };
+    }
+
+    fn beginLifecycleOperation(self: *Client) !void {
+        self.remote_cleanup_mutex.lockUncancelable(self.io);
+        defer self.remote_cleanup_mutex.unlock(self.io);
+        if (self.remote_cleanup_closing) return error.ClientDeinitialized;
+        self.active_lifecycle_operations += 1;
+    }
+
+    fn endLifecycleOperation(self: *Client) void {
+        self.remote_cleanup_mutex.lockUncancelable(self.io);
+        std.debug.assert(self.active_lifecycle_operations > 0);
+        self.active_lifecycle_operations -= 1;
+        self.remote_cleanup_mutex.unlock(self.io);
+        self.remote_cleanup_changed.set(self.io);
+    }
+
+    fn beginRpcOperation(self: *Client) !void {
+        self.remote_cleanup_mutex.lockUncancelable(self.io);
+        defer self.remote_cleanup_mutex.unlock(self.io);
+        if (self.remote_cleanup_closing) return error.ClientDeinitialized;
+        self.active_rpc_operations += 1;
+    }
+
+    fn endRpcOperation(self: *Client) void {
+        self.remote_cleanup_mutex.lockUncancelable(self.io);
+        std.debug.assert(self.active_rpc_operations > 0);
+        self.active_rpc_operations -= 1;
+        self.remote_cleanup_mutex.unlock(self.io);
+        self.remote_cleanup_changed.set(self.io);
+    }
+
+    fn beginEventOperation(self: *Client) !void {
+        self.remote_cleanup_mutex.lockUncancelable(self.io);
+        if (self.remote_cleanup_closing) {
+            self.remote_cleanup_mutex.unlock(self.io);
+            return error.ClientDeinitialized;
+        }
+        self.active_event_operations += 1;
+        self.remote_cleanup_mutex.unlock(self.io);
+        self.remote_cleanup_changed.set(self.io);
+    }
+
+    fn endEventOperation(self: *Client) void {
+        self.remote_cleanup_mutex.lockUncancelable(self.io);
+        std.debug.assert(self.active_event_operations > 0);
+        self.active_event_operations -= 1;
+        self.remote_cleanup_mutex.unlock(self.io);
+        self.remote_cleanup_changed.set(self.io);
+    }
+
+    fn admitOwnedSessionIdLocked(self: *Client, owned_session_id: []u8) !void {
+        if (self.hasSession(owned_session_id)) {
+            return error.SessionAlreadyActive;
+        }
+        for (self.pending_remote_cleanups.items) |cleanup| {
+            if (cleanup.detach_required and
+                cleanup.detach_requires_inactive_session and
+                std.mem.eql(
+                    u8,
+                    cleanup.remote_session_id.value(),
+                    owned_session_id,
+                ))
+            {
+                return error.RemoteSessionIdAlreadyActive;
+            }
+        }
+        try self.session_ids.append(self.allocator, owned_session_id);
+    }
+
     fn retireSessionId(self: *Client, session_id: []const u8) ?[]u8 {
         self.registry_mutex.lockUncancelable(self.io);
         defer self.registry_mutex.unlock(self.io);
@@ -3220,17 +4136,9 @@ pub const Client = struct {
         config: session_types.SessionConfig,
         token_bindings: []const provider.TokenBinding,
     ) !void {
-        if (self.hasSession(owned_session_id)) {
-            self.allocator.free(owned_session_id);
-            return error.SessionAlreadyActive;
-        }
-
-        self.session_ids.append(self.allocator, owned_session_id) catch |err| {
-            self.allocator.free(owned_session_id);
-            return err;
-        };
+        try self.admitOwnedSessionId(owned_session_id);
         errdefer self.removeSession(owned_session_id);
-        _ = try self.ensureEventLog(owned_session_id);
+        try self.ensureEventLogExists(owned_session_id);
 
         try self.registerToolHandlers(owned_session_id, config.tools);
         try self.registerPermissionHandler(owned_session_id, config);
@@ -3714,7 +4622,7 @@ pub const Client = struct {
         origin: CallbackOrigin,
     ) ?CallbackLease {
         if (origin.log) |log| {
-            log.retainCallback(origin.admitted) catch return null;
+            if (!log.retainCallback(origin.admitted)) return null;
         }
         self.active_callbacks += 1;
         self.callbacks_drained.reset();
@@ -3782,17 +4690,19 @@ pub const Client = struct {
                         canceled: anyerror!void,
                         timeout: anyerror!void,
                     };
-                    var results: [3]WaitResult = undefined;
-                    var select = std.Io.Select(WaitResult).init(self.io, &results);
-                    select.async(.ready, waitForEvent, .{ ready, self.io });
-                    if (cancellation) |value| {
-                        select.async(.canceled, waitForEvent, .{ &value.event, self.io });
-                    }
-                    if (deadline) |value| {
-                        select.async(.timeout, waitForDeadline, .{ value, self.io });
-                    }
-                    const result = try select.await();
-                    select.cancelDiscard();
+                    const result = result: {
+                        var results: [3]WaitResult = undefined;
+                        var select = std.Io.Select(WaitResult).init(self.io, &results);
+                        select.async(.ready, waitForEvent, .{ ready, self.io });
+                        if (cancellation) |value| {
+                            select.async(.canceled, waitForEvent, .{ &value.event, self.io });
+                        }
+                        if (deadline) |value| {
+                            select.async(.timeout, waitForDeadline, .{ value, self.io });
+                        }
+                        defer select.cancelDiscard();
+                        break :result try select.await();
+                    };
                     local_end.* = switch (result) {
                         .ready => |wait_result| blk: {
                             try wait_result;
@@ -3827,6 +4737,8 @@ pub const EventSubscriber = struct {
     active: bool = true,
 
     pub fn nextEvent(self: *EventSubscriber) !session_types.SessionEvent {
+        try self.lease.client.beginEventOperation();
+        defer self.lease.client.endEventOperation();
         if (!self.active) return error.InvalidEventSubscriber;
         return self.lease.client.nextSubscriberEvent(
             self.lease.log,
@@ -3851,6 +4763,8 @@ pub const Session = struct {
     generation: u64 = 0,
 
     pub fn send(self: Session, options: session_types.MessageOptions) ![]u8 {
+        try self.client.beginEventOperation();
+        defer self.client.endEventOperation();
         try validateMessageOptions(options);
         var log_lease = try self.operationEventLog();
         defer log_lease.deinit();
@@ -3905,6 +4819,8 @@ pub const Session = struct {
         options: session_types.MessageOptions,
         wait_options: session_types.WaitOptions,
     ) !?session_types.AssistantMessage {
+        try self.client.beginEventOperation();
+        defer self.client.endEventOperation();
         try validateMessageOptions(options);
         const deadline = if (wait_options.timeout_ns) |timeout_ns|
             std.Io.Clock.Timestamp.fromNow(self.client.io, .{
@@ -3972,17 +4888,19 @@ pub const Session = struct {
                 canceled: anyerror!void,
                 timeout: anyerror!void,
             };
-            var results: [3]WaitResult = undefined;
-            var select = std.Io.Select(WaitResult).init(self.client.io, &results);
-            select.async(.completed, waitForEvent, .{ &operation.completed, self.client.io });
-            if (cancellation) |value| {
-                select.async(.canceled, waitForEvent, .{ &value.event, self.client.io });
-            }
-            if (deadline) |value| {
-                select.async(.timeout, waitForDeadline, .{ value, self.client.io });
-            }
-            const result = try select.await();
-            select.cancelDiscard();
+            const result = result: {
+                var results: [3]WaitResult = undefined;
+                var select = std.Io.Select(WaitResult).init(self.client.io, &results);
+                select.async(.completed, waitForEvent, .{ &operation.completed, self.client.io });
+                if (cancellation) |value| {
+                    select.async(.canceled, waitForEvent, .{ &value.event, self.client.io });
+                }
+                if (deadline) |value| {
+                    select.async(.timeout, waitForDeadline, .{ value, self.client.io });
+                }
+                defer select.cancelDiscard();
+                break :result try select.await();
+            };
             if (operation.completed.isSet()) {
                 if (self.client.claimCompletedSendOperation(operation, .waiter)) |claimed| {
                     return self.client.destroyClaimedSendOperation(claimed);
@@ -4038,17 +4956,19 @@ pub const Session = struct {
                         canceled: anyerror!void,
                         timeout: anyerror!void,
                     };
-                    var results: [3]WaitResult = undefined;
-                    var select = std.Io.Select(WaitResult).init(self.client.io, &results);
-                    select.async(.ready, waitForEvent, .{ ready, self.client.io });
-                    if (cancellation) |value| {
-                        select.async(.canceled, waitForEvent, .{ &value.event, self.client.io });
-                    }
-                    if (deadline) |value| {
-                        select.async(.timeout, waitForDeadline, .{ value, self.client.io });
-                    }
-                    const result = try select.await();
-                    select.cancelDiscard();
+                    const result = result: {
+                        var results: [3]WaitResult = undefined;
+                        var select = std.Io.Select(WaitResult).init(self.client.io, &results);
+                        select.async(.ready, waitForEvent, .{ ready, self.client.io });
+                        if (cancellation) |value| {
+                            select.async(.canceled, waitForEvent, .{ &value.event, self.client.io });
+                        }
+                        if (deadline) |value| {
+                            select.async(.timeout, waitForDeadline, .{ value, self.client.io });
+                        }
+                        defer select.cancelDiscard();
+                        break :result try select.await();
+                    };
                     switch (try session_log.inspectTurn(receipt)) {
                         .completed => |response| return response,
                         .failure => |err| return err,
@@ -4086,6 +5006,8 @@ pub const Session = struct {
     }
 
     pub fn nextEvent(self: Session) !session_types.SessionEvent {
+        try self.client.beginEventOperation();
+        defer self.client.endEventOperation();
         const generation = if (self.generation == 0)
             (try self.client.ensureEventLog(self.id)).generation
         else
@@ -4103,6 +5025,8 @@ pub const Session = struct {
     }
 
     pub fn subscribe(self: Session) !EventSubscriber {
+        try self.client.beginRpcOperation();
+        defer self.client.endRpcOperation();
         const generation = if (self.generation == 0)
             (try self.client.ensureEventLog(self.id)).generation
         else
@@ -4510,6 +5434,8 @@ pub const Session = struct {
     }
 
     pub fn disconnect(self: Session) !void {
+        try self.client.beginRpcOperation();
+        defer self.client.endRpcOperation();
         const removal = try self.client.prepareSessionRemoval(
             self.id,
             self.generation,
@@ -4521,32 +5447,25 @@ pub const Session = struct {
                 self.id,
                 removal.log_lease.log.generation,
             );
-        errdefer if (released_oauth_interest) {
-            self.client.registerMcpOAuthInterestForSession(
-                self.id,
-                removal.log_lease.log.generation,
-            ) catch {};
-        };
-        for (0..2) |_| {
-            const parsed = try self.client.call(struct {
-                success: bool,
-                @"error": ?[]const u8 = null,
-            }, "session.detach", .{
-                .sessionId = self.id,
-            });
-            defer parsed.deinit();
-            if (parsed.value.success) {
-                removal_started = true;
-                const owner: SendOperationOwner =
-                    if (removal.log_lease.log.hasActiveCallbacks()) .reaper else .waiter;
-                self.client.startSessionRemoval(removal, owner);
-                if (owner == .waiter) {
-                    self.client.finishSessionRemoval(removal);
-                }
-                return;
+        self.client.detachSession(self.id) catch |detach_err| {
+            if (released_oauth_interest) {
+                self.client.registerMcpOAuthInterestForSession(
+                    self.id,
+                    removal.log_lease.log.generation,
+                ) catch |restore_err| {
+                    self.client.finishPump(restore_err);
+                    return detach_err;
+                };
             }
+            return detach_err;
+        };
+        removal_started = true;
+        const owner: SendOperationOwner =
+            if (removal.log_lease.log.hasActiveCallbacks()) .reaper else .waiter;
+        self.client.startSessionRemoval(removal, owner);
+        if (owner == .waiter) {
+            self.client.finishSessionRemoval(removal);
         }
-        return error.SessionDetachFailed;
     }
 
     pub fn setAutoTier(
@@ -5052,6 +5971,18 @@ const WireCapabilitiesUi = struct {
 const WireCapabilities = struct {
     ui: ?WireCapabilitiesUi = null,
 };
+
+fn rawLifecycleSessionId(value: std.json.Value) ?[]const u8 {
+    const object = switch (value) {
+        .object => |object| object,
+        else => return null,
+    };
+    const session_id = object.get("sessionId") orelse return null;
+    return switch (session_id) {
+        .string => |string| string,
+        else => null,
+    };
+}
 
 const WireSessionLifecycleResponse = struct {
     sessionId: ?[]const u8 = null,
@@ -6199,7 +7130,7 @@ test "user input handler receives requests and returns responses" {
         }
     }.handle;
     try client.registerUserInputHandler("session-1", handler, &called);
-    _ = try client.ensureEventLog("session-1");
+    try client.ensureEventLogExists("session-1");
 
     const parsed_params = try std.json.parseFromSlice(
         std.json.Value,
@@ -6718,7 +7649,7 @@ fn framedBody(allocator: std.mem.Allocator, framed: []const u8) ![]u8 {
 
 fn deinitTestMessaging(client: *Client) void {
     client.stopEventProcessor();
-    if (client.pump_future) |*pump| _ = pump.cancel(client.io) catch {};
+    if (client.pump_future) |*pump| pump.cancel(client.io);
     client.stopSessionRemovalReaper();
     client.finishSessionRemovals();
     client.stopSendReaper();
@@ -6733,6 +7664,24 @@ fn deinitTestMessaging(client: *Client) void {
         client.allocator.destroy(session_log);
     }
     client.event_logs.deinit(client.allocator);
+    for (client.pending_remote_cleanups.items) |cleanup| {
+        cleanup.deinit(client.allocator);
+        client.allocator.destroy(cleanup);
+    }
+    client.pending_remote_cleanups.deinit(client.allocator);
+}
+
+fn rollbackExtensionRuntimeForTest(client: *Client) void {
+    client.rollbackExtensionRuntime() catch |err| {
+        std.debug.panic("extension runtime rollback failed: {s}", .{@errorName(err)});
+    };
+}
+
+fn cancelTestFuture(future: *std.Io.Future(anyerror!void)) void {
+    future.cancel(std.testing.io) catch |err| switch (err) {
+        error.Canceled, error.TestTransportStopped => {},
+        else => std.debug.panic("test task failed: {s}", .{@errorName(err)}),
+    };
 }
 
 fn appendTestEvent(
@@ -7119,6 +8068,7 @@ test "session.sendAndWait cleans its message id and returns an owned assistant m
         .writer = &writer,
         .reader_buffer = &.{},
         .writer_buffer = &.{},
+        .ignore_eof = true,
     };
     defer {
         deinitTestMessaging(&client);
@@ -7370,7 +8320,7 @@ test "cancellation after send stops only the local wait" {
             value.cancel(std.testing.io);
         }
     }.run, .{&cancellation});
-    defer _ = cancel_future.cancel(std.testing.io) catch {};
+    defer cancelTestFuture(&cancel_future);
 
     try std.testing.expectError(
         error.Canceled,
@@ -7470,7 +8420,7 @@ test "cancellation covers the pending send RPC" {
             value.cancel(std.testing.io);
         }
     }.run, .{&cancellation});
-    defer _ = cancel_future.cancel(std.testing.io) catch {};
+    defer cancelTestFuture(&cancel_future);
 
     try std.testing.expectError(
         error.Canceled,
@@ -7527,7 +8477,7 @@ test "immediate send writes while another turn waiter is active" {
             if (response) |message| message.deinit(value.client.allocator);
         }
     }.run, .{active_session});
-    defer _ = waiter.cancel(std.testing.io) catch {};
+    defer cancelTestFuture(&waiter);
     try std.Io.sleep(
         std.testing.io,
         std.Io.Duration.fromMilliseconds(5),
@@ -7540,7 +8490,7 @@ test "immediate send writes while another turn waiter is active" {
             value.client.allocator.free(id);
         }
     }.run, .{active_session});
-    defer _ = immediate.cancel(std.testing.io) catch {};
+    defer cancelTestFuture(&immediate);
 
     var request_count: usize = 0;
     for (0..100) |_| {
@@ -7589,7 +8539,7 @@ test "completed send remains owned by its waiter while the reaper runs" {
     };
     try client.send_operations.append(allocator, operation);
     operation.future = std.testing.io.async(struct {
-        fn run() anyerror!void {}
+        fn run() void {}
     }.run, .{});
     operation.completed.set(std.testing.io);
 
@@ -7599,6 +8549,52 @@ test "completed send remains owned by its waiter while the reaper runs" {
         return error.TestExpectedWaiterClaim;
     try client.destroyClaimedSendOperation(claimed);
     try std.testing.expectEqual(@as(usize, 0), client.send_operations.items.len);
+}
+
+test "detached send failures remain observable after reaping" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestMessaging(&client);
+    const log = try client.ensureEventLog("s1");
+    var subscriber = try (Session{
+        .client = &client,
+        .id = "s1",
+        .generation = log.generation,
+    }).subscribe();
+    defer subscriber.deinit();
+    const receipt = try log.reserveTurn(.waited);
+    log.detachTurnWaiter(receipt);
+    const operation = try allocator.create(SendOperation);
+    operation.* = .{
+        .client = &client,
+        .log_lease = try client.acquireEventLog("s1", log.generation, false),
+        .receipt = receipt,
+        .request_id = 1,
+        .request = &.{},
+        .owner = .reaper,
+        .failure = error.TestDetachedSendFailure,
+    };
+    operation.future = std.testing.io.async(struct {
+        fn run() void {}
+    }.run, .{});
+    operation.completed.set(std.testing.io);
+    try client.send_operations.append(allocator, operation);
+
+    client.reapSendOperations();
+
+    try std.testing.expectEqual(@as(usize, 0), client.send_operations.items.len);
+    try std.testing.expectError(
+        error.TestDetachedSendFailure,
+        subscriber.nextEvent(),
+    );
 }
 
 test "failed send admission abandons its waited turn receipt" {
@@ -7692,7 +8688,7 @@ test "detached send lease keeps a closed log alive through a late response" {
             try value.disconnect();
         }
     }.run, .{active_session});
-    defer _ = disconnect_future.cancel(std.testing.io) catch {};
+    defer cancelTestFuture(&disconnect_future);
     var detach_written = false;
     for (0..100) |_| {
         const requests = try tmp.dir.readFileAlloc(
@@ -8049,7 +9045,7 @@ test "resume request preserves omitted and explicitly empty open canvases" {
     );
 }
 
-test "createSession and resumeSession preserve deep partial model capability overrides" {
+test "sequential create and resume responses do not depend on scheduler delay" {
     const allocator = std.testing.allocator;
     const cases = [_]struct {
         capabilities: ?models.CapabilitiesOverride,
@@ -8935,7 +9931,7 @@ test "typed hooks dispatch through a provisional session runtime" {
         .reader_buffer = &.{},
         .writer_buffer = &.{},
     };
-    defer client.rollbackExtensionRuntime();
+    defer rollbackExtensionRuntimeForTest(&client);
     var called = false;
     const handler = struct {
         fn handle(
@@ -8991,7 +9987,7 @@ test "agent stop hook reads the snake-case wire activity flag" {
         .reader_buffer = &.{},
         .writer_buffer = &.{},
     };
-    defer client.rollbackExtensionRuntime();
+    defer rollbackExtensionRuntimeForTest(&client);
     var called = false;
     const handler = struct {
         fn handle(
@@ -9043,7 +10039,7 @@ test "provisional create runtime does not shadow existing sessions" {
         .writer_buffer = &.{},
     };
     defer {
-        client.rollbackExtensionRuntime();
+        rollbackExtensionRuntimeForTest(&client);
         for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
         client.extension_runtimes.deinit(allocator);
     }
@@ -9082,7 +10078,7 @@ test "invalid hook output receives an internal-error response" {
         .reader_buffer = &.{},
         .writer_buffer = &.{},
     };
-    defer client.rollbackExtensionRuntime();
+    defer rollbackExtensionRuntimeForTest(&client);
     const handler = struct {
         fn handle(
             _: std.mem.Allocator,
@@ -9132,7 +10128,7 @@ test "invalid required hook fields receive an invalid-params response" {
         .reader_buffer = &.{},
         .writer_buffer = &.{},
     };
-    defer client.rollbackExtensionRuntime();
+    defer rollbackExtensionRuntimeForTest(&client);
     const handlers = struct {
         fn preTool(
             _: std.mem.Allocator,
@@ -9317,7 +10313,7 @@ test "failed resident resume preserves committed runtime and session id" {
         error.InvalidGrantedEnvironmentVariables,
         client.commitExtensionRuntime("s1", response.value, &.{"TOKEN"}),
     );
-    client.rollbackExtensionRuntime();
+    try client.rollbackExtensionRuntime();
     try std.testing.expectEqual(@as(usize, 1), client.extension_runtimes.items.len);
     try std.testing.expectEqual(@as(usize, 1), client.session_ids.items.len);
     try std.testing.expectEqual(
@@ -9407,21 +10403,24 @@ test "MCP OAuth event interest is retained and released" {
             return .cancelled;
         }
     }.handle;
-    _ = try client.ensureEventLog("s1");
+    try client.ensureEventLogExists("s1");
     try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
         .extensions = .{ .common = .{ .mcp = .{
             .on_auth_request = handler,
         } } },
     }, &.{});
     try client.commitExtensionRuntime("s1", .{}, &.{});
+    try client.registerMcpOAuthInterestForSession(
+        "s1",
+        client.activeGeneration("s1"),
+    );
     const runtime = client.findExtensionRuntime("s1").?;
-    try client.registerMcpOAuthInterest(runtime);
     try std.testing.expectEqualStrings(
         "interest-1",
-        runtime.mcp_oauth_interest_handle.?,
+        runtime.mcp_oauth_interest.?.handle(),
     );
     try client.releaseMcpOAuthInterest(runtime);
-    try std.testing.expect(runtime.mcp_oauth_interest_handle == null);
+    try std.testing.expect(runtime.mcp_oauth_interest == null);
     for (writer_buffer) |byte| {
         try std.testing.expectEqual(@as(u8, 0), byte);
     }
@@ -9452,6 +10451,275 @@ test "MCP OAuth event interest is retained and released" {
             "\"method\":\"session.eventLog.releaseInterest\"",
         ) != null,
     );
+}
+
+test "OAuth handle allocation compensation retains failed releases" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        release_response: []const u8,
+        expected_error: anyerror,
+    }{
+        .{
+            .release_response =
+            \\{"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"failed"}}
+            ,
+            .expected_error = error.JsonRpcError,
+        },
+        .{
+            .release_response =
+            \\{"jsonrpc":"2.0","id":2,"result":{"success":false}}
+            ,
+            .expected_error = error.EventInterestNotReleased,
+        },
+    };
+
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const register_response =
+            \\{"jsonrpc":"2.0","id":1,"result":{"handle":"interest-1"}}
+        ;
+        const responses = try std.fmt.allocPrint(
+            allocator,
+            "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+            .{
+                register_response.len,
+                register_response,
+                case.release_response.len,
+                case.release_response,
+            },
+        );
+        defer allocator.free(responses);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = responses });
+        const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+        defer response_file.close(std.testing.io);
+        var reader_buffer: [1024]u8 = undefined;
+        var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+        const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+        defer request_file.close(std.testing.io);
+        var writer_buffer: [2048]u8 = undefined;
+        var writer = request_file.writer(std.testing.io, &writer_buffer);
+        var client = Client{
+            .allocator = allocator,
+            .io = std.testing.io,
+            .child = null,
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &writer_buffer,
+            .ignore_eof = true,
+            .fail_mcp_oauth_handle_copy = true,
+        };
+        defer deinitTestClientRegistries(&client);
+        try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{}, &.{});
+
+        try std.testing.expectError(
+            case.expected_error,
+            client.installPendingMcpOAuthRegistration(
+                try client.registerMcpOAuthHandle("s1"),
+            ),
+        );
+        const runtime = &client.pending_extension_runtime.?;
+        try std.testing.expectEqualStrings(
+            "interest-1",
+            runtime.mcp_oauth_interest.?.handle(),
+        );
+        switch (runtime.mcp_oauth_interest.?) {
+            .retained => {},
+            .owned => return error.TestExpectedRetainedOAuthInterest,
+        }
+
+        const requests = try tmp.dir.readFileAlloc(
+            std.testing.io,
+            "requests",
+            allocator,
+            .limited(4096),
+        );
+        defer allocator.free(requests);
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(u8, requests, "\"method\":\"session.eventLog.releaseInterest\""),
+        );
+    }
+}
+
+test "stale OAuth registration compensates after disconnect or replacement" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        disconnects: bool,
+        compensation_succeeds: bool,
+    }{
+        .{ .disconnects = true, .compensation_succeeds = true },
+        .{ .disconnects = false, .compensation_succeeds = false },
+    };
+
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = "" });
+        const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+        defer response_file.close(std.testing.io);
+        const response_sink = try tmp.dir.openFile(
+            std.testing.io,
+            "responses",
+            .{ .mode = .write_only },
+        );
+        defer response_sink.close(std.testing.io);
+        var response_buffer: [2048]u8 = undefined;
+        var response_writer = response_sink.writer(std.testing.io, &response_buffer);
+        var reader_buffer: [2048]u8 = undefined;
+        var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+        const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+        defer request_file.close(std.testing.io);
+        var writer_buffer: [4096]u8 = undefined;
+        var writer = request_file.writer(std.testing.io, &writer_buffer);
+        var client = Client{
+            .allocator = allocator,
+            .io = std.testing.io,
+            .child = null,
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &writer_buffer,
+            .ignore_eof = true,
+        };
+        defer deinitTestClientRegistries(&client);
+        const log = try client.ensureEventLog("s1");
+        try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{}, &.{});
+        try client.commitExtensionRuntime("s1", .{}, &.{});
+        client.findExtensionRuntime("s1").?.mcp_auth_handler = struct {
+            fn handle(
+                _: std.mem.Allocator,
+                _: ext.McpAuthRequest,
+                _: ?*anyopaque,
+            ) !ext.McpAuthResult {
+                return .cancelled;
+            }
+        }.handle;
+
+        var registration = std.testing.io.async(struct {
+            fn run(value: *Client, generation: u64) anyerror!void {
+                try value.registerMcpOAuthInterestForSession("s1", generation);
+            }
+        }.run, .{ &client, log.generation });
+        var registration_joined = false;
+        defer if (!registration_joined) cancelTestFuture(&registration);
+        for (0..100) |_| {
+            const requests = try tmp.dir.readFileAlloc(
+                std.testing.io,
+                "requests",
+                allocator,
+                .limited(8192),
+            );
+            const registered =
+                std.mem.indexOf(u8, requests, "\"method\":\"session.eventLog.registerInterest\"") != null;
+            allocator.free(requests);
+            if (registered) break;
+            try std.Io.sleep(
+                std.testing.io,
+                std.Io.Duration.fromMilliseconds(1),
+                .awake,
+            );
+        } else return error.TestRegisterInterestNotWritten;
+
+        if (case.disconnects) {
+            try client.session_ids.append(allocator, try allocator.dupe(u8, "s1"));
+            var disconnect = std.testing.io.async(struct {
+                fn run(session: Session) anyerror!void {
+                    try session.disconnect();
+                }
+            }.run, .{Session{
+                .client = &client,
+                .id = "s1",
+                .generation = log.generation,
+            }});
+            var disconnect_joined = false;
+            defer if (!disconnect_joined) cancelTestFuture(&disconnect);
+            for (0..100) |_| {
+                const requests = try tmp.dir.readFileAlloc(
+                    std.testing.io,
+                    "requests",
+                    allocator,
+                    .limited(8192),
+                );
+                const detached =
+                    std.mem.indexOf(u8, requests, "\"method\":\"session.detach\"") != null;
+                allocator.free(requests);
+                if (detached) break;
+                try std.Io.sleep(
+                    std.testing.io,
+                    std.Io.Duration.fromMilliseconds(1),
+                    .awake,
+                );
+            } else return error.TestDetachRequestNotWritten;
+            try json_rpc.writeFrame(&response_writer.interface,
+                \\{"jsonrpc":"2.0","id":2,"result":{"success":true}}
+            );
+            try response_writer.interface.flush();
+            try disconnect.await(std.testing.io);
+            disconnect_joined = true;
+        } else {
+            try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{}, &.{});
+            try client.commitExtensionRuntime("s1", .{}, &.{});
+        }
+
+        try json_rpc.writeFrame(&response_writer.interface,
+            \\{"jsonrpc":"2.0","id":1,"result":{"handle":"interest-1"}}
+        );
+        try response_writer.interface.flush();
+        for (0..100) |_| {
+            const requests = try tmp.dir.readFileAlloc(
+                std.testing.io,
+                "requests",
+                allocator,
+                .limited(8192),
+            );
+            const released =
+                std.mem.indexOf(u8, requests, "\"method\":\"session.eventLog.releaseInterest\"") != null;
+            allocator.free(requests);
+            if (released) break;
+            try std.Io.sleep(
+                std.testing.io,
+                std.Io.Duration.fromMilliseconds(1),
+                .awake,
+            );
+        } else return error.TestReleaseInterestNotWritten;
+
+        try json_rpc.writeFrame(&response_writer.interface, if (case.compensation_succeeds)
+            \\{"jsonrpc":"2.0","id":3,"result":{"success":true}}
+        else
+            \\{"jsonrpc":"2.0","id":2,"result":{"success":false}}
+        );
+        try response_writer.interface.flush();
+
+        if (case.compensation_succeeds) {
+            try registration.await(std.testing.io);
+            registration_joined = true;
+            try std.testing.expectEqual(@as(usize, 0), client.pending_remote_cleanups.items.len);
+        } else {
+            try std.testing.expectError(
+                error.EventInterestNotReleased,
+                registration.await(std.testing.io),
+            );
+            registration_joined = true;
+            try std.testing.expectEqual(@as(usize, 1), client.pending_remote_cleanups.items.len);
+            try std.testing.expectEqualStrings(
+                "interest-1",
+                client.pending_remote_cleanups.items[0].oauth_interest.?.handle(),
+            );
+            try json_rpc.writeFrame(&response_writer.interface,
+                \\{"jsonrpc":"2.0","id":3,"result":{"success":true}}
+            );
+            try response_writer.interface.flush();
+            try client.retryPendingCleanup();
+            try std.testing.expectEqual(@as(usize, 0), client.pending_remote_cleanups.items.len);
+        }
+        if (case.disconnects) {
+            try std.testing.expect(client.findExtensionRuntime("s1") == null);
+        } else {
+            try std.testing.expect(client.findExtensionRuntime("s1").?.mcp_oauth_interest == null);
+        }
+    }
 }
 
 test "OAuth registration does not hold the registry mutex while waiting" {
@@ -9536,7 +10804,7 @@ test "OAuth registration does not hold the registry mutex while waiting" {
     try std.testing.expect(hook_called);
     try std.testing.expectEqualStrings(
         "interest-1",
-        client.findExtensionRuntime("s1").?.mcp_oauth_interest_handle.?,
+        client.findExtensionRuntime("s1").?.mcp_oauth_interest.?.handle(),
     );
     const requests = try tmp.dir.readFileAlloc(
         std.testing.io,
@@ -9614,10 +10882,10 @@ test "OAuth rollback does not hold the registry mutex while waiting" {
     }, &.{});
     try client.commitExtensionRuntime("s1", .{}, &.{});
     try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{}, &.{});
-    client.pending_extension_runtime.?.mcp_oauth_interest_handle =
-        try allocator.dupe(u8, "interest-1");
+    client.pending_extension_runtime.?.mcp_oauth_interest =
+        .{ .owned = try allocator.dupe(u8, "interest-1") };
 
-    client.rollbackExtensionRuntime();
+    try client.rollbackExtensionRuntime();
 
     try std.testing.expect(hook_called);
     try std.testing.expect(client.pending_extension_runtime == null);
@@ -9629,6 +10897,58 @@ test "OAuth rollback does not hold the registry mutex while waiting" {
     );
     defer allocator.free(requests);
     try std.testing.expect(std.mem.indexOf(u8, requests, "\"id\":901,\"result\"") != null);
+}
+
+test "failed OAuth rollback retains the pending runtime and interest handle" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const release_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"success":false}}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ release_response.len, release_response },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = responses });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+        .ignore_eof = true,
+    };
+    defer deinitTestMessaging(&client);
+    try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{}, &.{});
+    client.pending_extension_runtime.?.mcp_oauth_interest =
+        .{ .owned = try allocator.dupe(u8, "interest-1") };
+
+    try std.testing.expectError(
+        error.EventInterestNotReleased,
+        client.rollbackExtensionRuntime(),
+    );
+    try std.testing.expect(client.pending_extension_runtime != null);
+    try std.testing.expectEqualStrings(
+        "interest-1",
+        client.pending_extension_runtime.?.mcp_oauth_interest.?.handle(),
+    );
+
+    client.pending_extension_runtime.?.mcp_oauth_interest.?.deinit(allocator);
+    client.pending_extension_runtime.?.mcp_oauth_interest = null;
+    try client.rollbackExtensionRuntime();
 }
 
 test "disconnect releases OAuth interest before detaching" {
@@ -9955,7 +11275,7 @@ test "an unrelated active callback does not defer disconnect or same-id reuse" {
         .{},
         &.{},
     );
-    _ = try client.ensureEventLog("callback-session");
+    try client.ensureEventLogExists("callback-session");
     const disconnect_log = try client.ensureEventLog("disconnect-session");
     const handler = struct {
         fn handle(
@@ -10131,7 +11451,7 @@ test "old-generation admitted callbacks retain old state without blocking new di
             try session.processEvent(log, event);
         }
     }.run, .{ old_session, old_log, &second });
-    defer _ = old_callback.cancel(std.testing.io) catch {};
+    defer cancelTestFuture(&old_callback);
     try old_state.second_started.wait(std.testing.io);
     try std.testing.expectEqual(@as(usize, 2), old_state.call_count);
     try std.testing.expect(!new_called);
@@ -10141,7 +11461,7 @@ test "old-generation admitted callbacks retain old state without blocking new di
             try session.disconnect();
         }
     }.run, .{new_session});
-    defer _ = new_disconnect.cancel(std.testing.io) catch {};
+    defer cancelTestFuture(&new_disconnect);
     for (0..100) |_| {
         const requests = try tmp.dir.readFileAlloc(
             std.testing.io,
@@ -10257,6 +11577,92 @@ test "failed detach preserves events received during the attempt" {
     try std.testing.expect(log.isAcceptingIngress());
 }
 
+test "failed detach retains OAuth restoration failure without masking detach" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const release_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"success":true}}
+    ;
+    const first_detach =
+        \\{"jsonrpc":"2.0","id":2,"result":{"success":false,"error":"busy"}}
+    ;
+    const second_detach =
+        \\{"jsonrpc":"2.0","id":3,"result":{"success":false,"error":"busy"}}
+    ;
+    const register_failure =
+        \\{"jsonrpc":"2.0","id":4,"error":{"code":-32603,"message":"failed"}}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            release_response.len,
+            release_response,
+            first_detach.len,
+            first_detach,
+            second_detach.len,
+            second_detach,
+            register_failure.len,
+            register_failure,
+        },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = responses });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [2048]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+        .ignore_eof = true,
+    };
+    defer {
+        deinitTestMessaging(&client);
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+        for (client.session_ids.items) |id| allocator.free(id);
+        client.session_ids.deinit(allocator);
+    }
+    try client.ensureEventLogExists("s1");
+    try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{}, &.{});
+    try client.commitExtensionRuntime("s1", .{}, &.{});
+    const runtime = client.findExtensionRuntime("s1").?;
+    runtime.mcp_auth_handler = struct {
+        fn handle(
+            _: std.mem.Allocator,
+            _: ext.McpAuthRequest,
+            _: ?*anyopaque,
+        ) !ext.McpAuthResult {
+            return .cancelled;
+        }
+    }.handle;
+    runtime.mcp_oauth_interest = .{ .owned = try allocator.dupe(u8, "interest-1") };
+    try client.session_ids.append(allocator, try allocator.dupe(u8, "s1"));
+    const log = client.findEventLog("s1").?;
+    const session = Session{
+        .client = &client,
+        .id = "s1",
+        .generation = log.generation,
+    };
+
+    try std.testing.expectError(error.SessionDetachFailed, session.disconnect());
+    try std.testing.expectEqual(error.JsonRpcError, client.pump_failure.?);
+    try std.testing.expect(client.findSessionId("s1") != null);
+    try std.testing.expect(client.findExtensionRuntime("s1") != null);
+    try std.testing.expect(log.isAcceptingIngress());
+}
+
 test "client teardown releases OAuth interests before event storage" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -10307,10 +11713,288 @@ test "client teardown releases OAuth interests before event storage" {
         &.{},
     );
     try client.commitExtensionRuntime("s1", .{}, &.{});
-    client.findExtensionRuntime("s1").?.mcp_oauth_interest_handle =
-        try allocator.dupe(u8, "interest-1");
+    client.findExtensionRuntime("s1").?.mcp_oauth_interest =
+        .{ .owned = try allocator.dupe(u8, "interest-1") };
 
     client.deinit();
+}
+
+test "remote cleanup owner blocks teardown drain until ownership releases" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer client.pending_remote_cleanups.deinit(allocator);
+    const cleanup = try client.prepareRemoteCleanup("remote", false);
+    cleanup.detach_required = true;
+
+    const Wait = struct {
+        fn run(owner: *Client, started: *std.Io.Event, finished: *std.Io.Event) void {
+            started.set(owner.io);
+            const drained = owner.waitForRemoteCleanupOwners(null, false) catch {
+                @panic("remote cleanup owner wait failed");
+            };
+            if (!drained) {
+                @panic("remote cleanup owner wait failed");
+            }
+            finished.set(owner.io);
+        }
+    };
+    var started: std.Io.Event = .unset;
+    var finished: std.Io.Event = .unset;
+    var waiter = std.testing.io.async(Wait.run, .{ &client, &started, &finished });
+    var waiter_joined = false;
+    defer if (!waiter_joined) waiter.cancel(std.testing.io);
+    started.waitUncancelable(std.testing.io);
+    try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake);
+    try std.testing.expect(!finished.isSet());
+
+    client.makeRemoteCleanupRetryable(cleanup);
+    waiter.await(std.testing.io);
+    waiter_joined = true;
+    try std.testing.expect(finished.isSet());
+    client.remote_cleanup_mutex.lockUncancelable(std.testing.io);
+    client.remote_cleanup_closing = true;
+    client.remote_cleanup_mutex.unlock(std.testing.io);
+    try std.testing.expectError(error.ClientDeinitialized, client.retryPendingCleanup());
+    client.discardRemoteCleanup(cleanup);
+}
+
+test "canceling a shutdown owner wait releases selector tasks" {
+    var client = Client{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+        .active_lifecycle_operations = 1,
+    };
+    const Wait = struct {
+        fn run(owner: *Client) anyerror!void {
+            _ = try owner.waitForRemoteCleanupOwners(
+                std.Io.Clock.Timestamp.fromNow(owner.io, .{
+                    .raw = std.Io.Duration.fromSeconds(30),
+                    .clock = .awake,
+                }),
+                false,
+            );
+        }
+    };
+    var waiter = std.testing.io.async(Wait.run, .{&client});
+    try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake);
+    cancelTestFuture(&waiter);
+    client.endLifecycleOperation();
+}
+
+test "deinit waits for lifecycle owner admitted before cleanup preparation" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = "" });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    const reader_buffer = try allocator.alloc(u8, 128);
+    const writer_buffer = try allocator.alloc(u8, 128);
+    const reader = try allocator.create(std.Io.File.Reader);
+    const writer = try allocator.create(std.Io.File.Writer);
+    reader.* = response_file.readerStreaming(std.testing.io, reader_buffer);
+    writer.* = request_file.writer(std.testing.io, writer_buffer);
+    const client = try allocator.create(Client);
+    client.* = .{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = reader,
+        .writer = writer,
+        .reader_buffer = reader_buffer,
+        .writer_buffer = writer_buffer,
+    };
+
+    try client.beginLifecycleOperation();
+    try client.admitOwnedSessionIdForLifecycle(try allocator.dupe(u8, "admitted"));
+    const Deinit = struct {
+        fn run(target: *Client, finished: *std.Io.Event) void {
+            target.deinit();
+            finished.set(std.testing.io);
+        }
+    };
+    var finished: std.Io.Event = .unset;
+    var deinit_future = std.testing.io.async(Deinit.run, .{ client, &finished });
+    var deinit_joined = false;
+    defer if (!deinit_joined) deinit_future.cancel(std.testing.io);
+
+    client.lifecycle_admission_closed.waitUncancelable(std.testing.io);
+    client.remote_cleanup_mutex.lockUncancelable(std.testing.io);
+    const closing = client.remote_cleanup_closing;
+    client.remote_cleanup_mutex.unlock(std.testing.io);
+    try std.testing.expect(closing);
+    try std.testing.expect(!finished.isSet());
+
+    const cleanup = try client.prepareLifecycleRemoteCleanup("admitted", true);
+    client.discardRemoteCleanup(cleanup);
+    client.endLifecycleOperation();
+    deinit_future.await(std.testing.io);
+    deinit_joined = true;
+    try std.testing.expect(finished.isSet());
+    allocator.destroy(client);
+}
+
+test "lifecycle and session admission reject after deinit closes the gate" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+        .remote_cleanup_closing = true,
+    };
+    defer client.session_ids.deinit(allocator);
+
+    try std.testing.expectError(
+        error.ClientDeinitialized,
+        client.createSession(.{ .session_id = "create-after-close" }),
+    );
+    try std.testing.expectError(
+        error.ClientDeinitialized,
+        client.resumeSession("resume-after-close", .{}),
+    );
+    try std.testing.expectError(
+        error.ClientDeinitialized,
+        client.joinParentSession("join-after-close", .{}),
+    );
+    try std.testing.expectError(
+        error.ClientDeinitialized,
+        client.admitOwnedSessionId(try allocator.dupe(u8, "admit-after-close")),
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.active_lifecycle_operations);
+}
+
+test "shutdown reports cleanup failure and retains it for retry" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const first_failure =
+        \\{"jsonrpc":"2.0","id":1,"result":{"success":false,"error":"busy"}}
+    ;
+    const second_failure =
+        \\{"jsonrpc":"2.0","id":2,"result":{"success":false,"error":"busy"}}
+    ;
+    const retry_success =
+        \\{"jsonrpc":"2.0","id":3,"result":{"success":true}}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            first_failure.len,
+            first_failure,
+            second_failure.len,
+            second_failure,
+            retry_success.len,
+            retry_success,
+        },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "responses",
+        .data = responses,
+    });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    const reader_buffer = try allocator.alloc(u8, 1024);
+    const writer_buffer = try allocator.alloc(u8, 1024);
+    const reader = try allocator.create(std.Io.File.Reader);
+    const writer = try allocator.create(std.Io.File.Writer);
+    reader.* = response_file.readerStreaming(std.testing.io, reader_buffer);
+    writer.* = request_file.writer(std.testing.io, writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = reader,
+        .writer = writer,
+        .reader_buffer = reader_buffer,
+        .writer_buffer = writer_buffer,
+        .ignore_eof = true,
+    };
+    defer client.deinit();
+    const cleanup = try client.prepareRemoteCleanup("remote", false);
+    cleanup.detach_required = true;
+    client.makeRemoteCleanupRetryable(cleanup);
+
+    try std.testing.expectError(error.SessionDetachFailed, client.shutdown());
+    try std.testing.expectEqual(@as(usize, 1), client.pending_remote_cleanups.items.len);
+    try std.testing.expect(!client.shutdown_complete);
+    try client.shutdown();
+    try std.testing.expectEqual(@as(usize, 0), client.pending_remote_cleanups.items.len);
+    try std.testing.expect(client.shutdown_complete);
+    try std.testing.expectError(
+        error.ClientDeinitialized,
+        client.callRpc(std.json.Value, "test.afterShutdown", .{}),
+    );
+    try std.testing.expect(client.pump_future == null);
+}
+
+test "shutdown wakes and drains a blocked event consumer" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = "" });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    const reader_buffer = try allocator.alloc(u8, 128);
+    const writer_buffer = try allocator.alloc(u8, 128);
+    const reader = try allocator.create(std.Io.File.Reader);
+    const writer = try allocator.create(std.Io.File.Writer);
+    reader.* = response_file.readerStreaming(std.testing.io, reader_buffer);
+    writer.* = request_file.writer(std.testing.io, writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = reader,
+        .writer = writer,
+        .reader_buffer = reader_buffer,
+        .writer_buffer = writer_buffer,
+    };
+    defer client.deinit();
+    const log = try client.ensureEventLog("session");
+    const session = Session{
+        .client = &client,
+        .id = "session",
+        .generation = log.generation,
+    };
+    const Wait = struct {
+        fn run(target: Session) anyerror!void {
+            try std.testing.expectError(error.SessionDisconnected, target.nextEvent());
+        }
+    };
+    var waiter = std.testing.io.async(Wait.run, .{session});
+    var waiter_joined = false;
+    defer if (!waiter_joined) cancelTestFuture(&waiter);
+    client.remote_cleanup_changed.waitUncancelable(std.testing.io);
+
+    try client.shutdown();
+    try waiter.await(std.testing.io);
+    waiter_joined = true;
 }
 
 test "transport buffer teardown wipes reader and writer storage" {
@@ -10403,7 +12087,7 @@ test "zero OAuth token lifetime cancels the pending request" {
             } };
         }
     }.handle;
-    _ = try client.ensureEventLog("s1");
+    try client.ensureEventLogExists("s1");
     try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
         .extensions = .{ .common = .{ .mcp = .{
             .on_auth_request = handler,
@@ -10633,7 +12317,7 @@ test "session.event notifications retain owned data by session" {
         .{},
     );
     defer parsed.deinit();
-    _ = try client.ensureEventLog("s1");
+    try client.ensureEventLogExists("s1");
     try client.queueSessionEvent(parsed.value);
 
     const session_log = client.findEventLog("s1").?;
@@ -12107,13 +13791,21 @@ test "create rejects a mismatched runtime session id and rolls back" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const body =
+    const lifecycle_response =
         \\{"jsonrpc":"2.0","id":1,"result":{"sessionId":"different"}}
+    ;
+    const detach_response =
+        \\{"jsonrpc":"2.0","id":2,"result":{"success":true}}
     ;
     const response = try std.fmt.allocPrint(
         allocator,
-        "Content-Length: {d}\r\n\r\n{s}",
-        .{ body.len, body },
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            lifecycle_response.len,
+            lifecycle_response,
+            detach_response.len,
+            detach_response,
+        },
     );
     defer allocator.free(response);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = response });
@@ -12133,6 +13825,7 @@ test "create rejects a mismatched runtime session id and rolls back" {
         .writer = &writer,
         .reader_buffer = &.{},
         .writer_buffer = &.{},
+        .ignore_eof = true,
     };
     defer deinitTestClientRegistries(&client);
 
@@ -12145,6 +13838,454 @@ test "create rejects a mismatched runtime session id and rolls back" {
     }));
     try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
     try std.testing.expectEqual(@as(usize, 0), client.provider_tokens.items.len);
+}
+
+test "malformed create and new resume responses detach the remote session" {
+    const allocator = std.testing.allocator;
+    const operations = [_]bool{ false, true };
+    for (operations) |is_resume| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const lifecycle_response =
+            \\{"jsonrpc":"2.0","id":1,"result":{}}
+        ;
+        const detach_response =
+            \\{"jsonrpc":"2.0","id":2,"result":{"success":true}}
+        ;
+        const response = try std.fmt.allocPrint(
+            allocator,
+            "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+            .{
+                lifecycle_response.len,
+                lifecycle_response,
+                detach_response.len,
+                detach_response,
+            },
+        );
+        defer allocator.free(response);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = response });
+        const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+        defer response_file.close(std.testing.io);
+        var reader_buffer: [1024]u8 = undefined;
+        var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+        const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+        defer request_file.close(std.testing.io);
+        var writer_buffer: [2048]u8 = undefined;
+        var writer = request_file.writer(std.testing.io, &writer_buffer);
+        var client = Client{
+            .allocator = allocator,
+            .io = std.testing.io,
+            .child = null,
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &writer_buffer,
+            .ignore_eof = true,
+        };
+        defer deinitTestClientRegistries(&client);
+
+        if (is_resume) {
+            try std.testing.expectError(
+                error.MissingSessionId,
+                client.resumeSession("requested", .{}),
+            );
+        } else {
+            try std.testing.expectError(
+                error.MissingSessionId,
+                client.createSession(.{ .session_id = "requested" }),
+            );
+        }
+        try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            client.pending_remote_cleanups.items.len,
+        );
+        const requests = try tmp.dir.readFileAlloc(
+            std.testing.io,
+            "request",
+            allocator,
+            .limited(8192),
+        );
+        defer allocator.free(requests);
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(u8, requests, "\"method\":\"session.detach\""),
+        );
+        try std.testing.expect(std.mem.containsAtLeast(
+            u8,
+            requests,
+            1,
+            "\"sessionId\":\"requested\"",
+        ));
+    }
+}
+
+test "malformed resident resume response preserves the existing session" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const lifecycle_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{}}
+    ;
+    const response = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{
+            lifecycle_response.len,
+            lifecycle_response,
+        },
+    );
+    defer allocator.free(response);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = response });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+        .ignore_eof = true,
+    };
+    defer deinitTestClientRegistries(&client);
+    try client.ensureEventLogExists("resident");
+    try client.beginExtensionRuntime(
+        "resident",
+        session_types.ResumeSessionConfig{},
+        &.{},
+    );
+    try client.commitExtensionRuntime("resident", .{}, &.{});
+    try client.session_ids.append(allocator, try allocator.dupe(u8, "resident"));
+    const runtime_id = client.findExtensionRuntime("resident").?.runtime_id;
+
+    try std.testing.expectError(
+        error.MissingSessionId,
+        client.resumeSession("resident", .{}),
+    );
+    try std.testing.expect(client.findSessionId("resident") != null);
+    try std.testing.expectEqual(
+        runtime_id,
+        client.findExtensionRuntime("resident").?.runtime_id,
+    );
+    try std.testing.expect(client.pending_extension_runtime == null);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_remote_cleanups.items.len);
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "request",
+        allocator,
+        .limited(8192),
+    );
+    defer allocator.free(requests);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        std.mem.count(u8, requests, "\"method\":\"session.detach\""),
+    );
+}
+
+test "malformed secondary lifecycle field detaches returned remote session id" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const lifecycle_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"sessionId":"different","capabilities":42}}
+    ;
+    const detach_response =
+        \\{"jsonrpc":"2.0","id":2,"result":{"success":true}}
+    ;
+    const response = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            lifecycle_response.len,
+            lifecycle_response,
+            detach_response.len,
+            detach_response,
+        },
+    );
+    defer allocator.free(response);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = response });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+        .ignore_eof = true,
+    };
+    defer deinitTestClientRegistries(&client);
+
+    try std.testing.expectError(
+        error.UnexpectedToken,
+        client.createSession(.{ .session_id = "requested" }),
+    );
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "request",
+        allocator,
+        .limited(8192),
+    );
+    defer allocator.free(requests);
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        requests,
+        1,
+        "\"method\":\"session.detach\",\"params\":{\"sessionId\":\"different\"}",
+    ));
+    try std.testing.expect(!std.mem.containsAtLeast(
+        u8,
+        requests,
+        1,
+        "\"method\":\"session.detach\",\"params\":{\"sessionId\":\"requested\"}",
+    ));
+}
+
+test "malformed create retains cleanup when detach fails" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const lifecycle_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{}}
+    ;
+    const first_detach_failure =
+        \\{"jsonrpc":"2.0","id":2,"result":{"success":false,"error":"busy"}}
+    ;
+    const second_detach_failure =
+        \\{"jsonrpc":"2.0","id":3,"result":{"success":false,"error":"busy"}}
+    ;
+    const retry_success =
+        \\{"jsonrpc":"2.0","id":4,"result":{"success":true}}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            lifecycle_response.len,
+            lifecycle_response,
+            first_detach_failure.len,
+            first_detach_failure,
+            second_detach_failure.len,
+            second_detach_failure,
+            retry_success.len,
+            retry_success,
+        },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = responses });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+        .ignore_eof = true,
+    };
+    defer deinitTestClientRegistries(&client);
+
+    try std.testing.expectError(
+        error.SessionDetachFailed,
+        client.createSession(.{ .session_id = "requested" }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), client.pending_remote_cleanups.items.len);
+    try std.testing.expectEqualStrings(
+        "requested",
+        client.pending_remote_cleanups.items[0].remote_session_id.value(),
+    );
+    try std.testing.expect(client.findSessionId("requested") != null);
+    try client.retryPendingCleanup();
+    try std.testing.expectEqual(@as(usize, 0), client.pending_remote_cleanups.items.len);
+    try std.testing.expect(client.findSessionId("requested") == null);
+}
+
+test "failed post-create detach wins and preserves local lifecycle state" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const lifecycle_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"sessionId":"different"}}
+    ;
+    const detach_failure =
+        \\{"jsonrpc":"2.0","id":2,"result":{"success":false,"error":"busy"}}
+    ;
+    const detach_retry_failure =
+        \\{"jsonrpc":"2.0","id":3,"result":{"success":false,"error":"busy"}}
+    ;
+    const cleanup_success =
+        \\{"jsonrpc":"2.0","id":4,"result":{"success":true}}
+    ;
+    const response = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            lifecycle_response.len,
+            lifecycle_response,
+            detach_failure.len,
+            detach_failure,
+            detach_retry_failure.len,
+            detach_retry_failure,
+            cleanup_success.len,
+            cleanup_success,
+        },
+    );
+    defer allocator.free(response);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = response });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+        .ignore_eof = true,
+    };
+    defer deinitTestClientRegistries(&client);
+
+    try std.testing.expectError(
+        error.SessionDetachFailed,
+        client.createSession(.{ .session_id = "requested" }),
+    );
+    try std.testing.expect(client.findSessionId("requested") != null);
+    try std.testing.expect(client.pending_extension_runtime != null);
+    try std.testing.expect(client.findEventLog("requested") != null);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_remote_cleanups.items.len);
+    try std.testing.expectEqualStrings(
+        "different",
+        client.pending_remote_cleanups.items[0].remote_session_id.value(),
+    );
+
+    try std.testing.expectError(
+        error.RemoteSessionIdAlreadyActive,
+        client.admitOwnedSessionId(try allocator.dupe(u8, "different")),
+    );
+    try client.session_ids.append(allocator, try allocator.dupe(u8, "different"));
+    try std.testing.expectError(
+        error.RemoteSessionIdAlreadyActive,
+        client.retryPendingCleanup(),
+    );
+    try std.testing.expectEqual(@as(usize, 1), client.pending_remote_cleanups.items.len);
+    client.removeSession("different");
+    try client.retryPendingCleanup();
+    try std.testing.expectEqual(@as(usize, 0), client.pending_remote_cleanups.items.len);
+    try std.testing.expect(client.findSessionId("requested") == null);
+    try std.testing.expect(client.pending_extension_runtime == null);
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "request",
+        allocator,
+        .limited(8192),
+    );
+    defer allocator.free(requests);
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        std.mem.count(u8, requests, "\"sessionId\":\"different\""),
+    );
+}
+
+test "failed post-resume detach wins and preserves local lifecycle state" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const lifecycle_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"sessionId":"different"}}
+    ;
+    const detach_failure =
+        \\{"jsonrpc":"2.0","id":2,"result":{"success":false,"error":"busy"}}
+    ;
+    const detach_retry_failure =
+        \\{"jsonrpc":"2.0","id":3,"result":{"success":false,"error":"busy"}}
+    ;
+    const cleanup_success =
+        \\{"jsonrpc":"2.0","id":4,"result":{"success":true}}
+    ;
+    const response = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            lifecycle_response.len,
+            lifecycle_response,
+            detach_failure.len,
+            detach_failure,
+            detach_retry_failure.len,
+            detach_retry_failure,
+            cleanup_success.len,
+            cleanup_success,
+        },
+    );
+    defer allocator.free(response);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = response });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+        .ignore_eof = true,
+    };
+    defer deinitTestClientRegistries(&client);
+
+    try std.testing.expectError(
+        error.SessionDetachFailed,
+        client.resumeSession("requested", .{}),
+    );
+    try std.testing.expect(client.findSessionId("requested") != null);
+    try std.testing.expect(client.pending_extension_runtime != null);
+    try std.testing.expect(client.findEventLog("requested") != null);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_remote_cleanups.items.len);
+    try std.testing.expectEqualStrings(
+        "different",
+        client.pending_remote_cleanups.items[0].remote_session_id.value(),
+    );
+
+    try client.retryPendingCleanup();
+    try std.testing.expectEqual(@as(usize, 0), client.pending_remote_cleanups.items.len);
+    try std.testing.expect(client.findSessionId("requested") == null);
+    try std.testing.expect(client.pending_extension_runtime == null);
 }
 
 test "disconnect removes provider token registrations" {

@@ -134,13 +134,14 @@ pub const EventLog = struct {
         self.operation_references -= 1;
     }
 
-    pub fn retainCallback(self: *EventLog, admitted: bool) !void {
-        try self.mutex.lock(self.io);
+    pub fn retainCallback(self: *EventLog, admitted: bool) bool {
+        self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (!admitted and (!self.accepting_ingress or self.is_closed))
-            return error.SessionDisconnected;
+            return false;
         self.active_callbacks += 1;
         self.callbacks_drained.reset();
+        return true;
     }
 
     pub fn releaseCallback(self: *EventLog) void {
