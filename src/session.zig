@@ -444,6 +444,7 @@ pub const JoinSessionConfig = struct {
 /// Use `CreateSessionConfig` in new code.
 pub const SessionConfig = CreateSessionConfig;
 
+/// Options for all send, sendDetailed, sendAndWait, and sendAndWaitDetailed variants.
 /// Message options borrow all caller-provided data until the call returns.
 /// No deinit is required.
 pub const MessageOptions = struct {
@@ -988,9 +989,12 @@ pub fn cloneEvent(
             .arena = arena,
         } };
     };
-    if (event == .permission_requested) {
-        cloned.permission_requested.automatic_handling =
-            event.permission_requested.automatic_handling;
+    switch (event) {
+        .command_execute => |value| cloned.command_execute.automatic_handling = value.automatic_handling,
+        .elicitation_requested => |value| cloned.elicitation_requested.automatic_handling = value.automatic_handling,
+        .mcp_oauth_required => |value| cloned.mcp_oauth_required.automatic_handling = value.automatic_handling,
+        .permission_requested => |value| cloned.permission_requested.automatic_handling = value.automatic_handling,
+        else => {},
     }
     return cloned;
 }

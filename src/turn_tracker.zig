@@ -97,6 +97,15 @@ pub const TurnTracker = struct {
         return error.TooManyOutstandingTurns;
     }
 
+    pub fn hasActiveReceipts(self: *TurnTracker) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        for (self.receipts) |receipt| {
+            if (receipt.active) return true;
+        }
+        return false;
+    }
+
     pub fn bindMessageId(
         self: *TurnTracker,
         token: ReceiptToken,
@@ -201,6 +210,12 @@ pub const TurnTracker = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.terminal_error == null) self.terminal_error = err;
+        self.failAllLocked(err);
+    }
+
+    pub fn failActive(self: *TurnTracker, err: anyerror) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         self.failAllLocked(err);
     }
 
@@ -502,6 +517,29 @@ test "unrelated completed turns are bounded and do not fail active waits" {
     try std.testing.expectEqualStrings("three", message.content);
     try std.testing.expectEqual(@as(usize, 0), tracker.orphan_users.items.len);
     try std.testing.expectEqual(@as(usize, 0), tracker.orphan_turns.items.len);
+}
+
+test "failing active receipts does not reject future reservations" {
+    var tracker = try TurnTracker.init(
+        std.testing.allocator,
+        std.testing.io,
+        2,
+        2,
+    );
+    defer tracker.deinit();
+
+    const failed = try tracker.reserve(.waited);
+    tracker.failActive(error.CopilotSessionError);
+    switch (try tracker.inspect(failed)) {
+        .failure => |err| try std.testing.expectEqual(
+            error.CopilotSessionError,
+            err,
+        ),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const next = try tracker.reserve(.raw);
+    tracker.abandon(next);
 }
 
 test "conflicting raw turn correlation releases its receipt" {

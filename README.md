@@ -206,7 +206,7 @@ var event = try observer.nextEvent();
 defer event.deinit(allocator);
 ```
 
-Each subscriber starts after the events retained when `subscribe` runs. A slow
+A subscription receives events appended after `subscribe` returns. A slow
 subscriber receives `error.EventLogOverflow` once, then resumes at the oldest
 retained event.
 

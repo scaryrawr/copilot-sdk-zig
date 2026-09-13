@@ -16,6 +16,11 @@ pub const ReadAction = union(enum) {
     closed,
 };
 
+pub const DetailedReceiptRead = struct {
+    read: turn_tracker.ReceiptRead,
+    failure: ?errors.Failure = null,
+};
+
 const Entry = struct {
     sequence: u64,
     event: session.SessionEvent,
@@ -42,6 +47,7 @@ pub const EventLog = struct {
     next_sequence: u64 = 0,
     terminal_error: ?anyerror = null,
     terminal_detail: ?errors.Failure = null,
+    turn_failure_detail: ?errors.Failure = null,
     accepting_ingress: bool = true,
     ingress_count: usize = 0,
     operation_references: usize = 0,
@@ -88,6 +94,7 @@ pub const EventLog = struct {
         }
         self.tracker.deinit();
         if (self.terminal_detail) |*failure| failure.deinit();
+        if (self.turn_failure_detail) |*failure| failure.deinit();
         self.allocator.free(self.session_id);
         self.allocator.free(self.entries);
         self.allocator.free(self.subscribers);
@@ -149,6 +156,12 @@ pub const EventLog = struct {
         self: *EventLog,
         kind: turn_tracker.ReceiptKind,
     ) !turn_tracker.ReceiptToken {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (!self.tracker.hasActiveReceipts()) {
+            if (self.turn_failure_detail) |*failure| failure.deinit();
+            self.turn_failure_detail = null;
+        }
         return self.tracker.reserve(kind);
     }
 
@@ -184,6 +197,22 @@ pub const EventLog = struct {
         token: turn_tracker.ReceiptToken,
     ) !turn_tracker.ReceiptRead {
         return self.tracker.inspect(token);
+    }
+
+    pub fn inspectTurnDetailed(
+        self: *EventLog,
+        token: turn_tracker.ReceiptToken,
+    ) !DetailedReceiptRead {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const read = try self.tracker.inspect(token);
+        return .{
+            .read = read,
+            .failure = if (read == .failure)
+                try self.cloneDetailedFailureLocked()
+            else
+                null,
+        };
     }
 
     pub fn observeTurnEvent(
@@ -316,6 +345,8 @@ pub const EventLog = struct {
         self.terminal_error = err;
         if (self.terminal_detail) |*failure| failure.deinit();
         self.terminal_detail = null;
+        if (self.turn_failure_detail) |*failure| failure.deinit();
+        self.turn_failure_detail = null;
         const fail_tracker = self.ingress_count == 0;
         if (fail_tracker) for (self.subscribers) |*subscriber| {
             if (subscriber.active) subscriber.ready.set(self.io);
@@ -342,10 +373,29 @@ pub const EventLog = struct {
         if (fail_tracker) self.tracker.failAll(native_error);
     }
 
+    pub fn failTurnsDetailed(self: *EventLog, failure_value: errors.Failure) void {
+        const native_error = failure_value.native_error;
+        self.mutex.lockUncancelable(self.io);
+        if (self.turn_failure_detail) |*failure| failure.deinit();
+        self.turn_failure_detail = failure_value;
+        self.tracker.failActive(native_error);
+        self.mutex.unlock(self.io);
+    }
+
     pub fn detailedFailure(self: *EventLog) !?errors.Failure {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const failure = &(self.terminal_detail orelse return null);
+        return self.cloneDetailedFailureLocked();
+    }
+
+    fn cloneDetailedFailureLocked(self: *EventLog) !?errors.Failure {
+        const is_turn_failure = self.turn_failure_detail != null;
+        const failure = if (self.turn_failure_detail) |*value|
+            value
+        else if (self.terminal_detail) |*value|
+            value
+        else
+            return null;
         return switch (failure.detail) {
             .session => |session_failure| switch (session_failure) {
                 .agent => |agent| try cloneSessionAgentFailure(
@@ -355,13 +405,21 @@ pub const EventLog = struct {
                 ),
                 else => blk: {
                     const owned = failure.*;
-                    self.terminal_detail = null;
+                    if (is_turn_failure) {
+                        self.turn_failure_detail = null;
+                    } else {
+                        self.terminal_detail = null;
+                    }
                     break :blk owned;
                 },
             },
             else => blk: {
                 const owned = failure.*;
-                self.terminal_detail = null;
+                if (is_turn_failure) {
+                    self.turn_failure_detail = null;
+                } else {
+                    self.terminal_detail = null;
+                }
                 break :blk owned;
             },
         };

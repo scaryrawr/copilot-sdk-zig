@@ -1276,16 +1276,6 @@ const EventQueueFailure = enum {
     rejection_failed,
 };
 
-const BufferedResponse = struct {
-    id: u64,
-    body: []u8,
-
-    fn deinit(self: *BufferedResponse, allocator: std.mem.Allocator) void {
-        wipeSecret(self.body);
-        allocator.free(self.body);
-    }
-};
-
 const AutomaticEventTarget = union(enum) {
     queued: u64,
     transient: *session_types.SessionEvent,
@@ -2967,6 +2957,7 @@ pub const Client = struct {
     pump_future: ?std.Io.Future(void) = null,
     pump_closing: bool = false,
     pump_failure: ?errors.Failure = null,
+    pump_terminal_error: ?anyerror = null,
     send_operations: std.ArrayList(*SendOperation) = .empty,
     send_operations_mutex: std.Io.Mutex = .init,
     event_queue: std.ArrayList(QueuedLogEvent) = .empty,
@@ -2987,9 +2978,6 @@ pub const Client = struct {
     pending_provider_tokens: ?RegisteredProviderTokens = null,
     rpc_handlers: std.ArrayList(RegisteredRpcHandler) = .empty,
     dispatching_rpc_handler: bool = false,
-    active_request_ids: [8]u64 = undefined,
-    active_request_count: usize = 0,
-    buffered_responses: std.ArrayList(BufferedResponse) = .empty,
     rpc_ready: bool = false,
 
     pub fn init(
@@ -3241,8 +3229,6 @@ pub const Client = struct {
         self.provider_tokens.deinit(self.allocator);
         for (self.rpc_handlers.items) |handler| handler.deinit(self.allocator);
         self.rpc_handlers.deinit(self.allocator);
-        for (self.buffered_responses.items) |*response| response.deinit(self.allocator);
-        self.buffered_responses.deinit(self.allocator);
         if (self.pending_session) |*pending| pending.deinit(self.allocator);
         for (self.sessions.items) |*session| session.deinit(self.allocator);
         self.sessions.deinit(self.allocator);
@@ -5171,6 +5157,7 @@ pub const Client = struct {
                 method,
                 request,
                 context,
+                dispatched,
             );
         }
         defer self.endDirectRpcCall();
@@ -5331,19 +5318,34 @@ pub const Client = struct {
         method: []const u8,
         request: []const u8,
         context: OperationContext,
+        dispatched: ?*bool,
     ) errors.DetailedError!PolicyResult(failure_policy, std.json.Parsed(Result)) {
         var pending = PendingCall{ .id = id };
         self.pending_mutex.lockUncancelable(self.io);
-        if (self.pump_failure) |*failure| {
-            const native_error = failure.native_error;
+        if (self.pump_terminal_error) |native_error| {
             if (comptime failure_policy == .detailed) {
-                const owned = self.pump_failure.?;
+                if (self.pump_failure) |owned| {
+                    self.pump_failure = null;
+                    self.pending_mutex.unlock(self.io);
+                    return .{ .failure = owned };
+                }
+            }
+            self.pending_mutex.unlock(self.io);
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                native_error,
+                recordClientIo,
+                .{ self.allocator, .read, native_error },
+            ) };
+        }
+        if (self.pump_failure) |owned| {
+            if (comptime failure_policy == .detailed) {
                 self.pump_failure = null;
                 self.pending_mutex.unlock(self.io);
                 return .{ .failure = owned };
             }
             self.pending_mutex.unlock(self.io);
-            return .{ .failure = .{ .native_error = native_error } };
+            return .{ .failure = .{ .native_error = owned.native_error } };
         }
         self.pending_calls.append(self.allocator, &pending) catch |err| {
             self.pending_mutex.unlock(self.io);
@@ -5357,8 +5359,8 @@ pub const Client = struct {
             break;
         }
         self.pending_mutex.unlock(self.io);
-        errdefer self.removePendingCall(&pending);
-        errdefer if (pending.response) |response| {
+        defer self.removePendingCall(&pending);
+        defer if (pending.response) |response| {
             wipeSecret(response);
             self.allocator.free(response);
         };
@@ -5369,6 +5371,8 @@ pub const Client = struct {
             recordClientIo,
             .{ self.allocator, .read, err },
         ) };
+
+        if (dispatched) |value| value.* = true;
         self.writer_mutex.lockUncancelable(self.io);
         const write_result = writeFrameAndWipe(
             self.transportWriter(),
@@ -5389,7 +5393,6 @@ pub const Client = struct {
         pending.response = null;
         const native_failure = pending.failure;
         self.pending_mutex.unlock(self.io);
-        self.removePendingCall(&pending);
         if (native_failure) |err| {
             if (comptime failure_policy == .detailed) {
                 self.pending_mutex.lockUncancelable(self.io);
@@ -5743,6 +5746,7 @@ pub const Client = struct {
 
     fn finishPumpWithoutDetail(self: *Client, err: anyerror) void {
         self.pending_mutex.lockUncancelable(self.io);
+        if (self.pump_terminal_error == null) self.pump_terminal_error = err;
         for (self.pending_calls.items) |pending| {
             if (pending.response == null) pending.failure = err;
             pending.completed.set(self.io);
@@ -5756,6 +5760,7 @@ pub const Client = struct {
         var failure = failure_value;
         const native_error = failure.native_error;
         self.pending_mutex.lockUncancelable(self.io);
+        if (self.pump_terminal_error == null) self.pump_terminal_error = native_error;
         if (self.pump_failure == null) {
             self.pump_failure = failure;
         } else {
@@ -5851,6 +5856,7 @@ pub const Client = struct {
             "session.send",
             operation.request,
             .{ .session = .{ .session_id = operation.log_lease.log.session_id } },
+            null,
         ) catch |err| {
             operation.log_lease.log.failTurn(operation.receipt, err);
             return;
@@ -5906,27 +5912,6 @@ pub const Client = struct {
                 !candidate.future_published or
                 !candidate.completed.isSet()) continue;
             return self.send_operations.orderedRemove(index);
-        }
-        return null;
-    }
-
-    fn isActiveRequest(self: *const Client, id: u64) bool {
-        for (self.active_request_ids[0..self.active_request_count]) |active_id| {
-            if (active_id == id) return true;
-        }
-        return false;
-    }
-
-    fn hasBufferedResponse(self: *const Client, id: u64) bool {
-        for (self.buffered_responses.items) |response| {
-            if (response.id == id) return true;
-        }
-        return false;
-    }
-
-    fn takeBufferedResponse(self: *Client, id: u64) ?[]u8 {
-        for (self.buffered_responses.items, 0..) |response, index| {
-            if (response.id == id) return self.buffered_responses.orderedRemove(index).body;
         }
         return null;
     }
@@ -7663,7 +7648,7 @@ pub const Client = struct {
             ) }
         else
             null;
-        errdefer if (log_delivery) |*delivery| delivery.deinit(self.allocator);
+        defer if (log_delivery) |*delivery| delivery.deinit(self.allocator);
 
         self.events_mutex.lockUncancelable(self.io);
         if (self.sessionEventQueueFailure(session_id) != null or
@@ -7698,13 +7683,15 @@ pub const Client = struct {
         self.events_mutex.unlock(self.io);
 
         if (active_log) |log| if (retained_async) {
-            log.beginIngress() catch |err|
+            log.beginIngress() catch |err| {
+                self.removeQueuedEvent(event_id);
                 return .{ .failure = try policyFailure(
                     failure_policy,
                     err,
                     recordClientIo,
                     .{ self.allocator, .read, err },
                 ) };
+            };
             self.enqueueLogEvent(.{
                 .log = log,
                 .event_id = event_id,
@@ -7712,6 +7699,7 @@ pub const Client = struct {
                 .delivery_class = delivery_class,
             }) catch |err| {
                 log.finishIngress();
+                self.removeQueuedEvent(event_id);
                 return .{ .failure = try policyFailure(
                     failure_policy,
                     err,
@@ -7721,38 +7709,61 @@ pub const Client = struct {
             };
             log_delivery = null;
         } else {
-            log.beginIngress() catch |err|
+            log.beginIngress() catch |err| {
+                self.removeQueuedEvent(event_id);
                 return .{ .failure = try policyFailure(
                     failure_policy,
                     err,
                     recordClientIo,
                     .{ self.allocator, .read, err },
                 ) };
+            };
             defer log.finishIngress();
             var cloned = session_types.cloneEvent(self.allocator, event) catch |err|
-                return .{ .failure = try policyFailure(
-                    failure_policy,
-                    err,
-                    recordInvalidEvent,
-                    .{ self.allocator, .malformed_field_type, event_value },
-                ) };
-            errdefer cloned.deinit(self.allocator);
-            log.observeTurnEvent(cloned) catch |err|
+                {
+                    self.removeQueuedEvent(event_id);
+                    return .{ .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordInvalidEvent,
+                        .{ self.allocator, .malformed_field_type, event_value },
+                    ) };
+                };
+            var cloned_owned = true;
+            defer if (cloned_owned) cloned.deinit(self.allocator);
+            log.observeTurnEvent(cloned) catch |err| {
+                self.removeQueuedEvent(event_id);
                 return .{ .failure = try policyFailure(
                     failure_policy,
                     err,
                     recordClientIo,
                     .{ self.allocator, .read, err },
                 ) };
-            log.appendCompatibilityConsumed(cloned) catch |err|
+            };
+            log.appendCompatibilityConsumed(cloned) catch |err| {
+                self.removeQueuedEvent(event_id);
                 return .{ .failure = try policyFailure(
                     failure_policy,
                     err,
                     recordClientIo,
                     .{ self.allocator, .read, err },
                 ) };
+            };
+            cloned_owned = false;
         };
         return .{ .success = agent_view != null };
+    }
+
+    fn removeQueuedEvent(self: *Client, event_id: u64) void {
+        self.events_mutex.lockUncancelable(self.io);
+        defer self.events_mutex.unlock(self.io);
+        for (self.events.items, 0..) |queued, index| {
+            if (queued.id != event_id) continue;
+            var removed = self.events.orderedRemove(index);
+            removed.diagnostic_frame = null;
+            removed.deinit(self.allocator);
+            return;
+        }
     }
 
     fn cloneEventDelivery(
@@ -7913,7 +7924,10 @@ pub const Client = struct {
         if (self.event_worker_closing) return error.SessionDisconnected;
         try self.event_queue.append(self.allocator, work);
         if (self.event_worker_future == null) {
-            self.event_worker_future = try self.io.concurrent(eventWorkerMain, .{self});
+            self.event_worker_future = self.io.concurrent(eventWorkerMain, .{self}) catch |err| {
+                _ = self.event_queue.pop();
+                return err;
+            };
         }
         self.event_queue_ready.set(self.io);
     }
@@ -7972,7 +7986,7 @@ pub const Client = struct {
                     work.log.failAdmitted(err);
                     continue;
                 };
-                work.log.failDetailed(failure);
+                work.log.failTurnsDetailed(failure);
                 continue;
             }
             var event = work.delivery.intoEvent(self.allocator);
@@ -9204,16 +9218,21 @@ pub const Client = struct {
             }
 
             self.pending_mutex.lockUncancelable(self.io);
-            if (self.pump_failure) |failure| {
-                const native_error = failure.native_error;
+            if (self.pump_terminal_error) |native_error| {
                 if (comptime failure_policy == .detailed) {
-                    const owned = self.pump_failure.?;
-                    self.pump_failure = null;
-                    self.pending_mutex.unlock(self.io);
-                    return .{ .failure = owned };
+                    if (self.pump_failure) |owned| {
+                        self.pump_failure = null;
+                        self.pending_mutex.unlock(self.io);
+                        return .{ .failure = owned };
+                    }
                 }
                 self.pending_mutex.unlock(self.io);
-                return .{ .failure = .{ .native_error = native_error } };
+                return .{ .failure = try policyFailure(
+                    failure_policy,
+                    native_error,
+                    recordClientIo,
+                    .{ self.allocator, .read, native_error },
+                ) };
             }
             const transport_closed = self.transport_closed;
             self.pending_mutex.unlock(self.io);
@@ -9995,21 +10014,28 @@ pub const Session = struct {
         self.client.allocator.destroy(completed);
 
         while (true) {
-            switch (session_log.inspectTurn(receipt) catch |err|
-                return .{ .failure = try policyFailure(
-                    failure_policy,
-                    err,
-                    recordClientIo,
-                    .{ self.client.allocator, .read, err },
-                ) }) {
+            var inspected = self.inspectTurnForPolicy(
+                failure_policy,
+                session_log,
+                receipt,
+            ) catch |err| return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordClientIo,
+                .{ self.client.allocator, .read, err },
+            ) };
+            defer if (inspected.failure) |*failure| failure.deinit();
+            switch (inspected.read) {
                 .completed => |response| {
                     waiter_attached = false;
                     return .{ .success = response };
                 },
                 .failure => |err| {
                     if (comptime failure_policy == .detailed) {
-                        if (try session_log.detailedFailure()) |failure|
+                        if (inspected.failure) |failure| {
+                            inspected.failure = null;
                             return .{ .failure = failure };
+                        }
                     }
                     return .{ .failure = try policyFailure(
                         failure_policy,
@@ -10039,21 +10065,28 @@ pub const Session = struct {
                             recordClientIo,
                             .{ self.client.allocator, .read, err },
                         ) };
-                    switch (session_log.inspectTurn(receipt) catch |err|
-                        return .{ .failure = try policyFailure(
-                            failure_policy,
-                            err,
-                            recordClientIo,
-                            .{ self.client.allocator, .read, err },
-                        ) }) {
+                    var latest = self.inspectTurnForPolicy(
+                        failure_policy,
+                        session_log,
+                        receipt,
+                    ) catch |err| return .{ .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordClientIo,
+                        .{ self.client.allocator, .read, err },
+                    ) };
+                    defer if (latest.failure) |*failure| failure.deinit();
+                    switch (latest.read) {
                         .completed => |response| {
                             waiter_attached = false;
                             return .{ .success = response };
                         },
                         .failure => |err| {
                             if (comptime failure_policy == .detailed) {
-                                if (try session_log.detailedFailure()) |failure|
+                                if (latest.failure) |failure| {
+                                    latest.failure = null;
                                     return .{ .failure = failure };
+                                }
                             }
                             return .{ .failure = try policyFailure(
                                 failure_policy,
@@ -10116,6 +10149,19 @@ pub const Session = struct {
                 },
             }
         }
+    }
+
+    fn inspectTurnForPolicy(
+        self: Session,
+        comptime failure_policy: FailurePolicy,
+        session_log: *event_log.EventLog,
+        receipt: turn_tracker.ReceiptToken,
+    ) !event_log.DetailedReceiptRead {
+        _ = self;
+        return if (comptime failure_policy == .detailed)
+            session_log.inspectTurnDetailed(receipt)
+        else
+            .{ .read = try session_log.inspectTurn(receipt) };
     }
 
     pub fn nextEvent(self: Session) !session_types.SessionEvent {
