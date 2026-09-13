@@ -14,9 +14,10 @@ pub fn main(init: std.process.Init) !void {
     });
     defer session.disconnect() catch {};
 
-    const response = try session.sendAndWait(.{
-        .prompt = "Explain Zig error unions in one sentence.",
-    }) orelse return error.MissingAssistantResponse;
+    const response = try session.sendAndWaitWithOptions(
+        .{ .prompt = "Explain Zig error unions in one sentence." },
+        .{ .timeout_ns = 30 * std.time.ns_per_s },
+    ) orelse return error.MissingAssistantResponse;
     defer response.deinit(init.gpa);
 
     var stdout_buffer: [4096]u8 = undefined;

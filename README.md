@@ -107,23 +107,83 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
 Attach files or other typed context to a message:
 
 ```zig
-const attachments = [_]copilot.Attachment{
+const attachments = [_]copilot.MessageAttachment{
     .{ .file = .{
         .path = "/workspace/src/main.zig",
         .display_name = "main.zig",
-        .line_range = .{ .start = 12, .end = 28 },
     } },
+    .{ .selection = .{
+        .file_path = "/workspace/src/main.zig",
+        .display_name = "main.zig lines 12-28",
+        .selection = .{
+            .start = .{ .line = 12, .character = 0 },
+            .end = .{ .line = 28, .character = 0 },
+        },
+    } },
+};
+const headers = [_]copilot.RequestHeader{
+    .{ .name = "x-request-id", .value = "42" },
 };
 
 const message_id = try session.send(.{
     .prompt = "Explain this file.",
+    .source = .user,
     .attachments = &attachments,
+    .mode = .immediate,
+    .agent_mode = .interactive,
+    .request_headers = &headers,
+    .display_prompt = "Explain the selected code.",
 });
 defer allocator.free(message_id);
 ```
 
 `MessageOptions` borrows the prompt, the attachment slice, and all attachment
 data until `send` or `sendAndWait` returns. These inputs require no `deinit`.
+File, directory, and blob display names are optional. A selection requires a
+display name. Its range and text are independent optional fields.
+
+`sendAndWait` waits for up to 60 seconds. Use `sendAndWaitWithOptions` to set a
+different timeout or stop only the local wait:
+
+```zig
+var cancellation: copilot.Cancellation = .{};
+const response = try session.sendAndWaitWithOptions(
+    .{ .prompt = "Run the checks." },
+    .{
+        .timeout_ns = 15 * std.time.ns_per_s,
+        .cancellation = &cancellation,
+    },
+);
+defer if (response) |message| message.deinit(allocator);
+```
+
+Call `cancellation.cancel(io)` from another task to stop the wait. A timeout or
+cancellation does not call `session.abort`; it ends only the local wait. The
+timeout covers both the `session.send` RPC and the correlated turn wait. If a
+turn result has already committed when a local deadline or cancellation is
+observed, the turn result wins; otherwise cancellation wins over timeout.
+
+`sendAndWait` correlates the `messageId` returned by `session.send` with the
+matching `user.message` turn, then waits for that turn's
+`assistant.turn_end`. Unrelated sends, earlier timed-out waits, and
+`session.idle` events cannot complete it.
+
+Use a subscription when another consumer needs the same ordered event stream:
+
+```zig
+var observer = try session.subscribe();
+defer observer.deinit();
+
+const response = try session.sendAndWait(.{ .prompt = "Explain the branch." });
+defer if (response) |message| message.deinit(allocator);
+
+var event = try observer.nextEvent();
+defer event.deinit(allocator);
+```
+
+Each subscriber starts after the events retained when `subscribe` runs. A slow
+subscriber receives `error.EventLogOverflow` once when it falls behind the
+private retained-event limit, then resumes at the oldest retained event.
 
 `Session` borrows its `Client`. Keep the client alive while a session handle is
 in use. `SessionEvent` values and the message ID from `send` own memory from the

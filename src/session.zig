@@ -149,30 +149,60 @@ pub const SessionConfig = CreateSessionConfig;
 /// No deinit is required.
 pub const MessageOptions = struct {
     prompt: []const u8,
-    attachments: ?[]const Attachment = null,
+    source: ?MessageSource = null,
+    attachments: ?[]const MessageAttachment = null,
+    mode: ?MessageDeliveryMode = null,
+    agent_mode: ?AgentMode = null,
+    request_headers: ?[]const RequestHeader = null,
+    display_prompt: ?[]const u8 = null,
+};
+
+pub const MessageSource = union(enum) {
+    user,
+    system,
+    agent: []const u8,
+};
+
+pub const MessageDeliveryMode = enum {
+    enqueue,
+    immediate,
+};
+
+pub const AgentMode = enum {
+    interactive,
+    plan,
+    autopilot,
+    shell,
+};
+
+pub const RequestHeader = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+pub const WaitOptions = struct {
+    timeout_ns: ?u64 = 60 * std.time.ns_per_s,
+    cancellation: ?*Cancellation = null,
+};
+
+pub const Cancellation = struct {
+    event: std.Io.Event = .unset,
+
+    pub fn cancel(self: *Cancellation, io: std.Io) void {
+        self.event.set(io);
+    }
+
+    pub fn isCancelled(self: *const Cancellation) bool {
+        return self.event.isSet();
+    }
 };
 
 /// A borrowed attachment sent with a user message. No deinit is required.
-pub const Attachment = union(enum) {
+pub const MessageAttachment = union(enum) {
     file: File,
     directory: Directory,
     selection: Selection,
     blob: Blob,
-    github_reference: GitHubReference,
-    github_commit: GitHubCommit,
-    github_release: GitHubRelease,
-    github_actions_job: GitHubActionsJob,
-    github_repository: GitHubRepository,
-    github_file_diff: GitHubFileDiff,
-    github_tree_comparison: GitHubTreeComparison,
-    github_url: GitHubUrl,
-    github_file: GitHubFile,
-    github_snippet: GitHubSnippet,
-
-    pub const LineRange = struct {
-        start: u32,
-        end: u32,
-    };
 
     pub const SelectionPosition = struct {
         line: u32,
@@ -184,38 +214,9 @@ pub const Attachment = union(enum) {
         end: SelectionPosition,
     };
 
-    pub const GitHubReferenceType = enum {
-        issue,
-        pr,
-        discussion,
-    };
-
-    pub const GitHubRepoPointer = struct {
-        id: ?i64 = null,
-        name: []const u8,
-        owner: []const u8,
-    };
-
-    pub const GitHubFileDiffSide = struct {
-        path: []const u8,
-        git_ref: []const u8,
-        repo: GitHubRepoPointer,
-    };
-
-    pub const GitHubTreeComparisonSide = struct {
-        repo: GitHubRepoPointer,
-        revision: []const u8,
-    };
-
-    pub const GitHubSnippetLineRange = struct {
-        start: i64,
-        end: i64,
-    };
-
     pub const File = struct {
         path: []const u8,
         display_name: ?[]const u8 = null,
-        line_range: ?LineRange = null,
     };
 
     pub const Directory = struct {
@@ -225,9 +226,9 @@ pub const Attachment = union(enum) {
 
     pub const Selection = struct {
         file_path: []const u8,
-        text: []const u8,
-        display_name: ?[]const u8 = null,
-        selection: SelectionRange,
+        display_name: []const u8,
+        selection: ?SelectionRange = null,
+        text: ?[]const u8 = null,
     };
 
     pub const Blob = struct {
@@ -235,84 +236,9 @@ pub const Attachment = union(enum) {
         mime_type: []const u8,
         display_name: ?[]const u8 = null,
     };
-
-    pub const GitHubReference = struct {
-        number: u64,
-        title: []const u8,
-        reference_type: GitHubReferenceType,
-        state: []const u8,
-        url: []const u8,
-    };
-
-    pub const GitHubCommit = struct {
-        message: []const u8,
-        oid: []const u8,
-        repo: GitHubRepoPointer,
-        url: []const u8,
-    };
-
-    pub const GitHubRelease = struct {
-        name: []const u8,
-        repo: GitHubRepoPointer,
-        tag_name: []const u8,
-        url: []const u8,
-    };
-
-    pub const GitHubActionsJob = struct {
-        conclusion: ?[]const u8 = null,
-        job_id: i64,
-        job_name: []const u8,
-        repo: GitHubRepoPointer,
-        url: []const u8,
-        workflow_name: []const u8,
-    };
-
-    pub const GitHubRepository = struct {
-        description: ?[]const u8 = null,
-        git_ref: ?[]const u8 = null,
-        repo: GitHubRepoPointer,
-        url: []const u8,
-    };
-
-    pub const GitHubFileDiff = struct {
-        sides: Sides,
-        url: []const u8,
-
-        pub const Sides = union(enum) {
-            added: GitHubFileDiffSide,
-            deleted: GitHubFileDiffSide,
-            modified: struct {
-                base: GitHubFileDiffSide,
-                head: GitHubFileDiffSide,
-            },
-        };
-    };
-
-    pub const GitHubTreeComparison = struct {
-        base: GitHubTreeComparisonSide,
-        head: GitHubTreeComparisonSide,
-        url: []const u8,
-    };
-
-    pub const GitHubUrl = struct {
-        url: []const u8,
-    };
-
-    pub const GitHubFile = struct {
-        path: []const u8,
-        git_ref: []const u8,
-        repo: GitHubRepoPointer,
-        url: []const u8,
-    };
-
-    pub const GitHubSnippet = struct {
-        line_range: GitHubSnippetLineRange,
-        path: []const u8,
-        git_ref: []const u8,
-        repo: GitHubRepoPointer,
-        url: []const u8,
-    };
 };
+
+pub const Attachment = MessageAttachment;
 
 pub const AutoTier = enum {
     efficiency,
@@ -527,6 +453,37 @@ pub const UnknownEvent = event_payloads.UnknownEvent;
 pub const SessionEvent = session_events.SessionEvent;
 pub const SessionEventTag = session_events.SessionEventTag;
 pub const parseEvent = session_events.parseEvent;
+
+pub fn cloneEvent(
+    allocator: std.mem.Allocator,
+    event: SessionEvent,
+) !SessionEvent {
+    const data = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        event.rawData(),
+        .{},
+    );
+    defer data.deinit();
+    const envelope_json = try std.json.Stringify.valueAlloc(allocator, .{
+        .type = event.eventType(),
+        .data = data.value,
+    }, .{});
+    defer allocator.free(envelope_json);
+    const envelope = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        envelope_json,
+        .{},
+    );
+    defer envelope.deinit();
+    var cloned = try parseEvent(allocator, envelope.value);
+    if (event == .permission_requested) {
+        cloned.permission_requested.automatic_handling =
+            event.permission_requested.automatic_handling;
+    }
+    return cloned;
+}
 
 test "known and unknown events retain owned data" {
     const allocator = std.testing.allocator;
