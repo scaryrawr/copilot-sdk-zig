@@ -37,6 +37,301 @@ pub const InitialAgent = union(enum) {
     custom_agent: []const u8,
 };
 
+pub const LargeOutputConfig = struct {
+    enabled: ?bool = null,
+    max_size_bytes: ?u64 = null,
+    output_directory: ?[]const u8 = null,
+};
+
+pub const InfiniteSessionConfig = struct {
+    enabled: ?bool = null,
+    background_compaction_threshold: ?f64 = null,
+    buffer_exhaustion_threshold: ?f64 = null,
+};
+
+pub const MemoryConfiguration = struct {
+    enabled: bool,
+};
+
+pub const EmbeddingCacheStorage = enum {
+    persistent,
+    in_memory,
+};
+
+pub const CapiSessionOptions = struct {
+    auto_tier: ?AutoTier = null,
+    enable_websocket_responses: ?bool = null,
+};
+
+pub const SessionFsConventions = enum {
+    windows,
+    posix,
+};
+
+pub const SessionFsCapabilities = struct {
+    sqlite: ?bool = null,
+};
+
+pub const SessionFsConfig = struct {
+    initial_cwd: []const u8,
+    session_state_path: []const u8,
+    conventions: SessionFsConventions,
+    capabilities: ?SessionFsCapabilities = null,
+};
+
+pub const SessionFsProviderInit = struct {
+    session_id: []const u8,
+};
+
+pub const SessionFsEntryType = enum {
+    file,
+    directory,
+};
+
+pub const SessionFsEntry = struct {
+    name: []u8,
+    entry_type: SessionFsEntryType,
+};
+
+pub const SessionFsOwnedBytes = struct {
+    bytes: []u8,
+
+    pub fn deinit(self: *SessionFsOwnedBytes, allocator: std.mem.Allocator) void {
+        allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
+pub const SessionFsOwnedStrings = struct {
+    values: [][]u8,
+
+    pub fn deinit(self: *SessionFsOwnedStrings, allocator: std.mem.Allocator) void {
+        for (self.values) |value| allocator.free(value);
+        allocator.free(self.values);
+        self.* = undefined;
+    }
+};
+
+pub const SessionFsOwnedEntries = struct {
+    values: []SessionFsEntry,
+
+    pub fn deinit(self: *SessionFsOwnedEntries, allocator: std.mem.Allocator) void {
+        for (self.values) |value| allocator.free(value.name);
+        allocator.free(self.values);
+        self.* = undefined;
+    }
+};
+
+pub const SessionFsStat = struct {
+    is_file: bool,
+    is_directory: bool,
+    size: u64,
+    mtime: []u8,
+    birthtime: []u8,
+
+    pub fn deinit(self: *SessionFsStat, allocator: std.mem.Allocator) void {
+        allocator.free(self.mtime);
+        allocator.free(self.birthtime);
+        self.* = undefined;
+    }
+};
+
+pub const SessionFsSqliteQueryType = enum {
+    exec,
+    query,
+    run,
+};
+
+pub const SessionFsSqliteParameter = struct {
+    name: []const u8,
+    value: std.json.Value,
+};
+
+pub const SessionFsSqliteStatement = struct {
+    query_type: SessionFsSqliteQueryType,
+    query: []const u8,
+    params: ?[]const SessionFsSqliteParameter = null,
+};
+
+pub const SessionFsSqliteCell = struct {
+    name: []u8,
+    value: extensibility.OwnedJson,
+};
+
+pub const SessionFsSqliteRow = struct {
+    values: []SessionFsSqliteCell,
+
+    pub fn deinit(self: *SessionFsSqliteRow, allocator: std.mem.Allocator) void {
+        for (self.values) |*value| {
+            allocator.free(value.name);
+            value.value.deinit();
+        }
+        allocator.free(self.values);
+        self.* = undefined;
+    }
+};
+
+pub const SessionFsSqliteQueryResult = struct {
+    rows: []SessionFsSqliteRow,
+    columns: SessionFsOwnedStrings,
+    rows_affected: u64,
+    last_insert_rowid: ?i64 = null,
+
+    pub fn deinit(
+        self: *SessionFsSqliteQueryResult,
+        allocator: std.mem.Allocator,
+    ) void {
+        for (self.rows) |*row| row.deinit(allocator);
+        allocator.free(self.rows);
+        self.columns.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const SessionFsSqliteTransactionErrorClass = enum {
+    busy_or_locked,
+    fatal,
+    post_commit_ambiguous,
+};
+
+pub const SessionFsSqliteTransactionFailure = struct {
+    error_class: SessionFsSqliteTransactionErrorClass,
+    message: []u8,
+
+    pub fn deinit(
+        self: *SessionFsSqliteTransactionFailure,
+        allocator: std.mem.Allocator,
+    ) void {
+        allocator.free(self.message);
+        self.* = undefined;
+    }
+};
+
+pub const SessionFsOwnedSqliteResults = struct {
+    values: []SessionFsSqliteQueryResult,
+
+    pub fn deinit(
+        self: *SessionFsOwnedSqliteResults,
+        allocator: std.mem.Allocator,
+    ) void {
+        for (self.values) |*value| value.deinit(allocator);
+        allocator.free(self.values);
+        self.* = undefined;
+    }
+};
+
+pub const SessionFsSqliteTransactionOutcome = union(enum) {
+    success: SessionFsOwnedSqliteResults,
+    failure: SessionFsSqliteTransactionFailure,
+
+    pub fn deinit(
+        self: *SessionFsSqliteTransactionOutcome,
+        allocator: std.mem.Allocator,
+    ) void {
+        switch (self.*) {
+            .success => |*results| results.deinit(allocator),
+            .failure => |*failure| failure.deinit(allocator),
+        }
+        self.* = undefined;
+    }
+};
+
+pub const SessionFsSqliteProvider = struct {
+    context: ?*anyopaque = null,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        query: *const fn (
+            allocator: std.mem.Allocator,
+            query_type: SessionFsSqliteQueryType,
+            query: []const u8,
+            params: ?[]const SessionFsSqliteParameter,
+            context: ?*anyopaque,
+        ) anyerror!?SessionFsSqliteQueryResult,
+        transaction: ?*const fn (
+            allocator: std.mem.Allocator,
+            statements: []const SessionFsSqliteStatement,
+            context: ?*anyopaque,
+        ) anyerror!SessionFsSqliteTransactionOutcome = null,
+        exists: *const fn (context: ?*anyopaque) anyerror!bool,
+    };
+};
+
+pub const SessionFsProvider = struct {
+    context: ?*anyopaque = null,
+    vtable: *const VTable,
+    sqlite: ?SessionFsSqliteProvider = null,
+
+    pub const VTable = struct {
+        read_file: *const fn (
+            allocator: std.mem.Allocator,
+            path: []const u8,
+            context: ?*anyopaque,
+        ) anyerror!SessionFsOwnedBytes,
+        write_file: *const fn (
+            path: []const u8,
+            content: []const u8,
+            mode: ?u64,
+            context: ?*anyopaque,
+        ) anyerror!void,
+        append_file: *const fn (
+            path: []const u8,
+            content: []const u8,
+            mode: ?u64,
+            context: ?*anyopaque,
+        ) anyerror!void,
+        exists: *const fn (
+            path: []const u8,
+            context: ?*anyopaque,
+        ) anyerror!bool,
+        stat: *const fn (
+            allocator: std.mem.Allocator,
+            path: []const u8,
+            context: ?*anyopaque,
+        ) anyerror!SessionFsStat,
+        mkdir: *const fn (
+            path: []const u8,
+            recursive: bool,
+            mode: ?u64,
+            context: ?*anyopaque,
+        ) anyerror!void,
+        readdir: *const fn (
+            allocator: std.mem.Allocator,
+            path: []const u8,
+            context: ?*anyopaque,
+        ) anyerror!SessionFsOwnedStrings,
+        readdir_with_types: *const fn (
+            allocator: std.mem.Allocator,
+            path: []const u8,
+            context: ?*anyopaque,
+        ) anyerror!SessionFsOwnedEntries,
+        rm: *const fn (
+            path: []const u8,
+            recursive: bool,
+            force: bool,
+            context: ?*anyopaque,
+        ) anyerror!void,
+        rename: *const fn (
+            source: []const u8,
+            destination: []const u8,
+            context: ?*anyopaque,
+        ) anyerror!void,
+        deinit: *const fn (
+            allocator: std.mem.Allocator,
+            context: ?*anyopaque,
+        ) void,
+    };
+};
+
+pub const SessionFsProviderFactory = struct {
+    context: ?*anyopaque = null,
+    create: *const fn (
+        allocator: std.mem.Allocator,
+        init: SessionFsProviderInit,
+        context: ?*anyopaque,
+    ) anyerror!SessionFsProvider,
+};
+
 pub const CreateSessionConfig = struct {
     session_id: ?[]const u8 = null,
     model: ?[]const u8 = null,
@@ -69,6 +364,24 @@ pub const CreateSessionConfig = struct {
     on_user_input_request: ?UserInputHandler = null,
     user_input_context: ?*anyopaque = null,
     extensions: extensibility.CreateExtensions = .{},
+    client_name: ?[]const u8 = null,
+    reasoning_effort: ?ReasoningEffort = null,
+    reasoning_summary: ?ReasoningSummary = null,
+    enable_experimental_mode: ?bool = null,
+    context_tier: ?ContextTier = null,
+    large_output: ?LargeOutputConfig = null,
+    config_directory: ?[]const u8 = null,
+    capi: ?CapiSessionOptions = null,
+    additional_directories: ?[]const []const u8 = null,
+    infinite_sessions: ?InfiniteSessionConfig = null,
+    memory: ?MemoryConfiguration = null,
+    skip_embedding_retrieval: ?bool = null,
+    embedding_cache_storage: ?EmbeddingCacheStorage = null,
+    organization_custom_instructions: ?[]const u8 = null,
+    enable_file_hooks: ?bool = null,
+    enable_host_git_operations: ?bool = null,
+    enable_session_store: ?bool = null,
+    create_session_fs_provider: ?SessionFsProviderFactory = null,
 };
 
 pub const ResumeSessionConfig = struct {
@@ -104,6 +417,24 @@ pub const ResumeSessionConfig = struct {
     suppress_resume_event: bool = false,
     continue_pending_work: bool = false,
     extensions: extensibility.ResumeExtensions = .{},
+    client_name: ?[]const u8 = null,
+    reasoning_effort: ?ReasoningEffort = null,
+    reasoning_summary: ?ReasoningSummary = null,
+    enable_experimental_mode: ?bool = null,
+    context_tier: ?ContextTier = null,
+    large_output: ?LargeOutputConfig = null,
+    config_directory: ?[]const u8 = null,
+    capi: ?CapiSessionOptions = null,
+    additional_directories: ?[]const []const u8 = null,
+    infinite_sessions: ?InfiniteSessionConfig = null,
+    memory: ?MemoryConfiguration = null,
+    skip_embedding_retrieval: ?bool = null,
+    embedding_cache_storage: ?EmbeddingCacheStorage = null,
+    organization_custom_instructions: ?[]const u8 = null,
+    enable_file_hooks: ?bool = null,
+    enable_host_git_operations: ?bool = null,
+    enable_session_store: ?bool = null,
+    create_session_fs_provider: ?SessionFsProviderFactory = null,
 };
 
 pub const JoinSessionConfig = struct {
@@ -139,6 +470,24 @@ pub const JoinSessionConfig = struct {
     suppress_resume_event: bool = true,
     continue_pending_work: bool = false,
     extensions: extensibility.JoinExtensions = .{},
+    client_name: ?[]const u8 = null,
+    reasoning_effort: ?ReasoningEffort = null,
+    reasoning_summary: ?ReasoningSummary = null,
+    enable_experimental_mode: ?bool = null,
+    context_tier: ?ContextTier = null,
+    large_output: ?LargeOutputConfig = null,
+    config_directory: ?[]const u8 = null,
+    capi: ?CapiSessionOptions = null,
+    additional_directories: ?[]const []const u8 = null,
+    infinite_sessions: ?InfiniteSessionConfig = null,
+    memory: ?MemoryConfiguration = null,
+    skip_embedding_retrieval: ?bool = null,
+    embedding_cache_storage: ?EmbeddingCacheStorage = null,
+    organization_custom_instructions: ?[]const u8 = null,
+    enable_file_hooks: ?bool = null,
+    enable_host_git_operations: ?bool = null,
+    enable_session_store: ?bool = null,
+    create_session_fs_provider: ?SessionFsProviderFactory = null,
 };
 
 /// Compatibility alias for callers constructing create-session options.

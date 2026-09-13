@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub const json_rpc = @import("json_rpc.zig");
 pub const client = @import("client.zig");
 pub const session = @import("session.zig");
@@ -8,6 +10,7 @@ const provider = @import("provider.zig");
 pub const Client = client.Client;
 pub const ClientInfo = client.ClientInfo;
 pub const ClientOptions = client.ClientOptions;
+pub const ParentClientOptions = client.ParentClientOptions;
 pub const RpcHandler = client.RpcHandler;
 pub const Session = client.Session;
 pub const AbortResult = session.AbortResult;
@@ -22,6 +25,34 @@ pub const ModelSwitchConfirmation = session.ModelSwitchConfirmation;
 pub const ModelSwitchOptions = session.ModelSwitchOptions;
 pub const ModelSwitchResult = session.ModelSwitchResult;
 pub const ReasoningSummary = session.ReasoningSummary;
+pub const LargeOutputConfig = session.LargeOutputConfig;
+pub const InfiniteSessionConfig = session.InfiniteSessionConfig;
+pub const MemoryConfiguration = session.MemoryConfiguration;
+pub const EmbeddingCacheStorage = session.EmbeddingCacheStorage;
+pub const CapiSessionOptions = session.CapiSessionOptions;
+pub const SessionFsConventions = session.SessionFsConventions;
+pub const SessionFsCapabilities = session.SessionFsCapabilities;
+pub const SessionFsConfig = session.SessionFsConfig;
+pub const SessionFsProviderInit = session.SessionFsProviderInit;
+pub const SessionFsEntryType = session.SessionFsEntryType;
+pub const SessionFsEntry = session.SessionFsEntry;
+pub const SessionFsOwnedBytes = session.SessionFsOwnedBytes;
+pub const SessionFsOwnedStrings = session.SessionFsOwnedStrings;
+pub const SessionFsOwnedEntries = session.SessionFsOwnedEntries;
+pub const SessionFsStat = session.SessionFsStat;
+pub const SessionFsSqliteQueryType = session.SessionFsSqliteQueryType;
+pub const SessionFsSqliteParameter = session.SessionFsSqliteParameter;
+pub const SessionFsSqliteStatement = session.SessionFsSqliteStatement;
+pub const SessionFsSqliteCell = session.SessionFsSqliteCell;
+pub const SessionFsSqliteRow = session.SessionFsSqliteRow;
+pub const SessionFsSqliteQueryResult = session.SessionFsSqliteQueryResult;
+pub const SessionFsSqliteTransactionErrorClass = session.SessionFsSqliteTransactionErrorClass;
+pub const SessionFsSqliteTransactionFailure = session.SessionFsSqliteTransactionFailure;
+pub const SessionFsOwnedSqliteResults = session.SessionFsOwnedSqliteResults;
+pub const SessionFsSqliteTransactionOutcome = session.SessionFsSqliteTransactionOutcome;
+pub const SessionFsSqliteProvider = session.SessionFsSqliteProvider;
+pub const SessionFsProvider = session.SessionFsProvider;
+pub const SessionFsProviderFactory = session.SessionFsProviderFactory;
 pub const SessionConfig = session.SessionConfig;
 pub const CreateSessionConfig = session.CreateSessionConfig;
 pub const ResumeSessionConfig = session.ResumeSessionConfig;
@@ -113,6 +144,46 @@ pub const ModelLimits = models.Limits;
 pub const ModelVisionLimits = models.VisionLimits;
 pub const ModelPolicy = models.Policy;
 pub const ModelPolicyState = models.PolicyState;
+
+test "lifecycle configuration types are exported from the package root" {
+    const parent_options = ParentClientOptions{};
+    const large_output = LargeOutputConfig{};
+    const infinite_sessions = InfiniteSessionConfig{};
+    const memory = MemoryConfiguration{ .enabled = false };
+    const capi = CapiSessionOptions{};
+    const storage = EmbeddingCacheStorage.in_memory;
+
+    const create = CreateSessionConfig{
+        .large_output = large_output,
+        .infinite_sessions = infinite_sessions,
+        .memory = memory,
+        .capi = capi,
+        .embedding_cache_storage = storage,
+    };
+    const resumed_config = ResumeSessionConfig{
+        .large_output = large_output,
+        .infinite_sessions = infinite_sessions,
+        .memory = memory,
+        .capi = capi,
+        .embedding_cache_storage = storage,
+    };
+    const join = JoinSessionConfig{
+        .large_output = large_output,
+        .infinite_sessions = infinite_sessions,
+        .memory = memory,
+        .capi = capi,
+        .embedding_cache_storage = storage,
+    };
+
+    try std.testing.expect(create.create_session_fs_provider == null);
+    try std.testing.expect(resumed_config.create_session_fs_provider == null);
+    try std.testing.expect(join.create_session_fs_provider == null);
+    try std.testing.expect(parent_options.session_fs == null);
+    _ = SessionFsConfig;
+    _ = SessionFsProvider;
+    _ = SessionFsSqliteProvider;
+    _ = SessionFsSqliteTransactionOutcome;
+}
 pub const ModelBilling = models.Billing;
 pub const ModelTokenPrices = models.TokenPrices;
 pub const ModelLongContextTokenPrices = models.LongContextTokenPrices;

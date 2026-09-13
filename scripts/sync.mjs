@@ -16,6 +16,22 @@ import {
   writeSchemaSnapshot,
 } from "./schema-snapshot.mjs";
 import { generateSessionEvents } from "./generate-session-events.mjs";
+import {
+  exportedStringUnionValues,
+  inheritedInterfacePropertySignatures,
+  interfaceBase,
+  interfaceMemberSignatures,
+  interfacePropertySignatures,
+  omitIntersectionAlias,
+  plainOmitAlias,
+  requireExactInterfaceSignatures,
+  requireExactPropertySignatures,
+  requireExactTypeImportBinding,
+  requireSourceFragments,
+  sourceSection,
+  zigEnumValues,
+  zigStructFields,
+} from "./source-contract.mjs";
 
 const repository = "github/copilot-sdk";
 const ref = "main";
@@ -26,6 +42,7 @@ const schemaDirectory = join(vendorDirectory, "schemas");
 const metadataPath = join(vendorDirectory, "upstream.json");
 const generatedPath = join(root, "src", "protocol_version.zig");
 const zigSessionSource = readFileSync(join(root, "src", "session.zig"), "utf8");
+const zigClientSource = readFileSync(join(root, "src", "client.zig"), "utf8");
 const compatibilityPath = join(root, "sync", "compatibility.json");
 const publicRpcSurfacePath = join(root, "sync", "public-rpc-surface.json");
 const extensibilityContractPath = join(root, "sync", "extensibility-contract.json");
@@ -199,40 +216,6 @@ function expectedExtensibilityContract(upstreamCommit) {
   };
 }
 
-function sourceSection(source, startMarker, endMarker, owner) {
-  const start = source.indexOf(startMarker);
-  assert(start >= 0, `upstream ${owner} declaration is missing: ${startMarker}`);
-  const end = source.indexOf(endMarker, start + startMarker.length);
-  assert(end >= 0, `upstream ${owner} declaration has no boundary: ${endMarker}`);
-  return source.slice(start, end);
-}
-
-function requireSourceFragments(source, fragments, owner) {
-  for (const fragment of fragments) {
-    assert(source.includes(fragment), `upstream ${owner} declaration is missing: ${fragment}`);
-  }
-}
-
-function normalizedPropertySignatures(source) {
-  const declarations = source
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/\/\/.*$/gm, "");
-  return Object.fromEntries(
-    [...declarations.matchAll(/^\s*(?:readonly\s+)?(\w+)(\?)?\s*:\s*([^;]+);/gm)]
-      .map((match) => [
-        match[1],
-        `${match[2] === "?" ? "optional" : "required"}:${match[3].replace(/\s+/g, "")}`,
-      ]),
-  );
-}
-
-function requireExactPropertySignatures(actual, expected, label) {
-  requireExactStrings(Object.keys(actual), Object.keys(expected), `${label} fields`);
-  for (const [name, signature] of Object.entries(expected)) {
-    assert(actual[name] === signature, `${label}.${name} changed`);
-  }
-}
-
 const expectedCustomAgentSourceContract = {
   customAgent: {
     name: "required:string",
@@ -267,84 +250,306 @@ const expectedCustomAgentSourceContract = {
       customAgentsLocalOnly: "config.customAgentsLocalOnly",
       excludedBuiltinAgents: "config.excludedBuiltinAgents",
     },
-    join: {
-      base: "ResumeSessionConfig",
-      excluded: ["onPermissionRequest", "extensionSdkPath"],
-      properties: {
-        onPermissionRequest: "optional:PermissionHandler",
-        requestedEnvironmentVariables: "optional:string[]",
-        factories: "optional:FactoryHandle[]",
-      },
-    },
   },
 };
 
-function interfaceBase(source, name) {
-  const match = source.match(new RegExp(`export interface ${name} extends (\\w+) \\{`));
-  assert(match, `upstream ${name} inheritance changed`);
-  return match[1];
-}
+const expectedJoinSessionTypeScriptContract = {
+  base: "ResumeSessionConfig",
+  excluded: ["onPermissionRequest", "extensionSdkPath"],
+  properties: {
+    onPermissionRequest: "optional:PermissionHandler",
+    requestedEnvironmentVariables: "optional:string[]",
+    factories: "optional:FactoryHandle[]",
+  },
+};
 
-function omitIntersection(source, name) {
-  const match = source.match(
-    new RegExp(`export type ${name} = Omit<\\s*(\\w+)\\s*,([\\s\\S]*?)>\\s*&\\s*\\{([\\s\\S]*?)\\n\\};`),
-  );
-  assert(match, `upstream ${name} shape changed`);
+const expectedSessionRuntimeTypeScriptContract = {
+  fields: {
+    clientName: "optional:string",
+    reasoningEffort: "optional:ReasoningEffort",
+    reasoningSummary: "optional:ReasoningSummary",
+    enableExperimentalMode: "optional:boolean",
+    contextTier: "optional:ContextTier",
+    largeOutput: "optional:LargeToolOutputConfig",
+    configDirectory: "optional:string",
+    capi: "optional:CapiSessionOptions",
+    additionalDirectories: "optional:string[]",
+    infiniteSessions: "optional:InfiniteSessionConfig",
+    memory: "optional:MemoryConfiguration",
+    skipEmbeddingRetrieval: "optional:boolean",
+    embeddingCacheStorage: 'optional:"persistent"|"in-memory"',
+    organizationCustomInstructions: "optional:string",
+    enableFileHooks: "optional:boolean",
+    enableHostGitOperations: "optional:boolean",
+    enableSessionStore: "optional:boolean",
+    createSessionFsProvider:
+      "optional:(session:CopilotSession)=>SessionFsProvider",
+  },
+  largeOutput: {
+    enabled: "optional:boolean",
+    maxSizeBytes: "optional:number",
+    outputDirectory: "optional:string",
+  },
+  infiniteSessions: {
+    enabled: "optional:boolean",
+    backgroundCompactionThreshold: "optional:number",
+    bufferExhaustionThreshold: "optional:number",
+  },
+  memory: {
+    enabled: "required:boolean",
+  },
+  capi: {
+    autoTier: "optional:AutoTier",
+    enableWebSocketResponses: "optional:boolean",
+  },
+  lowering: [
+    "clientName: config.clientName",
+    "reasoningEffort: config.reasoningEffort",
+    "reasoningSummary: config.reasoningSummary",
+    "isExperimentalMode: this.experimentalModeForMode(config.enableExperimentalMode)",
+    "contextTier: config.contextTier",
+    "largeOutput: toWireLargeOutput(config.largeOutput)",
+    "configDir: config.configDirectory",
+    "capi: config.capi",
+    "additionalDirectories: config.additionalDirectories",
+    "infiniteSessions: config.infiniteSessions",
+    "memory: config.memory",
+    "skipEmbeddingRetrieval: config.skipEmbeddingRetrieval",
+    "embeddingCacheStorage: config.embeddingCacheStorage",
+    "organizationCustomInstructions: config.organizationCustomInstructions",
+    "enableFileHooks: config.enableFileHooks",
+    "enableHostGitOperations: config.enableHostGitOperations",
+    "enableSessionStore: config.enableSessionStore",
+  ],
+};
+
+const expectedSessionRuntimeZigContract = {
+  client_name: { type: "?[]const u8", default: "null" },
+  reasoning_effort: { type: "?ReasoningEffort", default: "null" },
+  reasoning_summary: { type: "?ReasoningSummary", default: "null" },
+  enable_experimental_mode: { type: "?bool", default: "null" },
+  context_tier: { type: "?ContextTier", default: "null" },
+  large_output: { type: "?LargeOutputConfig", default: "null" },
+  config_directory: { type: "?[]const u8", default: "null" },
+  capi: { type: "?CapiSessionOptions", default: "null" },
+  additional_directories: { type: "?[]const[]const u8", default: "null" },
+  infinite_sessions: { type: "?InfiniteSessionConfig", default: "null" },
+  memory: { type: "?MemoryConfiguration", default: "null" },
+  skip_embedding_retrieval: { type: "?bool", default: "null" },
+  embedding_cache_storage: { type: "?EmbeddingCacheStorage", default: "null" },
+  organization_custom_instructions: { type: "?[]const u8", default: "null" },
+  enable_file_hooks: { type: "?bool", default: "null" },
+  enable_host_git_operations: { type: "?bool", default: "null" },
+  enable_session_store: { type: "?bool", default: "null" },
+  create_session_fs_provider: {
+    type: "?SessionFsProviderFactory",
+    default: "null",
+  },
+};
+
+const expectedLifecycleBaseTypeScriptContract = {
+  onMcpAuthRequest: "optional:McpAuthHandler",
+  pluginDirectories: "optional:string[]",
+  skillDirectories: "optional:string[]",
+  disabledSkills: "optional:string[]",
+  includedBuiltinSkills: "optional:string[]",
+  enableSkills: "optional:boolean",
+  hooks: "optional:SessionHooks",
+  mcpServers: "optional:Record<string,MCPServerConfig>",
+  mcpOAuthTokenStorage: 'optional:"persistent"|"in-memory"',
+  authClientIdMetadataUrl: "optional:string",
+  disabledMcpServers: "optional:string[]",
+  canvases: "optional:Canvas[]",
+  requestCanvasRenderer: "optional:boolean",
+  requestExtensions: "optional:boolean",
+  extensionSdkPath: "optional:string",
+  extensionInfo: "optional:ExtensionInfo",
+  canvasProvider: "optional:CanvasProviderIdentity",
+  enableMcpApps: "optional:boolean",
+};
+
+const expectedExistingSessionConfigBaseTypeScriptContract = {
+  model: "optional:string",
+  modelCapabilities: "optional:ModelCapabilitiesOverride",
+  enableConfigDiscovery: "optional:boolean",
+  tools: "optional:Tool<any>[]",
+  commands: "optional:CommandDefinition[]",
+  systemMessage: "optional:SystemMessageConfig",
+  toolSearch: "optional:ToolSearchConfig",
+  availableTools: "optional:string[]|ToolSet",
+  excludedTools: "optional:string[]|ToolSet",
+  provider: "optional:ProviderConfig",
+  providers: "optional:NamedProviderConfig[]",
+  models: "optional:ProviderModelConfig[]",
+  enableSessionTelemetry: "optional:boolean",
+  enableCitations: "optional:boolean",
+  enableFileChangeTracking: "optional:boolean",
+  sessionLimits: "optional:SessionLimitsConfig",
+  skipCustomInstructions: "optional:boolean",
+  coauthorEnabled: "optional:boolean",
+  manageScheduleEnabled: "optional:boolean",
+  onPermissionRequest: "optional:PermissionHandler",
+  onUserInputRequest: "optional:UserInputHandler",
+  askUserVariant: "optional:AskUserVariant",
+  onElicitationRequest: "optional:ElicitationHandler",
+  githubMcpToolConfig: "optional:GitHubMcpToolConfig",
+  onExitPlanModeRequest: "optional:ExitPlanModeHandler",
+  onAutoModeSwitchRequest: "optional:AutoModeSwitchHandler",
+  workingDirectory: "optional:string",
+  streaming: "optional:boolean",
+  includeSubAgentStreamingEvents: "optional:boolean",
+  instructionDirectories: "optional:string[]",
+  gitHubToken: "optional:string",
+  gitHubTokenProvider: "optional:GitHubTokenProvider",
+  enableManagedSettings: "optional:boolean",
+  managedSettings: "optional:ManagedSettings",
+  enableOnDemandInstructionDiscovery: "optional:boolean",
+  remoteSession: "optional:RemoteSessionMode",
+  onEvent: "optional:SessionEventHandler",
+  featureFlags: "optional:Record<string,boolean>",
+  expAssignments: "optional:CopilotExpAssignmentResponse",
+};
+
+const expectedSessionConfigBaseTypeScriptContract = {
+  ...expectedExistingSessionConfigBaseTypeScriptContract,
+  ...expectedSessionRuntimeTypeScriptContract.fields,
+  ...expectedCustomAgentSourceContract.lifecycle.base,
+  ...expectedLifecycleBaseTypeScriptContract,
+};
+
+const expectedInheritedSessionTypeScriptContract = {
+  SessionConfig: {
+    sessionId: "optional:string",
+    cloud: "optional:CloudSessionOptions",
+  },
+  ResumeSessionConfig: {
+    suppressResumeEvent: "optional:boolean",
+    continuePendingWork: "optional:boolean",
+    openCanvases: "optional:OpenCanvasInstance[]",
+  },
+};
+
+const expectedSessionFsStringUnionContract = {
+  SessionFsErrorCode: ["ENOENT", "UNKNOWN"],
+  SessionFsReaddirWithTypesEntryType: ["file", "directory"],
+  SessionFsSetProviderConventions: ["windows", "posix"],
+  SessionFsSqliteQueryType: ["exec", "query", "run"],
+  SessionFsSqliteTransactionErrorClass: [
+    "busyOrLocked",
+    "fatal",
+    "postCommitAmbiguous",
+  ],
+};
+
+const sessionFsQueryWireToZig = {
+  exec: "exec",
+  query: "query",
+  run: "run",
+};
+
+const sessionFsTransactionWireToZig = {
+  busyOrLocked: "busy_or_locked",
+  fatal: "fatal",
+  postCommitAmbiguous: "post_commit_ambiguous",
+};
+
+function parseSessionSourceContract(extensionSource, sessionSource) {
   return {
-    base: match[1],
-    excluded: [...match[2].matchAll(/"([^"]+)"/g)].map((item) => item[1]),
-    properties: normalizedPropertySignatures(match[3]),
+    join: omitIntersectionAlias(extensionSource, "JoinSessionConfig"),
+    zig: {
+      create: zigStructFields(sessionSource, "CreateSessionConfig"),
+      resume: zigStructFields(sessionSource, "ResumeSessionConfig"),
+      join: zigStructFields(sessionSource, "JoinSessionConfig"),
+    },
   };
 }
 
-function stringUnionValues(source, name) {
-  const match = source.match(new RegExp(`export type ${name}\\s*=\\s*([^;]+);`));
-  assert(match, `upstream ${name} declaration changed`);
-  return [...match[1].matchAll(/"([^"]+)"/g)].map((item) => item[1]);
+function verifyPinnedSourceContracts({
+  upstreamCommit,
+  clientSource,
+  typesSource,
+  extensionSource,
+  rpcSource,
+  sessionFsProviderSource,
+}) {
+  const sourceContract = parseSessionSourceContract(
+    extensionSource,
+    zigSessionSource,
+  );
+  verifyCustomAgentSourceContract(
+    clientSource,
+    typesSource,
+    zigSessionSource,
+  );
+  verifySessionRuntimeSourceContract(clientSource, typesSource, sourceContract);
+  verifySessionFsSourceContract(
+    clientSource,
+    typesSource,
+    rpcSource,
+    sessionFsProviderSource,
+  );
+  verifyExtensibilitySourceContract(
+    expectedExtensibilityContract(upstreamCommit),
+    clientSource,
+    typesSource,
+    sourceContract,
+  );
 }
 
-function zigEnumValues(source, name) {
-  const declaration = sourceSection(
-    source,
-    `pub const ${name} = enum {`,
-    "};",
-    `Zig ${name}`,
+function verifyJoinSessionSourceContract(join, lifecycle) {
+  const expected = expectedJoinSessionTypeScriptContract;
+  assert(join.base === expected.base, "JoinSessionConfig base changed");
+  requireExactStrings(
+    join.excluded,
+    expected.excluded,
+    "JoinSessionConfig exclusions",
   );
-  return [...declaration.matchAll(/^\s*(\w+),\s*$/gm)].map((match) => match[1]);
+  requireExactPropertySignatures(
+    join.properties,
+    expected.properties,
+    "JoinSessionConfig",
+  );
+  for (const field of lifecycle.redeclared) {
+    assert(
+      join.excluded.includes(field),
+      `JoinSessionConfig redeclared field is not omitted: ${field}`,
+    );
+    assert(
+      Object.hasOwn(join.properties, field),
+      `JoinSessionConfig omitted field is not redeclared: ${field}`,
+    );
+  }
+  for (const field of lifecycle.omitted) {
+    assert(
+      join.excluded.includes(field),
+      `JoinSessionConfig permanently omitted field is not omitted: ${field}`,
+    );
+    assert(
+      !Object.hasOwn(join.properties, field),
+      `JoinSessionConfig permanently omitted field is redeclared: ${field}`,
+    );
+  }
 }
 
 function verifyCustomAgentSourceContract(
   clientSource,
   typesSource,
-  extensionSource,
   zigSessionSource,
 ) {
   const expected = expectedCustomAgentSourceContract;
-  const customAgent = sourceSection(
-    typesSource,
-    "export interface CustomAgentConfig {",
-    "export interface DefaultAgentConfig {",
-    "CustomAgentConfig",
-  );
   requireExactPropertySignatures(
-    normalizedPropertySignatures(customAgent),
+    interfacePropertySignatures(typesSource, "CustomAgentConfig"),
     expected.customAgent,
     "CustomAgentConfig",
   );
 
-  const defaultAgent = sourceSection(
-    typesSource,
-    "export interface DefaultAgentConfig {",
-    "export interface InfiniteSessionConfig {",
-    "DefaultAgentConfig",
-  );
   requireExactPropertySignatures(
-    normalizedPropertySignatures(defaultAgent),
+    interfacePropertySignatures(typesSource, "DefaultAgentConfig"),
     expected.defaultAgent,
     "DefaultAgentConfig",
   );
   requireExactStrings(
-    stringUnionValues(typesSource, "ReasoningEffort"),
+    exportedStringUnionValues(typesSource, "ReasoningEffort"),
     expected.reasoningEffort,
     "upstream ReasoningEffort values",
   );
@@ -354,16 +559,6 @@ function verifyCustomAgentSourceContract(
     "Zig ReasoningEffort values",
   );
 
-  const base = sourceSection(
-    typesSource,
-    "export interface SessionConfigBase {",
-    "export interface SessionConfig extends SessionConfigBase {",
-    "SessionConfigBase",
-  );
-  const baseProperties = normalizedPropertySignatures(base);
-  for (const [name, signature] of Object.entries(expected.lifecycle.base)) {
-    assert(baseProperties[name] === signature, `SessionConfigBase.${name} changed`);
-  }
   assert(
     interfaceBase(typesSource, "SessionConfig") === expected.lifecycle.createExtends,
     "upstream SessionConfig inheritance changed",
@@ -372,25 +567,6 @@ function verifyCustomAgentSourceContract(
     interfaceBase(typesSource, "ResumeSessionConfig") === expected.lifecycle.resumeExtends,
     "upstream ResumeSessionConfig inheritance changed",
   );
-  const join = sourceSection(
-    extensionSource,
-    "export type JoinSessionConfig = Omit<",
-    "export async function joinSession",
-    "JoinSessionConfig",
-  );
-  const joinShape = omitIntersection(join, "JoinSessionConfig");
-  assert(joinShape.base === expected.lifecycle.join.base, "JoinSessionConfig base changed");
-  requireExactStrings(
-    joinShape.excluded,
-    expected.lifecycle.join.excluded,
-    "JoinSessionConfig exclusions",
-  );
-  requireExactPropertySignatures(
-    joinShape.properties,
-    expected.lifecycle.join.properties,
-    "JoinSessionConfig",
-  );
-
   const customAgentLowering = sourceSection(
     clientSource,
     "function toWireCustomAgents(",
@@ -431,7 +607,576 @@ function verifyCustomAgentSourceContract(
   }
 }
 
-function verifyLifecycleContract(contract, clientSource, typesSource, extensionSource) {
+function verifySessionFsSourceContract(
+  clientSource,
+  typesSource,
+  rpcSource,
+  sessionFsProviderSource,
+) {
+  const fileInfo = plainOmitAlias(
+    sessionFsProviderSource,
+    "SessionFsFileInfo",
+  );
+  assert(
+    fileInfo.base === "SessionFsStatResult",
+    "SessionFsFileInfo base changed",
+  );
+  requireExactStrings(
+    fileInfo.excluded,
+    ["error"],
+    "SessionFsFileInfo exclusions",
+  );
+
+  const sqliteQueryResult = plainOmitAlias(
+    sessionFsProviderSource,
+    "SessionFsSqliteQueryResult",
+  );
+  assert(
+    sqliteQueryResult.base === "GeneratedSqliteQueryResult",
+    "SessionFsSqliteQueryResult base changed",
+  );
+  requireExactStrings(
+    sqliteQueryResult.excluded,
+    ["error"],
+    "SessionFsSqliteQueryResult exclusions",
+  );
+  requireExactTypeImportBinding(
+    sessionFsProviderSource,
+    {
+      imported: "SessionFsSqliteQueryResult",
+      local: "GeneratedSqliteQueryResult",
+      module: "./generated/rpc.js",
+    },
+    "SessionFS provider generated SQLite result import",
+  );
+
+  const aliases = Object.fromEntries(
+    Object.keys(expectedSessionFsStringUnionContract).map((name) => [
+      name,
+      exportedStringUnionValues(rpcSource, name),
+    ]),
+  );
+  for (const [name, expected] of Object.entries(
+    expectedSessionFsStringUnionContract,
+  )) {
+    requireExactStrings(aliases[name], expected, `upstream ${name} values`);
+  }
+  requireExactStrings(
+    aliases.SessionFsReaddirWithTypesEntryType,
+    zigEnumValues(zigSessionSource, "SessionFsEntryType"),
+    "SessionFS entry type values",
+  );
+  requireExactStrings(
+    aliases.SessionFsSetProviderConventions,
+    zigEnumValues(zigSessionSource, "SessionFsConventions"),
+    "SessionFS convention values",
+  );
+  requireExactStrings(
+    Object.keys(sessionFsQueryWireToZig),
+    aliases.SessionFsSqliteQueryType,
+    "SessionFS SQLite query wire mapping keys",
+  );
+  requireExactStrings(
+    aliases.SessionFsSqliteQueryType.map(
+      (value) => sessionFsQueryWireToZig[value],
+    ),
+    zigEnumValues(zigSessionSource, "SessionFsSqliteQueryType"),
+    "SessionFS SQLite query type values",
+  );
+  requireExactStrings(
+    Object.keys(sessionFsTransactionWireToZig),
+    aliases.SessionFsSqliteTransactionErrorClass,
+    "SessionFS transaction wire mapping keys",
+  );
+  requireExactStrings(
+    aliases.SessionFsSqliteTransactionErrorClass.map(
+      (value) => sessionFsTransactionWireToZig[value],
+    ),
+    zigEnumValues(zigSessionSource, "SessionFsSqliteTransactionErrorClass"),
+    "SessionFS transaction error class values",
+  );
+
+  requireExactPropertySignatures(
+    interfacePropertySignatures(typesSource, "SessionFsConfig"),
+    {
+      initialCwd: "required:string",
+      sessionStatePath: "required:string",
+      conventions: 'required:"windows"|"posix"',
+      capabilities: "optional:{sqlite?:boolean;}",
+    },
+    "SessionFsConfig",
+  );
+  requireSourceFragments(
+    typesSource,
+    ["sessionFs?: SessionFsConfig"],
+    "CopilotClientOptions",
+  );
+  requireSourceFragments(
+    clientSource,
+    [
+      "this.sessionFsConfig = options.sessionFs ?? null",
+      'await this.connection!.sendRequest("sessionFs.setProvider", {',
+      "initialCwd: this.sessionFsConfig.initialCwd",
+      "sessionStatePath: this.sessionFsConfig.sessionStatePath",
+      "conventions: this.sessionFsConfig.conventions",
+      "capabilities: this.sessionFsConfig.capabilities",
+      "if (!config.createSessionFsProvider)",
+      "this.sessionFsConfig.capabilities?.sqlite && !provider.sqlite",
+    ],
+    "SessionFS client lifecycle",
+  );
+
+  requireExactInterfaceSignatures(
+    interfaceMemberSignatures(rpcSource, "SessionFsHandler"),
+    {
+      methods: {
+        readFile:
+          "required:(params:SessionFsReadFileRequest)=>Promise<SessionFsReadFileResult>",
+        writeFile:
+          "required:(params:SessionFsWriteFileRequest)=>Promise<SessionFsError|undefined>",
+        appendFile:
+          "required:(params:SessionFsAppendFileRequest)=>Promise<SessionFsError|undefined>",
+        exists:
+          "required:(params:SessionFsExistsRequest)=>Promise<SessionFsExistsResult>",
+        stat:
+          "required:(params:SessionFsStatRequest)=>Promise<SessionFsStatResult>",
+        mkdir:
+          "required:(params:SessionFsMkdirRequest)=>Promise<SessionFsError|undefined>",
+        readdir:
+          "required:(params:SessionFsReaddirRequest)=>Promise<SessionFsReaddirResult>",
+        readdirWithTypes:
+          "required:(params:SessionFsReaddirWithTypesRequest)=>Promise<SessionFsReaddirWithTypesResult>",
+        rm:
+          "required:(params:SessionFsRmRequest)=>Promise<SessionFsError|undefined>",
+        rename:
+          "required:(params:SessionFsRenameRequest)=>Promise<SessionFsError|undefined>",
+        sqliteQuery:
+          "required:(params:SessionFsSqliteQueryRequest)=>Promise<SessionFsSqliteQueryResult>",
+        sqliteTransaction:
+          "required:(params:SessionFsSqliteTransactionRequest)=>Promise<SessionFsSqliteTransactionResult>",
+        sqliteExists:
+          "required:(params:SessionFsSqliteExistsRequest)=>Promise<SessionFsSqliteExistsResult>",
+      },
+      properties: {},
+    },
+    "SessionFsHandler",
+  );
+
+  const rpcProperties = {
+    SessionFsAppendFileRequest: {
+      sessionId: "required:string",
+      path: "required:string",
+      content: "required:string",
+      mode: "optional:number",
+    },
+    SessionFsError: {
+      code: "required:SessionFsErrorCode",
+      message: "optional:string",
+    },
+    SessionFsExistsRequest: {
+      sessionId: "required:string",
+      path: "required:string",
+    },
+    SessionFsExistsResult: {
+      exists: "required:boolean",
+    },
+    SessionFsMkdirRequest: {
+      sessionId: "required:string",
+      path: "required:string",
+      recursive: "optional:boolean",
+      mode: "optional:number",
+    },
+    SessionFsReaddirRequest: {
+      sessionId: "required:string",
+      path: "required:string",
+    },
+    SessionFsReaddirResult: {
+      entries: "required:string[]",
+      error: "optional:SessionFsError",
+    },
+    SessionFsReaddirWithTypesEntry: {
+      name: "required:string",
+      type: "required:SessionFsReaddirWithTypesEntryType",
+    },
+    SessionFsReaddirWithTypesRequest: {
+      sessionId: "required:string",
+      path: "required:string",
+    },
+    SessionFsReaddirWithTypesResult: {
+      entries: "required:SessionFsReaddirWithTypesEntry[]",
+      error: "optional:SessionFsError",
+    },
+    SessionFsReadFileRequest: {
+      sessionId: "required:string",
+      path: "required:string",
+    },
+    SessionFsReadFileResult: {
+      content: "required:string",
+      error: "optional:SessionFsError",
+    },
+    SessionFsRenameRequest: {
+      sessionId: "required:string",
+      src: "required:string",
+      dest: "required:string",
+    },
+    SessionFsRmRequest: {
+      sessionId: "required:string",
+      path: "required:string",
+      recursive: "optional:boolean",
+      force: "optional:boolean",
+    },
+    SessionFsSetProviderCapabilities: {
+      sqlite: "optional:boolean",
+    },
+    SessionFsSetProviderRequest: {
+      initialCwd: "required:string",
+      sessionStatePath: "required:string",
+      conventions: "required:SessionFsSetProviderConventions",
+      capabilities: "optional:SessionFsSetProviderCapabilities",
+    },
+    SessionFsSetProviderResult: {
+      success: "required:boolean",
+    },
+    SessionFsSqliteExistsRequest: {
+      sessionId: "required:string",
+    },
+    SessionFsSqliteExistsResult: {
+      exists: "required:boolean",
+    },
+    SessionFsSqliteQueryRequest: {
+      sessionId: "required:string",
+      query: "required:string",
+      queryType: "required:SessionFsSqliteQueryType",
+      params: "optional:{[k:string]:JsonValue|undefined;}",
+    },
+    SessionFsSqliteQueryResult: {
+      rows: "required:{[k:string]:JsonValue|undefined;}[]",
+      columns: "required:string[]",
+      rowsAffected: "required:number",
+      lastInsertRowid: "optional:number",
+      error: "optional:SessionFsError",
+    },
+    SessionFsSqliteTransactionError: {
+      errorClass: "required:SessionFsSqliteTransactionErrorClass",
+      message: "required:string",
+    },
+    SessionFsSqliteTransactionRequest: {
+      sessionId: "required:string",
+      statements: "required:SessionFsSqliteTransactionStatement[]",
+    },
+    SessionFsSqliteTransactionStatement: {
+      query: "required:string",
+      queryType: "required:SessionFsSqliteQueryType",
+      params: "optional:{[k:string]:JsonValue|undefined;}",
+    },
+    SessionFsSqliteTransactionResult: {
+      results: "required:SessionFsSqliteQueryResult[]",
+      error: "optional:SessionFsSqliteTransactionError",
+    },
+    SessionFsStatRequest: {
+      sessionId: "required:string",
+      path: "required:string",
+    },
+    SessionFsStatResult: {
+      isFile: "required:boolean",
+      isDirectory: "required:boolean",
+      size: "required:number",
+      mtime: "required:string",
+      birthtime: "required:string",
+      error: "optional:SessionFsError",
+    },
+    SessionFsWriteFileRequest: {
+      sessionId: "required:string",
+      path: "required:string",
+      content: "required:string",
+      mode: "optional:number",
+    },
+  };
+  for (const [name, expected] of Object.entries(rpcProperties)) {
+    requireExactPropertySignatures(
+      interfacePropertySignatures(rpcSource, name),
+      expected,
+      name,
+    );
+  }
+
+  requireExactInterfaceSignatures(
+    interfaceMemberSignatures(
+      sessionFsProviderSource,
+      "SessionFsSqliteProvider",
+    ),
+    {
+      methods: {
+        query:
+          "required:(queryType:SessionFsSqliteQueryType,query:string,params?:Record<string,string|number|null>)=>Promise<SessionFsSqliteQueryResult|undefined>",
+        transaction:
+          "optional:(statements:SessionFsSqliteStatement[])=>Promise<SessionFsSqliteQueryResult[]>",
+        exists: "required:()=>Promise<boolean>",
+      },
+      properties: {},
+    },
+    "SessionFsSqliteProvider",
+  );
+
+  requireExactPropertySignatures(
+    zigStructFields(zigSessionSource, "SessionFsStat", { allowMethods: true }),
+    {
+      is_file: { type: "bool", default: null },
+      is_directory: { type: "bool", default: null },
+      size: { type: "u64", default: null },
+      mtime: { type: "[]u8", default: null },
+      birthtime: { type: "[]u8", default: null },
+    },
+    "Zig SessionFsStat",
+  );
+  requireExactPropertySignatures(
+    zigStructFields(zigSessionSource, "SessionFsSqliteQueryResult", {
+      allowMethods: true,
+    }),
+    {
+      rows: { type: "[]SessionFsSqliteRow", default: null },
+      columns: { type: "SessionFsOwnedStrings", default: null },
+      rows_affected: { type: "u64", default: null },
+      last_insert_rowid: { type: "?i64", default: "null" },
+    },
+    "Zig SessionFsSqliteQueryResult",
+  );
+  const sqliteProviderVTableSource = sourceSection(
+    zigSessionSource,
+    "    pub const VTable = struct {",
+    "pub const SessionFsProvider = struct {",
+    "Zig SessionFsSqliteProvider.VTable",
+  );
+  requireExactPropertySignatures(
+    zigStructFields(sqliteProviderVTableSource, "VTable"),
+    {
+      query: {
+        type: "*const fn(allocator:std.mem.Allocator,query_type:SessionFsSqliteQueryType,query:[]const u8,params:?[]const SessionFsSqliteParameter,context:?*anyopaque,)anyerror!?SessionFsSqliteQueryResult",
+        default: null,
+      },
+      transaction: {
+        type: "?*const fn(allocator:std.mem.Allocator,statements:[]const SessionFsSqliteStatement,context:?*anyopaque,)anyerror!SessionFsSqliteTransactionOutcome",
+        default: "null",
+      },
+      exists: {
+        type: "*const fn(context:?*anyopaque)anyerror!bool",
+        default: null,
+      },
+    },
+    "Zig SessionFsSqliteProvider.VTable",
+  );
+  requireExactInterfaceSignatures(
+    interfaceMemberSignatures(sessionFsProviderSource, "SessionFsProvider"),
+    {
+      methods: {
+        readFile: "required:(path:string)=>Promise<string>",
+        writeFile:
+          "required:(path:string,content:string,mode?:number)=>Promise<void>",
+        appendFile:
+          "required:(path:string,content:string,mode?:number)=>Promise<void>",
+        exists: "required:(path:string)=>Promise<boolean>",
+        stat: "required:(path:string)=>Promise<SessionFsFileInfo>",
+        mkdir:
+          "required:(path:string,recursive:boolean,mode?:number)=>Promise<void>",
+        readdir: "required:(path:string)=>Promise<string[]>",
+        readdirWithTypes:
+          "required:(path:string)=>Promise<SessionFsReaddirWithTypesEntry[]>",
+        rm:
+          "required:(path:string,recursive:boolean,force:boolean)=>Promise<void>",
+        rename: "required:(src:string,dest:string)=>Promise<void>",
+      },
+      properties: {
+        sqlite: "optional:SessionFsSqliteProvider",
+      },
+    },
+    "SessionFsProvider",
+  );
+  requireExactPropertySignatures(
+    interfacePropertySignatures(
+      sessionFsProviderSource,
+      "SessionFsSqliteStatement",
+    ),
+    {
+      queryType: "required:SessionFsSqliteQueryType",
+      query: "required:string",
+      params: "optional:Record<string,string|number|null>",
+    },
+    "SessionFsSqliteStatement",
+  );
+  requireSourceFragments(
+    sessionFsProviderSource,
+    [
+      "sqliteQuery: async",
+      "sqliteTransaction: async",
+      "sqliteExists: async",
+      'const code = e.code === "ENOENT" ? "ENOENT" : "UNKNOWN"',
+      'errorClass: "fatal"',
+      "return result ?? { rows: [], columns: [], rowsAffected: 0 }",
+    ],
+    "SessionFS adapter",
+  );
+  requireExactStrings(
+    zigEnumValues(zigClientSource, "SessionFsMethod", { visibility: "optional" }),
+    [
+      "read_file",
+      "write_file",
+      "append_file",
+      "exists",
+      "stat",
+      "mkdir",
+      "readdir",
+      "readdir_with_types",
+      "rm",
+      "rename",
+      "sqlite_query",
+      "sqlite_transaction",
+      "sqlite_exists",
+    ],
+    "Zig SessionFsMethod values",
+  );
+  requireSourceFragments(
+    zigClientSource,
+    [
+      ...Object.entries(sessionFsQueryWireToZig).map(
+        ([wire, zig]) =>
+          `if (std.mem.eql(u8, name, "${wire}")) return .${zig};`,
+      ),
+      '.code = if (err == error.FileNotFound) "ENOENT" else "UNKNOWN"',
+      '.busy_or_locked => "busyOrLocked"',
+      '.fatal => "fatal"',
+      '.post_commit_ambiguous => "postCommitAmbiguous"',
+      "session_fs: ?session_types.SessionFsConfig = null",
+      'try self.setSessionFsProvider(value)',
+      '.initialCwd = config.initial_cwd',
+      '.sessionStatePath = config.session_state_path',
+      '.conventions = config.conventions',
+      '.capabilities = config.capabilities',
+      "if (self.registered_session_fs == null and factory != null)",
+      "if (self.registered_session_fs != null and factory == null)",
+      "if (registration.sqlite and created.sqlite == null)",
+    ],
+    "Zig SessionFS client lifecycle",
+  );
+}
+
+function verifySessionRuntimeSourceContract(
+  clientSource,
+  typesSource,
+  sourceContract,
+) {
+  const expected = expectedSessionRuntimeTypeScriptContract;
+  requireExactPropertySignatures(
+    interfacePropertySignatures(typesSource, "SessionConfigBase"),
+    expectedSessionConfigBaseTypeScriptContract,
+    "SessionConfigBase",
+  );
+  for (const [name, fields] of Object.entries(
+    expectedInheritedSessionTypeScriptContract,
+  )) {
+    requireExactPropertySignatures(
+      inheritedInterfacePropertySignatures(
+        typesSource,
+        name,
+        "SessionConfigBase",
+      ),
+      fields,
+      name,
+    );
+  }
+
+  for (const [name, fields] of [
+    ["LargeToolOutputConfig", expected.largeOutput],
+    ["InfiniteSessionConfig", expected.infiniteSessions],
+    ["MemoryConfiguration", expected.memory],
+    ["CapiSessionOptions", expected.capi],
+  ]) {
+    requireExactPropertySignatures(
+      interfacePropertySignatures(typesSource, name),
+      fields,
+      name,
+    );
+  }
+
+  const create = sourceSection(
+    clientSource,
+    "    async createSession(",
+    "    async resumeSession(",
+    "createSession",
+  );
+  const resume = sourceSection(
+    clientSource,
+    "    private async resumeSessionInternal(",
+    "    async ping(",
+    "resumeSessionInternal",
+  );
+  for (const [owner, source] of [
+    ["createSession", create],
+    ["resumeSessionInternal", resume],
+  ]) {
+    requireSourceFragments(source, expected.lowering, owner);
+    requireSourceFragments(
+      source,
+      ["workspacePath", 'session["_workspacePath"] = workspacePath'],
+      owner,
+    );
+  }
+
+  for (const [owner, fields] of [
+    ["Zig CreateSessionConfig", sourceContract.zig.create],
+    ["Zig ResumeSessionConfig", sourceContract.zig.resume],
+    ["Zig JoinSessionConfig", sourceContract.zig.join],
+  ]) {
+    for (const [name, expectedField] of Object.entries(expectedSessionRuntimeZigContract)) {
+      assert(fields[name]?.type === expectedField.type, `${owner}.${name} type changed`);
+      assert(fields[name]?.default === expectedField.default, `${owner}.${name} default changed`);
+    }
+  }
+
+  const zigLowering = sourceSection(
+    zigClientSource,
+    "fn lowerSessionOptions(options: NormalizedSessionOptions) WireSessionOptions {",
+    "const ExtensionWireValues = struct {",
+    "Zig lowerSessionOptions",
+  );
+  requireSourceFragments(
+    zigLowering,
+    [
+      ".clientName = options.client_name",
+      ".reasoningEffort = options.reasoning_effort",
+      ".reasoningSummary = options.reasoning_summary",
+      ".isExperimentalMode = options.enable_experimental_mode",
+      ".contextTier = options.context_tier",
+      ".largeOutput = if (options.large_output)",
+      ".maxSizeBytes = value.max_size_bytes",
+      ".outputDir = value.output_directory",
+      ".configDir = options.config_directory",
+      ".capi = if (options.capi)",
+      ".autoTier = value.auto_tier",
+      ".enableWebSocketResponses = value.enable_websocket_responses",
+      ".additionalDirectories = options.additional_directories",
+      ".infiniteSessions = if (options.infinite_sessions)",
+      ".backgroundCompactionThreshold = value.background_compaction_threshold",
+      ".bufferExhaustionThreshold = value.buffer_exhaustion_threshold",
+      ".memory = if (options.memory)",
+      ".skipEmbeddingRetrieval = options.skip_embedding_retrieval",
+      ".embeddingCacheStorage = if (options.embedding_cache_storage)",
+      '.in_memory => .@"in-memory"',
+      ".organizationCustomInstructions = options.organization_custom_instructions",
+      ".enableFileHooks = options.enable_file_hooks",
+      ".enableHostGitOperations = options.enable_host_git_operations",
+      ".enableSessionStore = options.enable_session_store",
+    ],
+    "Zig lowerSessionOptions",
+  );
+}
+
+function verifyLifecycleContract(
+  contract,
+  clientSource,
+  typesSource,
+  sourceContract,
+) {
+  const { join, zig } = sourceContract;
   const base = sourceSection(
     typesSource,
     "export interface SessionConfigBase {",
@@ -449,12 +1194,6 @@ function verifyLifecycleContract(contract, clientSource, typesSource, extensionS
     "export interface ResumeSessionConfig extends SessionConfigBase {",
     "export interface ExtensionJoinOptions {",
     "ResumeSessionConfig",
-  );
-  const join = sourceSection(
-    extensionSource,
-    "export type JoinSessionConfig = Omit<",
-    "export async function joinSession",
-    "JoinSessionConfig",
   );
   const extensionResume = sourceSection(
     clientSource,
@@ -506,36 +1245,40 @@ function verifyLifecycleContract(contract, clientSource, typesSource, extensionS
     }
   }
   assert(resume.startsWith("export interface ResumeSessionConfig extends SessionConfigBase {"), "upstream ResumeSessionConfig no longer extends SessionConfigBase");
-
-  assertFieldsOwnedBy(
-    contract.lifecycle.extensionJoin.fields,
-    { requestedEnvironmentVariables: "requestedEnvironmentVariables?: string[]" },
-    join,
-    "JoinSessionConfig",
+  assert(
+    zig.resume.suppress_resume_event?.type === "bool" &&
+      zig.resume.suppress_resume_event.default === "false",
+    "Zig ResumeSessionConfig.suppress_resume_event changed",
   );
+  assert(
+    zig.resume.continue_pending_work?.type === "bool" &&
+      zig.resume.continue_pending_work.default === "false",
+    "Zig ResumeSessionConfig.continue_pending_work changed",
+  );
+  assert(
+    zig.join.suppress_resume_event?.type === "bool" &&
+      zig.join.suppress_resume_event.default === "true",
+    "Zig JoinSessionConfig.suppress_resume_event changed",
+  );
+  assert(
+    zig.join.continue_pending_work?.type === "bool" &&
+      zig.join.continue_pending_work.default === "false",
+    "Zig JoinSessionConfig.continue_pending_work changed",
+  );
+
+  verifyJoinSessionSourceContract(join, contract.lifecycle.extensionJoin);
+  for (const field of contract.lifecycle.extensionJoin.fields) {
+    assert(
+      Object.hasOwn(join.properties, field),
+      `JoinSessionConfig is missing lifecycle field: ${field}`,
+    );
+  }
   assertFieldsOwnedBy(
     contract.lifecycle.extensionJoin.responseFields,
     { grantedEnvironmentVariables: "grantedEnvironmentVariables?: Record<string, string>" },
     extensionResume,
     "resumeSessionInternal response",
   );
-  assertFieldsOwnedBy(
-    contract.lifecycle.extensionJoin.redeclared,
-    { onPermissionRequest: "onPermissionRequest?: PermissionHandler" },
-    join,
-    "JoinSessionConfig",
-  );
-  for (const field of contract.lifecycle.extensionJoin.omitted) {
-    assert(field === "extensionSdkPath", `no upstream JoinSessionConfig omission check for: ${field}`);
-    assert(
-      /Omit<\s*ResumeSessionConfig,\s*"onPermissionRequest"\s*\|\s*"extensionSdkPath"\s*>/.test(join),
-      "upstream JoinSessionConfig no longer omits extensionSdkPath",
-    );
-    assert(
-      !/extensionSdkPath\s*\?:/.test(join),
-      "upstream JoinSessionConfig directly declares extensionSdkPath",
-    );
-  }
 }
 
 function verifyHookContract(contract, typesSource) {
@@ -567,7 +1310,7 @@ function verifyExtensibilitySourceContract(
   contract,
   clientSource,
   typesSource,
-  extensionSource,
+  sourceContract,
 ) {
   const clientOptions = sourceSection(
     typesSource,
@@ -602,14 +1345,8 @@ function verifyExtensibilitySourceContract(
     ['sendRequest("plugins.builtin.set"'],
     "CopilotClient startup",
   );
-  verifyLifecycleContract(contract, clientSource, typesSource, extensionSource);
+  verifyLifecycleContract(contract, clientSource, typesSource, sourceContract);
   verifyHookContract(contract, typesSource);
-}
-
-function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, extensionSource) {
-  const contract = expectedExtensibilityContract(upstreamCommit);
-  verifyExtensibilitySourceContract(contract, clientSource, typesSource, extensionSource);
-  writeFileSync(extensibilityContractPath, `${JSON.stringify(contract, null, 2)}\n`);
 }
 
 function collectPropertyValues(value, property, output = new Set()) {
@@ -1051,7 +1788,7 @@ async function installSchemaPackage(version, ifPublished) {
 
 async function synchronize(explicitCommit, ifPublished = false) {
   const commit = await resolveCommit(explicitCommit);
-  const [protocol, packageManifest, lock, nodeClient, nodeSession, nodeTypes, nodeExtension] = await Promise.all([
+  const [protocol, packageManifest, lock, nodeClient, nodeSession, nodeTypes, nodeExtension, nodeRpc, nodeSessionFsProvider] = await Promise.all([
     fetchJson(rawUrl(commit, "sdk-protocol-version.json")),
     fetchJson(rawUrl(commit, "nodejs/package.json")),
     fetchJson(rawUrl(commit, "nodejs/package-lock.json")),
@@ -1059,6 +1796,8 @@ async function synchronize(explicitCommit, ifPublished = false) {
     fetchText(rawUrl(commit, "nodejs/src/session.ts")),
     fetchText(rawUrl(commit, "nodejs/src/types.ts")),
     fetchText(rawUrl(commit, "nodejs/src/extension.ts")),
+    fetchText(rawUrl(commit, "nodejs/src/generated/rpc.ts")),
+    fetchText(rawUrl(commit, "nodejs/src/sessionFsProvider.ts")),
   ]);
   const cliPackageVersion =
     packageManifest.copilotCliVersion ??
@@ -1068,7 +1807,14 @@ async function synchronize(explicitCommit, ifPublished = false) {
     /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(cliPackageVersion),
     "upstream package manifest has no exact Copilot CLI version",
   );
-  verifyCustomAgentSourceContract(nodeClient, nodeTypes, nodeExtension, zigSessionSource);
+  verifyPinnedSourceContracts({
+    upstreamCommit: commit,
+    clientSource: nodeClient,
+    typesSource: nodeTypes,
+    extensionSource: nodeExtension,
+    rpcSource: nodeRpc,
+    sessionFsProviderSource: nodeSessionFsProvider,
+  });
 
   try {
     const schemaPackage = await installSchemaPackage(cliPackageVersion, ifPublished);
@@ -1095,7 +1841,11 @@ async function synchronize(explicitCommit, ifPublished = false) {
     writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
     writeFileSync(generatedPath, `pub const sdk_protocol_version: u64 = ${protocol.version};\n`);
     writePublicRpcSurface(commit, nodeClient, nodeSession);
-    writeExtensibilityContract(commit, nodeClient, nodeTypes, nodeExtension);
+    const extensibilityContract = expectedExtensibilityContract(commit);
+    writeFileSync(
+      extensibilityContractPath,
+      `${JSON.stringify(extensibilityContract, null, 2)}\n`,
+    );
     writeSchemaSnapshot();
     generateSessionEvents();
   } finally {
@@ -1110,18 +1860,21 @@ if (args.includes("--check")) {
   assert(args.length === 1, "--check does not accept other arguments");
   const metadata = parseJson(metadataPath);
   validateMetadata(metadata);
-  const [nodeClient, nodeTypes, nodeExtension] = await Promise.all([
+  const [nodeClient, nodeTypes, nodeExtension, nodeRpc, nodeSessionFsProvider] = await Promise.all([
     fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/client.ts")),
     fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/types.ts")),
     fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/extension.ts")),
+    fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/generated/rpc.ts")),
+    fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/sessionFsProvider.ts")),
   ]);
-  verifyCustomAgentSourceContract(nodeClient, nodeTypes, nodeExtension, zigSessionSource);
-  verifyExtensibilitySourceContract(
-    expectedExtensibilityContract(metadata.upstreamCommit),
-    nodeClient,
-    nodeTypes,
-    nodeExtension,
-  );
+  verifyPinnedSourceContracts({
+    upstreamCommit: metadata.upstreamCommit,
+    clientSource: nodeClient,
+    typesSource: nodeTypes,
+    extensionSource: nodeExtension,
+    rpcSource: nodeRpc,
+    sessionFsProviderSource: nodeSessionFsProvider,
+  });
   verify();
 } else {
   const commitIndex = args.indexOf("--commit");

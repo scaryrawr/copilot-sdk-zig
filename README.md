@@ -130,6 +130,207 @@ in use. `SessionEvent` values and the message ID from `send` own memory from the
 client allocator. `Session.disconnect` releases the client-side session
 resources while preserving the session state so it can be resumed later.
 
+## Configure session runtime options and SessionFS
+
+`CreateSessionConfig`, `ResumeSessionConfig`, and `JoinSessionConfig` expose the
+same session runtime fields. Set them directly on the lifecycle config.
+`SessionConfig` remains an alias for `CreateSessionConfig`.
+
+```zig
+const session = try client.createSession(.{
+    .client_name = "acme-editor",
+    .reasoning_effort = .high,
+    .reasoning_summary = .concise,
+    .enable_experimental_mode = false,
+    .context_tier = .long_context,
+    .large_output = .{
+        .enabled = true,
+        .max_size_bytes = 64 * 1024,
+        .output_directory = "/tmp/copilot-output",
+    },
+    .config_directory = "/var/lib/acme/copilot",
+    .capi = .{
+        .auto_tier = .balance,
+        .enable_websocket_responses = false,
+    },
+    .additional_directories = &.{"/work/shared"},
+    .infinite_sessions = .{
+        .enabled = true,
+        .background_compaction_threshold = 0.80,
+        .buffer_exhaustion_threshold = 0.95,
+    },
+    .memory = .{ .enabled = false },
+    .skip_embedding_retrieval = true,
+    .embedding_cache_storage = .in_memory,
+    .organization_custom_instructions = "Use the release checklist.",
+    .enable_file_hooks = false,
+    .enable_host_git_operations = true,
+    .enable_session_store = false,
+});
+```
+
+The public field names and types are:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `client_name` | `?[]const u8` | Identifies the integrating application. |
+| `reasoning_effort` | `?ReasoningEffort` | Selects `low`, `medium`, `high`, `xhigh`, or `max`. |
+| `reasoning_summary` | `?ReasoningSummary` | Selects the reasoning summary mode. |
+| `enable_experimental_mode` | `?bool` | Enables or disables experimental runtime behavior. |
+| `context_tier` | `?ContextTier` | Selects `default` or `long_context`. |
+| `large_output` | `?LargeOutputConfig` | Sets `enabled`, `max_size_bytes`, and `output_directory`. |
+| `config_directory` | `?[]const u8` | Overrides the runtime configuration directory. |
+| `capi` | `?CapiSessionOptions` | Sets `auto_tier` and `enable_websocket_responses`. |
+| `additional_directories` | `?[]const []const u8` | Adds directories that the session may access. |
+| `infinite_sessions` | `?InfiniteSessionConfig` | Sets `enabled`, `background_compaction_threshold`, and `buffer_exhaustion_threshold`. |
+| `memory` | `?MemoryConfiguration` | Sets the required nested `enabled` value. |
+| `skip_embedding_retrieval` | `?bool` | Disables embedding retrieval when true. |
+| `embedding_cache_storage` | `?EmbeddingCacheStorage` | Selects `persistent` or `in_memory`. |
+| `organization_custom_instructions` | `?[]const u8` | Adds organization instructions to the session. |
+| `enable_file_hooks` | `?bool` | Enables or disables file-based hooks. |
+| `enable_host_git_operations` | `?bool` | Enables or disables host Git operations. |
+| `enable_session_store` | `?bool` | Enables or disables the cross-session store. |
+| `create_session_fs_provider` | `?SessionFsProviderFactory` | Creates the filesystem provider for this session. This field is never sent as JSON. |
+
+Optional values preserve presence. `null` omits a field. An explicit `false`,
+`""`, `&.{}`, or empty optional nested struct stays in the request as `false`,
+an empty string, an empty array, or `{}`. For example,
+`.additional_directories = &.{}` sends `"additionalDirectories":[]`, while
+`.additional_directories = null` omits that JSON field.
+
+### Register SessionFS
+
+Register SessionFS on the connection before creating or resuming a session.
+The minimum registration supplies both paths and the path convention.
+
+```zig
+var client = try copilot.Client.init(allocator, io, .{
+    .session_fs = .{
+        .initial_cwd = "/workspace",
+        .session_state_path = ".copilot/session",
+        .conventions = .posix,
+    },
+});
+defer client.deinit();
+```
+
+Set `.capabilities = .{ .sqlite = true }` only when every session provider
+implements the SQLite callbacks. For an extension child process, use
+`Client.initParentWithOptions` so `joinParentSession` can register SessionFS on
+that connection.
+
+```zig
+var client = try copilot.Client.initParentWithOptions(allocator, io, .{
+    .session_fs = .{
+        .initial_cwd = "/workspace",
+        .session_state_path = ".copilot/session",
+        .conventions = .posix,
+        .capabilities = .{ .sqlite = true },
+    },
+});
+defer client.deinit();
+```
+
+The client sends `sessionFs.setProvider` during startup. If the connection has
+a SessionFS registration, each create, resume, or join config must set
+`create_session_fs_provider`. If the registration declares SQLite support, the
+created provider must also set `SessionFsProvider.sqlite`. The lifecycle call
+fails before `session.create` or `session.resume` when these values do not
+match. A config that sets `create_session_fs_provider` without a connection
+registration also fails before the lifecycle RPC.
+
+Create one provider for each session.
+
+```zig
+fn createSessionFsProvider(
+    allocator: std.mem.Allocator,
+    init: copilot.SessionFsProviderInit,
+    context: ?*anyopaque,
+) !copilot.SessionFsProvider {
+    const factory: *FsFactory = @ptrCast(@alignCast(context.?));
+    const state = try allocator.create(MySessionFs);
+    errdefer allocator.destroy(state);
+    state.* = try MySessionFs.init(allocator, init.session_id, factory.root);
+    return .{
+        .context = state,
+        .vtable = &MySessionFs.vtable,
+        .sqlite = MySessionFs.sqliteProvider(state),
+    };
+}
+
+const session = try client.createSession(.{
+    .create_session_fs_provider = .{
+        .context = &fs_factory,
+        .create = createSessionFsProvider,
+    },
+});
+```
+
+`SessionFsProviderInit.session_id` is borrowed for the factory call. The
+provider must not retain that slice without copying it. The factory may allocate
+provider state with the supplied allocator. `SessionFsProvider.VTable.deinit`
+must release that state with the same allocator.
+
+### Implement the SessionFS callbacks
+
+`SessionFsProvider.VTable` defines ten filesystem callbacks:
+
+| Callback | Capability and result |
+| --- | --- |
+| `read_file` | Reads UTF-8 file content and returns `SessionFsOwnedBytes`. |
+| `write_file` | Replaces a file with UTF-8 content and an optional `u64` mode. |
+| `append_file` | Appends UTF-8 content with an optional `u64` mode. |
+| `exists` | Reports whether a path exists. Callback errors produce `false`. |
+| `stat` | Returns file flags, size, and RFC 3339 `mtime` and `birthtime` values. |
+| `mkdir` | Creates a directory with `recursive` and an optional `u64` mode. |
+| `readdir` | Returns owned entry names in `SessionFsOwnedStrings`. |
+| `readdir_with_types` | Returns owned names tagged as `file` or `directory`. |
+| `rm` | Removes a path with `recursive` and `force` controls. |
+| `rename` | Moves `source` to `destination`. |
+
+`SessionFsSqliteProvider.VTable` adds three callbacks:
+
+| Callback | Capability and result |
+| --- | --- |
+| `query` | Receives `exec`, `query`, or `run` plus optional named parameters. It returns typed rows, columns, `rows_affected`, and an optional `last_insert_rowid`. |
+| `transaction` | Runs typed statements and returns either owned query results or a classified failure. The callback is optional. |
+| `exists` | Reports whether the session SQLite database exists. |
+
+Only `SessionFsSqliteParameter.value` and `SessionFsSqliteCell.value` contain
+opaque JSON. The statement, query result, row, column, count, last insert ID,
+transaction result, and transaction failure class remain typed. Use
+`busy_or_locked`, `fatal`, or `post_commit_ambiguous` for a transaction failure.
+
+The adapter takes ownership of every successful callback result. Allocate
+`SessionFsOwnedBytes`, `SessionFsOwnedStrings`, `SessionFsOwnedEntries`,
+`SessionFsStat`, `SessionFsSqliteQueryResult`, and
+`SessionFsSqliteTransactionOutcome` with the callback allocator. The adapter
+deinitializes each result after it writes the JSON-RPC response, including write
+and validation failures.
+
+### Read the workspace path
+
+`Session.workspacePath()` returns `!?[]const u8`.
+
+```zig
+if (try session.workspacePath()) |workspace_path| {
+    std.debug.print("workspace: {s}\n", .{workspace_path});
+}
+```
+
+An active session with no runtime path returns `null`. An inactive handle
+returns `error.SessionNotActive`. The returned path is borrowed from the client
+and remains valid until disconnect, client deinitialization, or a successful
+resident resume replaces the session record.
+
+The client owns the session ID, copied workspace path, and optional SessionFS
+provider for each active or disconnected handle. A lifecycle call does not
+replace that state until all fallible response processing succeeds. A failed
+resident resume therefore preserves the existing state. If processing fails
+after a new create or nonresident resume returns a runtime session ID, the
+client detaches that runtime session before local cleanup. The client tears down
+each provider exactly once while its session ID remains valid.
+
 ## Configure extensions
 
 Trusted built-in plugins are installed transactionally after `connect` and

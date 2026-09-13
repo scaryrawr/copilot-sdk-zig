@@ -36,6 +36,19 @@ fn writeFrameAndWipe(
     try json_rpc.writeFrame(writer, body);
 }
 
+fn validateSessionFsConfig(config: session_types.SessionFsConfig) !void {
+    if (config.initial_cwd.len == 0 or
+        !std.unicode.utf8ValidateSlice(config.initial_cwd))
+    {
+        return error.InvalidSessionFsInitialCwd;
+    }
+    if (config.session_state_path.len == 0 or
+        !std.unicode.utf8ValidateSlice(config.session_state_path))
+    {
+        return error.InvalidSessionFsStatePath;
+    }
+}
+
 pub const ClientOptions = struct {
     cli_path: []const u8 = "copilot",
     working_directory: ?[]const u8 = null,
@@ -44,6 +57,11 @@ pub const ClientOptions = struct {
     client_info: ?ClientInfo = null,
     /// Absolute trusted plugin directories installed before `init` returns.
     builtin_plugin_directories: []const []const u8 = &.{},
+    session_fs: ?session_types.SessionFsConfig = null,
+};
+
+pub const ParentClientOptions = struct {
+    session_fs: ?session_types.SessionFsConfig = null,
 };
 
 pub const ClientInfo = struct {
@@ -471,6 +489,526 @@ const RegisteredRpcHandler = struct {
     }
 };
 
+const SessionFsMethod = enum {
+    read_file,
+    write_file,
+    append_file,
+    exists,
+    stat,
+    mkdir,
+    readdir,
+    readdir_with_types,
+    rm,
+    rename,
+    sqlite_query,
+    sqlite_transaction,
+    sqlite_exists,
+};
+
+const RegisteredSessionFs = struct {
+    sqlite: bool,
+};
+
+const SessionFsLifecycleKind = enum {
+    create,
+    resumed,
+};
+
+const SessionRecord = struct {
+    id: []u8,
+    active: bool = true,
+    workspace_path: ?[]u8 = null,
+    session_fs: ?session_types.SessionFsProvider = null,
+
+    fn deactivate(self: *SessionRecord, allocator: std.mem.Allocator) void {
+        if (!self.active) return;
+        if (self.session_fs) |provider_value| {
+            provider_value.vtable.deinit(allocator, provider_value.context);
+        }
+        if (self.workspace_path) |path| allocator.free(path);
+        self.active = false;
+        self.workspace_path = null;
+        self.session_fs = null;
+    }
+
+    fn deinit(self: *SessionRecord, allocator: std.mem.Allocator) void {
+        self.deactivate(allocator);
+        allocator.free(self.id);
+        self.* = undefined;
+    }
+};
+
+const PendingSessionRecord = struct {
+    kind: SessionFsLifecycleKind,
+    id: []u8,
+    owns_id: bool,
+    prior_record_index: ?usize = null,
+    workspace_path: ?[]u8 = null,
+    session_fs: ?session_types.SessionFsProvider = null,
+
+    fn deinit(self: *PendingSessionRecord, allocator: std.mem.Allocator) void {
+        if (self.session_fs) |provider_value| {
+            provider_value.vtable.deinit(allocator, provider_value.context);
+        }
+        if (self.workspace_path) |path| allocator.free(path);
+        if (self.owns_id) allocator.free(self.id);
+        self.* = undefined;
+    }
+};
+
+const SessionFsPathRequest = struct {
+    path: []const u8,
+};
+
+const SessionFsWriteRequest = struct {
+    path: []const u8,
+    content: []const u8,
+    mode: ?u64,
+};
+
+const SessionFsMkdirRequest = struct {
+    path: []const u8,
+    recursive: bool,
+    mode: ?u64,
+};
+
+const SessionFsRmRequest = struct {
+    path: []const u8,
+    recursive: bool,
+    force: bool,
+};
+
+const SessionFsRenameRequest = struct {
+    source: []const u8,
+    destination: []const u8,
+};
+
+const SessionFsOperation = union(SessionFsMethod) {
+    read_file: SessionFsPathRequest,
+    write_file: SessionFsWriteRequest,
+    append_file: SessionFsWriteRequest,
+    exists: SessionFsPathRequest,
+    stat: SessionFsPathRequest,
+    mkdir: SessionFsMkdirRequest,
+    readdir: SessionFsPathRequest,
+    readdir_with_types: SessionFsPathRequest,
+    rm: SessionFsRmRequest,
+    rename: SessionFsRenameRequest,
+    sqlite_query: session_types.SessionFsSqliteStatement,
+    sqlite_transaction: []const session_types.SessionFsSqliteStatement,
+    sqlite_exists: void,
+};
+
+const ParsedSessionFsRequest = struct {
+    session_id: ?[]const u8,
+    operation: SessionFsOperation,
+};
+
+const WireSessionFsError = struct {
+    code: []const u8,
+    message: []const u8,
+};
+
+const WireSessionFsReadResult = struct {
+    content: []const u8,
+    @"error": ?WireSessionFsError = null,
+};
+
+const WireSessionFsExistsResult = struct {
+    exists: bool,
+};
+
+const WireSessionFsStatResult = struct {
+    isFile: bool,
+    isDirectory: bool,
+    size: u64,
+    mtime: []const u8,
+    birthtime: []const u8,
+    @"error": ?WireSessionFsError = null,
+};
+
+const WireSessionFsReaddirResult = struct {
+    entries: []const []const u8,
+    @"error": ?WireSessionFsError = null,
+};
+
+const WireSessionFsEntry = struct {
+    name: []const u8,
+    type: session_types.SessionFsEntryType,
+};
+
+const WireSessionFsReaddirWithTypesResult = struct {
+    entries: []const WireSessionFsEntry,
+    @"error": ?WireSessionFsError = null,
+};
+
+fn parseSessionFsMethod(method: []const u8) ?SessionFsMethod {
+    const entries = [_]struct { []const u8, SessionFsMethod }{
+        .{ "sessionFs.readFile", .read_file },
+        .{ "sessionFs.writeFile", .write_file },
+        .{ "sessionFs.appendFile", .append_file },
+        .{ "sessionFs.exists", .exists },
+        .{ "sessionFs.stat", .stat },
+        .{ "sessionFs.mkdir", .mkdir },
+        .{ "sessionFs.readdir", .readdir },
+        .{ "sessionFs.readdirWithTypes", .readdir_with_types },
+        .{ "sessionFs.rm", .rm },
+        .{ "sessionFs.rename", .rename },
+        .{ "sessionFs.sqliteQuery", .sqlite_query },
+        .{ "sessionFs.sqliteTransaction", .sqlite_transaction },
+        .{ "sessionFs.sqliteExists", .sqlite_exists },
+    };
+    for (entries) |entry| {
+        if (std.mem.eql(u8, method, entry[0])) return entry[1];
+    }
+    return null;
+}
+
+fn validateJsonObjectFields(
+    object: std.json.ObjectMap,
+    allowed: []const []const u8,
+) !void {
+    var iterator = object.iterator();
+    while (iterator.next()) |entry| {
+        for (allowed) |name| {
+            if (std.mem.eql(u8, entry.key_ptr.*, name)) break;
+        } else return error.UnknownField;
+    }
+}
+
+fn sessionFsString(object: std.json.ObjectMap, name: []const u8) ![]const u8 {
+    const value = try jsonRequiredString(object, name);
+    if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
+    return value;
+}
+
+fn sessionFsOptionalId(object: std.json.ObjectMap) !?[]const u8 {
+    const value = object.get("sessionId") orelse return null;
+    const session_id = switch (value) {
+        .string => |string| string,
+        else => return error.InvalidField,
+    };
+    if (!std.unicode.utf8ValidateSlice(session_id)) return error.InvalidUtf8;
+    return session_id;
+}
+
+fn sessionFsOptionalU64(object: std.json.ObjectMap, name: []const u8) !?u64 {
+    const value = object.get(name) orelse return null;
+    return switch (value) {
+        .integer => |number| if (number >= 0)
+            @intCast(number)
+        else
+            error.InvalidInteger,
+        .number_string => |number| try std.fmt.parseInt(u64, number, 10),
+        else => error.InvalidInteger,
+    };
+}
+
+fn sessionFsOptionalBool(
+    object: std.json.ObjectMap,
+    name: []const u8,
+    default: bool,
+) !bool {
+    const value = object.get(name) orelse return default;
+    return switch (value) {
+        .bool => |boolean| boolean,
+        else => error.InvalidField,
+    };
+}
+
+fn parseSessionFsQueryType(value: std.json.Value) !session_types.SessionFsSqliteQueryType {
+    const name = switch (value) {
+        .string => |string| string,
+        else => return error.InvalidQueryType,
+    };
+    if (!std.unicode.utf8ValidateSlice(name)) return error.InvalidUtf8;
+    if (std.mem.eql(u8, name, "exec")) return .exec;
+    if (std.mem.eql(u8, name, "query")) return .query;
+    if (std.mem.eql(u8, name, "run")) return .run;
+    return error.InvalidQueryType;
+}
+
+fn parseSessionFsParameters(
+    allocator: std.mem.Allocator,
+    value: ?std.json.Value,
+) !?[]const session_types.SessionFsSqliteParameter {
+    const params_value = value orelse return null;
+    const object = switch (params_value) {
+        .object => |items| items,
+        else => return error.InvalidParameters,
+    };
+    const params = try allocator.alloc(
+        session_types.SessionFsSqliteParameter,
+        object.count(),
+    );
+    var index: usize = 0;
+    var iterator = object.iterator();
+    while (iterator.next()) |entry| : (index += 1) {
+        if (!std.unicode.utf8ValidateSlice(entry.key_ptr.*))
+            return error.InvalidUtf8;
+        params[index] = .{
+            .name = entry.key_ptr.*,
+            .value = entry.value_ptr.*,
+        };
+    }
+    return params;
+}
+
+fn parseSessionFsStatement(
+    allocator: std.mem.Allocator,
+    object: std.json.ObjectMap,
+) !session_types.SessionFsSqliteStatement {
+    try validateJsonObjectFields(object, &.{ "query", "queryType", "params" });
+    return .{
+        .query_type = try parseSessionFsQueryType(
+            object.get("queryType") orelse return error.MissingField,
+        ),
+        .query = try sessionFsString(object, "query"),
+        .params = try parseSessionFsParameters(allocator, object.get("params")),
+    };
+}
+
+fn parseSessionFsRequest(
+    allocator: std.mem.Allocator,
+    method: SessionFsMethod,
+    params: ?std.json.Value,
+) !ParsedSessionFsRequest {
+    const object = switch (params orelse return error.MissingField) {
+        .object => |value| value,
+        else => return error.InvalidField,
+    };
+    const session_id = try sessionFsOptionalId(object);
+    const operation: SessionFsOperation = switch (method) {
+        .read_file, .exists, .stat, .readdir, .readdir_with_types => operation: {
+            try validateJsonObjectFields(object, &.{ "sessionId", "path" });
+            const request = SessionFsPathRequest{
+                .path = try sessionFsString(object, "path"),
+            };
+            break :operation switch (method) {
+                .read_file => .{ .read_file = request },
+                .exists => .{ .exists = request },
+                .stat => .{ .stat = request },
+                .readdir => .{ .readdir = request },
+                .readdir_with_types => .{ .readdir_with_types = request },
+                else => unreachable,
+            };
+        },
+        .write_file, .append_file => operation: {
+            try validateJsonObjectFields(
+                object,
+                &.{ "sessionId", "path", "content", "mode" },
+            );
+            const request = SessionFsWriteRequest{
+                .path = try sessionFsString(object, "path"),
+                .content = try sessionFsString(object, "content"),
+                .mode = try sessionFsOptionalU64(object, "mode"),
+            };
+            break :operation switch (method) {
+                .write_file => .{ .write_file = request },
+                .append_file => .{ .append_file = request },
+                else => unreachable,
+            };
+        },
+        .mkdir => .{ .mkdir = blk: {
+            try validateJsonObjectFields(
+                object,
+                &.{ "sessionId", "path", "recursive", "mode" },
+            );
+            break :blk .{
+                .path = try sessionFsString(object, "path"),
+                .recursive = try sessionFsOptionalBool(object, "recursive", false),
+                .mode = try sessionFsOptionalU64(object, "mode"),
+            };
+        } },
+        .rm => .{ .rm = blk: {
+            try validateJsonObjectFields(
+                object,
+                &.{ "sessionId", "path", "recursive", "force" },
+            );
+            break :blk .{
+                .path = try sessionFsString(object, "path"),
+                .recursive = try sessionFsOptionalBool(object, "recursive", false),
+                .force = try sessionFsOptionalBool(object, "force", false),
+            };
+        } },
+        .rename => .{ .rename = blk: {
+            try validateJsonObjectFields(object, &.{ "sessionId", "src", "dest" });
+            break :blk .{
+                .source = try sessionFsString(object, "src"),
+                .destination = try sessionFsString(object, "dest"),
+            };
+        } },
+        .sqlite_query => .{ .sqlite_query = blk: {
+            try validateJsonObjectFields(
+                object,
+                &.{ "sessionId", "query", "queryType", "params" },
+            );
+            break :blk .{
+                .query_type = try parseSessionFsQueryType(
+                    object.get("queryType") orelse return error.MissingField,
+                ),
+                .query = try sessionFsString(object, "query"),
+                .params = try parseSessionFsParameters(
+                    allocator,
+                    object.get("params"),
+                ),
+            };
+        } },
+        .sqlite_transaction => .{ .sqlite_transaction = blk: {
+            try validateJsonObjectFields(object, &.{ "sessionId", "statements" });
+            const values = switch (object.get("statements") orelse return error.MissingField) {
+                .array => |array| array.items,
+                else => return error.InvalidField,
+            };
+            const statements = try allocator.alloc(
+                session_types.SessionFsSqliteStatement,
+                values.len,
+            );
+            for (values, 0..) |value, index| {
+                const statement = switch (value) {
+                    .object => |statement_object| statement_object,
+                    else => return error.InvalidField,
+                };
+                statements[index] = try parseSessionFsStatement(allocator, statement);
+            }
+            break :blk statements;
+        } },
+        .sqlite_exists => .{ .sqlite_exists = blk: {
+            try validateJsonObjectFields(object, &.{"sessionId"});
+            break :blk {};
+        } },
+    };
+    return .{ .session_id = session_id, .operation = operation };
+}
+
+fn sessionFsError(err: anyerror) WireSessionFsError {
+    return .{
+        .code = if (err == error.FileNotFound) "ENOENT" else "UNKNOWN",
+        .message = @errorName(err),
+    };
+}
+
+fn isValidRfc3339(value: []const u8) bool {
+    if (!std.unicode.utf8ValidateSlice(value) or value.len < 20) return false;
+    if (value[4] != '-' or value[7] != '-' or
+        (value[10] != 'T' and value[10] != 't') or
+        value[13] != ':' or value[16] != ':')
+    {
+        return false;
+    }
+    const year = std.fmt.parseInt(u16, value[0..4], 10) catch return false;
+    const month_number = std.fmt.parseInt(u4, value[5..7], 10) catch return false;
+    const day = std.fmt.parseInt(u5, value[8..10], 10) catch return false;
+    const hour = std.fmt.parseInt(u5, value[11..13], 10) catch return false;
+    const minute = std.fmt.parseInt(u6, value[14..16], 10) catch return false;
+    const second = std.fmt.parseInt(u6, value[17..19], 10) catch return false;
+    if (month_number < 1 or month_number > 12 or hour > 23 or
+        minute > 59 or second > 60)
+    {
+        return false;
+    }
+    const month: std.time.epoch.Month = @enumFromInt(month_number);
+    if (day < 1 or day > std.time.epoch.getDaysInMonth(year, month)) return false;
+
+    var index: usize = 19;
+    if (value[index] == '.') {
+        index += 1;
+        const fraction_start = index;
+        while (index < value.len and std.ascii.isDigit(value[index])) : (index += 1) {}
+        if (index == fraction_start) return false;
+    }
+    if (index == value.len - 1 and (value[index] == 'Z' or value[index] == 'z'))
+        return true;
+    if (index + 6 != value.len or
+        (value[index] != '+' and value[index] != '-') or
+        value[index + 3] != ':')
+    {
+        return false;
+    }
+    const offset_hour = std.fmt.parseInt(u5, value[index + 1 .. index + 3], 10) catch
+        return false;
+    const offset_minute = std.fmt.parseInt(u6, value[index + 4 .. index + 6], 10) catch
+        return false;
+    return offset_hour <= 23 and offset_minute <= 59;
+}
+
+fn currentRfc3339(io: std.Io, buffer: []u8) ![]const u8 {
+    const now = std.Io.Clock.real.now(io);
+    const seconds: u64 = if (now.nanoseconds <= 0)
+        0
+    else
+        @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s));
+    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = seconds };
+    const year_day = epoch_seconds.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_seconds = epoch_seconds.getDaySeconds();
+    return std.fmt.bufPrint(
+        buffer,
+        "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.000Z",
+        .{
+            year_day.year,
+            month_day.month.numeric(),
+            month_day.day_index + 1,
+            day_seconds.getHoursIntoDay(),
+            day_seconds.getMinutesIntoHour(),
+            day_seconds.getSecondsIntoMinute(),
+        },
+    );
+}
+
+test "currentRfc3339 propagates formatting failure" {
+    var buffer: [23]u8 = undefined;
+    try std.testing.expectError(
+        error.NoSpaceLeft,
+        currentRfc3339(std.testing.io, &buffer),
+    );
+}
+
+fn jsonUnsigned(allocator: std.mem.Allocator, value: u64) !std.json.Value {
+    if (value <= std.math.maxInt(i64)) return .{ .integer = @intCast(value) };
+    return .{ .number_string = try std.fmt.allocPrint(allocator, "{d}", .{value}) };
+}
+
+fn sessionFsSqliteQueryValue(
+    allocator: std.mem.Allocator,
+    result: session_types.SessionFsSqliteQueryResult,
+) !std.json.Value {
+    var root: std.json.ObjectMap = .empty;
+    var rows = std.json.Array.init(allocator);
+    for (result.rows) |row| {
+        var row_object: std.json.ObjectMap = .empty;
+        for (row.values) |cell| {
+            if (!std.unicode.utf8ValidateSlice(cell.name) or
+                !std.unicode.utf8ValidateSlice(cell.value.json))
+            {
+                return error.InvalidUtf8;
+            }
+            const value = try std.json.parseFromSliceLeaky(
+                std.json.Value,
+                allocator,
+                cell.value.json,
+                .{},
+            );
+            if (row_object.contains(cell.name)) return error.DuplicateField;
+            try row_object.put(allocator, cell.name, value);
+        }
+        try rows.append(.{ .object = row_object });
+    }
+    try root.put(allocator, "rows", .{ .array = rows });
+
+    var columns = std.json.Array.init(allocator);
+    for (result.columns.values) |column| {
+        if (!std.unicode.utf8ValidateSlice(column)) return error.InvalidUtf8;
+        try columns.append(.{ .string = column });
+    }
+    try root.put(allocator, "columns", .{ .array = columns });
+    try root.put(allocator, "rowsAffected", try jsonUnsigned(allocator, result.rows_affected));
+    if (result.last_insert_rowid) |row_id| {
+        try root.put(allocator, "lastInsertRowid", .{ .integer = row_id });
+    }
+    return .{ .object = root };
+}
+
 pub const Client = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -480,7 +1018,9 @@ pub const Client = struct {
     reader_buffer: []u8,
     writer_buffer: []u8,
     next_request_id: u64 = 1,
-    session_ids: std.ArrayList([]u8) = .empty,
+    sessions: std.ArrayList(SessionRecord) = .empty,
+    registered_session_fs: ?RegisteredSessionFs = null,
+    pending_session: ?PendingSessionRecord = null,
     events: std.ArrayList(QueuedEvent) = .empty,
     tools: std.ArrayList(RegisteredTool) = .empty,
     user_input_handlers: std.ArrayList(RegisteredUserInputHandler) = .empty,
@@ -497,14 +1037,25 @@ pub const Client = struct {
         io: std.Io,
         options: ClientOptions,
     ) !Client {
+        if (options.session_fs) |config| try validateSessionFsConfig(config);
         var client = try spawn(allocator, io, options);
         errdefer client.deinit();
         try client.connect(options.connection_token, options.client_info);
         try client.setBuiltinPluginDirectories(options.builtin_plugin_directories);
+        try client.registerSessionFs(options.session_fs);
         return client;
     }
 
     pub fn initParent(allocator: std.mem.Allocator, io: std.Io) !Client {
+        return initParentWithOptions(allocator, io, .{});
+    }
+
+    pub fn initParentWithOptions(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        options: ParentClientOptions,
+    ) !Client {
+        if (options.session_fs) |config| try validateSessionFsConfig(config);
         const reader_buffer = try allocator.alloc(u8, 8192);
         errdefer allocator.free(reader_buffer);
         const writer_buffer = try allocator.alloc(u8, 8192);
@@ -528,6 +1079,7 @@ pub const Client = struct {
         };
         errdefer client.deinit();
         try client.connect(null, null);
+        try client.registerSessionFs(options.session_fs);
         return client;
     }
 
@@ -605,8 +1157,9 @@ pub const Client = struct {
         self.provider_tokens.deinit(self.allocator);
         for (self.rpc_handlers.items) |handler| handler.deinit(self.allocator);
         self.rpc_handlers.deinit(self.allocator);
-        for (self.session_ids.items) |id| self.allocator.free(id);
-        self.session_ids.deinit(self.allocator);
+        if (self.pending_session) |*pending| pending.deinit(self.allocator);
+        for (self.sessions.items) |*session| session.deinit(self.allocator);
+        self.sessions.deinit(self.allocator);
         if (self.child) |*child| child.kill(self.io);
         self.allocator.destroy(self.reader);
         self.allocator.destroy(self.writer);
@@ -655,10 +1208,39 @@ pub const Client = struct {
         parsed.deinit();
     }
 
+    fn setSessionFsProvider(
+        self: *Client,
+        config: session_types.SessionFsConfig,
+    ) !void {
+        const parsed = try self.call(struct {
+            success: bool,
+        }, "sessionFs.setProvider", .{
+            .initialCwd = config.initial_cwd,
+            .sessionStatePath = config.session_state_path,
+            .conventions = config.conventions,
+            .capabilities = config.capabilities,
+        });
+        defer parsed.deinit();
+        if (!parsed.value.success) return error.SessionFsRegistrationRejected;
+    }
+
+    fn registerSessionFs(
+        self: *Client,
+        config: ?session_types.SessionFsConfig,
+    ) !void {
+        const value = config orelse return;
+        self.registered_session_fs = .{
+            .sqlite = value.capabilities != null and
+                (value.capabilities.?.sqlite orelse false),
+        };
+        try self.setSessionFsProvider(value);
+    }
+
     pub fn createSession(
         self: *Client,
         config: session_types.CreateSessionConfig,
     ) !Session {
+        const options = normalizeSessionOptions(config);
         try validateCustomAgents(config.custom_agents, config.agent);
         try ext.validate(config.extensions.common);
         try validateCustomAgentMcpServers(config.custom_agents);
@@ -680,11 +1262,13 @@ pub const Client = struct {
             self.allocator.free(owned_session_id);
             return error.SessionAlreadyActive;
         }
-        self.session_ids.append(self.allocator, owned_session_id) catch |err| {
-            self.allocator.free(owned_session_id);
-            return err;
-        };
-        errdefer self.removeSession(owned_session_id);
+        try self.beginSessionRecord(
+            .create,
+            owned_session_id,
+            true,
+            options.create_session_fs_provider,
+        );
+        errdefer self.rollbackSessionRecord();
 
         var extension_values = ExtensionWireValues.init(self.allocator);
         defer extension_values.deinit();
@@ -706,19 +1290,17 @@ pub const Client = struct {
         const request = try buildPreparedCreateSessionRequest(
             owned_session_id,
             config,
+            options,
             tools.items,
             &extension_values,
             prepared_providers,
         );
-        const parsed = try self.call(
+        var parsed = try self.call(
             WireSessionLifecycleResponse,
             "session.create",
             request,
         );
-        defer {
-            wipeLifecycleResponseSecrets(parsed.value);
-            parsed.deinit();
-        }
+        defer deinitLifecycleResponse(&parsed);
         const returned_id = parsed.value.sessionId orelse return error.MissingSessionId;
         if (!std.mem.eql(u8, owned_session_id, returned_id)) {
             if (!self.hasSession(returned_id)) {
@@ -728,9 +1310,15 @@ pub const Client = struct {
         }
         errdefer self.detachSessionBestEffort(returned_id);
 
+        try self.prepareSessionCommit(returned_id, parsed.value.workspacePath);
         try self.commitExtensionRuntime(returned_id, parsed.value, &.{});
         self.commitProviderTokens();
-        return .{ .client = self, .id = owned_session_id };
+        const session_index = self.commitSessionRecord();
+        return .{
+            .client = self,
+            .id = self.sessions.items[session_index].id,
+            .record_index = session_index,
+        };
     }
 
     pub fn resumeSession(
@@ -738,7 +1326,12 @@ pub const Client = struct {
         session_id: []const u8,
         config: session_types.ResumeSessionConfig,
     ) !Session {
-        return self.resumeSessionWithEnvironment(session_id, config, &.{});
+        return self.resumeSessionWithEnvironment(
+            session_id,
+            config,
+            normalizeSessionOptions(config),
+            &.{},
+        );
     }
 
     /// Deprecated compatibility wrapper. Use `resumeSession`.
@@ -747,13 +1340,19 @@ pub const Client = struct {
         session_id: []const u8,
         config: session_types.SessionConfig,
     ) !Session {
-        return self.resumeSession(session_id, resumeConfigFromCreate(config));
+        return self.resumeSessionWithEnvironment(
+            session_id,
+            resumeConfigFromCreate(config),
+            normalizeSessionOptions(config),
+            &.{},
+        );
     }
 
     fn resumeSessionWithEnvironment(
         self: *Client,
         session_id: []const u8,
         config: session_types.ResumeSessionConfig,
+        options: NormalizedSessionOptions,
         requested_environment_variables: []const []const u8,
     ) !Session {
         try validateCustomAgents(config.custom_agents, config.agent);
@@ -769,16 +1368,19 @@ pub const Client = struct {
         );
         defer prepared_providers.deinit(self.allocator);
 
-        const existing_session_id = self.findSessionId(session_id);
-        const runtime_session_id = existing_session_id orelse id: {
-            const copy = try self.allocator.dupe(u8, session_id);
-            self.session_ids.append(self.allocator, copy) catch |err| {
-                self.allocator.free(copy);
-                return err;
-            };
-            break :id copy;
-        };
-        errdefer if (existing_session_id == null) self.removeSession(runtime_session_id);
+        const existing_session = self.findSession(session_id);
+        const candidate_session_id = if (existing_session) |record|
+            record.id
+        else
+            try self.allocator.dupe(u8, session_id);
+        try self.beginSessionRecord(
+            .resumed,
+            candidate_session_id,
+            existing_session == null,
+            options.create_session_fs_provider,
+        );
+        errdefer self.rollbackSessionRecord();
+        const runtime_session_id = self.pending_session.?.id;
 
         var extension_values = ExtensionWireValues.init(self.allocator);
         defer extension_values.deinit();
@@ -805,16 +1407,14 @@ pub const Client = struct {
         const request = try buildPreparedResumeSessionRequest(
             runtime_session_id,
             config,
+            options,
             tools.items,
             &extension_values,
             requested_environment_variables,
             prepared_providers,
         );
-        const parsed = try self.call(WireSessionLifecycleResponse, "session.resume", request);
-        defer {
-            wipeLifecycleResponseSecrets(parsed.value);
-            parsed.deinit();
-        }
+        var parsed = try self.call(WireSessionLifecycleResponse, "session.resume", request);
+        defer deinitLifecycleResponse(&parsed);
         const returned_id = parsed.value.sessionId orelse return error.MissingSessionId;
         if (!std.mem.eql(u8, runtime_session_id, returned_id)) {
             if (!self.hasSession(returned_id)) {
@@ -822,15 +1422,21 @@ pub const Client = struct {
             }
             return error.SessionIdMismatch;
         }
-        errdefer if (existing_session_id == null) self.detachSessionBestEffort(returned_id);
+        errdefer if (existing_session == null) self.detachSessionBestEffort(returned_id);
 
+        try self.prepareSessionCommit(runtime_session_id, parsed.value.workspacePath);
         try self.commitExtensionRuntime(
             runtime_session_id,
             parsed.value,
             requested_environment_variables,
         );
         self.commitProviderTokens();
-        return .{ .client = self, .id = runtime_session_id };
+        const session_index = self.commitSessionRecord();
+        return .{
+            .client = self,
+            .id = self.sessions.items[session_index].id,
+            .record_index = session_index,
+        };
     }
 
     fn detachSessionBestEffort(self: *Client, session_id: []const u8) void {
@@ -841,6 +1447,133 @@ pub const Client = struct {
             .sessionId = session_id,
         }) catch return;
         parsed.deinit();
+    }
+
+    fn beginSessionRecord(
+        self: *Client,
+        kind: SessionFsLifecycleKind,
+        session_id: []u8,
+        owns_id: bool,
+        factory: ?session_types.SessionFsProviderFactory,
+    ) !void {
+        const prior_record_index = if (kind == .resumed)
+            self.findSessionIndex(session_id)
+        else
+            null;
+        const pending_id = if (prior_record_index != null and !owns_id)
+            try self.allocator.dupe(u8, session_id)
+        else
+            session_id;
+        const pending_owns_id = owns_id or prior_record_index != null;
+        errdefer if (pending_owns_id) self.allocator.free(pending_id);
+        if (self.pending_session != null)
+            return error.SessionLifecycleAlreadyInProgress;
+        if (self.registered_session_fs == null and factory != null)
+            return error.SessionFsNotRegistered;
+        if (self.registered_session_fs != null and factory == null)
+            return error.SessionFsProviderRequired;
+
+        const provider_value = if (factory) |provider_factory| provider: {
+            const created = try provider_factory.create(
+                self.allocator,
+                .{ .session_id = pending_id },
+                provider_factory.context,
+            );
+            errdefer created.vtable.deinit(self.allocator, created.context);
+            if (self.registered_session_fs) |registration| {
+                if (registration.sqlite and created.sqlite == null)
+                    return error.SessionFsSqliteProviderRequired;
+            }
+            break :provider created;
+        } else null;
+        self.pending_session = .{
+            .kind = kind,
+            .id = pending_id,
+            .owns_id = pending_owns_id,
+            .prior_record_index = prior_record_index,
+            .session_fs = provider_value,
+        };
+    }
+
+    fn rollbackSessionRecord(self: *Client) void {
+        if (self.pending_session) |*pending| {
+            pending.deinit(self.allocator);
+        }
+        self.pending_session = null;
+    }
+
+    fn prepareSessionCommit(
+        self: *Client,
+        session_id: []const u8,
+        workspace_path: ?[]const u8,
+    ) !void {
+        const pending = if (self.pending_session) |*value|
+            value
+        else
+            return error.MissingPendingSession;
+        if (!std.mem.eql(u8, pending.id, session_id))
+            return error.UnexpectedSessionId;
+        const replacement_path = if (workspace_path) |path|
+            try self.allocator.dupe(u8, path)
+        else
+            null;
+        errdefer if (replacement_path) |path| self.allocator.free(path);
+        try self.sessions.ensureUnusedCapacity(self.allocator, 1);
+        if (pending.workspace_path) |path| self.allocator.free(path);
+        pending.workspace_path = replacement_path;
+    }
+
+    fn commitSessionRecord(self: *Client) usize {
+        var pending = self.pending_session.?;
+        self.pending_session = null;
+        const prior_record_index = pending.prior_record_index;
+        self.sessions.appendAssumeCapacity(.{
+            .id = pending.id,
+            .workspace_path = pending.workspace_path,
+            .session_fs = pending.session_fs,
+        });
+        const session_index = self.sessions.items.len - 1;
+        pending.owns_id = false;
+        pending.workspace_path = null;
+        pending.session_fs = null;
+        if (prior_record_index) |index| {
+            self.sessions.items[index].deactivate(self.allocator);
+        }
+        return session_index;
+    }
+
+    fn findSessionIndex(self: *Client, session_id: []const u8) ?usize {
+        for (self.sessions.items, 0..) |session, index| {
+            if (session.active and std.mem.eql(u8, session.id, session_id))
+                return index;
+        }
+        return null;
+    }
+
+    fn findSession(
+        self: *Client,
+        session_id: []const u8,
+    ) ?*SessionRecord {
+        const index = self.findSessionIndex(session_id) orelse return null;
+        return &self.sessions.items[index];
+    }
+
+    fn findSessionFsProvider(
+        self: *Client,
+        session_id: ?[]const u8,
+    ) ?session_types.SessionFsProvider {
+        if (session_id) |id| {
+            if (self.pending_session) |pending| {
+                if (std.mem.eql(u8, pending.id, id))
+                    return pending.session_fs;
+            }
+            if (self.findSession(id)) |session| return session.session_fs;
+            return null;
+        }
+        if (self.pending_session) |pending| {
+            if (pending.kind == .create) return pending.session_fs;
+        }
+        return null;
     }
 
     fn beginExtensionRuntime(
@@ -1005,11 +1738,12 @@ pub const Client = struct {
         session_id: []const u8,
         config: session_types.JoinSessionConfig,
     ) !JoinedSession {
+        const options = normalizeSessionOptions(config);
         const resume_config = resumeConfigFromJoin(config);
-        // Extension SDK overrides are structurally impossible here.
         const session = try self.resumeSessionWithEnvironment(
             session_id,
             resume_config,
+            options,
             config.extensions.requested_environment_variables,
         );
         const grants = session.snapshotEnvironmentGrants(self.allocator) catch |err| {
@@ -1181,6 +1915,14 @@ pub const Client = struct {
         method: []const u8,
         params: ?std.json.Value,
     ) !void {
+        if (parseSessionFsMethod(method)) |session_fs_method| {
+            return self.dispatchSessionFsRequest(
+                writer,
+                id,
+                session_fs_method,
+                params,
+            );
+        }
         if (std.mem.eql(u8, method, "hooks.invoke")) {
             return self.dispatchHookRequest(writer, id, params);
         }
@@ -1246,6 +1988,388 @@ pub const Client = struct {
         const response = try json_rpc.encodeSuccessResponse(self.allocator, id, result.value);
         defer self.allocator.free(response);
         try json_rpc.writeFrame(writer, response);
+    }
+
+    fn dispatchSessionFsRequest(
+        self: *Client,
+        writer: *std.Io.Writer,
+        id: std.json.Value,
+        method: SessionFsMethod,
+        params: ?std.json.Value,
+    ) !void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const request = parseSessionFsRequest(
+            arena.allocator(),
+            method,
+            params,
+        ) catch return self.writeServerRequestError(
+            writer,
+            id,
+            -32602,
+            "invalid session filesystem request",
+        );
+        if (request.session_id == null and
+            (self.pending_session == null or
+                self.pending_session.?.kind != .create))
+        {
+            return self.writeServerRequestError(
+                writer,
+                id,
+                -32602,
+                "invalid session filesystem request",
+            );
+        }
+        const provider_value = self.findSessionFsProvider(request.session_id) orelse
+            return self.writeServerRequestError(
+                writer,
+                id,
+                -32000,
+                "session not registered",
+            );
+
+        self.dispatching_rpc_handler = true;
+        defer self.dispatching_rpc_handler = false;
+        switch (request.operation) {
+            .read_file => |input| {
+                var result = provider_value.vtable.read_file(
+                    self.allocator,
+                    input.path,
+                    provider_value.context,
+                ) catch |err| return self.writeTypedSuccess(
+                    writer,
+                    id,
+                    WireSessionFsReadResult{
+                        .content = "",
+                        .@"error" = sessionFsError(err),
+                    },
+                );
+                defer result.deinit(self.allocator);
+                if (!std.unicode.utf8ValidateSlice(result.bytes))
+                    return self.writeServerRequestError(
+                        writer,
+                        id,
+                        -32603,
+                        "invalid session filesystem result",
+                    );
+                return self.writeTypedSuccess(
+                    writer,
+                    id,
+                    WireSessionFsReadResult{ .content = result.bytes },
+                );
+            },
+            .write_file => |input| {
+                provider_value.vtable.write_file(
+                    input.path,
+                    input.content,
+                    input.mode,
+                    provider_value.context,
+                ) catch |err| return self.writeTypedSuccess(
+                    writer,
+                    id,
+                    sessionFsError(err),
+                );
+                return self.writeNullSuccess(writer, id);
+            },
+            .append_file => |input| {
+                provider_value.vtable.append_file(
+                    input.path,
+                    input.content,
+                    input.mode,
+                    provider_value.context,
+                ) catch |err| return self.writeTypedSuccess(
+                    writer,
+                    id,
+                    sessionFsError(err),
+                );
+                return self.writeNullSuccess(writer, id);
+            },
+            .exists => |input| {
+                const exists = provider_value.vtable.exists(
+                    input.path,
+                    provider_value.context,
+                ) catch false;
+                return self.writeTypedSuccess(
+                    writer,
+                    id,
+                    WireSessionFsExistsResult{ .exists = exists },
+                );
+            },
+            .stat => |input| {
+                var result = provider_value.vtable.stat(
+                    self.allocator,
+                    input.path,
+                    provider_value.context,
+                ) catch |err| {
+                    var timestamp_buffer: [24]u8 = undefined;
+                    const timestamp = try currentRfc3339(self.io, &timestamp_buffer);
+                    return self.writeTypedSuccess(
+                        writer,
+                        id,
+                        WireSessionFsStatResult{
+                            .isFile = false,
+                            .isDirectory = false,
+                            .size = 0,
+                            .mtime = timestamp,
+                            .birthtime = timestamp,
+                            .@"error" = sessionFsError(err),
+                        },
+                    );
+                };
+                defer result.deinit(self.allocator);
+                if (!isValidRfc3339(result.mtime) or
+                    !isValidRfc3339(result.birthtime))
+                {
+                    return self.writeServerRequestError(
+                        writer,
+                        id,
+                        -32603,
+                        "invalid session filesystem result",
+                    );
+                }
+                return self.writeTypedSuccess(
+                    writer,
+                    id,
+                    WireSessionFsStatResult{
+                        .isFile = result.is_file,
+                        .isDirectory = result.is_directory,
+                        .size = result.size,
+                        .mtime = result.mtime,
+                        .birthtime = result.birthtime,
+                    },
+                );
+            },
+            .mkdir => |input| {
+                provider_value.vtable.mkdir(
+                    input.path,
+                    input.recursive,
+                    input.mode,
+                    provider_value.context,
+                ) catch |err| return self.writeTypedSuccess(
+                    writer,
+                    id,
+                    sessionFsError(err),
+                );
+                return self.writeNullSuccess(writer, id);
+            },
+            .readdir => |input| {
+                var result = provider_value.vtable.readdir(
+                    self.allocator,
+                    input.path,
+                    provider_value.context,
+                ) catch |err| return self.writeTypedSuccess(
+                    writer,
+                    id,
+                    WireSessionFsReaddirResult{
+                        .entries = &.{},
+                        .@"error" = sessionFsError(err),
+                    },
+                );
+                defer result.deinit(self.allocator);
+                for (result.values) |entry| {
+                    if (!std.unicode.utf8ValidateSlice(entry))
+                        return self.writeServerRequestError(
+                            writer,
+                            id,
+                            -32603,
+                            "invalid session filesystem result",
+                        );
+                }
+                return self.writeTypedSuccess(
+                    writer,
+                    id,
+                    WireSessionFsReaddirResult{ .entries = result.values },
+                );
+            },
+            .readdir_with_types => |input| {
+                var result = provider_value.vtable.readdir_with_types(
+                    self.allocator,
+                    input.path,
+                    provider_value.context,
+                ) catch |err| return self.writeTypedSuccess(
+                    writer,
+                    id,
+                    WireSessionFsReaddirWithTypesResult{
+                        .entries = &.{},
+                        .@"error" = sessionFsError(err),
+                    },
+                );
+                defer result.deinit(self.allocator);
+                const entries = try arena.allocator().alloc(
+                    WireSessionFsEntry,
+                    result.values.len,
+                );
+                for (result.values, 0..) |entry, index| {
+                    if (!std.unicode.utf8ValidateSlice(entry.name))
+                        return self.writeServerRequestError(
+                            writer,
+                            id,
+                            -32603,
+                            "invalid session filesystem result",
+                        );
+                    entries[index] = .{
+                        .name = entry.name,
+                        .type = entry.entry_type,
+                    };
+                }
+                return self.writeTypedSuccess(
+                    writer,
+                    id,
+                    WireSessionFsReaddirWithTypesResult{ .entries = entries },
+                );
+            },
+            .rm => |input| {
+                provider_value.vtable.rm(
+                    input.path,
+                    input.recursive,
+                    input.force,
+                    provider_value.context,
+                ) catch |err| return self.writeTypedSuccess(
+                    writer,
+                    id,
+                    sessionFsError(err),
+                );
+                return self.writeNullSuccess(writer, id);
+            },
+            .rename => |input| {
+                provider_value.vtable.rename(
+                    input.source,
+                    input.destination,
+                    provider_value.context,
+                ) catch |err| return self.writeTypedSuccess(
+                    writer,
+                    id,
+                    sessionFsError(err),
+                );
+                return self.writeNullSuccess(writer, id);
+            },
+            .sqlite_query => |input| {
+                const sqlite = provider_value.sqlite orelse
+                    return self.writeServerRequestError(
+                        writer,
+                        id,
+                        -32000,
+                        "SQLite is not supported by this provider",
+                    );
+                const result = sqlite.vtable.query(
+                    self.allocator,
+                    input.query_type,
+                    input.query,
+                    input.params,
+                    sqlite.context,
+                ) catch |err| return self.writeServerRequestError(
+                    writer,
+                    id,
+                    -32000,
+                    @errorName(err),
+                );
+                if (result == null) {
+                    return self.writeTypedSuccess(writer, id, .{
+                        .rows = @as([]const std.json.Value, &.{}),
+                        .columns = @as([]const []const u8, &.{}),
+                        .rowsAffected = @as(u64, 0),
+                    });
+                }
+                var populated = result.?;
+                defer populated.deinit(self.allocator);
+                const value = sessionFsSqliteQueryValue(
+                    arena.allocator(),
+                    populated,
+                ) catch return self.writeServerRequestError(
+                    writer,
+                    id,
+                    -32603,
+                    "invalid session filesystem result",
+                );
+                return self.writeTypedSuccess(writer, id, value);
+            },
+            .sqlite_transaction => |input| {
+                const sqlite = provider_value.sqlite orelse
+                    return self.writeServerRequestError(
+                        writer,
+                        id,
+                        -32000,
+                        "SQLite is not supported by this provider",
+                    );
+                const transaction = sqlite.vtable.transaction orelse
+                    return self.writeTypedSuccess(writer, id, .{
+                        .results = @as([]const std.json.Value, &.{}),
+                        .@"error" = .{
+                            .errorClass = "fatal",
+                            .message = "SQLite transactions are not supported by this provider",
+                        },
+                    });
+                var outcome = transaction(
+                    self.allocator,
+                    input,
+                    sqlite.context,
+                ) catch |err| {
+                    return self.writeTypedSuccess(writer, id, .{
+                        .results = @as([]const std.json.Value, &.{}),
+                        .@"error" = .{
+                            .errorClass = "fatal",
+                            .message = @errorName(err),
+                        },
+                    });
+                };
+                defer outcome.deinit(self.allocator);
+                switch (outcome) {
+                    .success => |results| {
+                        var values = std.json.Array.init(arena.allocator());
+                        for (results.values) |result| {
+                            try values.append(try sessionFsSqliteQueryValue(
+                                arena.allocator(),
+                                result,
+                            ));
+                        }
+                        return self.writeTypedSuccess(writer, id, .{
+                            .results = values.items,
+                        });
+                    },
+                    .failure => |failure| {
+                        if (!std.unicode.utf8ValidateSlice(failure.message))
+                            return self.writeServerRequestError(
+                                writer,
+                                id,
+                                -32603,
+                                "invalid session filesystem result",
+                            );
+                        return self.writeTypedSuccess(writer, id, .{
+                            .results = @as([]const std.json.Value, &.{}),
+                            .@"error" = .{
+                                .errorClass = switch (failure.error_class) {
+                                    .busy_or_locked => "busyOrLocked",
+                                    .fatal => "fatal",
+                                    .post_commit_ambiguous => "postCommitAmbiguous",
+                                },
+                                .message = failure.message,
+                            },
+                        });
+                    },
+                }
+            },
+            .sqlite_exists => {
+                const sqlite = provider_value.sqlite orelse
+                    return self.writeServerRequestError(
+                        writer,
+                        id,
+                        -32000,
+                        "SQLite is not supported by this provider",
+                    );
+                const exists = sqlite.vtable.exists(sqlite.context) catch |err|
+                    return self.writeServerRequestError(
+                        writer,
+                        id,
+                        -32000,
+                        @errorName(err),
+                    );
+                return self.writeTypedSuccess(
+                    writer,
+                    id,
+                    WireSessionFsExistsResult{ .exists = exists },
+                );
+            },
+        }
     }
 
     fn writeTypedSuccess(
@@ -1915,7 +3039,7 @@ pub const Client = struct {
         }
     }
 
-    fn removeSession(self: *Client, session_id: []const u8) void {
+    fn removeSessionState(self: *Client, session_id: []const u8) void {
         for (self.extension_runtimes.items, 0..) |runtime, runtime_index| {
             if (runtime.session_id != null and
                 std.mem.eql(u8, runtime.session_id.?, session_id))
@@ -1963,17 +3087,6 @@ pub const Client = struct {
             }
         }
 
-        self.removeSessionId(session_id);
-    }
-
-    fn findSessionId(self: *Client, session_id: []const u8) ?[]u8 {
-        for (self.session_ids.items) |id| {
-            if (std.mem.eql(u8, id, session_id)) return id;
-        }
-        return null;
-    }
-
-    fn removeSessionId(self: *Client, session_id: []const u8) void {
         var provider_token_index: usize = 0;
         while (provider_token_index < self.provider_tokens.items.len) {
             if (std.mem.eql(
@@ -1987,14 +3100,19 @@ pub const Client = struct {
                 provider_token_index += 1;
             }
         }
+    }
 
-        for (self.session_ids.items, 0..) |id, session_index| {
-            if (std.mem.eql(u8, id, session_id)) {
-                self.allocator.free(id);
-                _ = self.session_ids.orderedRemove(session_index);
-                return;
-            }
-        }
+    fn removeSessionAt(self: *Client, record_index: usize) void {
+        if (record_index >= self.sessions.items.len) return;
+        const record = &self.sessions.items[record_index];
+        if (!record.active) return;
+        self.removeSessionState(record.id);
+        record.deactivate(self.allocator);
+    }
+
+    fn removeSession(self: *Client, session_id: []const u8) void {
+        const record_index = self.findSessionIndex(session_id) orelse return;
+        self.removeSessionAt(record_index);
     }
 
     fn registerOwnedSession(
@@ -2008,7 +3126,7 @@ pub const Client = struct {
             return error.SessionAlreadyActive;
         }
 
-        self.session_ids.append(self.allocator, owned_session_id) catch |err| {
+        self.sessions.append(self.allocator, .{ .id = owned_session_id }) catch |err| {
             self.allocator.free(owned_session_id);
             return err;
         };
@@ -2025,10 +3143,7 @@ pub const Client = struct {
     }
 
     fn hasSession(self: *Client, session_id: []const u8) bool {
-        for (self.session_ids.items) |registered| {
-            if (std.mem.eql(u8, registered, session_id)) return true;
-        }
-        return false;
+        return self.findSession(session_id) != null;
     }
 
     fn registerProviderTokens(
@@ -2328,15 +3443,44 @@ pub const Client = struct {
     }
 };
 
+const ResolvedSession = struct {
+    record_index: usize,
+    id: []const u8,
+};
+
 pub const Session = struct {
     client: *Client,
     id: []const u8,
+    record_index: ?usize = null,
+
+    fn resolve(self: Session) !ResolvedSession {
+        if (self.record_index) |record_index| {
+            if (record_index >= self.client.sessions.items.len)
+                return error.SessionNotActive;
+            const record = &self.client.sessions.items[record_index];
+            if (!record.active or !std.mem.eql(u8, self.id, record.id))
+                return error.SessionNotActive;
+            return .{ .record_index = record_index, .id = record.id };
+        }
+
+        var matching_index: ?usize = null;
+        for (self.client.sessions.items, 0..) |record, record_index| {
+            if (!std.mem.eql(u8, self.id, record.id)) continue;
+            if (matching_index != null) return error.SessionNotActive;
+            matching_index = record_index;
+        }
+        const record_index = matching_index orelse return error.SessionNotActive;
+        const record = &self.client.sessions.items[record_index];
+        if (!record.active) return error.SessionNotActive;
+        return .{ .record_index = record_index, .id = record.id };
+    }
 
     pub fn send(self: Session, options: session_types.MessageOptions) ![]u8 {
+        const resolved = try self.resolve();
         const parsed = try self.client.call(
             struct { messageId: []const u8 },
             "session.send",
-            lowerMessage(self.id, options),
+            lowerMessage(resolved.id, options),
         );
         defer parsed.deinit();
         return self.client.allocator.dupe(u8, parsed.value.messageId);
@@ -2346,6 +3490,7 @@ pub const Session = struct {
         self: Session,
         options: session_types.MessageOptions,
     ) !?session_types.AssistantMessage {
+        _ = try self.resolve();
         const message_id = try self.send(options);
         defer self.client.allocator.free(message_id);
 
@@ -2372,14 +3517,19 @@ pub const Session = struct {
     }
 
     pub fn nextEvent(self: Session) !session_types.SessionEvent {
-        var event = try self.client.nextEvent(self.id);
+        const resolved = try self.resolve();
+        var event = try self.client.nextEvent(resolved.id);
         errdefer event.deinit(self.client.allocator);
         if (event == .mcp_oauth_required) {
-            try self.handleMcpAuthEvent(event.mcp_oauth_required.data_json);
+            try self.handleMcpAuthEvent(
+                resolved.id,
+                event.mcp_oauth_required.data_json,
+            );
         }
         if (event == .external_tool_requested) {
             const request = event.external_tool_requested;
-            if (self.client.findToolHandler(self.id, request.tool_name)) |tool| {
+            _ = try self.resolve();
+            if (self.client.findToolHandler(resolved.id, request.tool_name)) |tool| {
                 const result = tool.handler(
                     self.client.allocator,
                     request.arguments_json,
@@ -2394,11 +3544,12 @@ pub const Session = struct {
         }
         if (event == .permission_requested) {
             const request = event.permission_requested;
-            if (self.client.findPermissionHandler(self.id)) |handler| {
+            _ = try self.resolve();
+            if (self.client.findPermissionHandler(resolved.id)) |handler| {
                 const decision = handler.handler(
                     request,
                     .{
-                        .session_id = self.id,
+                        .session_id = resolved.id,
                         .managed_settings_enabled = handler.managed_settings_enabled,
                     },
                     handler.context,
@@ -2439,8 +3590,14 @@ pub const Session = struct {
     }
 
     pub fn capabilities(self: Session) ext.CapabilitySet {
-        const runtime = self.client.findExtensionRuntime(self.id) orelse return .{};
+        const resolved = self.resolve() catch return .{};
+        const runtime = self.client.findExtensionRuntime(resolved.id) orelse return .{};
         return runtime.capabilities;
+    }
+
+    pub fn workspacePath(self: Session) !?[]const u8 {
+        const resolved = try self.resolve();
+        return self.client.sessions.items[resolved.record_index].workspace_path;
     }
 
     pub fn experimental(
@@ -2449,9 +3606,10 @@ pub const Session = struct {
     ) !switch (feature) {
         .mcp_apps => McpApps,
     } {
+        const resolved = try self.resolve();
         return switch (feature) {
             .mcp_apps => blk: {
-                const runtime = self.client.findExtensionRuntime(self.id) orelse
+                const runtime = self.client.findExtensionRuntime(resolved.id) orelse
                     return error.UnsupportedCapability;
                 if (!runtime.mcp_apps_requested)
                     return error.ExperimentalFeatureNotRequested;
@@ -2467,7 +3625,8 @@ pub const Session = struct {
         allocator: std.mem.Allocator,
         request: ext.OpenCanvasRequest,
     ) !ext.OpenCanvasResult {
-        const runtime = self.client.findExtensionRuntime(self.id) orelse
+        const resolved = try self.resolve();
+        const runtime = self.client.findExtensionRuntime(resolved.id) orelse
             return error.UnsupportedCapability;
         if (!runtime.capabilities.supports(.canvases))
             return error.UnsupportedCapability;
@@ -2477,7 +3636,7 @@ pub const Session = struct {
             null;
         defer if (input) |value| value.deinit();
         const parsed = try self.client.call(WireOpenCanvas, "session.canvas.open", .{
-            .sessionId = self.id,
+            .sessionId = resolved.id,
             .extensionId = request.extension_id,
             .canvasId = request.canvas_id,
             .instanceId = request.instance_id,
@@ -2496,12 +3655,13 @@ pub const Session = struct {
     }
 
     pub fn closeCanvas(self: Session, instance_id: []const u8) !void {
-        const runtime = self.client.findExtensionRuntime(self.id) orelse
+        const resolved = try self.resolve();
+        const runtime = self.client.findExtensionRuntime(resolved.id) orelse
             return error.UnsupportedCapability;
         if (!runtime.capabilities.supports(.canvases))
             return error.UnsupportedCapability;
         const parsed = try self.client.call(std.json.Value, "session.canvas.close", .{
-            .sessionId = self.id,
+            .sessionId = resolved.id,
             .instanceId = instance_id,
         });
         parsed.deinit();
@@ -2513,7 +3673,8 @@ pub const Session = struct {
         allocator: std.mem.Allocator,
         request: ext.InvokeCanvasActionRequest,
     ) !ext.OwnedJson {
-        const runtime = self.client.findExtensionRuntime(self.id) orelse
+        const resolved = try self.resolve();
+        const runtime = self.client.findExtensionRuntime(resolved.id) orelse
             return error.UnsupportedCapability;
         if (!runtime.capabilities.supports(.canvases))
             return error.UnsupportedCapability;
@@ -2523,7 +3684,7 @@ pub const Session = struct {
             null;
         defer if (input) |value| value.deinit();
         const parsed = try self.client.call(std.json.Value, "session.canvas.action.invoke", .{
-            .sessionId = self.id,
+            .sessionId = resolved.id,
             .instanceId = request.instance_id,
             .actionName = request.action_name,
             .input = if (input) |value| value.value else null,
@@ -2539,7 +3700,8 @@ pub const Session = struct {
         self: Session,
         allocator: std.mem.Allocator,
     ) !ext.OpenCanvasSnapshot {
-        const runtime = self.client.findExtensionRuntime(self.id) orelse
+        const resolved = try self.resolve();
+        const runtime = self.client.findExtensionRuntime(resolved.id) orelse
             return .{ .allocator = allocator, .items = try allocator.alloc(ext.OpenCanvas, 0) };
         const items = try allocator.alloc(ext.OpenCanvas, runtime.open_canvases.items.len);
         var initialized: usize = 0;
@@ -2558,7 +3720,8 @@ pub const Session = struct {
         self: Session,
         allocator: std.mem.Allocator,
     ) !ext.EnvironmentGrants {
-        const runtime = self.client.findExtensionRuntime(self.id) orelse return .{
+        const resolved = try self.resolve();
+        const runtime = self.client.findExtensionRuntime(resolved.id) orelse return .{
             .allocator = allocator,
             .items = try allocator.alloc(ext.EnvironmentGrant, 0),
         };
@@ -2587,8 +3750,13 @@ pub const Session = struct {
         return .{ .allocator = allocator, .items = items };
     }
 
-    fn handleMcpAuthEvent(self: Session, data_json: []const u8) !void {
-        const runtime = self.client.findExtensionRuntime(self.id) orelse return;
+    fn handleMcpAuthEvent(
+        self: Session,
+        session_id: []const u8,
+        data_json: []const u8,
+    ) !void {
+        _ = try self.resolve();
+        const runtime = self.client.findExtensionRuntime(session_id) orelse return;
         const handler = runtime.mcp_auth_handler orelse return;
         const parsed = try std.json.parseFromSlice(
             WireMcpAuthRequest,
@@ -2645,7 +3813,7 @@ pub const Session = struct {
                 RpcSuccess,
                 "session.mcp.oauth.handlePendingRequest",
                 .{
-                    .sessionId = self.id,
+                    .sessionId = session_id,
                     .requestId = parsed.value.requestId,
                     .result = .{ .kind = "cancelled" },
                 },
@@ -2659,7 +3827,7 @@ pub const Session = struct {
                             RpcSuccess,
                             "session.mcp.oauth.handlePendingRequest",
                             .{
-                                .sessionId = self.id,
+                                .sessionId = session_id,
                                 .requestId = parsed.value.requestId,
                                 .result = .{ .kind = "cancelled" },
                             },
@@ -2670,7 +3838,7 @@ pub const Session = struct {
                     RpcSuccess,
                     "session.mcp.oauth.handlePendingRequest",
                     .{
-                        .sessionId = self.id,
+                        .sessionId = session_id,
                         .requestId = parsed.value.requestId,
                         .result = .{
                             .kind = "token",
@@ -2689,13 +3857,14 @@ pub const Session = struct {
     }
 
     pub fn disconnect(self: Session) !void {
+        const resolved = try self.resolve();
         var released_oauth_interest = false;
-        if (self.client.findExtensionRuntime(self.id)) |runtime| {
+        if (self.client.findExtensionRuntime(resolved.id)) |runtime| {
             released_oauth_interest = runtime.mcp_oauth_interest_handle != null;
             try self.client.releaseMcpOAuthInterest(runtime);
         }
         errdefer if (released_oauth_interest) {
-            if (self.client.findExtensionRuntime(self.id)) |runtime| {
+            if (self.client.findExtensionRuntime(resolved.id)) |runtime| {
                 if (runtime.mcp_auth_handler != null) {
                     self.client.registerMcpOAuthInterest(runtime) catch {};
                 }
@@ -2706,11 +3875,11 @@ pub const Session = struct {
                 success: bool,
                 @"error": ?[]const u8 = null,
             }, "session.detach", .{
-                .sessionId = self.id,
+                .sessionId = resolved.id,
             });
             defer parsed.deinit();
             if (parsed.value.success) {
-                self.client.removeSession(self.id);
+                self.client.removeSessionAt(resolved.record_index);
                 return;
             }
         }
@@ -2721,11 +3890,12 @@ pub const Session = struct {
         self: Session,
         auto_tier: ?session_types.AutoTier,
     ) !session_types.AutoTierSwitchResult {
+        const resolved = try self.resolve();
         const parsed = try self.client.call(
             session_types.AutoTierSwitchResult,
             "session.model.switchAutoTier",
             .{
-                .sessionId = self.id,
+                .sessionId = resolved.id,
                 .autoTier = if (auto_tier) |tier|
                     std.json.Value{ .string = @tagName(tier) }
                 else
@@ -2738,8 +3908,9 @@ pub const Session = struct {
 
     /// Aborts the current agent turn. The caller owns the returned result.
     pub fn abort(self: Session) !std.json.Parsed(session_types.AbortResult) {
+        const resolved = try self.resolve();
         return self.client.call(session_types.AbortResult, "session.abort", .{
-            .sessionId = self.id,
+            .sessionId = resolved.id,
         });
     }
 
@@ -2750,11 +3921,12 @@ pub const Session = struct {
         model_id: []const u8,
         options: session_types.ModelSwitchOptions,
     ) !std.json.Parsed(session_types.ModelSwitchResult) {
+        const resolved = try self.resolve();
         return self.client.call(
             session_types.ModelSwitchResult,
             "session.model.switchTo",
             WireModelSwitchRequest{
-                .sessionId = self.id,
+                .sessionId = resolved.id,
                 .modelId = model_id,
                 .autoTier = options.auto_tier,
                 .reasoningEffort = options.reasoning_effort,
@@ -2772,8 +3944,9 @@ pub const Session = struct {
         message: []const u8,
         options: session_types.LogOptions,
     ) ![]u8 {
+        const resolved = try self.resolve();
         const parsed = try self.client.call(struct { eventId: []const u8 }, "session.log", WireLogRequest{
-            .sessionId = self.id,
+            .sessionId = resolved.id,
             .message = message,
             .level = options.level,
             .type = options.log_type,
@@ -2786,8 +3959,9 @@ pub const Session = struct {
     }
 
     pub fn approvePermission(self: Session, request_id: []const u8) !void {
+        const resolved = try self.resolve();
         const parsed = try self.client.call(RpcSuccess, "session.permissions.handlePendingPermissionRequest", .{
-            .sessionId = self.id,
+            .sessionId = resolved.id,
             .requestId = request_id,
             .result = .{ .kind = "approve-once" },
         });
@@ -2800,8 +3974,9 @@ pub const Session = struct {
         request_id: []const u8,
         feedback: ?[]const u8,
     ) !void {
+        const resolved = try self.resolve();
         const parsed = try self.client.call(RpcSuccess, "session.permissions.handlePendingPermissionRequest", .{
-            .sessionId = self.id,
+            .sessionId = resolved.id,
             .requestId = request_id,
             .result = .{ .kind = "reject", .feedback = feedback },
         });
@@ -2815,6 +3990,7 @@ pub const Session = struct {
         decision_json: []const u8,
         decision_context_json: ?[]const u8,
     ) !void {
+        const resolved = try self.resolve();
         const decision = try std.json.parseFromSlice(
             std.json.Value,
             self.client.allocator,
@@ -2843,7 +4019,7 @@ pub const Session = struct {
                 RpcSuccess,
                 "session.permissions.handlePendingPermissionRequest",
                 .{
-                    .sessionId = self.id,
+                    .sessionId = resolved.id,
                     .requestId = request_id,
                     .result = decision.value,
                     .decisionContext = context.value,
@@ -2854,7 +4030,7 @@ pub const Session = struct {
                 RpcSuccess,
                 "session.permissions.handlePendingPermissionRequest",
                 .{
-                    .sessionId = self.id,
+                    .sessionId = resolved.id,
                     .requestId = request_id,
                     .result = decision.value,
                 },
@@ -2868,8 +4044,9 @@ pub const Session = struct {
         request_id: []const u8,
         result: []const u8,
     ) !void {
+        const resolved = try self.resolve();
         const parsed = try self.client.call(struct { success: bool }, "session.tools.handlePendingToolCall", .{
-            .sessionId = self.id,
+            .sessionId = resolved.id,
             .requestId = request_id,
             .result = result,
         });
@@ -2882,6 +4059,7 @@ pub const Session = struct {
         request_id: []const u8,
         result_json: []const u8,
     ) !void {
+        const resolved = try self.resolve();
         const result = try std.json.parseFromSlice(
             std.json.Value,
             self.client.allocator,
@@ -2900,7 +4078,7 @@ pub const Session = struct {
             struct { success: bool },
             "session.tools.handlePendingToolCall",
             .{
-                .sessionId = self.id,
+                .sessionId = resolved.id,
                 .requestId = request_id,
                 .result = result.value,
             },
@@ -2914,8 +4092,9 @@ pub const Session = struct {
         request_id: []const u8,
         message: []const u8,
     ) !void {
+        const resolved = try self.resolve();
         const parsed = try self.client.call(struct { success: bool }, "session.tools.handlePendingToolCall", .{
-            .sessionId = self.id,
+            .sessionId = resolved.id,
             .requestId = request_id,
             .@"error" = message,
         });
@@ -2937,13 +4116,15 @@ pub const JoinedSession = struct {
 pub const McpApps = struct {
     session: Session,
 
-    fn ensureSupported(self: McpApps) !void {
-        const runtime = self.session.client.findExtensionRuntime(self.session.id) orelse
+    fn ensureSupported(self: McpApps) !ResolvedSession {
+        const resolved = try self.session.resolve();
+        const runtime = self.session.client.findExtensionRuntime(resolved.id) orelse
             return error.UnsupportedCapability;
         if (!runtime.mcp_apps_requested)
             return error.ExperimentalFeatureNotRequested;
         if (!runtime.capabilities.supports(.mcp_apps))
             return error.UnsupportedCapability;
+        return resolved;
     }
 
     pub fn listTools(
@@ -2952,12 +4133,12 @@ pub const McpApps = struct {
         server_name: []const u8,
         origin_server_name: []const u8,
     ) !ext.OwnedJson {
-        try self.ensureSupported();
+        const resolved = try self.ensureSupported();
         const parsed = try self.session.client.call(
             std.json.Value,
             "session.mcp.apps.listTools",
             .{
-                .sessionId = self.session.id,
+                .sessionId = resolved.id,
                 .serverName = server_name,
                 .originServerName = origin_server_name,
             },
@@ -2974,7 +4155,7 @@ pub const McpApps = struct {
         allocator: std.mem.Allocator,
         request: ext.McpAppToolCall,
     ) !ext.OwnedJson {
-        try self.ensureSupported();
+        const resolved = try self.ensureSupported();
         const arguments = try std.json.parseFromSlice(
             std.json.Value,
             self.session.client.allocator,
@@ -2987,7 +4168,7 @@ pub const McpApps = struct {
             std.json.Value,
             "session.mcp.apps.callTool",
             .{
-                .sessionId = self.session.id,
+                .sessionId = resolved.id,
                 .serverName = request.server_name,
                 .toolName = request.tool_name,
                 .arguments = arguments.value,
@@ -3007,12 +4188,12 @@ pub const McpApps = struct {
         server_name: []const u8,
         uri: []const u8,
     ) !ext.OwnedJson {
-        try self.ensureSupported();
+        const resolved = try self.ensureSupported();
         const parsed = try self.session.client.call(
             std.json.Value,
             "session.mcp.apps.readResource",
             .{
-                .sessionId = self.session.id,
+                .sessionId = resolved.id,
                 .serverName = server_name,
                 .uri = uri,
             },
@@ -3082,6 +4263,13 @@ fn parseHookBase(input: std.json.ObjectMap) !ext.HookBaseInput {
 fn wipeLifecycleResponseSecrets(response: WireSessionLifecycleResponse) void {
     const grants = response.grantedEnvironmentVariables orelse return;
     wipeJsonStrings(grants);
+}
+
+fn deinitLifecycleResponse(
+    response: *std.json.Parsed(WireSessionLifecycleResponse),
+) void {
+    wipeLifecycleResponseSecrets(response.value);
+    response.deinit();
 }
 
 fn stringifyJsonValue(
@@ -3222,6 +4410,7 @@ const WireCapabilities = struct {
 
 const WireSessionLifecycleResponse = struct {
     sessionId: ?[]const u8 = null,
+    workspacePath: ?[]const u8 = null,
     capabilities: ?WireCapabilities = null,
     openCanvases: ?[]const WireOpenCanvas = null,
     grantedEnvironmentVariables: ?std.json.Value = null,
@@ -3419,6 +4608,135 @@ const WireDefaultAgent = struct {
     excludedTools: ?[]const []const u8,
 };
 
+const NormalizedSessionOptions = struct {
+    client_name: ?[]const u8,
+    reasoning_effort: ?session_types.ReasoningEffort,
+    reasoning_summary: ?session_types.ReasoningSummary,
+    enable_experimental_mode: ?bool,
+    context_tier: ?session_types.ContextTier,
+    large_output: ?session_types.LargeOutputConfig,
+    config_directory: ?[]const u8,
+    capi: ?session_types.CapiSessionOptions,
+    additional_directories: ?[]const []const u8,
+    infinite_sessions: ?session_types.InfiniteSessionConfig,
+    memory: ?session_types.MemoryConfiguration,
+    skip_embedding_retrieval: ?bool,
+    embedding_cache_storage: ?session_types.EmbeddingCacheStorage,
+    organization_custom_instructions: ?[]const u8,
+    enable_file_hooks: ?bool,
+    enable_host_git_operations: ?bool,
+    enable_session_store: ?bool,
+    create_session_fs_provider: ?session_types.SessionFsProviderFactory,
+};
+
+fn normalizeSessionOptions(config: anytype) NormalizedSessionOptions {
+    return .{
+        .client_name = config.client_name,
+        .reasoning_effort = config.reasoning_effort,
+        .reasoning_summary = config.reasoning_summary,
+        .enable_experimental_mode = config.enable_experimental_mode,
+        .context_tier = config.context_tier,
+        .large_output = config.large_output,
+        .config_directory = config.config_directory,
+        .capi = config.capi,
+        .additional_directories = config.additional_directories,
+        .infinite_sessions = config.infinite_sessions,
+        .memory = config.memory,
+        .skip_embedding_retrieval = config.skip_embedding_retrieval,
+        .embedding_cache_storage = config.embedding_cache_storage,
+        .organization_custom_instructions = config.organization_custom_instructions,
+        .enable_file_hooks = config.enable_file_hooks,
+        .enable_host_git_operations = config.enable_host_git_operations,
+        .enable_session_store = config.enable_session_store,
+        .create_session_fs_provider = config.create_session_fs_provider,
+    };
+}
+
+const WireEmbeddingCacheStorage = enum {
+    persistent,
+    @"in-memory",
+};
+
+const WireLargeOutput = struct {
+    enabled: ?bool = null,
+    maxSizeBytes: ?u64 = null,
+    outputDir: ?[]const u8 = null,
+};
+
+const WireInfiniteSessions = struct {
+    enabled: ?bool = null,
+    backgroundCompactionThreshold: ?f64 = null,
+    bufferExhaustionThreshold: ?f64 = null,
+};
+
+const WireMemory = struct {
+    enabled: bool,
+};
+
+const WireCapiSessionOptions = struct {
+    autoTier: ?session_types.AutoTier = null,
+    enableWebSocketResponses: ?bool = null,
+};
+
+const WireSessionOptions = struct {
+    clientName: ?[]const u8 = null,
+    reasoningEffort: ?session_types.ReasoningEffort = null,
+    reasoningSummary: ?session_types.ReasoningSummary = null,
+    isExperimentalMode: ?bool = null,
+    contextTier: ?session_types.ContextTier = null,
+    largeOutput: ?WireLargeOutput = null,
+    configDir: ?[]const u8 = null,
+    capi: ?WireCapiSessionOptions = null,
+    additionalDirectories: ?[]const []const u8 = null,
+    infiniteSessions: ?WireInfiniteSessions = null,
+    memory: ?WireMemory = null,
+    skipEmbeddingRetrieval: ?bool = null,
+    embeddingCacheStorage: ?WireEmbeddingCacheStorage = null,
+    organizationCustomInstructions: ?[]const u8 = null,
+    enableFileHooks: ?bool = null,
+    enableHostGitOperations: ?bool = null,
+    enableSessionStore: ?bool = null,
+};
+
+fn lowerSessionOptions(options: NormalizedSessionOptions) WireSessionOptions {
+    return .{
+        .clientName = options.client_name,
+        .reasoningEffort = options.reasoning_effort,
+        .reasoningSummary = options.reasoning_summary,
+        .isExperimentalMode = options.enable_experimental_mode,
+        .contextTier = options.context_tier,
+        .largeOutput = if (options.large_output) |value| .{
+            .enabled = value.enabled,
+            .maxSizeBytes = value.max_size_bytes,
+            .outputDir = value.output_directory,
+        } else null,
+        .configDir = options.config_directory,
+        .capi = if (options.capi) |value| .{
+            .autoTier = value.auto_tier,
+            .enableWebSocketResponses = value.enable_websocket_responses,
+        } else null,
+        .additionalDirectories = options.additional_directories,
+        .infiniteSessions = if (options.infinite_sessions) |value| .{
+            .enabled = value.enabled,
+            .backgroundCompactionThreshold = value.background_compaction_threshold,
+            .bufferExhaustionThreshold = value.buffer_exhaustion_threshold,
+        } else null,
+        .memory = if (options.memory) |value| .{ .enabled = value.enabled } else null,
+        .skipEmbeddingRetrieval = options.skip_embedding_retrieval,
+        .embeddingCacheStorage = if (options.embedding_cache_storage) |value|
+            switch (value) {
+                .persistent => .persistent,
+                .in_memory => .@"in-memory",
+            }
+        else
+            null,
+        .organizationCustomInstructions = options.organization_custom_instructions,
+        .enableFileHooks = options.enable_file_hooks,
+        .enableHostGitOperations = options.enable_host_git_operations,
+        .enableSessionStore = options.enable_session_store,
+    };
+}
+
 const ExtensionWireValues = struct {
     allocator: std.mem.Allocator,
     json_values: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty,
@@ -3600,6 +4918,23 @@ fn lowerHttpMcp(allocator: std.mem.Allocator, config: ext.McpServerConfig.Http) 
 
 const CreateSessionRequest = struct {
     sessionId: ?[]const u8,
+    clientName: ?[]const u8,
+    reasoningEffort: ?session_types.ReasoningEffort,
+    reasoningSummary: ?session_types.ReasoningSummary,
+    isExperimentalMode: ?bool,
+    contextTier: ?session_types.ContextTier,
+    largeOutput: ?WireLargeOutput,
+    configDir: ?[]const u8,
+    capi: ?WireCapiSessionOptions,
+    additionalDirectories: ?[]const []const u8,
+    infiniteSessions: ?WireInfiniteSessions,
+    memory: ?WireMemory,
+    skipEmbeddingRetrieval: ?bool,
+    embeddingCacheStorage: ?WireEmbeddingCacheStorage,
+    organizationCustomInstructions: ?[]const u8,
+    enableFileHooks: ?bool,
+    enableHostGitOperations: ?bool,
+    enableSessionStore: ?bool,
     model: ?[]const u8,
     provider: ?provider.WireProvider,
     providers: ?[]const provider.WireNamedProvider,
@@ -3646,6 +4981,23 @@ const CreateSessionRequest = struct {
 
 const ResumeSessionRequest = struct {
     sessionId: []const u8,
+    clientName: ?[]const u8,
+    reasoningEffort: ?session_types.ReasoningEffort,
+    reasoningSummary: ?session_types.ReasoningSummary,
+    isExperimentalMode: ?bool,
+    contextTier: ?session_types.ContextTier,
+    largeOutput: ?WireLargeOutput,
+    configDir: ?[]const u8,
+    capi: ?WireCapiSessionOptions,
+    additionalDirectories: ?[]const []const u8,
+    infiniteSessions: ?WireInfiniteSessions,
+    memory: ?WireMemory,
+    skipEmbeddingRetrieval: ?bool,
+    embeddingCacheStorage: ?WireEmbeddingCacheStorage,
+    organizationCustomInstructions: ?[]const u8,
+    enableFileHooks: ?bool,
+    enableHostGitOperations: ?bool,
+    enableSessionStore: ?bool,
     model: ?[]const u8,
     provider: ?provider.WireProvider,
     providers: ?[]const provider.WireNamedProvider,
@@ -3860,6 +5212,7 @@ fn buildCreateSessionRequest(
     return buildPreparedCreateSessionRequest(
         config.session_id,
         config,
+        normalizeSessionOptions(config),
         tools,
         values,
         .{},
@@ -3869,14 +5222,33 @@ fn buildCreateSessionRequest(
 fn buildPreparedCreateSessionRequest(
     session_id: ?[]const u8,
     config: session_types.CreateSessionConfig,
+    options: NormalizedSessionOptions,
     tools: []const WireTool,
     values: *ExtensionWireValues,
     prepared_providers: provider.PreparedProviders,
 ) !CreateSessionRequest {
     const features = config.extensions.common;
+    const wire_options = lowerSessionOptions(options);
     try provider.validateCapabilities(config.model_capabilities);
     return .{
         .sessionId = session_id,
+        .clientName = wire_options.clientName,
+        .reasoningEffort = wire_options.reasoningEffort,
+        .reasoningSummary = wire_options.reasoningSummary,
+        .isExperimentalMode = wire_options.isExperimentalMode,
+        .contextTier = wire_options.contextTier,
+        .largeOutput = wire_options.largeOutput,
+        .configDir = wire_options.configDir,
+        .capi = wire_options.capi,
+        .additionalDirectories = wire_options.additionalDirectories,
+        .infiniteSessions = wire_options.infiniteSessions,
+        .memory = wire_options.memory,
+        .skipEmbeddingRetrieval = wire_options.skipEmbeddingRetrieval,
+        .embeddingCacheStorage = wire_options.embeddingCacheStorage,
+        .organizationCustomInstructions = wire_options.organizationCustomInstructions,
+        .enableFileHooks = wire_options.enableFileHooks,
+        .enableHostGitOperations = wire_options.enableHostGitOperations,
+        .enableSessionStore = wire_options.enableSessionStore,
         .model = config.model,
         .provider = prepared_providers.provider,
         .providers = prepared_providers.providers,
@@ -3941,6 +5313,7 @@ fn buildResumeSessionRequest(
     return buildPreparedResumeSessionRequest(
         session_id,
         config,
+        normalizeSessionOptions(config),
         tools,
         values,
         requested_environment_variables,
@@ -3951,12 +5324,14 @@ fn buildResumeSessionRequest(
 fn buildPreparedResumeSessionRequest(
     session_id: []const u8,
     config: session_types.ResumeSessionConfig,
+    options: NormalizedSessionOptions,
     tools: []const WireTool,
     values: *ExtensionWireValues,
     requested_environment_variables: []const []const u8,
     prepared_providers: provider.PreparedProviders,
 ) !ResumeSessionRequest {
     const features = config.extensions.common;
+    const wire_options = lowerSessionOptions(options);
     if (config.extensions.open_canvases) |configured_open_canvases| {
         try values.open_canvases.ensureTotalCapacity(
             values.allocator,
@@ -3982,6 +5357,23 @@ fn buildPreparedResumeSessionRequest(
     try provider.validateCapabilities(config.model_capabilities);
     return .{
         .sessionId = session_id,
+        .clientName = wire_options.clientName,
+        .reasoningEffort = wire_options.reasoningEffort,
+        .reasoningSummary = wire_options.reasoningSummary,
+        .isExperimentalMode = wire_options.isExperimentalMode,
+        .contextTier = wire_options.contextTier,
+        .largeOutput = wire_options.largeOutput,
+        .configDir = wire_options.configDir,
+        .capi = wire_options.capi,
+        .additionalDirectories = wire_options.additionalDirectories,
+        .infiniteSessions = wire_options.infiniteSessions,
+        .memory = wire_options.memory,
+        .skipEmbeddingRetrieval = wire_options.skipEmbeddingRetrieval,
+        .embeddingCacheStorage = wire_options.embeddingCacheStorage,
+        .organizationCustomInstructions = wire_options.organizationCustomInstructions,
+        .enableFileHooks = wire_options.enableFileHooks,
+        .enableHostGitOperations = wire_options.enableHostGitOperations,
+        .enableSessionStore = wire_options.enableSessionStore,
         .model = config.model,
         .provider = prepared_providers.provider,
         .providers = prepared_providers.providers,
@@ -4122,9 +5514,479 @@ fn appendWireTools(
     }
 }
 
+const TestSessionFs = struct {
+    last_method: ?SessionFsMethod = null,
+    last_mode: ?u64 = null,
+    saw_object_param: bool = false,
+    fail_method: ?SessionFsMethod = null,
+    invalid_read_utf8: bool = false,
+    invalid_timestamp: bool = false,
+    transaction_failure: ?session_types.SessionFsSqliteTransactionErrorClass = null,
+    exercise_opaque_values: bool = false,
+    null_sqlite_result: bool = false,
+    saw_opaque_params: [6]bool = .{false} ** 6,
+    deinit_count: usize = 0,
+    id_at_deinit: ?[]const u8 = null,
+    expected_id_value: ?[]const u8 = null,
+    saw_valid_id_at_deinit: bool = false,
+
+    fn fromContext(context: ?*anyopaque) *TestSessionFs {
+        return @ptrCast(@alignCast(context.?));
+    }
+
+    fn readFile(
+        allocator: std.mem.Allocator,
+        _: []const u8,
+        context: ?*anyopaque,
+    ) !session_types.SessionFsOwnedBytes {
+        const self = fromContext(context);
+        self.last_method = .read_file;
+        if (self.fail_method == .read_file) return error.FileNotFound;
+        return .{ .bytes = if (self.invalid_read_utf8)
+            try allocator.dupe(u8, &.{0xff})
+        else
+            try allocator.dupe(u8, "hello") };
+    }
+
+    fn writeFile(
+        _: []const u8,
+        _: []const u8,
+        mode: ?u64,
+        context: ?*anyopaque,
+    ) !void {
+        const self = fromContext(context);
+        self.last_method = .write_file;
+        self.last_mode = mode;
+        if (self.fail_method == .write_file) return error.AccessDenied;
+    }
+
+    fn appendFile(
+        _: []const u8,
+        _: []const u8,
+        mode: ?u64,
+        context: ?*anyopaque,
+    ) !void {
+        const self = fromContext(context);
+        self.last_method = .append_file;
+        self.last_mode = mode;
+        if (self.fail_method == .append_file) return error.FileNotFound;
+    }
+
+    fn exists(_: []const u8, context: ?*anyopaque) !bool {
+        const self = fromContext(context);
+        self.last_method = .exists;
+        if (self.fail_method == .exists) return error.AccessDenied;
+        return true;
+    }
+
+    fn stat(
+        allocator: std.mem.Allocator,
+        _: []const u8,
+        context: ?*anyopaque,
+    ) !session_types.SessionFsStat {
+        const self = fromContext(context);
+        self.last_method = .stat;
+        if (self.fail_method == .stat) return error.FileNotFound;
+        const mtime = if (self.invalid_timestamp)
+            try allocator.dupe(u8, "not-a-time")
+        else
+            try allocator.dupe(u8, "2026-09-13T01:02:03Z");
+        errdefer allocator.free(mtime);
+        return .{
+            .is_file = true,
+            .is_directory = false,
+            .size = 5,
+            .mtime = mtime,
+            .birthtime = try allocator.dupe(u8, "2026-09-12T01:02:03.456Z"),
+        };
+    }
+
+    fn mkdir(
+        _: []const u8,
+        _: bool,
+        mode: ?u64,
+        context: ?*anyopaque,
+    ) !void {
+        const self = fromContext(context);
+        self.last_method = .mkdir;
+        self.last_mode = mode;
+        if (self.fail_method == .mkdir) return error.AccessDenied;
+    }
+
+    fn readdir(
+        allocator: std.mem.Allocator,
+        _: []const u8,
+        context: ?*anyopaque,
+    ) !session_types.SessionFsOwnedStrings {
+        const self = fromContext(context);
+        self.last_method = .readdir;
+        if (self.fail_method == .readdir) return error.FileNotFound;
+        const values = try allocator.alloc([]u8, 2);
+        var initialized: usize = 0;
+        errdefer {
+            for (values[0..initialized]) |value| allocator.free(value);
+            allocator.free(values);
+        }
+        values[0] = try allocator.dupe(u8, "a.txt");
+        initialized += 1;
+        values[1] = try allocator.dupe(u8, "dir");
+        return .{ .values = values };
+    }
+
+    fn readdirWithTypes(
+        allocator: std.mem.Allocator,
+        _: []const u8,
+        context: ?*anyopaque,
+    ) !session_types.SessionFsOwnedEntries {
+        const self = fromContext(context);
+        self.last_method = .readdir_with_types;
+        if (self.fail_method == .readdir_with_types) return error.FileNotFound;
+        const values = try allocator.alloc(session_types.SessionFsEntry, 2);
+        var initialized: usize = 0;
+        errdefer {
+            for (values[0..initialized]) |value| allocator.free(value.name);
+            allocator.free(values);
+        }
+        values[0] = .{
+            .name = try allocator.dupe(u8, "a.txt"),
+            .entry_type = .file,
+        };
+        initialized += 1;
+        values[1] = .{
+            .name = try allocator.dupe(u8, "dir"),
+            .entry_type = .directory,
+        };
+        return .{ .values = values };
+    }
+
+    fn rm(
+        _: []const u8,
+        _: bool,
+        _: bool,
+        context: ?*anyopaque,
+    ) !void {
+        const self = fromContext(context);
+        self.last_method = .rm;
+        if (self.fail_method == .rm) return error.FileNotFound;
+    }
+
+    fn rename(
+        _: []const u8,
+        _: []const u8,
+        context: ?*anyopaque,
+    ) !void {
+        const self = fromContext(context);
+        self.last_method = .rename;
+        if (self.fail_method == .rename) return error.AccessDenied;
+    }
+
+    fn sqliteQuery(
+        allocator: std.mem.Allocator,
+        _: session_types.SessionFsSqliteQueryType,
+        _: []const u8,
+        params: ?[]const session_types.SessionFsSqliteParameter,
+        context: ?*anyopaque,
+    ) !?session_types.SessionFsSqliteQueryResult {
+        const self = fromContext(context);
+        self.last_method = .sqlite_query;
+        if (self.fail_method == .sqlite_query) return error.QueryFailed;
+        if (params) |values| {
+            for (values) |param| {
+                if (param.value == .object) self.saw_object_param = true;
+                const index: usize = switch (param.value) {
+                    .null => 0,
+                    .bool => 1,
+                    .integer, .float, .number_string => 2,
+                    .string => 3,
+                    .array => 4,
+                    .object => 5,
+                };
+                self.saw_opaque_params[index] = true;
+            }
+        }
+        const cell_json: []const []const u8 = if (self.exercise_opaque_values)
+            &.{ "null", "true", "42", "\"text\"", "[1,2]", "{\"nested\":true}" }
+        else
+            &.{"{\"nested\":true}"};
+        const cell_names: []const []const u8 = if (self.exercise_opaque_values)
+            &.{
+                "nullValue",
+                "boolValue",
+                "numberValue",
+                "stringValue",
+                "arrayValue",
+                "objectValue",
+            }
+        else
+            &.{"value"};
+        const rows = try allocator.alloc(session_types.SessionFsSqliteRow, 1);
+        errdefer allocator.free(rows);
+        const cells = try allocator.alloc(
+            session_types.SessionFsSqliteCell,
+            cell_json.len,
+        );
+        var initialized_cells: usize = 0;
+        errdefer {
+            for (cells[0..initialized_cells]) |*cell| {
+                allocator.free(cell.name);
+                cell.value.deinit();
+            }
+            allocator.free(cells);
+        }
+        for (cell_json, 0..) |json_source, index| {
+            const name = try allocator.dupe(u8, cell_names[index]);
+            errdefer allocator.free(name);
+            const json = try allocator.dupe(u8, json_source);
+            cells[index] = .{
+                .name = name,
+                .value = .{
+                    .allocator = allocator,
+                    .json = json,
+                },
+            };
+            initialized_cells += 1;
+        }
+        rows[0] = .{ .values = cells };
+        const columns = try allocator.alloc([]u8, cell_json.len);
+        var initialized_columns: usize = 0;
+        errdefer {
+            for (columns[0..initialized_columns]) |column| allocator.free(column);
+            allocator.free(columns);
+        }
+        for (columns, 0..) |*column, index| {
+            column.* = try allocator.dupe(u8, cell_names[index]);
+            initialized_columns += 1;
+        }
+        return .{
+            .rows = rows,
+            .columns = .{ .values = columns },
+            .rows_affected = 1,
+            .last_insert_rowid = 7,
+        };
+    }
+
+    fn sqliteQueryOptional(
+        allocator: std.mem.Allocator,
+        query_type: session_types.SessionFsSqliteQueryType,
+        query: []const u8,
+        params: ?[]const session_types.SessionFsSqliteParameter,
+        context: ?*anyopaque,
+    ) anyerror!?session_types.SessionFsSqliteQueryResult {
+        const self = fromContext(context);
+        if (self.null_sqlite_result) return null;
+        return sqliteQuery(allocator, query_type, query, params, context);
+    }
+
+    fn sqliteTransaction(
+        allocator: std.mem.Allocator,
+        _: []const session_types.SessionFsSqliteStatement,
+        context: ?*anyopaque,
+    ) !session_types.SessionFsSqliteTransactionOutcome {
+        const self = fromContext(context);
+        self.last_method = .sqlite_transaction;
+        if (self.fail_method == .sqlite_transaction) return error.TransactionFailed;
+        if (self.transaction_failure) |error_class| {
+            return .{ .failure = .{
+                .error_class = error_class,
+                .message = try allocator.dupe(u8, "transaction failed"),
+            } };
+        }
+        const values = try allocator.alloc(session_types.SessionFsSqliteQueryResult, 0);
+        return .{ .success = .{ .values = values } };
+    }
+
+    fn sqliteExists(context: ?*anyopaque) !bool {
+        const self = fromContext(context);
+        self.last_method = .sqlite_exists;
+        if (self.fail_method == .sqlite_exists) return error.QueryFailed;
+        return true;
+    }
+
+    fn deinit(_: std.mem.Allocator, context: ?*anyopaque) void {
+        const self = fromContext(context);
+        self.deinit_count += 1;
+        if (self.id_at_deinit) |id| {
+            self.saw_valid_id_at_deinit = std.mem.eql(
+                u8,
+                id,
+                self.expected_id_value.?,
+            );
+        }
+    }
+
+    const sqlite_vtable = session_types.SessionFsSqliteProvider.VTable{
+        .query = sqliteQuery,
+        .transaction = sqliteTransaction,
+        .exists = sqliteExists,
+    };
+
+    const vtable = session_types.SessionFsProvider.VTable{
+        .read_file = readFile,
+        .write_file = writeFile,
+        .append_file = appendFile,
+        .exists = exists,
+        .stat = stat,
+        .mkdir = mkdir,
+        .readdir = readdir,
+        .readdir_with_types = readdirWithTypes,
+        .rm = rm,
+        .rename = rename,
+        .deinit = deinit,
+    };
+
+    fn provider(self: *TestSessionFs) session_types.SessionFsProvider {
+        return .{
+            .context = self,
+            .vtable = &vtable,
+            .sqlite = .{
+                .context = self,
+                .vtable = &sqlite_vtable,
+            },
+        };
+    }
+
+    fn providerWithoutSqlite(self: *TestSessionFs) session_types.SessionFsProvider {
+        return .{
+            .context = self,
+            .vtable = &vtable,
+        };
+    }
+};
+
+fn expectSessionFsResponse(
+    client: *Client,
+    id: i64,
+    method: []const u8,
+    params_json: []const u8,
+    expected: []const u8,
+) !void {
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        params_json,
+        .{},
+    );
+    defer parsed.deinit();
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try client.dispatchServerRequest(
+        &output.writer,
+        .{ .integer = id },
+        method,
+        parsed.value,
+    );
+    const body = try framedBody(std.testing.allocator, output.written());
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqualStrings(expected, body);
+}
+
+fn appendTestSession(
+    client: *Client,
+    id: []const u8,
+    workspace_path: ?[]const u8,
+    session_fs: ?session_types.SessionFsProvider,
+) !void {
+    const owned_id = try client.allocator.dupe(u8, id);
+    errdefer client.allocator.free(owned_id);
+    const owned_workspace_path = if (workspace_path) |path|
+        try client.allocator.dupe(u8, path)
+    else
+        null;
+    errdefer if (owned_workspace_path) |path| client.allocator.free(path);
+    try client.sessions.append(client.allocator, .{
+        .id = owned_id,
+        .workspace_path = owned_workspace_path,
+        .session_fs = session_fs,
+    });
+}
+
+fn appendTestSessionHandle(client: *Client, id: []const u8) !Session {
+    try appendTestSession(client, id, null, null);
+    const record_index = client.sessions.items.len - 1;
+    return .{
+        .client = client,
+        .id = client.sessions.items[record_index].id,
+        .record_index = record_index,
+    };
+}
+
+fn deinitTestSessions(client: *Client) void {
+    if (client.pending_session) |*pending| pending.deinit(client.allocator);
+    for (client.sessions.items) |*session| session.deinit(client.allocator);
+    client.sessions.deinit(client.allocator);
+}
+
+fn dispatchOwnedSessionFsResultsForAllocationFailures(
+    allocator: std.mem.Allocator,
+) !void {
+    var provider_state = TestSessionFs{};
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestSessions(&client);
+    try appendTestSession(&client, "s1", null, provider_state.provider());
+
+    const cases = [_]struct {
+        method: []const u8,
+        params: []const u8,
+    }{
+        .{
+            .method = "sessionFs.readFile",
+            .params = "{\"sessionId\":\"s1\",\"path\":\"a\"}",
+        },
+        .{
+            .method = "sessionFs.stat",
+            .params = "{\"sessionId\":\"s1\",\"path\":\"a\"}",
+        },
+        .{
+            .method = "sessionFs.readdir",
+            .params = "{\"sessionId\":\"s1\",\"path\":\".\"}",
+        },
+        .{
+            .method = "sessionFs.readdirWithTypes",
+            .params = "{\"sessionId\":\"s1\",\"path\":\".\"}",
+        },
+        .{
+            .method = "sessionFs.sqliteQuery",
+            .params = "{\"sessionId\":\"s1\",\"queryType\":\"query\",\"query\":\"select 1\"}",
+        },
+        .{
+            .method = "sessionFs.sqliteTransaction",
+            .params = "{\"sessionId\":\"s1\",\"statements\":[]}",
+        },
+    };
+    for (cases, 1..) |case, id| {
+        const parsed = try std.json.parseFromSlice(
+            std.json.Value,
+            allocator,
+            case.params,
+            .{},
+        );
+        defer parsed.deinit();
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        defer output.deinit();
+        client.dispatchServerRequest(
+            &output.writer,
+            .{ .integer = @intCast(id) },
+            case.method,
+            parsed.value,
+        ) catch |err| switch (err) {
+            error.WriteFailed => return error.OutOfMemory,
+            else => return err,
+        };
+    }
+}
+
 test "public client API type checks" {
     _ = &Client.init;
     _ = &Client.initParent;
+    _ = &Client.initParentWithOptions;
     _ = &Client.createSession;
     _ = &Client.joinSession;
     _ = &Client.resumeSession;
@@ -4141,12 +6003,14 @@ test "public client API type checks" {
     _ = &Session.setModel;
     _ = &Session.setAutoTier;
     _ = &Session.log;
+    _ = &Session.workspacePath;
     _ = &Session.capabilities;
     _ = &Session.experimental;
     _ = &Session.openCanvas;
     _ = &Session.closeCanvas;
     _ = &Session.invokeCanvasAction;
     _ = &Session.snapshotOpenCanvases;
+    _ = &Session.snapshotEnvironmentGrants;
     _ = &McpApps.listTools;
     _ = &McpApps.callTool;
     _ = &McpApps.readResource;
@@ -4156,6 +6020,930 @@ test "public client API type checks" {
     _ = &Session.respondToTool;
     _ = &Session.respondToToolResultJson;
     _ = &Session.respondToToolError;
+}
+
+test "SessionFS owned callback results clean up at every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        dispatchOwnedSessionFsResultsForAllocationFailures,
+        .{},
+    );
+}
+
+test "SessionFS dispatch covers every method with literal JSON-RPC results" {
+    const allocator = std.testing.allocator;
+    var provider_state = TestSessionFs{};
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+        .registered_session_fs = .{ .sqlite = true },
+    };
+    try appendTestSession(&client, "session-1", null, provider_state.provider());
+    defer deinitTestSessions(&client);
+
+    const cases = [_]struct {
+        method: []const u8,
+        params: []const u8,
+        expected: []const u8,
+        called: SessionFsMethod,
+    }{
+        .{
+            .method = "sessionFs.readFile",
+            .params = "{\"sessionId\":\"session-1\",\"path\":\"a.txt\"}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":\"hello\"}}",
+            .called = .read_file,
+        },
+        .{
+            .method = "sessionFs.writeFile",
+            .params = "{\"sessionId\":\"session-1\",\"path\":\"a.txt\",\"content\":\"x\",\"mode\":18446744073709551615}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":null}",
+            .called = .write_file,
+        },
+        .{
+            .method = "sessionFs.appendFile",
+            .params = "{\"sessionId\":\"session-1\",\"path\":\"a.txt\",\"content\":\"y\",\"mode\":0}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":null}",
+            .called = .append_file,
+        },
+        .{
+            .method = "sessionFs.exists",
+            .params = "{\"sessionId\":\"session-1\",\"path\":\"a.txt\"}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"exists\":true}}",
+            .called = .exists,
+        },
+        .{
+            .method = "sessionFs.stat",
+            .params = "{\"sessionId\":\"session-1\",\"path\":\"a.txt\"}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"isFile\":true,\"isDirectory\":false,\"size\":5,\"mtime\":\"2026-09-13T01:02:03Z\",\"birthtime\":\"2026-09-12T01:02:03.456Z\"}}",
+            .called = .stat,
+        },
+        .{
+            .method = "sessionFs.mkdir",
+            .params = "{\"sessionId\":\"session-1\",\"path\":\"dir\",\"recursive\":true,\"mode\":493}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":6,\"result\":null}",
+            .called = .mkdir,
+        },
+        .{
+            .method = "sessionFs.readdir",
+            .params = "{\"sessionId\":\"session-1\",\"path\":\".\"}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"entries\":[\"a.txt\",\"dir\"]}}",
+            .called = .readdir,
+        },
+        .{
+            .method = "sessionFs.readdirWithTypes",
+            .params = "{\"sessionId\":\"session-1\",\"path\":\".\"}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":8,\"result\":{\"entries\":[{\"name\":\"a.txt\",\"type\":\"file\"},{\"name\":\"dir\",\"type\":\"directory\"}]}}",
+            .called = .readdir_with_types,
+        },
+        .{
+            .method = "sessionFs.rm",
+            .params = "{\"sessionId\":\"session-1\",\"path\":\"dir\",\"recursive\":true,\"force\":true}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":9,\"result\":null}",
+            .called = .rm,
+        },
+        .{
+            .method = "sessionFs.rename",
+            .params = "{\"sessionId\":\"session-1\",\"src\":\"a.txt\",\"dest\":\"b.txt\"}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":10,\"result\":null}",
+            .called = .rename,
+        },
+        .{
+            .method = "sessionFs.sqliteQuery",
+            .params = "{\"sessionId\":\"session-1\",\"queryType\":\"query\",\"query\":\"select :value\",\"params\":{\"value\":{\"nested\":true}}}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":11,\"result\":{\"rows\":[{\"value\":{\"nested\":true}}],\"columns\":[\"value\"],\"rowsAffected\":1,\"lastInsertRowid\":7}}",
+            .called = .sqlite_query,
+        },
+        .{
+            .method = "sessionFs.sqliteTransaction",
+            .params = "{\"sessionId\":\"session-1\",\"statements\":[{\"queryType\":\"exec\",\"query\":\"begin\"}]}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":12,\"result\":{\"results\":[]}}",
+            .called = .sqlite_transaction,
+        },
+        .{
+            .method = "sessionFs.sqliteExists",
+            .params = "{\"sessionId\":\"session-1\"}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":13,\"result\":{\"exists\":true}}",
+            .called = .sqlite_exists,
+        },
+    };
+    for (cases, 1..) |case, id| {
+        provider_state.last_method = null;
+        try expectSessionFsResponse(
+            &client,
+            @intCast(id),
+            case.method,
+            case.params,
+            case.expected,
+        );
+        try std.testing.expectEqual(case.called, provider_state.last_method.?);
+        if (case.called == .write_file) {
+            try std.testing.expectEqual(
+                std.math.maxInt(u64),
+                provider_state.last_mode.?,
+            );
+        }
+    }
+    try std.testing.expect(provider_state.saw_object_param);
+}
+
+test "SessionFS preserves every opaque SQLite parameter and row value shape" {
+    const allocator = std.testing.allocator;
+    var provider_state = TestSessionFs{ .exercise_opaque_values = true };
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    try appendTestSession(&client, "s1", null, provider_state.provider());
+    defer deinitTestSessions(&client);
+
+    try expectSessionFsResponse(
+        &client,
+        1,
+        "sessionFs.sqliteQuery",
+        "{\"sessionId\":\"s1\",\"queryType\":\"query\",\"query\":\"select values\",\"params\":{\"n\":null,\"b\":true,\"i\":42,\"s\":\"text\",\"a\":[1,2],\"o\":{\"nested\":true}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"rows\":[{\"nullValue\":null,\"boolValue\":true,\"numberValue\":42,\"stringValue\":\"text\",\"arrayValue\":[1,2],\"objectValue\":{\"nested\":true}}],\"columns\":[\"nullValue\",\"boolValue\",\"numberValue\",\"stringValue\",\"arrayValue\",\"objectValue\"],\"rowsAffected\":1,\"lastInsertRowid\":7}}",
+    );
+    for (provider_state.saw_opaque_params) |seen| {
+        try std.testing.expect(seen);
+    }
+}
+
+test "SessionFS SQLite query lowers null and populated provider results exactly" {
+    const IntendedQuery = *const fn (
+        std.mem.Allocator,
+        session_types.SessionFsSqliteQueryType,
+        []const u8,
+        ?[]const session_types.SessionFsSqliteParameter,
+        ?*anyopaque,
+    ) anyerror!?session_types.SessionFsSqliteQueryResult;
+    if (comptime @FieldType(session_types.SessionFsSqliteProvider.VTable, "query") != IntendedQuery) {
+        return error.SessionFsSqliteQueryCallbackMustReturnOptionalResult;
+    } else {
+        const allocator = std.testing.allocator;
+        var provider_state = TestSessionFs{ .null_sqlite_result = true };
+        const sqlite_vtable = session_types.SessionFsSqliteProvider.VTable{
+            .query = TestSessionFs.sqliteQueryOptional,
+            .transaction = TestSessionFs.sqliteTransaction,
+            .exists = TestSessionFs.sqliteExists,
+        };
+        const test_provider = session_types.SessionFsProvider{
+            .context = &provider_state,
+            .vtable = &TestSessionFs.vtable,
+            .sqlite = .{
+                .context = &provider_state,
+                .vtable = &sqlite_vtable,
+            },
+        };
+        var client = Client{
+            .allocator = allocator,
+            .io = std.testing.io,
+            .child = null,
+            .reader = undefined,
+            .writer = undefined,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        };
+        try appendTestSession(&client, "s1", null, test_provider);
+        defer deinitTestSessions(&client);
+
+        try expectSessionFsResponse(
+            &client,
+            1,
+            "sessionFs.sqliteQuery",
+            "{\"sessionId\":\"s1\",\"queryType\":\"query\",\"query\":\"select nothing\"}",
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"rows\":[],\"columns\":[],\"rowsAffected\":0}}",
+        );
+
+        provider_state.null_sqlite_result = false;
+        try expectSessionFsResponse(
+            &client,
+            2,
+            "sessionFs.sqliteQuery",
+            "{\"sessionId\":\"s1\",\"queryType\":\"query\",\"query\":\"select value\"}",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"rows\":[{\"value\":{\"nested\":true}}],\"columns\":[\"value\"],\"rowsAffected\":1,\"lastInsertRowid\":7}}",
+        );
+    }
+}
+
+test "SessionFS registration stores capabilities and emits the exact startup request" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const response = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"success\":true}}";
+    const framed = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ response.len, response },
+    );
+    defer allocator.free(framed);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "responses",
+        .data = framed,
+    });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [512]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+    };
+
+    try client.registerSessionFs(.{
+        .initial_cwd = "/repo",
+        .session_state_path = ".copilot/session",
+        .conventions = .posix,
+        .capabilities = .{ .sqlite = true },
+    });
+    try std.testing.expect(client.registered_session_fs.?.sqlite);
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "requests",
+        allocator,
+        .limited(2048),
+    );
+    defer allocator.free(requests);
+    var frames = std.Io.Reader.fixed(requests);
+    const body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessionFs.setProvider\",\"params\":{\"initialCwd\":\"/repo\",\"sessionStatePath\":\".copilot/session\",\"conventions\":\"posix\",\"capabilities\":{\"sqlite\":true}}}",
+        body,
+    );
+}
+
+test "SessionFS registration paths reject empty and invalid UTF-8 values" {
+    try std.testing.expectError(
+        error.InvalidSessionFsInitialCwd,
+        validateSessionFsConfig(.{
+            .initial_cwd = "",
+            .session_state_path = "/state",
+            .conventions = .posix,
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidSessionFsInitialCwd,
+        validateSessionFsConfig(.{
+            .initial_cwd = &.{0xff},
+            .session_state_path = "/state",
+            .conventions = .posix,
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidSessionFsStatePath,
+        validateSessionFsConfig(.{
+            .initial_cwd = "/repo",
+            .session_state_path = "",
+            .conventions = .posix,
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidSessionFsStatePath,
+        validateSessionFsConfig(.{
+            .initial_cwd = "/repo",
+            .session_state_path = &.{0xff},
+            .conventions = .posix,
+        }),
+    );
+    try validateSessionFsConfig(.{
+        .initial_cwd = "/repo",
+        .session_state_path = "/state",
+        .conventions = .posix,
+    });
+}
+
+test "SessionFS lifecycle boundary matrix rejects invalid factory combinations" {
+    const allocator = std.testing.allocator;
+    const Factory = struct {
+        fn withSqlite(
+            _: std.mem.Allocator,
+            _: session_types.SessionFsProviderInit,
+            context: ?*anyopaque,
+        ) !session_types.SessionFsProvider {
+            return TestSessionFs.fromContext(context).provider();
+        }
+
+        fn withoutSqlite(
+            _: std.mem.Allocator,
+            _: session_types.SessionFsProviderInit,
+            context: ?*anyopaque,
+        ) !session_types.SessionFsProvider {
+            return TestSessionFs.fromContext(context).providerWithoutSqlite();
+        }
+    };
+    var provider_state = TestSessionFs{};
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+
+    const first_id = try allocator.dupe(u8, "s1");
+    try client.beginSessionRecord(.create, first_id, true, null);
+    try std.testing.expect(client.pending_session != null);
+    client.rollbackSessionRecord();
+    try std.testing.expectError(
+        error.SessionFsNotRegistered,
+        client.beginSessionRecord(.create, try allocator.dupe(u8, "s1"), true, .{
+            .context = &provider_state,
+            .create = Factory.withSqlite,
+        }),
+    );
+
+    client.registered_session_fs = .{ .sqlite = true };
+    try std.testing.expectError(
+        error.SessionFsProviderRequired,
+        client.beginSessionRecord(.create, try allocator.dupe(u8, "s1"), true, null),
+    );
+    try std.testing.expectError(
+        error.SessionFsSqliteProviderRequired,
+        client.beginSessionRecord(.create, try allocator.dupe(u8, "s1"), true, .{
+            .context = &provider_state,
+            .create = Factory.withoutSqlite,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), provider_state.deinit_count);
+    try std.testing.expect(client.pending_session == null);
+
+    try client.beginSessionRecord(.create, try allocator.dupe(u8, "s1"), true, .{
+        .context = &provider_state,
+        .create = Factory.withSqlite,
+    });
+    try std.testing.expect(client.pending_session != null);
+    client.rollbackSessionRecord();
+    try std.testing.expectEqual(@as(usize, 2), provider_state.deinit_count);
+}
+
+test "SessionFS lifecycle entry points enforce registration before RPC" {
+    const allocator = std.testing.allocator;
+    const Factory = struct {
+        fn create(
+            _: std.mem.Allocator,
+            _: session_types.SessionFsProviderInit,
+            context: ?*anyopaque,
+        ) !session_types.SessionFsProvider {
+            return TestSessionFs.fromContext(context).provider();
+        }
+    };
+    var provider_state = TestSessionFs{};
+    const factory = session_types.SessionFsProviderFactory{
+        .context = &provider_state,
+        .create = Factory.create,
+    };
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestClientRegistries(&client);
+
+    try std.testing.expectError(
+        error.SessionFsNotRegistered,
+        client.createSession(.{
+            .session_id = "create",
+            .create_session_fs_provider = factory,
+        }),
+    );
+    try std.testing.expectError(
+        error.SessionFsNotRegistered,
+        client.resumeSession("resume", .{
+            .create_session_fs_provider = factory,
+        }),
+    );
+    try std.testing.expectError(
+        error.SessionFsNotRegistered,
+        client.joinParentSession("join", .{
+            .create_session_fs_provider = factory,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), provider_state.deinit_count);
+    try std.testing.expectEqual(@as(usize, 0), client.sessions.items.len);
+
+    client.registered_session_fs = .{ .sqlite = false };
+    try std.testing.expectError(
+        error.SessionFsProviderRequired,
+        client.createSession(.{ .session_id = "create" }),
+    );
+    try std.testing.expectError(
+        error.SessionFsProviderRequired,
+        client.resumeSession("resume", .{}),
+    );
+    try std.testing.expectError(
+        error.SessionFsProviderRequired,
+        client.joinParentSession("join", .{}),
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.sessions.items.len);
+}
+
+test "SessionFS routing prefers exact pending then committed and limits ID-less fallback" {
+    const allocator = std.testing.allocator;
+    var committed_state = TestSessionFs{};
+    var pending_state = TestSessionFs{};
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+        .registered_session_fs = .{ .sqlite = false },
+    };
+    try appendTestSession(&client, "committed", null, committed_state.provider());
+    client.pending_session = .{
+        .kind = .create,
+        .id = try allocator.dupe(u8, "pending"),
+        .owns_id = true,
+        .session_fs = pending_state.provider(),
+    };
+    defer deinitTestSessions(&client);
+
+    try expectSessionFsResponse(
+        &client,
+        1,
+        "sessionFs.writeFile",
+        "{\"sessionId\":\"committed\",\"path\":\"a\",\"content\":\"x\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}",
+    );
+    try std.testing.expectEqual(SessionFsMethod.write_file, committed_state.last_method.?);
+    try std.testing.expect(pending_state.last_method == null);
+
+    try expectSessionFsResponse(
+        &client,
+        2,
+        "sessionFs.appendFile",
+        "{\"path\":\"a\",\"content\":\"x\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":null}",
+    );
+    try std.testing.expectEqual(SessionFsMethod.append_file, pending_state.last_method.?);
+
+    try expectSessionFsResponse(
+        &client,
+        3,
+        "sessionFs.exists",
+        "{\"sessionId\":\"unknown\",\"path\":\"a\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32000,\"message\":\"session not registered\"}}",
+    );
+    try std.testing.expectEqual(SessionFsMethod.append_file, pending_state.last_method.?);
+
+    client.pending_session.?.kind = .resumed;
+    try expectSessionFsResponse(
+        &client,
+        4,
+        "sessionFs.exists",
+        "{\"path\":\"a\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":4,\"error\":{\"code\":-32602,\"message\":\"invalid session filesystem request\"}}",
+    );
+
+    allocator.free(client.pending_session.?.id);
+    client.pending_session.?.id = try allocator.dupe(u8, "committed");
+    try expectSessionFsResponse(
+        &client,
+        5,
+        "sessionFs.exists",
+        "{\"sessionId\":\"committed\",\"path\":\"a\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"exists\":true}}",
+    );
+    try std.testing.expectEqual(SessionFsMethod.exists, pending_state.last_method.?);
+    try std.testing.expectEqual(SessionFsMethod.write_file, committed_state.last_method.?);
+}
+
+test "SessionFS resident replacement commits atomically and rollback keeps the resident" {
+    const allocator = std.testing.allocator;
+    const Factory = struct {
+        fn create(
+            _: std.mem.Allocator,
+            init: session_types.SessionFsProviderInit,
+            context: ?*anyopaque,
+        ) !session_types.SessionFsProvider {
+            try std.testing.expectEqualStrings("s1", init.session_id);
+            return TestSessionFs.fromContext(context).provider();
+        }
+    };
+    var old_state = TestSessionFs{};
+    var failed_state = TestSessionFs{};
+    var replacement_state = TestSessionFs{};
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+        .registered_session_fs = .{ .sqlite = false },
+    };
+    try appendTestSession(&client, "s1", "/old", old_state.provider());
+    defer deinitTestSessions(&client);
+
+    try client.beginSessionRecord(.resumed, client.findSession("s1").?.id, false, .{
+        .context = &failed_state,
+        .create = Factory.create,
+    });
+    try client.prepareSessionCommit("s1", "/failed");
+    client.rollbackSessionRecord();
+    try std.testing.expectEqual(@as(usize, 1), failed_state.deinit_count);
+    try std.testing.expectEqual(@as(usize, 0), old_state.deinit_count);
+    try std.testing.expectEqualStrings(
+        "/old",
+        client.findSession("s1").?.workspace_path.?,
+    );
+
+    try client.beginSessionRecord(.resumed, client.findSession("s1").?.id, false, .{
+        .context = &replacement_state,
+        .create = Factory.create,
+    });
+    try client.prepareSessionCommit("s1", "/new");
+    _ = client.commitSessionRecord();
+    try std.testing.expectEqual(@as(usize, 1), old_state.deinit_count);
+    try std.testing.expectEqual(@as(usize, 0), replacement_state.deinit_count);
+    try std.testing.expectEqualStrings(
+        "/new",
+        client.findSession("s1").?.workspace_path.?,
+    );
+}
+
+test "SessionRecord workspace allocation failure preserves resident state" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = failing.allocator();
+    var old_state = TestSessionFs{};
+    var replacement_state = TestSessionFs{};
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+        .registered_session_fs = .{ .sqlite = false },
+    };
+    defer deinitTestSessions(&client);
+    try appendTestSession(&client, "s1", "/old", old_state.provider());
+    try client.beginSessionRecord(.resumed, client.findSession("s1").?.id, false, .{
+        .context = &replacement_state,
+        .create = struct {
+            fn create(
+                _: std.mem.Allocator,
+                _: session_types.SessionFsProviderInit,
+                context: ?*anyopaque,
+            ) !session_types.SessionFsProvider {
+                return TestSessionFs.fromContext(context).provider();
+            }
+        }.create,
+    });
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        client.prepareSessionCommit("s1", "/new"),
+    );
+    try std.testing.expectEqualStrings(
+        "/old",
+        client.findSession("s1").?.workspace_path.?,
+    );
+    try std.testing.expectEqual(@as(usize, 0), old_state.deinit_count);
+    try std.testing.expect(client.pending_session.?.workspace_path == null);
+    client.rollbackSessionRecord();
+    try std.testing.expectEqual(@as(usize, 1), replacement_state.deinit_count);
+}
+
+test "SessionRecord capacity allocation failure leaves new session uncommitted" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = failing.allocator();
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestSessions(&client);
+    try client.beginSessionRecord(
+        .create,
+        try allocator.dupe(u8, "s1"),
+        true,
+        null,
+    );
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        client.prepareSessionCommit("s1", null),
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.sessions.items.len);
+    try std.testing.expect(client.pending_session != null);
+    client.rollbackSessionRecord();
+    try std.testing.expect(client.pending_session == null);
+}
+
+test "SessionRecord id allocation failure leaves lifecycle state empty" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = 0,
+    });
+    var client = Client{
+        .allocator = failing.allocator(),
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestClientRegistries(&client);
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        client.createSession(.{ .session_id = "s1" }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.sessions.items.len);
+    try std.testing.expect(client.pending_session == null);
+}
+
+test "SessionRecord provider factory failure releases the uncommitted id" {
+    var client = Client{
+        .allocator = std.testing.allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+        .registered_session_fs = .{ .sqlite = false },
+    };
+    defer deinitTestClientRegistries(&client);
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        client.createSession(.{
+            .session_id = "s1",
+            .create_session_fs_provider = .{
+                .create = struct {
+                    fn create(
+                        _: std.mem.Allocator,
+                        _: session_types.SessionFsProviderInit,
+                        _: ?*anyopaque,
+                    ) !session_types.SessionFsProvider {
+                        return error.OutOfMemory;
+                    }
+                }.create,
+            },
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.sessions.items.len);
+    try std.testing.expect(client.pending_session == null);
+}
+
+test "SessionFS boundary validation and method-specific failures are literal" {
+    const allocator = std.testing.allocator;
+    var provider_state = TestSessionFs{};
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    try appendTestSession(&client, "s1", null, provider_state.provider());
+    defer deinitTestSessions(&client);
+
+    try expectSessionFsResponse(
+        &client,
+        1,
+        "sessionFs.writeFile",
+        "{\"sessionId\":\"s1\",\"path\":\"a\",\"content\":\"x\",\"mode\":-1}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32602,\"message\":\"invalid session filesystem request\"}}",
+    );
+    try expectSessionFsResponse(
+        &client,
+        2,
+        "sessionFs.writeFile",
+        "{\"sessionId\":\"s1\",\"path\":\"a\",\"content\":\"x\",\"mode\":18446744073709551616}",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32602,\"message\":\"invalid session filesystem request\"}}",
+    );
+    try expectSessionFsResponse(
+        &client,
+        3,
+        "sessionFs.exists",
+        "{\"sessionId\":\"s1\",\"path\":\"a\",\"extra\":true}",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32602,\"message\":\"invalid session filesystem request\"}}",
+    );
+
+    provider_state.fail_method = .read_file;
+    try expectSessionFsResponse(
+        &client,
+        4,
+        "sessionFs.readFile",
+        "{\"sessionId\":\"s1\",\"path\":\"missing\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"content\":\"\",\"error\":{\"code\":\"ENOENT\",\"message\":\"FileNotFound\"}}}",
+    );
+    provider_state.fail_method = .write_file;
+    try expectSessionFsResponse(
+        &client,
+        5,
+        "sessionFs.writeFile",
+        "{\"sessionId\":\"s1\",\"path\":\"a\",\"content\":\"x\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"code\":\"UNKNOWN\",\"message\":\"AccessDenied\"}}",
+    );
+    provider_state.fail_method = .exists;
+    try expectSessionFsResponse(
+        &client,
+        6,
+        "sessionFs.exists",
+        "{\"sessionId\":\"s1\",\"path\":\"a\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{\"exists\":false}}",
+    );
+    provider_state.fail_method = .readdir;
+    try expectSessionFsResponse(
+        &client,
+        7,
+        "sessionFs.readdir",
+        "{\"sessionId\":\"s1\",\"path\":\"missing\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"entries\":[],\"error\":{\"code\":\"ENOENT\",\"message\":\"FileNotFound\"}}}",
+    );
+    const mapped_failures = [_]struct {
+        id: i64,
+        method: SessionFsMethod,
+        wire_method: []const u8,
+        params: []const u8,
+        expected: []const u8,
+    }{
+        .{
+            .id = 11,
+            .method = .append_file,
+            .wire_method = "sessionFs.appendFile",
+            .params = "{\"sessionId\":\"s1\",\"path\":\"a\",\"content\":\"x\"}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":11,\"result\":{\"code\":\"ENOENT\",\"message\":\"FileNotFound\"}}",
+        },
+        .{
+            .id = 12,
+            .method = .mkdir,
+            .wire_method = "sessionFs.mkdir",
+            .params = "{\"sessionId\":\"s1\",\"path\":\"a\"}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":12,\"result\":{\"code\":\"UNKNOWN\",\"message\":\"AccessDenied\"}}",
+        },
+        .{
+            .id = 13,
+            .method = .readdir_with_types,
+            .wire_method = "sessionFs.readdirWithTypes",
+            .params = "{\"sessionId\":\"s1\",\"path\":\"a\"}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":13,\"result\":{\"entries\":[],\"error\":{\"code\":\"ENOENT\",\"message\":\"FileNotFound\"}}}",
+        },
+        .{
+            .id = 14,
+            .method = .rm,
+            .wire_method = "sessionFs.rm",
+            .params = "{\"sessionId\":\"s1\",\"path\":\"a\"}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":14,\"result\":{\"code\":\"ENOENT\",\"message\":\"FileNotFound\"}}",
+        },
+        .{
+            .id = 15,
+            .method = .rename,
+            .wire_method = "sessionFs.rename",
+            .params = "{\"sessionId\":\"s1\",\"src\":\"a\",\"dest\":\"b\"}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":15,\"result\":{\"code\":\"UNKNOWN\",\"message\":\"AccessDenied\"}}",
+        },
+    };
+    for (mapped_failures) |case| {
+        provider_state.fail_method = case.method;
+        try expectSessionFsResponse(
+            &client,
+            case.id,
+            case.wire_method,
+            case.params,
+            case.expected,
+        );
+    }
+
+    provider_state.fail_method = null;
+    provider_state.invalid_read_utf8 = true;
+    try expectSessionFsResponse(
+        &client,
+        8,
+        "sessionFs.readFile",
+        "{\"sessionId\":\"s1\",\"path\":\"a\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":8,\"error\":{\"code\":-32603,\"message\":\"invalid session filesystem result\"}}",
+    );
+    provider_state.invalid_read_utf8 = false;
+    provider_state.invalid_timestamp = true;
+    try expectSessionFsResponse(
+        &client,
+        9,
+        "sessionFs.stat",
+        "{\"sessionId\":\"s1\",\"path\":\"a\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":9,\"error\":{\"code\":-32603,\"message\":\"invalid session filesystem result\"}}",
+    );
+    provider_state.invalid_timestamp = false;
+    provider_state.fail_method = .sqlite_query;
+    try expectSessionFsResponse(
+        &client,
+        10,
+        "sessionFs.sqliteQuery",
+        "{\"sessionId\":\"s1\",\"queryType\":\"query\",\"query\":\"select 1\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":10,\"error\":{\"code\":-32000,\"message\":\"QueryFailed\"}}",
+    );
+}
+
+test "SessionFS transaction failure classes keep their wire spellings" {
+    const allocator = std.testing.allocator;
+    var provider_state = TestSessionFs{};
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    try appendTestSession(&client, "s1", null, provider_state.provider());
+    defer deinitTestSessions(&client);
+
+    const cases = [_]struct {
+        value: session_types.SessionFsSqliteTransactionErrorClass,
+        wire: []const u8,
+    }{
+        .{ .value = .busy_or_locked, .wire = "busyOrLocked" },
+        .{ .value = .fatal, .wire = "fatal" },
+        .{ .value = .post_commit_ambiguous, .wire = "postCommitAmbiguous" },
+    };
+    for (cases, 1..) |case, id| {
+        provider_state.transaction_failure = case.value;
+        const expected = try std.fmt.allocPrint(
+            allocator,
+            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"results\":[],\"error\":{{\"errorClass\":\"{s}\",\"message\":\"transaction failed\"}}}}}}",
+            .{ id, case.wire },
+        );
+        defer allocator.free(expected);
+        try expectSessionFsResponse(
+            &client,
+            @intCast(id),
+            "sessionFs.sqliteTransaction",
+            "{\"sessionId\":\"s1\",\"statements\":[]}",
+            expected,
+        );
+    }
+}
+
+test "SessionFS missing transaction callback returns the pinned fatal result" {
+    const allocator = std.testing.allocator;
+    var provider_state = TestSessionFs{};
+    const sqlite_vtable = session_types.SessionFsSqliteProvider.VTable{
+        .query = TestSessionFs.sqliteQuery,
+        .exists = TestSessionFs.sqliteExists,
+    };
+    var provider_value = provider_state.provider();
+    provider_value.sqlite.?.vtable = &sqlite_vtable;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    try appendTestSession(&client, "s1", null, provider_value);
+    defer deinitTestSessions(&client);
+
+    try expectSessionFsResponse(
+        &client,
+        1,
+        "sessionFs.sqliteTransaction",
+        "{\"sessionId\":\"s1\",\"statements\":[]}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"results\":[],\"error\":{\"errorClass\":\"fatal\",\"message\":\"SQLite transactions are not supported by this provider\"}}}",
+    );
 }
 
 test "RPC handler registration rejects duplicates and unregisters" {
@@ -4401,12 +7189,12 @@ test "permission handler receives events and can leave requests pending" {
         .reader_buffer = &.{},
         .writer_buffer = &.{},
     };
-    try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
+    try appendTestSession(&client, "session-1", null, null);
     defer {
         client.removeSession("session-1");
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
-        client.session_ids.deinit(allocator);
+        deinitTestSessions(&client);
     }
 
     var called = false;
@@ -4474,12 +7262,12 @@ test "permission handler receives injected managed settings metadata" {
         .reader_buffer = &.{},
         .writer_buffer = &.{},
     };
-    try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
+    try appendTestSession(&client, "session-1", null, null);
     defer {
         client.removeSession("session-1");
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
-        client.session_ids.deinit(allocator);
+        deinitTestSessions(&client);
     }
 
     var called = false;
@@ -4534,12 +7322,12 @@ test "permission handler failures leave requests available for manual handling" 
         .reader_buffer = &.{},
         .writer_buffer = &.{},
     };
-    try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
+    try appendTestSession(&client, "session-1", null, null);
     defer {
         client.removeSession("session-1");
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
-        client.session_ids.deinit(allocator);
+        deinitTestSessions(&client);
     }
 
     const handler = struct {
@@ -4592,14 +7380,14 @@ test "approveAll leaves managed permission events observable" {
         .reader_buffer = &.{},
         .writer_buffer = &.{},
     };
-    try client.session_ids.append(allocator, try allocator.dupe(u8, "managed-session"));
-    try client.session_ids.append(allocator, try allocator.dupe(u8, "managed-request"));
+    try appendTestSession(&client, "managed-session", null, null);
+    try appendTestSession(&client, "managed-request", null, null);
     defer {
         client.removeSession("managed-session");
         client.removeSession("managed-request");
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
-        client.session_ids.deinit(allocator);
+        deinitTestSessions(&client);
     }
     try client.registerPermissionHandler("managed-session", .{
         .enable_managed_settings = true,
@@ -4702,12 +7490,12 @@ fn runAutomaticPermissionRpc(
         .reader_buffer = &.{},
         .writer_buffer = &writer_buffer,
     };
-    try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
+    try appendTestSession(&client, "session-1", null, null);
     defer {
         client.removeSession("session-1");
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
-        client.session_ids.deinit(allocator);
+        deinitTestSessions(&client);
     }
 
     const handler = struct {
@@ -4821,12 +7609,12 @@ test "permission response delivery failures are explicit" {
         .reader_buffer = &.{},
         .writer_buffer = &.{},
     };
-    try client.session_ids.append(allocator, try allocator.dupe(u8, "session-1"));
+    try appendTestSession(&client, "session-1", null, null);
     defer {
         client.removeSession("session-1");
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
-        client.session_ids.deinit(allocator);
+        deinitTestSessions(&client);
     }
 
     const handler = struct {
@@ -4919,10 +7707,11 @@ fn runSendRpc(
     };
     defer {
         client.events.deinit(allocator);
-        client.session_ids.deinit(allocator);
+        deinitTestSessions(&client);
     }
 
-    const message_id = try (Session{ .client = &client, .id = "session-1" }).send(options);
+    const session = try appendTestSessionHandle(&client, "session-1");
+    const message_id = try session.send(options);
     errdefer allocator.free(message_id);
     const request_frame = try tmp.dir.readFileAlloc(
         std.testing.io,
@@ -5267,7 +8056,7 @@ test "session.sendAndWait cleans its message id and returns an owned assistant m
     defer {
         for (client.events.items) |*event| event.deinit(allocator);
         client.events.deinit(allocator);
-        client.session_ids.deinit(allocator);
+        deinitTestSessions(&client);
     }
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "session-1"),
@@ -5284,10 +8073,8 @@ test "session.sendAndWait cleans its message id and returns an owned assistant m
     const attachments = [_]session_types.Attachment{
         .{ .file = .{ .path = "/tmp/a.zig" } },
     };
-    const message = (try (Session{
-        .client = &client,
-        .id = "session-1",
-    }).sendAndWait(.{
+    const session = try appendTestSessionHandle(&client, "session-1");
+    const message = (try session.sendAndWait(.{
         .prompt = "inspect",
         .attachments = &attachments,
     })).?;
@@ -5496,6 +8283,7 @@ test "create request places the lowered provider in params" {
     const params = try buildPreparedCreateSessionRequest(
         config.session_id,
         config,
+        normalizeSessionOptions(config),
         &.{},
         &extension_values,
         prepared,
@@ -5535,6 +8323,7 @@ test "resume request places provider without suppressing resume by default" {
     const params = try buildPreparedResumeSessionRequest(
         "session-1",
         config,
+        normalizeSessionOptions(config),
         &.{},
         &extension_values,
         &.{},
@@ -5693,8 +8482,7 @@ test "createSession and resumeSession preserve deep partial model capability ove
             .writer_buffer = &writer_buffer,
         };
         defer {
-            for (client.session_ids.items) |id| allocator.free(id);
-            client.session_ids.deinit(allocator);
+            deinitTestSessions(&client);
             for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
             client.extension_runtimes.deinit(allocator);
         }
@@ -6414,8 +9202,10 @@ test "capability updates are tri-state and canvas state is defensive" {
     defer {
         for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
         client.extension_runtimes.deinit(allocator);
+        deinitTestSessions(&client);
     }
 
+    const session = try appendTestSessionHandle(&client, "s1");
     try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
         .extensions = .{ .common = .{
             .experimental = .{ .mcp_apps = true },
@@ -6430,7 +9220,6 @@ test "capability updates are tri-state and canvas state is defensive" {
             .canvasId = "c1",
         }},
     }, &.{});
-    const session = Session{ .client = &client, .id = "s1" };
     try std.testing.expect(session.capabilities().supports(.canvases));
     try std.testing.expectEqual(ext.CapabilityState.unknown, session.capabilities().mcp_apps);
     try std.testing.expectError(error.UnsupportedCapability, session.experimental(.mcp_apps));
@@ -6848,13 +9637,13 @@ test "failed resident resume preserves committed runtime and session id" {
         if (client.pending_extension_runtime) |*runtime| runtime.deinit(allocator);
         for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
         client.extension_runtimes.deinit(allocator);
-        for (client.session_ids.items) |id| allocator.free(id);
-        client.session_ids.deinit(allocator);
+        for (client.sessions.items) |*session| session.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
     var old_context: u8 = 1;
     var new_context: u8 = 2;
     const session_id = try allocator.dupe(u8, "s1");
-    try client.session_ids.append(allocator, session_id);
+    try client.sessions.append(allocator, .{ .id = session_id });
     try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
         .extensions = .{ .common = .{ .hooks = .{
             .context = &old_context,
@@ -6880,12 +9669,32 @@ test "failed resident resume preserves committed runtime and session id" {
     );
     client.rollbackExtensionRuntime();
     try std.testing.expectEqual(@as(usize, 1), client.extension_runtimes.items.len);
-    try std.testing.expectEqual(@as(usize, 1), client.session_ids.items.len);
+    try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
     try std.testing.expectEqual(
         @as(?*anyopaque, &old_context),
         client.findExtensionRuntime("s1").?.hooks.context,
     );
-    try std.testing.expect(client.findSessionId("s1").?.ptr == session_id.ptr);
+    try std.testing.expect(client.findSession("s1").?.id.ptr == session_id.ptr);
+}
+
+test "lifecycle response cleanup wipes granted environment secrets first" {
+    var storage: [4096]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var parsed = try std.json.parseFromSlice(
+        WireSessionLifecycleResponse,
+        fixed.allocator(),
+        "{\"sessionId\":\"s1\",\"grantedEnvironmentVariables\":{\"TOKEN\":\"secret-value\"}}",
+        .{ .allocate = .alloc_always },
+    );
+    const token = parsed.value.grantedEnvironmentVariables.?.object
+        .get("TOKEN").?.string;
+    try std.testing.expectEqualStrings("secret-value", token);
+
+    deinitLifecycleResponse(&parsed);
+
+    for (token) |byte| {
+        try std.testing.expectEqual(@as(u8, 0), byte);
+    }
 }
 
 test "failed frame writes wipe the transport buffer" {
@@ -7066,8 +9875,8 @@ test "disconnect releases OAuth interest before detaching" {
     defer {
         for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
         client.extension_runtimes.deinit(allocator);
-        for (client.session_ids.items) |id| allocator.free(id);
-        client.session_ids.deinit(allocator);
+        for (client.sessions.items) |*session| session.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
     const handler = struct {
         fn handle(
@@ -7085,11 +9894,11 @@ test "disconnect releases OAuth interest before detaching" {
     }, &.{});
     try client.commitExtensionRuntime("s1", .{}, &.{});
     const session_id = try allocator.dupe(u8, "s1");
-    try client.session_ids.append(allocator, session_id);
+    try client.sessions.append(allocator, .{ .id = session_id });
 
     try (Session{ .client = &client, .id = session_id }).disconnect();
     try std.testing.expect(client.findExtensionRuntime("s1") == null);
-    try std.testing.expect(client.findSessionId("s1") == null);
+    try std.testing.expect(client.findSession("s1") == null);
 
     const requests = try tmp.dir.readFileAlloc(
         std.testing.io,
@@ -7257,6 +10066,7 @@ test "zero OAuth token lifetime cancels the pending request" {
         client.events.deinit(allocator);
         for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
         client.extension_runtimes.deinit(allocator);
+        deinitTestSessions(&client);
     }
     const handler = struct {
         fn handle(
@@ -7277,7 +10087,7 @@ test "zero OAuth token lifetime cancels the pending request" {
     }, &.{});
     try client.commitExtensionRuntime("s1", .{}, &.{});
 
-    const session = Session{ .client = &client, .id = "s1" };
+    const session = try appendTestSessionHandle(&client, "s1");
     try std.testing.expectError(
         error.InvalidMcpAuthTokenExpiration,
         session.nextEvent(),
@@ -7312,7 +10122,9 @@ test "review regressions preserve protocol semantics" {
     defer {
         for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
         client.extension_runtimes.deinit(allocator);
+        deinitTestSessions(&client);
     }
+    const session = try appendTestSessionHandle(&client, "s1");
     try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
         .extensions = .{ .common = .{ .experimental = .{ .mcp_apps = true } } },
     }, &.{});
@@ -7325,7 +10137,6 @@ test "review regressions preserve protocol semantics" {
     );
     defer response.deinit();
     try client.commitExtensionRuntime("s1", response.value, &.{"TOKEN"});
-    const session = Session{ .client = &client, .id = "s1" };
     var grants = try session.snapshotEnvironmentGrants(allocator);
     defer grants.deinit();
     try std.testing.expectEqualStrings("secret", grants.get("TOKEN").?);
@@ -7474,6 +10285,231 @@ test "typed RPC results allow additional fields" {
     try std.testing.expectEqualStrings("s1", parsed.value.sessionId);
 }
 
+test "workspace path is copied from lifecycle responses and inactive handles differ" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const response_body =
+        \\{"jsonrpc":"2.0","id":1,"result":{"sessionId":"s1","workspacePath":"/tmp/workspace"}}
+    ;
+    const response_body_without_path =
+        \\{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s2"}}
+    ;
+    const response = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            response_body.len,
+            response_body,
+            response_body_without_path.len,
+            response_body_without_path,
+        },
+    );
+    defer allocator.free(response);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "responses",
+        .data = response,
+    });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+    };
+    defer deinitTestClientRegistries(&client);
+
+    const session = try client.createSession(.{ .session_id = "s1" });
+    try std.testing.expectEqualStrings(
+        "/tmp/workspace",
+        (try session.workspacePath()).?,
+    );
+    const session_without_path = try client.createSession(.{ .session_id = "s2" });
+    try std.testing.expectEqual(null, try session_without_path.workspacePath());
+    client.removeSession("s1");
+    try std.testing.expectError(error.SessionNotActive, session.workspacePath());
+    try appendTestSession(&client, "s1", "/replacement", null);
+    try std.testing.expectError(error.SessionNotActive, session.workspacePath());
+    try std.testing.expectEqualStrings(
+        "/replacement",
+        client.findSession("s1").?.workspace_path.?,
+    );
+}
+
+test "stale session handles cannot act on a recreated session" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const response_bodies = [_][]const u8{
+        \\{"jsonrpc":"2.0","id":1,"result":{"sessionId":"s1","workspacePath":"/old","capabilities":{"ui":{"canvases":true,"mcpApps":true}}}}
+        ,
+        \\{"jsonrpc":"2.0","id":2,"result":{"success":true}}
+        ,
+        \\{"jsonrpc":"2.0","id":3,"result":{"sessionId":"s1","workspacePath":"/replacement","capabilities":{"ui":{"canvases":true,"mcpApps":true}},"openCanvases":[{"instanceId":"replacement-canvas","extensionId":"replacement-extension","canvasId":"replacement-view"}]}}
+        ,
+        \\{"jsonrpc":"2.0","id":4,"result":{"status":"unchanged","messageId":"replacement-message"}}
+        ,
+        \\{"jsonrpc":"2.0","id":5,"result":{"instanceId":"new-canvas","extensionId":"replacement-extension","canvasId":"replacement-view"}}
+        ,
+        \\{"jsonrpc":"2.0","id":6,"result":{"status":"unchanged","effectiveAutoTier":"balance"}}
+        ,
+        \\{"jsonrpc":"2.0","id":7,"result":{"tools":["replacement-tool"]}}
+        ,
+        \\{"jsonrpc":"2.0","id":8,"result":{"success":true}}
+        ,
+    };
+    var framed_responses: std.Io.Writer.Allocating = .init(allocator);
+    defer framed_responses.deinit();
+    for (response_bodies) |body| {
+        try json_rpc.writeFrame(&framed_responses.writer, body);
+    }
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "responses",
+        .data = framed_responses.written(),
+    });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [4096]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+    };
+    defer deinitTestClientRegistries(&client);
+
+    const config = session_types.CreateSessionConfig{
+        .session_id = "s1",
+        .extensions = .{ .common = .{
+            .experimental = .{ .mcp_apps = true },
+        } },
+    };
+    const old = try client.createSession(config);
+    const old_apps = try old.experimental(.mcp_apps);
+    try old.disconnect();
+    const replacement = try client.createSession(config);
+
+    const event = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"s1","event":{"type":"assistant.message","data":{"content":"replacement event","messageId":"replacement-event"}}}
+    ,
+        .{},
+    );
+    defer event.deinit();
+    try client.queueSessionEvent(event.value);
+
+    try std.testing.expectError(error.SessionNotActive, old.setAutoTier(.balance));
+    try std.testing.expectError(error.SessionNotActive, old.send(.{ .prompt = "old send" }));
+    try std.testing.expectError(error.SessionNotActive, old.sendAndWait(.{ .prompt = "old wait" }));
+    try std.testing.expectError(error.SessionNotActive, old.nextEvent());
+    try std.testing.expectEqual(ext.CapabilitySet{}, old.capabilities());
+    try std.testing.expectError(error.SessionNotActive, old.workspacePath());
+    try std.testing.expectError(error.SessionNotActive, old.experimental(.mcp_apps));
+    try std.testing.expectError(error.SessionNotActive, old.openCanvas(allocator, .{
+        .canvas_id = "old-view",
+        .instance_id = "old-canvas",
+        .input_json = "{}",
+    }));
+    try std.testing.expectError(error.SessionNotActive, old.closeCanvas("replacement-canvas"));
+    try std.testing.expectError(error.SessionNotActive, old.invokeCanvasAction(allocator, .{
+        .instance_id = "replacement-canvas",
+        .action_name = "old-action",
+        .input_json = "{}",
+    }));
+    try std.testing.expectError(error.SessionNotActive, old.snapshotOpenCanvases(allocator));
+    try std.testing.expectError(error.SessionNotActive, old.snapshotEnvironmentGrants(allocator));
+    try std.testing.expectError(error.SessionNotActive, old.disconnect());
+    try std.testing.expectError(error.SessionNotActive, old.abort());
+    try std.testing.expectError(error.SessionNotActive, old.setModel("old-model", .{}));
+    try std.testing.expectError(error.SessionNotActive, old.log("old log", .{}));
+    try std.testing.expectError(error.SessionNotActive, old.approvePermission("old-permission"));
+    try std.testing.expectError(error.SessionNotActive, old.rejectPermission("old-permission", "no"));
+    try std.testing.expectError(error.SessionNotActive, old.respondToPermissionJson(
+        "old-permission",
+        "{\"kind\":\"approve-once\"}",
+        null,
+    ));
+    try std.testing.expectError(error.SessionNotActive, old.respondToTool("old-tool", "old result"));
+    try std.testing.expectError(error.SessionNotActive, old.respondToToolResultJson(
+        "old-tool",
+        "{\"textResultForLlm\":\"old result\"}",
+    ));
+    try std.testing.expectError(error.SessionNotActive, old.respondToToolError("old-tool", "old error"));
+    try std.testing.expectError(
+        error.SessionNotActive,
+        old_apps.listTools(allocator, "old-server", "old-origin"),
+    );
+    try std.testing.expectError(error.SessionNotActive, old_apps.callTool(allocator, .{
+        .server_name = "old-server",
+        .tool_name = "old-tool",
+        .arguments_json = "{}",
+        .origin_server_name = "old-origin",
+    }));
+    try std.testing.expectError(
+        error.SessionNotActive,
+        old_apps.readResource(allocator, "old-server", "old://resource"),
+    );
+
+    try std.testing.expect(replacement.capabilities().supports(.canvases));
+    try std.testing.expect(replacement.capabilities().supports(.mcp_apps));
+    try std.testing.expectEqualStrings("/replacement", (try replacement.workspacePath()).?);
+    var replacement_event = try replacement.nextEvent();
+    defer replacement_event.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "replacement event",
+        replacement_event.assistant_message.content,
+    );
+    var canvases = try replacement.snapshotOpenCanvases(allocator);
+    defer canvases.deinit();
+    try std.testing.expectEqual(@as(usize, 1), canvases.items.len);
+    try std.testing.expectEqualStrings("replacement-canvas", canvases.items[0].instance_id);
+    var grants = try replacement.snapshotEnvironmentGrants(allocator);
+    defer grants.deinit();
+    try std.testing.expectEqual(@as(usize, 0), grants.items.len);
+    const message_id = try replacement.send(.{ .prompt = "replacement send" });
+    defer allocator.free(message_id);
+    try std.testing.expectEqualStrings("replacement-message", message_id);
+    var opened = try replacement.openCanvas(allocator, .{
+        .canvas_id = "replacement-view",
+        .instance_id = "new-canvas",
+    });
+    defer opened.deinit();
+    try std.testing.expectEqualStrings("new-canvas", opened.value.instance_id);
+    try std.testing.expectEqual(
+        session_types.AutoTierSwitchStatus.unchanged,
+        (try replacement.setAutoTier(.balance)).status,
+    );
+    const replacement_apps = try replacement.experimental(.mcp_apps);
+    var tools = try replacement_apps.listTools(
+        allocator,
+        "replacement-server",
+        "replacement-origin",
+    );
+    defer tools.deinit();
+    try std.testing.expectEqualStrings("{\"tools\":[\"replacement-tool\"]}", tools.json);
+    try replacement.disconnect();
+}
+
 test "session.event notifications queue by session" {
     const allocator = std.testing.allocator;
     var client = Client{
@@ -7526,12 +10562,12 @@ test "disconnect removes session-owned allocations" {
         client.events.deinit(allocator);
         for (client.tools.items) |tool| tool.deinit(allocator);
         client.tools.deinit(allocator);
-        for (client.session_ids.items) |id| allocator.free(id);
-        client.session_ids.deinit(allocator);
+        for (client.sessions.items) |*session| session.deinit(allocator);
+        client.sessions.deinit(allocator);
     }
 
     const session_id = try allocator.dupe(u8, "s1");
-    try client.session_ids.append(allocator, session_id);
+    try client.sessions.append(allocator, .{ .id = session_id });
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "s1"),
         .event = .{ .session_idle = .{} },
@@ -7539,7 +10575,8 @@ test "disconnect removes session-owned allocations" {
 
     client.removeSession("s1");
 
-    try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
+    try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
+    try std.testing.expect(!client.sessions.items[0].active);
     try std.testing.expectEqual(@as(usize, 0), client.events.items.len);
 }
 
@@ -7620,8 +10657,7 @@ test "create resume and parent join lower custom agents to literal lifecycle JSO
         .writer_buffer = &writer_buffer,
     };
     defer {
-        for (client.session_ids.items) |id| allocator.free(id);
-        client.session_ids.deinit(allocator);
+        deinitTestSessions(&client);
         for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
         client.extension_runtimes.deinit(allocator);
     }
@@ -7724,6 +10760,216 @@ test "create resume and parent join lower custom agents to literal lifecycle JSO
         \\{"jsonrpc":"2.0","id":3,"method":"session.resume","params":{"sessionId":"parent-session","streaming":false,"tools":[],"customAgents":[{"name":"parent-reviewer","displayName":"Parent reviewer","description":"Reviews the parent session.","tools":["read"],"prompt":"Review the parent.","mcpServers":{"parent-docs":{"type":"stdio","command":"parent-mcp","args":["--stdio"],"env":{"TOKEN":"secret"},"cwd":"/parent","tools":["lookup"],"timeout":75}},"infer":true,"skills":["review"],"model":"gpt-5.4","reasoningEffort":"max"}],"defaultAgent":{"excludedTools":["write"]},"agent":"parent-reviewer","customAgentsLocalOnly":false,"excludedBuiltinAgents":["task"],"toolFilterPrecedence":"excluded","requestPermission":true,"requestUserInput":false,"enableManagedSettings":false,"disableResume":true}}
     , join_body);
     try std.testing.expectEqualStrings("", frames.buffered());
+}
+
+test "create resume deprecated join and parent join lower lifecycle options exactly" {
+    const allocator = std.testing.allocator;
+    const Helpers = struct {
+        fn createProvider(
+            _: std.mem.Allocator,
+            _: session_types.SessionFsProviderInit,
+            context: ?*anyopaque,
+        ) anyerror!session_types.SessionFsProvider {
+            return TestSessionFs.fromContext(context).provider();
+        }
+    };
+    var session_fs = TestSessionFs{};
+    const factory = session_types.SessionFsProviderFactory{
+        .context = &session_fs,
+        .create = Helpers.createProvider,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const create_response = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"sessionId\":\"created\"}}";
+    const resume_response = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"resumed\"}}";
+    const deprecated_join_response = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"sessionId\":\"joined\"}}";
+    const parent_join_response = "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"sessionId\":\"parent\"}}";
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            create_response.len,
+            create_response,
+            resume_response.len,
+            resume_response,
+            deprecated_join_response.len,
+            deprecated_join_response,
+            parent_join_response.len,
+            parent_join_response,
+        },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = responses });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [8192]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+        .registered_session_fs = .{ .sqlite = false },
+    };
+    defer {
+        deinitTestSessions(&client);
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+    }
+
+    _ = try client.createSession(.{
+        .session_id = "created",
+        .client_name = "create-client",
+        .reasoning_effort = .high,
+        .reasoning_summary = .concise,
+        .enable_experimental_mode = false,
+        .context_tier = .long_context,
+        .large_output = .{
+            .enabled = true,
+            .max_size_bytes = 65536,
+            .output_directory = "/tmp/create-output",
+        },
+        .config_directory = "/tmp/create-config",
+        .capi = .{
+            .auto_tier = .balance,
+            .enable_websocket_responses = false,
+        },
+        .additional_directories = &.{ "/work/a", "/work/b" },
+        .infinite_sessions = .{
+            .enabled = true,
+            .background_compaction_threshold = 0.75,
+            .buffer_exhaustion_threshold = 0.9,
+        },
+        .memory = .{ .enabled = false },
+        .skip_embedding_retrieval = true,
+        .embedding_cache_storage = .in_memory,
+        .organization_custom_instructions = "Create instructions.",
+        .enable_file_hooks = false,
+        .enable_host_git_operations = true,
+        .enable_session_store = false,
+        .create_session_fs_provider = factory,
+    });
+    _ = try client.resumeSession("resumed", .{
+        .client_name = "resume-client",
+        .reasoning_effort = .max,
+        .reasoning_summary = .detailed,
+        .enable_experimental_mode = true,
+        .context_tier = .default,
+        .large_output = .{},
+        .config_directory = "",
+        .capi = .{},
+        .additional_directories = &.{},
+        .infinite_sessions = .{},
+        .memory = .{ .enabled = true },
+        .skip_embedding_retrieval = false,
+        .embedding_cache_storage = .persistent,
+        .organization_custom_instructions = "",
+        .enable_file_hooks = false,
+        .enable_host_git_operations = false,
+        .enable_session_store = false,
+        .create_session_fs_provider = factory,
+    });
+    _ = try client.joinSession("joined", .{
+        .client_name = "deprecated-join",
+        .additional_directories = &.{},
+        .enable_experimental_mode = false,
+        .large_output = .{},
+        .capi = .{},
+        .infinite_sessions = .{},
+        .organization_custom_instructions = "",
+        .create_session_fs_provider = factory,
+    });
+    var parent = try client.joinParentSession("parent", .{
+        .client_name = "parent-join",
+        .reasoning_effort = .low,
+        .context_tier = .long_context,
+        .additional_directories = &.{"/parent/work"},
+        .enable_session_store = true,
+        .create_session_fs_provider = factory,
+    });
+    defer parent.deinit();
+
+    const requests = try tmp.dir.readFileAlloc(std.testing.io, "requests", allocator, .limited(32768));
+    defer allocator.free(requests);
+    var frames = std.Io.Reader.fixed(requests);
+
+    const create_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(create_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":1,"method":"session.create","params":{"sessionId":"created","clientName":"create-client","reasoningEffort":"high","reasoningSummary":"concise","isExperimentalMode":false,"contextTier":"long_context","largeOutput":{"enabled":true,"maxSizeBytes":65536,"outputDir":"/tmp/create-output"},"configDir":"/tmp/create-config","capi":{"autoTier":"balance","enableWebSocketResponses":false},"additionalDirectories":["/work/a","/work/b"],"infiniteSessions":{"enabled":true,"backgroundCompactionThreshold":0.75,"bufferExhaustionThreshold":0.9},"memory":{"enabled":false},"skipEmbeddingRetrieval":true,"embeddingCacheStorage":"in-memory","organizationCustomInstructions":"Create instructions.","enableFileHooks":false,"enableHostGitOperations":true,"enableSessionStore":false,"streaming":false,"tools":[],"toolFilterPrecedence":"excluded","requestPermission":false,"requestUserInput":false,"enableManagedSettings":false}}
+    , create_body);
+
+    const resume_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(resume_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":2,"method":"session.resume","params":{"sessionId":"resumed","clientName":"resume-client","reasoningEffort":"max","reasoningSummary":"detailed","isExperimentalMode":true,"contextTier":"default","largeOutput":{},"configDir":"","capi":{},"additionalDirectories":[],"infiniteSessions":{},"memory":{"enabled":true},"skipEmbeddingRetrieval":false,"embeddingCacheStorage":"persistent","organizationCustomInstructions":"","enableFileHooks":false,"enableHostGitOperations":false,"enableSessionStore":false,"streaming":false,"tools":[],"toolFilterPrecedence":"excluded","requestPermission":false,"requestUserInput":false,"enableManagedSettings":false}}
+    , resume_body);
+
+    const deprecated_join_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(deprecated_join_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":3,"method":"session.resume","params":{"sessionId":"joined","clientName":"deprecated-join","isExperimentalMode":false,"largeOutput":{},"capi":{},"additionalDirectories":[],"infiniteSessions":{},"organizationCustomInstructions":"","streaming":false,"tools":[],"toolFilterPrecedence":"excluded","requestPermission":false,"requestUserInput":false,"enableManagedSettings":false,"disableResume":true}}
+    , deprecated_join_body);
+
+    const parent_join_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(parent_join_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":4,"method":"session.resume","params":{"sessionId":"parent","clientName":"parent-join","reasoningEffort":"low","contextTier":"long_context","additionalDirectories":["/parent/work"],"enableSessionStore":true,"streaming":false,"tools":[],"toolFilterPrecedence":"excluded","requestPermission":true,"requestUserInput":false,"enableManagedSettings":false,"disableResume":true}}
+    , parent_join_body);
+    try std.testing.expectEqualStrings("", frames.buffered());
+}
+
+test "lifecycle options distinguish omission from false and empty values" {
+    const allocator = std.testing.allocator;
+
+    var omitted_values = ExtensionWireValues.init(allocator);
+    defer omitted_values.deinit();
+    const omitted_request = try buildCreateSessionRequest(.{}, &.{}, &omitted_values);
+    const omitted_encoded = try json_rpc.encodeRequest(
+        allocator,
+        40,
+        "session.create",
+        omitted_request,
+    );
+    defer allocator.free(omitted_encoded);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":40,"method":"session.create","params":{"streaming":false,"tools":[],"toolFilterPrecedence":"excluded","requestPermission":false,"requestUserInput":false,"enableManagedSettings":false}}
+    , omitted_encoded);
+
+    var explicit_values = ExtensionWireValues.init(allocator);
+    defer explicit_values.deinit();
+    const explicit_request = try buildCreateSessionRequest(.{
+        .enable_experimental_mode = false,
+        .large_output = .{},
+        .config_directory = "",
+        .capi = .{},
+        .additional_directories = &.{},
+        .infinite_sessions = .{},
+        .memory = .{ .enabled = false },
+        .skip_embedding_retrieval = false,
+        .organization_custom_instructions = "",
+        .enable_file_hooks = false,
+        .enable_host_git_operations = false,
+        .enable_session_store = false,
+    }, &.{}, &explicit_values);
+    const explicit_encoded = try json_rpc.encodeRequest(
+        allocator,
+        41,
+        "session.create",
+        explicit_request,
+    );
+    defer allocator.free(explicit_encoded);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":41,"method":"session.create","params":{"isExperimentalMode":false,"largeOutput":{},"configDir":"","capi":{},"additionalDirectories":[],"infiniteSessions":{},"memory":{"enabled":false},"skipEmbeddingRetrieval":false,"organizationCustomInstructions":"","enableFileHooks":false,"enableHostGitOperations":false,"enableSessionStore":false,"streaming":false,"tools":[],"toolFilterPrecedence":"excluded","requestPermission":false,"requestUserInput":false,"enableManagedSettings":false}}
+    , explicit_encoded);
 }
 
 test "custom agent optional slices preserve omitted and empty values" {
@@ -7892,7 +11138,7 @@ test "custom agent validation precedes lifecycle state and RPC writes" {
         }),
     );
     try std.testing.expectEqual(@as(u64, 1), client.next_request_id);
-    try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.sessions.items.len);
     try std.testing.expectEqual(@as(usize, 0), client.extension_runtimes.items.len);
     try std.testing.expect(client.pending_extension_runtime == null);
 }
@@ -7952,6 +11198,7 @@ test "resume request places provider in params and disables nested resume" {
     const params = try buildPreparedResumeSessionRequest(
         "session-1",
         resumeConfigFromCreate(config),
+        normalizeSessionOptions(config),
         &.{},
         &extension_values,
         &.{},
@@ -8030,6 +11277,7 @@ test "create and resume requests encode complete provider graphs exactly" {
         try buildPreparedCreateSessionRequest(
             config.session_id,
             config,
+            normalizeSessionOptions(config),
             &.{},
             &create_extension_values,
             prepared,
@@ -8048,6 +11296,7 @@ test "create and resume requests encode complete provider graphs exactly" {
         try buildPreparedResumeSessionRequest(
             "session-provider-graph",
             resumeConfigFromCreate(config),
+            normalizeSessionOptions(config),
             &.{},
             &resume_extension_values,
             &.{},
@@ -8112,6 +11361,7 @@ test "singular create request encodes every provider field and default callback 
         try buildPreparedCreateSessionRequest(
             "singular",
             config,
+            normalizeSessionOptions(config),
             &.{},
             &create_extension_values,
             prepared,
@@ -8130,6 +11380,7 @@ test "singular create request encodes every provider field and default callback 
         try buildPreparedResumeSessionRequest(
             "singular",
             resumeConfigFromCreate(config),
+            normalizeSessionOptions(config),
             &.{},
             &resume_extension_values,
             &.{},
@@ -8300,6 +11551,7 @@ fn failingProviderTokenCallback(
 }
 
 fn deinitTestClientRegistries(client: *Client) void {
+    deinitTestSessions(client);
     if (client.pending_extension_runtime) |*runtime| runtime.deinit(client.allocator);
     for (client.extension_runtimes.items) |*runtime| runtime.deinit(client.allocator);
     client.extension_runtimes.deinit(client.allocator);
@@ -8314,8 +11566,6 @@ fn deinitTestClientRegistries(client: *Client) void {
     client.provider_tokens.deinit(client.allocator);
     for (client.rpc_handlers.items) |handler| handler.deinit(client.allocator);
     client.rpc_handlers.deinit(client.allocator);
-    for (client.session_ids.items) |id| client.allocator.free(id);
-    client.session_ids.deinit(client.allocator);
 }
 
 test "provider token callback is routable before create response" {
@@ -8663,7 +11913,7 @@ test "provider token dispatch routes by session and provider and rejects invalid
             &.{},
         ),
     );
-    try std.testing.expectEqual(@as(usize, 2), client.session_ids.items.len);
+    try std.testing.expectEqual(@as(usize, 2), client.sessions.items.len);
 }
 
 test "failed create and resume roll back provider token routes" {
@@ -8716,7 +11966,7 @@ test "failed create and resume roll back provider token routes" {
         } else {
             try std.testing.expectError(error.JsonRpcError, client.createSession(config));
         }
-        try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
+        try std.testing.expectEqual(@as(usize, 0), client.sessions.items.len);
         try std.testing.expectEqual(@as(usize, 0), client.provider_tokens.items.len);
     }
 }
@@ -8761,12 +12011,377 @@ test "create rejects a mismatched runtime session id and rolls back" {
             .bearer_token_provider = .{ .callback = failingProviderTokenCallback },
         },
     }));
-    try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.sessions.items.len);
     try std.testing.expectEqual(@as(usize, 0), client.provider_tokens.items.len);
+
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "request",
+        allocator,
+        .limited(2048),
+    );
+    defer allocator.free(requests);
+    var frames = std.Io.Reader.fixed(requests);
+    const create_request = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(create_request);
+    const detach_request = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(detach_request);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session.detach\",\"params\":{\"sessionId\":\"different\"}}",
+        detach_request,
+    );
+}
+
+test "resident resume detaches a mismatched returned id and keeps the resident" {
+    const allocator = std.testing.allocator;
+    var old_state = TestSessionFs{};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const resume_body =
+        \\{"jsonrpc":"2.0","id":1,"result":{"sessionId":"different","workspacePath":"/new"}}
+    ;
+    const detach_body =
+        \\{"jsonrpc":"2.0","id":2,"result":{"success":true}}
+    ;
+    const response = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{ resume_body.len, resume_body, detach_body.len, detach_body },
+    );
+    defer allocator.free(response);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = response });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+    };
+    defer deinitTestClientRegistries(&client);
+    try appendTestSession(&client, "resident", "/old", old_state.provider());
+
+    try std.testing.expectError(
+        error.SessionIdMismatch,
+        client.resumeSession("resident", .{}),
+    );
+    try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
+    try std.testing.expectEqualStrings(
+        "/old",
+        client.findSession("resident").?.workspace_path.?,
+    );
+    try std.testing.expectEqual(@as(usize, 0), old_state.deinit_count);
+
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "request",
+        allocator,
+        .limited(2048),
+    );
+    defer allocator.free(requests);
+    var frames = std.Io.Reader.fixed(requests);
+    const resume_request = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(resume_request);
+    const detach_request = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(detach_request);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session.detach\",\"params\":{\"sessionId\":\"different\"}}",
+        detach_request,
+    );
+}
+
+test "resident resume does not detach another active local session on id mismatch" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const resume_body =
+        \\{"jsonrpc":"2.0","id":1,"result":{"sessionId":"other","workspacePath":"/new"}}
+    ;
+    const response = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ resume_body.len, resume_body },
+    );
+    defer allocator.free(response);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = response });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+    };
+    defer deinitTestClientRegistries(&client);
+    try appendTestSession(&client, "resident", "/resident", null);
+    try appendTestSession(&client, "other", "/other", null);
+    const resident = Session{
+        .client = &client,
+        .id = client.sessions.items[0].id,
+        .record_index = 0,
+    };
+    const other = Session{
+        .client = &client,
+        .id = client.sessions.items[1].id,
+        .record_index = 1,
+    };
+
+    try std.testing.expectError(
+        error.SessionIdMismatch,
+        client.resumeSession("resident", .{}),
+    );
+    try std.testing.expectEqualStrings("/resident", (try resident.workspacePath()).?);
+    try std.testing.expectEqualStrings("/other", (try other.workspacePath()).?);
+
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "request",
+        allocator,
+        .limited(2048),
+    );
+    defer allocator.free(requests);
+    var frames = std.Io.Reader.fixed(requests);
+    const resume_request = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(resume_request);
+    try std.testing.expectError(
+        error.MissingContentLength,
+        json_rpc.readFrame(allocator, &frames),
+    );
+}
+
+test "post-response failure detaches new create and nonresident resume" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        session_id: []const u8,
+        is_resume: bool,
+    }{
+        .{ .session_id = "created", .is_resume = false },
+        .{ .session_id = "resumed", .is_resume = true },
+    };
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const lifecycle_body = try std.fmt.allocPrint(
+            allocator,
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"sessionId\":\"{s}\",\"grantedEnvironmentVariables\":[]}}}}",
+            .{case.session_id},
+        );
+        defer allocator.free(lifecycle_body);
+        const detach_body = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"success\":true}}";
+        const response = try std.fmt.allocPrint(
+            allocator,
+            "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+            .{ lifecycle_body.len, lifecycle_body, detach_body.len, detach_body },
+        );
+        defer allocator.free(response);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = response });
+        const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+        defer response_file.close(std.testing.io);
+        var reader_buffer: [1024]u8 = undefined;
+        var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+        const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+        defer request_file.close(std.testing.io);
+        var writer_buffer: [1024]u8 = undefined;
+        var writer = request_file.writer(std.testing.io, &writer_buffer);
+        var client = Client{
+            .allocator = allocator,
+            .io = std.testing.io,
+            .child = null,
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &writer_buffer,
+        };
+        defer deinitTestClientRegistries(&client);
+
+        if (case.is_resume) {
+            try std.testing.expectError(
+                error.InvalidGrantedEnvironmentVariables,
+                client.resumeSession(case.session_id, .{}),
+            );
+        } else {
+            try std.testing.expectError(
+                error.InvalidGrantedEnvironmentVariables,
+                client.createSession(.{ .session_id = case.session_id }),
+            );
+        }
+        try std.testing.expectEqual(@as(usize, 0), client.sessions.items.len);
+
+        const requests = try tmp.dir.readFileAlloc(
+            std.testing.io,
+            "request",
+            allocator,
+            .limited(2048),
+        );
+        defer allocator.free(requests);
+        var frames = std.Io.Reader.fixed(requests);
+        const lifecycle_request = try json_rpc.readFrame(allocator, &frames);
+        defer allocator.free(lifecycle_request);
+        const detach_request = try json_rpc.readFrame(allocator, &frames);
+        defer allocator.free(detach_request);
+        const expected_detach = try std.fmt.allocPrint(
+            allocator,
+            "{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session.detach\",\"params\":{{\"sessionId\":\"{s}\"}}}}",
+            .{case.session_id},
+        );
+        defer allocator.free(expected_detach);
+        try std.testing.expectEqualStrings(expected_detach, detach_request);
+    }
+}
+
+test "post-response failure does not detach a resident resume" {
+    const allocator = std.testing.allocator;
+    var old_state = TestSessionFs{};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const body =
+        \\{"jsonrpc":"2.0","id":1,"result":{"sessionId":"resident","workspacePath":"/new","grantedEnvironmentVariables":[]}}
+    ;
+    const response = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ body.len, body },
+    );
+    defer allocator.free(response);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = response });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+    };
+    defer deinitTestClientRegistries(&client);
+    try appendTestSession(&client, "resident", "/old", old_state.provider());
+    const old_session = Session{
+        .client = &client,
+        .id = client.sessions.items[0].id,
+        .record_index = 0,
+    };
+
+    try std.testing.expectError(
+        error.InvalidGrantedEnvironmentVariables,
+        client.resumeSession("resident", .{}),
+    );
+    try std.testing.expectEqualStrings(
+        "/old",
+        (try old_session.workspacePath()).?,
+    );
+    try std.testing.expectEqualStrings(
+        "/old",
+        client.findSession("resident").?.workspace_path.?,
+    );
+    try std.testing.expectEqual(@as(usize, 0), old_state.deinit_count);
+
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "request",
+        allocator,
+        .limited(2048),
+    );
+    defer allocator.free(requests);
+    var frames = std.Io.Reader.fixed(requests);
+    const resume_request = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(resume_request);
+    try std.testing.expectEqualStrings("", frames.buffered());
+}
+
+test "successful resident resume appends a replacement record and invalidates old handles" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const response_bodies = [_][]const u8{
+        \\{"jsonrpc":"2.0","id":1,"result":{"sessionId":"resident","workspacePath":"/old","capabilities":{"ui":{"mcpApps":true}}}}
+        ,
+        \\{"jsonrpc":"2.0","id":2,"result":{"sessionId":"resident","workspacePath":"/replacement","capabilities":{"ui":{"mcpApps":true}}}}
+        ,
+    };
+    var framed_responses: std.Io.Writer.Allocating = .init(allocator);
+    defer framed_responses.deinit();
+    for (response_bodies) |body| {
+        try json_rpc.writeFrame(&framed_responses.writer, body);
+    }
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "responses",
+        .data = framed_responses.written(),
+    });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [2048]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+    };
+    defer deinitTestClientRegistries(&client);
+
+    const old = try client.createSession(.{
+        .session_id = "resident",
+        .extensions = .{ .common = .{
+            .experimental = .{ .mcp_apps = true },
+        } },
+    });
+    const old_apps = try old.experimental(.mcp_apps);
+    const replacement = try client.resumeSession("resident", .{
+        .extensions = .{ .common = .{
+            .experimental = .{ .mcp_apps = true },
+        } },
+    });
+
+    try std.testing.expectEqual(@as(usize, 2), client.sessions.items.len);
+    try std.testing.expect(old.record_index.? != replacement.record_index.?);
+    try std.testing.expectError(error.SessionNotActive, old.workspacePath());
+    try std.testing.expectError(
+        error.SessionNotActive,
+        old_apps.listTools(allocator, "old-server", "old-origin"),
+    );
+    try std.testing.expectEqualStrings(
+        "/replacement",
+        (try replacement.workspacePath()).?,
+    );
 }
 
 test "disconnect removes provider token registrations" {
     const allocator = std.testing.allocator;
+    var session_fs = TestSessionFs{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const body =
@@ -8805,10 +12420,17 @@ test "disconnect removes provider token registrations" {
             .token_provider = .{ .callback = failingProviderTokenCallback },
         }},
     );
+    const record = client.findSession("disconnect-session").?;
+    session_fs.id_at_deinit = record.id;
+    session_fs.expected_id_value = "disconnect-session";
+    record.session_fs = session_fs.provider();
 
     try (Session{ .client = &client, .id = "disconnect-session" }).disconnect();
-    try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
+    try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
+    try std.testing.expect(!client.sessions.items[0].active);
     try std.testing.expectEqual(@as(usize, 0), client.provider_tokens.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session_fs.deinit_count);
+    try std.testing.expect(session_fs.saw_valid_id_at_deinit);
 
     const request = try tmp.dir.readFileAlloc(std.testing.io, "request", allocator, .limited(1024));
     defer allocator.free(request);
@@ -8822,6 +12444,7 @@ test "disconnect removes provider token registrations" {
 
 test "client deinit frees provider token registrations" {
     const allocator = std.testing.allocator;
+    var session_fs = TestSessionFs{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const input_file = try tmp.dir.createFile(std.testing.io, "input", .{ .read = true });
@@ -8851,5 +12474,11 @@ test "client deinit frees provider token registrations" {
             .token_provider = .{ .callback = failingProviderTokenCallback },
         }},
     );
+    const record = client.findSession("deinit-session").?;
+    session_fs.id_at_deinit = record.id;
+    session_fs.expected_id_value = "deinit-session";
+    record.session_fs = session_fs.provider();
     client.deinit();
+    try std.testing.expectEqual(@as(usize, 1), session_fs.deinit_count);
+    try std.testing.expect(session_fs.saw_valid_id_at_deinit);
 }
