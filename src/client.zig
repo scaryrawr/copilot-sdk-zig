@@ -4798,13 +4798,15 @@ pub const JoinedSession = struct {
 pub const McpApps = struct {
     session: Session,
 
-    fn ensureSupported(self: McpApps) !void {
-        const runtime = self.session.client.findExtensionRuntime(self.session.id) orelse
+    fn ensureSupported(self: McpApps) !ResolvedSession {
+        const resolved = try self.session.resolve();
+        const runtime = self.session.client.findExtensionRuntime(resolved.id) orelse
             return error.UnsupportedCapability;
         if (!runtime.mcp_apps_requested)
             return error.ExperimentalFeatureNotRequested;
         if (!runtime.capabilities.supports(.mcp_apps))
             return error.UnsupportedCapability;
+        return resolved;
     }
 
     pub fn listTools(
@@ -4813,12 +4815,12 @@ pub const McpApps = struct {
         server_name: []const u8,
         origin_server_name: []const u8,
     ) !ext.OwnedJson {
-        try self.ensureSupported();
+        const resolved = try self.ensureSupported();
         const parsed = try self.session.client.call(
             std.json.Value,
             "session.mcp.apps.listTools",
             .{
-                .sessionId = self.session.id,
+                .sessionId = resolved.id,
                 .serverName = server_name,
                 .originServerName = origin_server_name,
             },
@@ -4835,7 +4837,7 @@ pub const McpApps = struct {
         allocator: std.mem.Allocator,
         request: ext.McpAppToolCall,
     ) !ext.OwnedJson {
-        try self.ensureSupported();
+        const resolved = try self.ensureSupported();
         const arguments = try std.json.parseFromSlice(
             std.json.Value,
             self.session.client.allocator,
@@ -4848,7 +4850,7 @@ pub const McpApps = struct {
             std.json.Value,
             "session.mcp.apps.callTool",
             .{
-                .sessionId = self.session.id,
+                .sessionId = resolved.id,
                 .serverName = request.server_name,
                 .toolName = request.tool_name,
                 .arguments = arguments.value,
@@ -4868,12 +4870,12 @@ pub const McpApps = struct {
         server_name: []const u8,
         uri: []const u8,
     ) !ext.OwnedJson {
-        try self.ensureSupported();
+        const resolved = try self.ensureSupported();
         const parsed = try self.session.client.call(
             std.json.Value,
             "session.mcp.apps.readResource",
             .{
-                .sessionId = self.session.id,
+                .sessionId = resolved.id,
                 .serverName = server_name,
                 .uri = uri,
             },
@@ -6834,6 +6836,7 @@ test "workspace paths are copied and session handles are generation safe" {
     try client.prepareSessionCommit("session", &first_path);
     const first_index = client.commitSessionRecord();
     const first = client.sessionHandle(first_index);
+    const first_mcp_apps = McpApps{ .session = first };
     first_path[1] = 'X';
     try std.testing.expectEqualStrings("/old", (try first.workspacePath()).?);
 
@@ -6849,6 +6852,10 @@ test "workspace paths are copied and session handles are generation safe" {
     try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
     try std.testing.expect(first.generation != replacement.generation);
     try std.testing.expectError(error.SessionNotActive, first.workspacePath());
+    try std.testing.expectError(
+        error.SessionNotActive,
+        first_mcp_apps.listTools(allocator, "server", "origin"),
+    );
     try std.testing.expectEqualStrings(
         "/replacement",
         (try replacement.workspacePath()).?,
@@ -6870,6 +6877,7 @@ test "inactive session record slots are reused without stale id access" {
     try client.beginSessionRecord(try allocator.dupe(u8, "first"), null);
     try client.prepareSessionCommit("first", "/first");
     const first = client.sessionHandle(client.commitSessionRecord());
+    const first_mcp_apps = McpApps{ .session = first };
     client.removeSessionAt(first.record_index);
 
     try client.beginSessionRecord(try allocator.dupe(u8, "second"), null);
@@ -6880,6 +6888,18 @@ test "inactive session record slots are reused without stale id access" {
     try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
     try std.testing.expect(first.generation != second.generation);
     try std.testing.expectError(error.SessionNotActive, first.workspacePath());
+    try std.testing.expectError(
+        error.SessionNotActive,
+        first_mcp_apps.callTool(allocator, .{
+            .server_name = "server",
+            .tool_name = "tool",
+            .origin_server_name = "origin",
+        }),
+    );
+    try std.testing.expectError(
+        error.SessionNotActive,
+        first_mcp_apps.readResource(allocator, "server", "resource"),
+    );
     try std.testing.expectEqualStrings("/second", (try second.workspacePath()).?);
 
     client.removeSessionAt(second.record_index);
