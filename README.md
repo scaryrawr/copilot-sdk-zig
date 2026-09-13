@@ -65,10 +65,10 @@ const weather_tool = schema.defineTool(WeatherArguments, .{
 
 ## Send a prompt
 
-Pass a `std.Io` implementation to `Client.init`. The client starts
-`copilot --headless --stdio --no-auto-update` and completes the `connect`
-handshake before it returns. Set `ClientOptions.client_info` to identify the
-integrating application and SDK surface in runtime telemetry.
+Pass a `std.Io` implementation to `Client.init`. With default options, the
+client starts `copilot --headless --stdio --no-auto-update` and completes the
+`connect` handshake before it returns. Set `ClientOptions.client_info` to
+identify the integrating application and SDK in runtime telemetry.
 
 ```zig
 const std = @import("std");
@@ -130,11 +130,109 @@ in use. `SessionEvent` values and the message ID from `send` own memory from the
 client allocator. `Session.disconnect` releases the client-side session
 resources while preserving the session state so it can be resumed later.
 
-## Configure session runtime options and SessionFS
+## Configure the runtime
+
+Omitting `.connection` preserves the original behavior and uses the legacy
+`cli_path`, `cli_args`, `working_directory`, and `connection_token` fields as a
+stdio connection. New code can select the transport explicitly:
+
+```zig
+var client = try copilot.Client.init(allocator, io, .{
+    .connection = .{ .stdio = .{
+        .path = "copilot",
+        .args = &.{"--verbose"},
+        .env = &.{.{
+            .name = "ACME_REGION",
+            .value = "us-east",
+        }},
+    } },
+    .mode = .copilot_cli,
+    .base_directory = "/srv/copilot",
+    .log_level = .info,
+    .use_logged_in_user = true,
+    .session_idle_timeout_seconds = 300,
+    .enable_remote_sessions = true,
+});
+defer client.deinit();
+```
+
+Use `.tcp` to spawn and own a runtime connected over a socket. Port `0`
+lets the runtime choose a port, and an omitted connection token is generated:
+
+```zig
+.connection = .{ .tcp = .{
+    .path = "copilot",
+    .port = 0,
+} },
+```
+
+Use `.uri` to connect to an already running runtime:
+
+```zig
+.connection = .{ .uri = .{
+    .url = "127.0.0.1:4321",
+    .token = "shared-secret",
+} },
+.mode = .empty,
+```
+
+A URI connection has no child-process fields. Deinitializing its client closes
+only the client-owned socket after bounded session detach attempts. It never
+shuts down the external runtime. URI connection setup has a ten-second
+deadline. The client keeps `.mode` active for URI session defaults. It ignores
+process-owned runtime settings because the external runtime owns that policy.
+It rejects `.github_token` and `.use_logged_in_user` because the external
+runtime also owns GitHub authentication. Stdio and TCP clients request
+`runtime.shutdown` for at most ten seconds, close the transport, then
+unconditionally terminate and reap their child.
+
+When `.connection` is omitted, `COPILOT_SDK_DEFAULT_CONNECTION` accepts
+`stdio`, `inprocess`, or no value. `stdio` and no value select the compatibility
+stdio connection. This SDK returns `error.UnsupportedInProcessConnection` for
+`inprocess`. Other values return `error.InvalidDefaultConnection`. An explicit
+`.connection` ignores this environment variable.
+
+Set `.github_token` and `.use_logged_in_user` on `ClientOptions`. If
+`.github_token` is set and `.use_logged_in_user` is omitted, the child uses only
+the token. If no token is set and `.use_logged_in_user` is omitted, the child
+uses the current Copilot login. These options apply only to SDK-owned stdio and
+TCP runtimes.
+
+Tokens are passed through a managed environment variable rather than argv.
+Raw `.env` entries cannot override SDK-owned connection,
+authentication, telemetry, empty-mode, or base-directory variables. All
+configuration is validated before a child is spawned or a socket is opened.
+Omit `.env` to inherit the parent environment. Set it to `&.{}` to
+start the child with only SDK-managed variables.
+
+Empty mode disables the runtime's normal disk-backed configuration:
+
+```zig
+.connection = .{ .stdio = .{} },
+.mode = .empty,
+.base_directory = "/srv/copilot",
+```
+
+For child connections, empty mode requires either `.base_directory` or
+`.session_filesystem`. A URI connection can select empty mode because the
+external runtime owns persistence. Every create or resume call must also set
+`.available_tools`, including an empty slice when the session needs no tools.
+
+Empty mode sends the runtime's restrictive defaults for session telemetry,
+embedding retrieval and storage, instruction discovery, file hooks, host Git
+operations, session storage, skills, memory, MCP OAuth token storage, custom
+agent discovery, experimental mode, and environment context. After create or
+resume, the client also disables coauthoring and schedule management and clears
+installed plugins. Existing `skip_custom_instructions`,
+`custom_agents_local_only`, and included built-in skill settings override their
+empty-mode defaults. `available_tools` remains required. Coauthoring and
+schedule-management opt-ins remain outside this API.
+
+## Configure session runtime options
 
 `CreateSessionConfig`, `ResumeSessionConfig`, and `JoinSessionConfig` expose the
-same session runtime fields. Set them directly on the lifecycle config.
-`SessionConfig` remains an alias for `CreateSessionConfig`.
+same stable runtime fields. `SessionConfig` remains an alias for
+`CreateSessionConfig`.
 
 ```zig
 const session = try client.createSession(.{
@@ -146,7 +244,7 @@ const session = try client.createSession(.{
     .large_output = .{
         .enabled = true,
         .max_size_bytes = 64 * 1024,
-        .output_directory = "/tmp/copilot-output",
+        .output_directory = "/var/lib/acme/copilot-output",
     },
     .config_directory = "/var/lib/acme/copilot",
     .capi = .{
@@ -169,167 +267,93 @@ const session = try client.createSession(.{
 });
 ```
 
-The public field names and types are:
+Optional values preserve presence. `null` omits a field. Explicit `false`, an
+empty string, an empty slice, or an empty nested struct remains present in the
+request. In particular, `.additional_directories = &.{}` sends
+`"additionalDirectories":[]`.
 
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `client_name` | `?[]const u8` | Identifies the integrating application. |
-| `reasoning_effort` | `?ReasoningEffort` | Selects `low`, `medium`, `high`, `xhigh`, or `max`. |
-| `reasoning_summary` | `?ReasoningSummary` | Selects the reasoning summary mode. |
-| `enable_experimental_mode` | `?bool` | Enables or disables experimental runtime behavior. |
-| `context_tier` | `?ContextTier` | Selects `default` or `long_context`. |
-| `large_output` | `?LargeOutputConfig` | Sets `enabled`, `max_size_bytes`, and `output_directory`. |
-| `config_directory` | `?[]const u8` | Overrides the runtime configuration directory. |
-| `capi` | `?CapiSessionOptions` | Sets `auto_tier` and `enable_websocket_responses`. |
-| `additional_directories` | `?[]const []const u8` | Adds directories that the session may access. |
-| `infinite_sessions` | `?InfiniteSessionConfig` | Sets `enabled`, `background_compaction_threshold`, and `buffer_exhaustion_threshold`. |
-| `memory` | `?MemoryConfiguration` | Sets the required nested `enabled` value. |
-| `skip_embedding_retrieval` | `?bool` | Disables embedding retrieval when true. |
-| `embedding_cache_storage` | `?EmbeddingCacheStorage` | Selects `persistent` or `in_memory`. |
-| `organization_custom_instructions` | `?[]const u8` | Adds organization instructions to the session. |
-| `enable_file_hooks` | `?bool` | Enables or disables file-based hooks. |
-| `enable_host_git_operations` | `?bool` | Enables or disables host Git operations. |
-| `enable_session_store` | `?bool` | Enables or disables the cross-session store. |
-| `create_session_fs_provider` | `?SessionFsProviderFactory` | Creates the filesystem provider for this session. This field is never sent as JSON. |
+Configure runtime telemetry on a child connection:
 
-Optional values preserve presence. `null` omits a field. An explicit `false`,
-`""`, `&.{}`, or empty optional nested struct stays in the request as `false`,
-an empty string, an empty array, or `{}`. For example,
-`.additional_directories = &.{}` sends `"additionalDirectories":[]`, while
-`.additional_directories = null` omits that JSON field.
+```zig
+.telemetry = .{
+    .otlp_endpoint = "http://127.0.0.1:4318",
+    .otlp_protocol = .http_json,
+    .file_path = "/var/log/copilot-traces.jsonl",
+    .exporter_type = "file",
+    .source_name = "acme-agent",
+    .capture_content = false,
+},
+```
 
-### Register SessionFS
-
-Register SessionFS on the connection before creating or resuming a session.
-The minimum registration supplies both paths and the path convention.
+Client callbacks carry independent context pointers; no callback state is
+global. `on_get_trace_context` is consulted for session create, resume, and
+send calls. Callback failures are isolated and omit trace context. A model
+callback returns an owned `std.json.Parsed(copilot.models.ModelList)` using the
+provided allocator, preserving the same ownership contract as
+`Client.listModels`:
 
 ```zig
 var client = try copilot.Client.init(allocator, io, .{
-    .session_fs = .{
-        .initial_cwd = "/workspace",
-        .session_state_path = ".copilot/session",
-        .conventions = .posix,
+    .on_list_models = .{
+        .handler = listModels,
+        .context = model_context,
+    },
+    .on_get_trace_context = .{
+        .handler = getTraceContext,
+        .context = trace_context,
     },
 });
-defer client.deinit();
 ```
 
-Set `.capabilities = .{ .sqlite = true }` only when every session provider
-implements the SQLite callbacks. For an extension child process, use
-`Client.initParentWithOptions` so `joinParentSession` can register SessionFS on
-that connection.
+For virtual or remote workspaces, `.session_filesystem` supplies client-wide
+metadata. Each create, resume, or join config selects its provider factory.
+The factory receives the session ID and returns that session's file operations,
+optional SQLite operations, context, and optional `deinit` callback. Providers
+are routed by exact session ID and destroyed exactly once on rollback,
+replacement, disconnect, or client teardown:
 
 ```zig
-var client = try copilot.Client.initParentWithOptions(allocator, io, .{
-    .session_fs = .{
-        .initial_cwd = "/workspace",
-        .session_state_path = ".copilot/session",
-        .conventions = .posix,
-        .capabilities = .{ .sqlite = true },
-    },
-});
-defer client.deinit();
+.session_filesystem = .{
+    .initial_working_directory = "/workspace",
+    .session_state_path = "/state/sessions",
+    .conventions = .posix,
+    .capabilities = .{ .sqlite = true },
+},
 ```
 
-The client sends `sessionFs.setProvider` during startup. If the connection has
-a SessionFS registration, each create, resume, or join config must set
-`create_session_fs_provider`. If the registration declares SQLite support, the
-created provider must also set `SessionFsProvider.sqlite`. The lifecycle call
-fails before `session.create` or `session.resume` when these values do not
-match. A config that sets `create_session_fs_provider` without a connection
-registration also fails before the lifecycle RPC.
-
-Create one provider for each session.
-
 ```zig
-fn createSessionFsProvider(
-    allocator: std.mem.Allocator,
-    init: copilot.SessionFsProviderInit,
-    context: ?*anyopaque,
-) !copilot.SessionFsProvider {
-    const factory: *FsFactory = @ptrCast(@alignCast(context.?));
-    const state = try allocator.create(MySessionFs);
-    errdefer allocator.destroy(state);
-    state.* = try MySessionFs.init(allocator, init.session_id, factory.root);
-    return .{
-        .context = state,
-        .vtable = &MySessionFs.vtable,
-        .sqlite = MySessionFs.sqliteProvider(state),
-    };
-}
-
 const session = try client.createSession(.{
-    .create_session_fs_provider = .{
-        .context = &fs_factory,
-        .create = createSessionFsProvider,
+    .create_session_filesystem_provider = .{
+        .handler = createSessionFilesystem,
+        .context = filesystem_context,
     },
+    .remote_session = .@"export",
 });
 ```
 
-`SessionFsProviderInit.session_id` is borrowed for the factory call. The
-provider must not retain that slice without copying it. The factory may allocate
-provider state with the supplied allocator. `SessionFsProvider.VTable.deinit`
-must release that state with the same allocator.
+`remote_session` accepts `.off`, `.@"export"`, or `.on`. It controls one
+session and is separate from `ClientOptions.enable_remote_sessions`, which
+enables runtime-wide remote-session support for an owned child.
 
-### Implement the SessionFS callbacks
-
-`SessionFsProvider.VTable` defines ten filesystem callbacks:
-
-| Callback | Capability and result |
-| --- | --- |
-| `read_file` | Reads UTF-8 file content and returns `SessionFsOwnedBytes`. |
-| `write_file` | Replaces a file with UTF-8 content and an optional `u64` mode. |
-| `append_file` | Appends UTF-8 content with an optional `u64` mode. |
-| `exists` | Reports whether a path exists. Callback errors produce `false`. |
-| `stat` | Returns file flags, size, and RFC 3339 `mtime` and `birthtime` values. |
-| `mkdir` | Creates a directory with `recursive` and an optional `u64` mode. |
-| `readdir` | Returns owned entry names in `SessionFsOwnedStrings`. |
-| `readdir_with_types` | Returns owned names tagged as `file` or `directory`. |
-| `rm` | Removes a path with `recursive` and `force` controls. |
-| `rename` | Moves `source` to `destination`. |
-
-`SessionFsSqliteProvider.VTable` adds three callbacks:
-
-| Callback | Capability and result |
-| --- | --- |
-| `query` | Receives `exec`, `query`, or `run` plus optional named parameters. It returns typed rows, columns, `rows_affected`, and an optional `last_insert_rowid`. |
-| `transaction` | Runs typed statements and returns either owned query results or a classified failure. The callback is optional. |
-| `exists` | Reports whether the session SQLite database exists. |
-
-Only `SessionFsSqliteParameter.value` and `SessionFsSqliteCell.value` contain
-opaque JSON. The statement, query result, row, column, count, last insert ID,
-transaction result, and transaction failure class remain typed. Use
-`busy_or_locked`, `fatal`, or `post_commit_ambiguous` for a transaction failure.
-
-The adapter takes ownership of every successful callback result. Allocate
-`SessionFsOwnedBytes`, `SessionFsOwnedStrings`, `SessionFsOwnedEntries`,
-`SessionFsStat`, `SessionFsSqliteQueryResult`, and
-`SessionFsSqliteTransactionOutcome` with the callback allocator. The adapter
-deinitializes each result after it writes the JSON-RPC response, including write
-and validation failures.
+Filesystem callbacks return owned byte slices or `std.json.Parsed` results
+with the allocator supplied by the SDK. Non-SQLite provider failures map
+`error.FileNotFound` to `ENOENT` and other errors to `UNKNOWN`. SQLite callback
+failures remain JSON-RPC errors, matching the upstream adapter. Malformed
+callback requests and structurally invalid SQLite results receive a correlated
+JSON-RPC error.
 
 ### Read the workspace path
 
-`Session.workspacePath()` returns `!?[]const u8`.
+`Session.workspacePath()` returns the response-derived workspace path or
+`null`. The returned slice is borrowed from the client. It remains valid until
+disconnect, client deinitialization, or a successful resident resume replaces
+the session record. Inactive handles return `error.SessionNotActive`.
 
 ```zig
 if (try session.workspacePath()) |workspace_path| {
     std.debug.print("workspace: {s}\n", .{workspace_path});
 }
 ```
-
-An active session with no runtime path returns `null`. An inactive handle
-returns `error.SessionNotActive`. The returned path is borrowed from the client
-and remains valid until disconnect, client deinitialization, or a successful
-resident resume replaces the session record.
-
-The client owns the session ID, copied workspace path, and optional SessionFS
-provider for each active or disconnected handle. A lifecycle call does not
-replace that state until all fallible response processing succeeds. A failed
-resident resume therefore preserves the existing state. If processing fails
-after a new create or nonresident resume returns a runtime session ID, the
-client detaches that runtime session before local cleanup. The client tears down
-each provider exactly once while its session ID remains valid.
 
 ## Configure extensions
 
@@ -737,7 +761,7 @@ tests verify protocol behavior without requiring Copilot credentials.
 
 ## RPC coverage
 
-The SDK supports only the stdio transport. Typed high-level methods implement:
+Typed high-level methods implement:
 
 - `connect`
 - `plugins.builtin.set`
@@ -798,7 +822,6 @@ every parsed event. The `unknown` variant is only for discriminators that are
 absent from the pinned schema. Keep an `else` branch in a switch that must
 compile after a schema sync adds event tags.
 
-The SDK does not support an external CLI server URL.
 `sync/schema-snapshot.json` records every method by direction and scope.
 `sync/public-rpc-surface.json` separately records direct RPC calls made by the
 pinned upstream Node client and session implementations. The sync checks fail
