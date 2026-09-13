@@ -913,6 +913,7 @@ fn spawnStdio(
         allocator,
         child_runtime,
         connection_token,
+        io,
     );
     defer deinitEnvironment(&environment);
 
@@ -963,6 +964,7 @@ fn spawnTcp(
         allocator,
         child_runtime,
         connection_token,
+        io,
     );
     defer deinitEnvironment(&environment);
 
@@ -1087,11 +1089,12 @@ fn buildRuntimeEnvironment(
     allocator: std.mem.Allocator,
     child_runtime: runtime_types.ChildRuntime,
     connection_token: ?[]const u8,
+    io: std.Io,
 ) !std.process.Environ.Map {
     var result = if (child_runtime.environment) |_|
         std.process.Environ.Map.init(allocator)
     else
-        try inheritedEnvironmentMap(allocator);
+        try inheritedEnvironmentMap(allocator, io);
     errdefer deinitEnvironment(&result);
     if (child_runtime.environment) |environment| {
         for (environment) |entry| {
@@ -1141,12 +1144,33 @@ fn buildRuntimeEnvironment(
     return result;
 }
 
-fn inheritedEnvironmentMap(allocator: std.mem.Allocator) !std.process.Environ.Map {
+fn inheritedEnvironmentMap(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+) !std.process.Environ.Map {
     return switch (builtin.os.tag) {
         .windows, .wasi, .emscripten => std.process.Environ.createMap(
             .{ .block = .global },
             allocator,
         ),
+        .linux => blk: {
+            const bytes = try std.Io.Dir.cwd().readFileAlloc(
+                io,
+                "/proc/self/environ",
+                allocator,
+                .limited(1024 * 1024),
+            );
+            defer allocator.free(bytes);
+            var result = std.process.Environ.Map.init(allocator);
+            errdefer result.deinit();
+            var entries = std.mem.splitScalar(u8, bytes, 0);
+            while (entries.next()) |entry| {
+                if (entry.len == 0) continue;
+                const separator = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
+                try result.put(entry[0..separator], entry[separator + 1 ..]);
+            }
+            break :blk result;
+        },
         else => blk: {
             const entries = std.mem.span(std.c.environ);
             break :blk std.process.Environ.createMap(.{
@@ -1306,7 +1330,7 @@ pub const Client = struct {
         options: ClientOptions,
     ) !Client {
         var ambient_environment = if (options.connection == null)
-            try inheritedEnvironmentMap(allocator)
+            try inheritedEnvironmentMap(allocator, io)
         else
             null;
         defer if (ambient_environment) |*value| deinitEnvironment(value);
@@ -6116,13 +6140,13 @@ test "runtime configuration rejects invalid state before spawning" {
 test "runtime environment distinguishes inheritance from explicit empty" {
     const allocator = std.testing.allocator;
 
-    var inherited = try buildRuntimeEnvironment(allocator, .{}, null);
+    var inherited = try buildRuntimeEnvironment(allocator, .{}, null, std.testing.io);
     defer deinitEnvironment(&inherited);
     try std.testing.expect(inherited.get("NODE_DEBUG") == null);
 
     var empty = try buildRuntimeEnvironment(allocator, .{
         .environment = &.{},
-    }, null);
+    }, null, std.testing.io);
     defer deinitEnvironment(&empty);
     try std.testing.expectEqual(@as(usize, 0), empty.count());
 
@@ -6131,7 +6155,7 @@ test "runtime environment distinguishes inheritance from explicit empty" {
             .{ .name = "NODE_DEBUG", .value = "rpc" },
             .{ .name = "TEST_RUNTIME_VALUE", .value = "present" },
         },
-    }, null);
+    }, null, std.testing.io);
     defer deinitEnvironment(&filtered);
     try std.testing.expect(filtered.get("NODE_DEBUG") == null);
     try std.testing.expectEqualStrings("present", filtered.get("TEST_RUNTIME_VALUE").?);
