@@ -617,10 +617,10 @@ pub const Client = struct {
     session_removal_reaper_future: ?std.Io.Future(void) = null,
     session_removal_reaper_closing: bool = false,
     pump_future: ?std.Io.Future(void) = null,
+    pump_stopped: std.Io.Event = .is_set,
     pump_failure: ?anyerror = null,
     ignore_eof: bool = false,
     synchronize_test_responses: bool = true,
-    stop_test_pump: bool = false,
     fail_mcp_oauth_handle_copy: bool = false,
     tools: std.ArrayList(RegisteredTool) = .empty,
     user_input_handlers: std.ArrayList(RegisteredUserInputHandler) = .empty,
@@ -2169,7 +2169,22 @@ pub const Client = struct {
         self.ensurePumpLocked();
         self.pending_mutex.unlock(self.io);
 
-        try pending.completed.wait(self.io);
+        if (self.ignore_eof) {
+            while (!pending.completed.isSet()) {
+                self.pending_mutex.lockUncancelable(self.io);
+                self.ensurePumpLocked();
+                self.pending_mutex.unlock(self.io);
+                if (!pending.completed.isSet()) {
+                    try std.Io.sleep(
+                        self.io,
+                        std.Io.Duration.fromMilliseconds(1),
+                        .awake,
+                    );
+                }
+            }
+        } else {
+            try pending.completed.wait(self.io);
+        }
         self.pending_mutex.lockUncancelable(self.io);
         const failure = pending.failure;
         const response = pending.response;
@@ -2540,7 +2555,13 @@ pub const Client = struct {
     }
 
     fn ensurePumpLocked(self: *Client) void {
-        if (self.pump_future == null and !self.stop_test_pump) {
+        if (self.pump_future != null and self.pump_stopped.isSet()) {
+            self.pump_future.?.await(self.io);
+            self.pump_future = null;
+            if (self.ignore_eof) self.reader.size = null;
+        }
+        if (self.pump_future == null) {
+            self.pump_stopped.reset();
             self.pump_future = self.io.async(pumpMain, .{self});
         }
     }
@@ -2613,6 +2634,7 @@ pub const Client = struct {
     }
 
     fn pumpMain(self: *Client) void {
+        defer self.pump_stopped.set(self.io);
         while (true) {
             const body = json_rpc.readFrame(
                 self.allocator,
@@ -2621,19 +2643,7 @@ pub const Client = struct {
                 if ((err == error.EndOfStream or err == error.MissingContentLength) and
                     self.ignore_eof)
                 {
-                    self.pending_mutex.lockUncancelable(self.io);
-                    const should_stop = self.stop_test_pump;
-                    self.pending_mutex.unlock(self.io);
-                    if (should_stop) return;
-                    std.Io.sleep(
-                        self.io,
-                        std.Io.Duration.fromMilliseconds(1),
-                        .awake,
-                    ) catch |sleep_err| {
-                        self.finishPump(sleep_err);
-                        return;
-                    };
-                    continue;
+                    return;
                 }
                 self.finishPump(err);
                 return;
@@ -7647,9 +7657,6 @@ fn framedBody(allocator: std.mem.Allocator, framed: []const u8) ![]u8 {
 
 fn deinitTestMessaging(client: *Client) void {
     client.stopEventProcessor();
-    client.pending_mutex.lockUncancelable(client.io);
-    client.stop_test_pump = true;
-    client.pending_mutex.unlock(client.io);
     if (client.pump_future) |*pump| pump.await(client.io);
     client.finishPump(error.EndOfStream);
     client.stopSessionRemovalReaper();
