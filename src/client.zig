@@ -15431,6 +15431,104 @@ test "delete session transport failure preserves all local state" {
     });
 }
 
+test "ping requires an integer protocolVersion with legacy and detailed parity" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        result: []const u8,
+        expected_error: anyerror,
+    }{
+        .{
+            .result = "{\"message\":\"pong\",\"timestamp\":\"2026-01-01T00:00:00Z\"}",
+            .expected_error = error.MissingField,
+        },
+        .{
+            .result = "{\"message\":\"pong\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"protocolVersion\":\"3\"}",
+            .expected_error = error.UnexpectedToken,
+        },
+    };
+
+    for (cases) |case| {
+        var frames: std.ArrayList(u8) = .empty;
+        defer frames.deinit(allocator);
+        for (1..3) |id| {
+            const body = try std.fmt.allocPrint(
+                allocator,
+                "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{s}}}",
+                .{ id, case.result },
+            );
+            defer allocator.free(body);
+            try appendTestFrame(allocator, &frames, body);
+        }
+
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(std.testing.io, .{
+            .sub_path = "responses",
+            .data = frames.items,
+        });
+        const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+        defer response_file.close(std.testing.io);
+        var reader_buffer: [2048]u8 = undefined;
+        var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+        const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+        defer request_file.close(std.testing.io);
+        var writer_buffer: [2048]u8 = undefined;
+        var writer = request_file.writer(std.testing.io, &writer_buffer);
+        var client = Client{
+            .allocator = allocator,
+            .io = std.testing.io,
+            .child = null,
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        };
+        defer deinitTestClientRegistries(&client);
+
+        if (client.ping(null)) |response_value| {
+            var response = response_value;
+            defer response.deinit();
+            return error.TestExpectedClientFailure;
+        } else |err| {
+            try std.testing.expectEqual(case.expected_error, err);
+        }
+
+        var failure = switch (try client.pingDetailed(null)) {
+            .success => |response_value| {
+                var response = response_value;
+                defer response.deinit();
+                return error.TestExpectedClientFailure;
+            },
+            .failure => |failure_value| failure_value,
+        };
+        defer failure.deinit();
+        try std.testing.expectEqual(case.expected_error, failure.native_error);
+        switch (failure.detail) {
+            .client => |client_failure| switch (client_failure) {
+                .json => |json_failure| {
+                    try std.testing.expectEqual(
+                        errors.ClientOperation.read,
+                        json_failure.operation,
+                    );
+                    try std.testing.expectEqual(case.expected_error, json_failure.cause.code);
+                    try std.testing.expectEqualStrings(
+                        @errorName(case.expected_error),
+                        json_failure.message,
+                    );
+                },
+                else => return error.TestExpectedClientFailure,
+            },
+            else => return error.TestExpectedClientFailure,
+        }
+
+        try writer.interface.flush();
+        try expectRequestBodies(allocator, &tmp, &.{
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"params\":{}}",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\",\"params\":{}}",
+        });
+    }
+}
+
 test "client administration and history use exact wire requests and owned results" {
     const allocator = std.testing.allocator;
     var frames: std.ArrayList(u8) = .empty;
