@@ -290,9 +290,11 @@ pub const TurnTracker = struct {
         }
         const owned_message_id = try self.allocator.dupe(u8, message_id);
         errdefer self.allocator.free(owned_message_id);
+        const owned_turn_id = try self.allocator.dupe(u8, turn_id);
+        errdefer self.allocator.free(owned_turn_id);
         try self.orphan_users.append(self.allocator, .{
             .message_id = owned_message_id,
-            .turn_id = try self.allocator.dupe(u8, turn_id),
+            .turn_id = owned_turn_id,
         });
     }
 
@@ -330,8 +332,10 @@ pub const TurnTracker = struct {
             var evicted = self.orphan_turns.orderedRemove(0);
             self.deinitTurnFacts(&evicted);
         }
+        const owned_turn_id = try self.allocator.dupe(u8, turn_id);
+        errdefer self.allocator.free(owned_turn_id);
         try self.orphan_turns.append(self.allocator, .{
-            .turn_id = try self.allocator.dupe(u8, turn_id),
+            .turn_id = owned_turn_id,
             .completed = true,
         });
     }
@@ -446,6 +450,21 @@ fn observeTurn(
     var turn_end = try parseEvent(allocator, end_json);
     defer turn_end.deinit(allocator);
     try tracker.observe(turn_end);
+}
+
+fn exerciseOrphanAllocationFailures(allocator: std.mem.Allocator) !void {
+    var tracker = try TurnTracker.init(allocator, std.testing.io, 2, 2);
+    defer tracker.deinit();
+    try tracker.storeUserTurn("message", "turn-user");
+    try tracker.storeTurnEnd("turn-end");
+}
+
+test "orphan correlation storage rolls back every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        exerciseOrphanAllocationFailures,
+        .{},
+    );
 }
 
 test "timeout then retry keeps turns isolated" {
