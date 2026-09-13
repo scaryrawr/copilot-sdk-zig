@@ -605,6 +605,8 @@ pub const Client = struct {
     event_queue_ready: std.Io.Event = .unset,
     event_queue: std.ArrayList(QueuedSessionEvent) = .empty,
     event_processor_future: ?std.Io.Future(void) = null,
+    event_processor_starting: bool = false,
+    event_processor_started: std.Io.Event = .is_set,
     event_processor_closing: bool = false,
     send_operations_mutex: std.Io.Mutex = .init,
     send_operations: std.ArrayList(*SendOperation) = .empty,
@@ -617,6 +619,8 @@ pub const Client = struct {
     session_removal_reaper_future: ?std.Io.Future(void) = null,
     session_removal_reaper_closing: bool = false,
     pump_future: ?std.Io.Future(void) = null,
+    pump_starting: bool = false,
+    pump_started: std.Io.Event = .is_set,
     pump_stopped: std.Io.Event = .is_set,
     pump_failure: ?anyerror = null,
     ignore_eof: bool = false,
@@ -846,6 +850,10 @@ pub const Client = struct {
 
     fn completeShutdownTransport(self: *Client) void {
         if (self.shutdown_complete) return;
+        self.pending_mutex.lockUncancelable(self.io);
+        const pump_starting = self.pump_starting;
+        self.pending_mutex.unlock(self.io);
+        if (pump_starting) self.pump_started.waitUncancelable(self.io);
         if (self.pump_future) |*pump| {
             pump.cancel(self.io);
             self.pump_future = null;
@@ -2165,15 +2173,11 @@ pub const Client = struct {
         );
         self.writer_mutex.unlock(self.io);
         try write_result;
-        self.pending_mutex.lockUncancelable(self.io);
-        self.ensurePumpLocked();
-        self.pending_mutex.unlock(self.io);
+        self.ensurePump();
 
         if (self.ignore_eof) {
             while (!pending.completed.isSet()) {
-                self.pending_mutex.lockUncancelable(self.io);
-                self.ensurePumpLocked();
-                self.pending_mutex.unlock(self.io);
+                self.ensurePump();
                 if (!pending.completed.isSet()) {
                     try std.Io.sleep(
                         self.io,
@@ -2554,16 +2558,27 @@ pub const Client = struct {
         self.session_removals.deinit(self.allocator);
     }
 
-    fn ensurePumpLocked(self: *Client) void {
+    fn ensurePump(self: *Client) void {
+        self.pending_mutex.lockUncancelable(self.io);
         if (self.pump_future != null and self.pump_stopped.isSet()) {
             self.pump_future.?.await(self.io);
             self.pump_future = null;
             if (self.ignore_eof) self.reader.size = null;
         }
-        if (self.pump_future == null) {
+        const start_pump = self.pump_future == null and !self.pump_starting;
+        if (start_pump) {
+            self.pump_starting = true;
+            self.pump_started.reset();
             self.pump_stopped.reset();
-            self.pump_future = self.io.async(pumpMain, .{self});
         }
+        self.pending_mutex.unlock(self.io);
+        if (!start_pump) return;
+        const future = self.io.async(pumpMain, .{self});
+        self.pending_mutex.lockUncancelable(self.io);
+        self.pump_future = future;
+        self.pump_starting = false;
+        self.pump_started.set(self.io);
+        self.pending_mutex.unlock(self.io);
     }
 
     fn removePendingCall(self: *Client, pending: *PendingCall) void {
@@ -3519,18 +3534,36 @@ pub const Client = struct {
         );
         errdefer event.deinit(self.allocator);
         try self.event_queue_mutex.lock(self.io);
-        defer self.event_queue_mutex.unlock(self.io);
-        if (self.event_processor_closing) return error.SessionDisconnected;
-        if (self.event_queue.items.len == event_ingress_limit)
+        if (self.event_processor_closing) {
+            self.event_queue_mutex.unlock(self.io);
+            return error.SessionDisconnected;
+        }
+        if (self.event_queue.items.len == event_ingress_limit) {
+            self.event_queue_mutex.unlock(self.io);
             return error.EventIngressOverflow;
-        try self.event_queue.append(self.allocator, .{
+        }
+        self.event_queue.append(self.allocator, .{
             .log = log,
             .event = event,
-        });
+        }) catch |err| {
+            self.event_queue_mutex.unlock(self.io);
+            return err;
+        };
         self.event_queue_ready.set(self.io);
-        if (self.event_processor_future == null) {
-            self.event_processor_future = self.io.async(eventProcessorMain, .{self});
+        const start_processor =
+            self.event_processor_future == null and !self.event_processor_starting;
+        if (start_processor) {
+            self.event_processor_starting = true;
+            self.event_processor_started.reset();
         }
+        self.event_queue_mutex.unlock(self.io);
+        if (!start_processor) return;
+        const future = self.io.async(eventProcessorMain, .{self});
+        self.event_queue_mutex.lockUncancelable(self.io);
+        self.event_processor_future = future;
+        self.event_processor_starting = false;
+        self.event_processor_started.set(self.io);
+        self.event_queue_mutex.unlock(self.io);
     }
 
     fn ensureEventLog(self: *Client, session_id: []const u8) !*event_log.EventLog {
@@ -3622,7 +3655,11 @@ pub const Client = struct {
         self.event_queue_mutex.lockUncancelable(self.io);
         self.event_processor_closing = true;
         self.event_queue_ready.set(self.io);
+        const processor_starting = self.event_processor_starting;
         self.event_queue_mutex.unlock(self.io);
+        if (processor_starting) {
+            self.event_processor_started.waitUncancelable(self.io);
+        }
         if (self.event_processor_future) |*future| {
             future.await(self.io);
             self.event_processor_future = null;
@@ -7657,6 +7694,10 @@ fn framedBody(allocator: std.mem.Allocator, framed: []const u8) ![]u8 {
 
 fn deinitTestMessaging(client: *Client) void {
     client.stopEventProcessor();
+    client.pending_mutex.lockUncancelable(client.io);
+    const pump_starting = client.pump_starting;
+    client.pending_mutex.unlock(client.io);
+    if (pump_starting) client.pump_started.waitUncancelable(client.io);
     if (client.pump_future) |*pump| pump.await(client.io);
     client.finishPump(error.EndOfStream);
     client.stopSessionRemovalReaper();
