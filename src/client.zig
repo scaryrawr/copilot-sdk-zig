@@ -1500,7 +1500,7 @@ pub const Client = struct {
                     return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
                 .transcript_path = jsonOptionalString(input, "transcriptPath") catch
                     return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
-                .stop_hook_active = (jsonOptionalBool(input, "stopHookActive") catch
+                .stop_hook_active = (jsonOptionalBool(input, "stop_hook_active") catch
                     return self.writeServerRequestError(writer, id, -32602, "invalid hook input")) orelse false,
             }, invocation, runtime.hooks.context) catch |err|
                 return self.writeServerRequestError(writer, id, -32000, @errorName(err));
@@ -6036,6 +6036,57 @@ test "typed hooks dispatch through a provisional session runtime" {
     const body = try framedBody(allocator, output.written());
     defer allocator.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"permissionDecision\":\"deny\"") != null);
+}
+
+test "agent stop hook reads the snake-case wire activity flag" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer client.rollbackExtensionRuntime();
+    var called = false;
+    const handler = struct {
+        fn handle(
+            _: std.mem.Allocator,
+            input: ext.AgentStopInput,
+            _: ext.HookInvocation,
+            context: ?*anyopaque,
+        ) !ext.AgentStopOutput {
+            const did_call: *bool = @ptrCast(@alignCast(context.?));
+            try std.testing.expect(input.stop_hook_active);
+            did_call.* = true;
+            return .{};
+        }
+    }.handle;
+    try client.beginExtensionRuntime(null, session_types.CreateSessionConfig{
+        .extensions = .{ .common = .{ .hooks = .{
+            .on_agent_stop = handler,
+            .context = &called,
+        } } },
+    }, &.{});
+    const params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"s1","hookType":"agentStop","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","stop_hook_active":true}}
+    ,
+        .{},
+    );
+    defer params.deinit();
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try client.dispatchServerRequest(
+        &output.writer,
+        .{ .integer = 8 },
+        "hooks.invoke",
+        params.value,
+    );
+    try std.testing.expect(called);
 }
 
 test "provisional create runtime does not shadow existing sessions" {
