@@ -218,7 +218,7 @@ fn readFrameImpl(
             return .{ .failure = error.EndOfStream };
         return .{ .failure = .{
             .allocator = allocator,
-            .native_error = error.TruncatedFrame,
+            .native_error = error.EndOfStream,
             .detail = .{ .protocol = .{ .truncated_frame = .{
                 .declared = length,
                 .received = received,
@@ -320,7 +320,7 @@ test "fragmented framing reports actual EOF after partial body" {
         .failure => |value| value,
     };
     defer failure.deinit();
-    try std.testing.expectEqual(error.TruncatedFrame, failure.native_error);
+    try std.testing.expectEqual(error.EndOfStream, failure.native_error);
     switch (failure.detail) {
         .protocol => |protocol_failure| switch (protocol_failure) {
             .truncated_frame => |truncated| {
@@ -366,7 +366,7 @@ test "captured framing failures retain literal input and lengths" {
         .failure => |failure| failure,
     };
     defer truncated_failure.deinit();
-    try std.testing.expectEqual(error.TruncatedFrame, truncated_failure.native_error);
+    try std.testing.expectEqual(error.EndOfStream, truncated_failure.native_error);
     switch (truncated_failure.detail) {
         .protocol => |protocol_failure| switch (protocol_failure) {
             .truncated_frame => |failure| {
@@ -398,7 +398,7 @@ test "truncated frames preserve legacy error and detailed diagnostics" {
         .failure => |failure| failure,
     };
     defer failure_value.deinit();
-    try std.testing.expectEqual(error.TruncatedFrame, failure_value.native_error);
+    try std.testing.expectEqual(error.EndOfStream, failure_value.native_error);
     switch (failure_value.detail) {
         .protocol => |failure| switch (failure) {
             .truncated_frame => |truncated| {

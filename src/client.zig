@@ -68,6 +68,17 @@ fn policyFailure(
     return @call(.auto, constructor, args);
 }
 
+fn isTransportEndOfStream(failure: *const errors.Failure) bool {
+    if (failure.native_error != error.EndOfStream) return false;
+    return switch (failure.detail) {
+        .client => |client_failure| switch (client_failure) {
+            .io => |io_failure| io_failure.operation == .read,
+            else => false,
+        },
+        else => false,
+    };
+}
+
 fn ownedCause(code: anyerror) errors.Cause {
     return .{ .code = code };
 }
@@ -2676,7 +2687,7 @@ pub const Client = struct {
                 .success => |value| value,
                 .failure => |failure_value| {
                     var frame_failure = failure_value;
-                    if (frame_failure.native_error == error.EndOfStream) {
+                    if (isTransportEndOfStream(&frame_failure)) {
                         frame_failure.deinit();
                         return .{ .failure = try self.recordReadFailure(error.EndOfStream) };
                     }
@@ -4132,7 +4143,7 @@ pub const Client = struct {
                 .success => |value| value,
                 .failure => |failure_value| {
                     var frame_failure = failure_value;
-                    if (frame_failure.native_error == error.EndOfStream) {
+                    if (isTransportEndOfStream(&frame_failure)) {
                         frame_failure.deinit();
                         return .{ .failure = try self.recordReadFailure(error.EndOfStream) };
                     }
@@ -11899,7 +11910,7 @@ test "truncated RPC frames consistently map to protocol failure" {
     const allocator = std.testing.allocator;
     var failure_value = try expectTruncatedCallFailure(allocator);
     defer failure_value.deinit();
-    try std.testing.expectEqual(error.TruncatedFrame, failure_value.native_error);
+    try std.testing.expectEqual(error.EndOfStream, failure_value.native_error);
     switch (failure_value.detail) {
         .protocol => |failure| switch (failure) {
             .truncated_frame => |truncated| {
