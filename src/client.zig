@@ -620,6 +620,7 @@ pub const Client = struct {
     pump_failure: ?anyerror = null,
     ignore_eof: bool = false,
     synchronize_test_responses: bool = true,
+    stop_test_pump: bool = false,
     fail_mcp_oauth_handle_copy: bool = false,
     tools: std.ArrayList(RegisteredTool) = .empty,
     user_input_handlers: std.ArrayList(RegisteredUserInputHandler) = .empty,
@@ -2539,7 +2540,7 @@ pub const Client = struct {
     }
 
     fn ensurePumpLocked(self: *Client) void {
-        if (self.pump_future == null) {
+        if (self.pump_future == null and !self.stop_test_pump) {
             self.pump_future = self.io.async(pumpMain, .{self});
         }
     }
@@ -2620,6 +2621,10 @@ pub const Client = struct {
                 if ((err == error.EndOfStream or err == error.MissingContentLength) and
                     self.ignore_eof)
                 {
+                    self.pending_mutex.lockUncancelable(self.io);
+                    const should_stop = self.stop_test_pump;
+                    self.pending_mutex.unlock(self.io);
+                    if (should_stop) return;
                     std.Io.sleep(
                         self.io,
                         std.Io.Duration.fromMilliseconds(1),
@@ -7642,7 +7647,11 @@ fn framedBody(allocator: std.mem.Allocator, framed: []const u8) ![]u8 {
 
 fn deinitTestMessaging(client: *Client) void {
     client.stopEventProcessor();
-    if (client.pump_future) |*pump| pump.cancel(client.io);
+    client.pending_mutex.lockUncancelable(client.io);
+    client.stop_test_pump = true;
+    client.pending_mutex.unlock(client.io);
+    if (client.pump_future) |*pump| pump.await(client.io);
+    client.finishPump(error.EndOfStream);
     client.stopSessionRemovalReaper();
     client.finishSessionRemovals();
     client.stopSendReaper();
