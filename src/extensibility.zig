@@ -475,13 +475,13 @@ pub const ResumeExtensions = struct {
     common: SessionFeatures = .{},
     extension_sdk_path: ?[]const u8 = null,
     canvas_provider: ?CanvasProviderIdentity = null,
-    open_canvases: []const OpenCanvas = &.{},
+    open_canvases: ?[]const OpenCanvas = null,
 };
 
 pub const JoinExtensions = struct {
     common: SessionFeatures = .{},
     canvas_provider: ?CanvasProviderIdentity = null,
-    open_canvases: []const OpenCanvas = &.{},
+    open_canvases: ?[]const OpenCanvas = null,
     requested_environment_variables: []const []const u8 = &.{},
 };
 

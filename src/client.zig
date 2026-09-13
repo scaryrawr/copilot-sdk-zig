@@ -798,7 +798,7 @@ pub const Client = struct {
         try self.beginExtensionRuntime(
             runtime_session_id,
             config,
-            config.extensions.open_canvases,
+            config.extensions.open_canvases orelse &.{},
         );
         errdefer self.rollbackExtensionRuntime();
 
@@ -3957,26 +3957,27 @@ fn buildPreparedResumeSessionRequest(
     prepared_providers: provider.PreparedProviders,
 ) !ResumeSessionRequest {
     const features = config.extensions.common;
-    const configured_open_canvases = config.extensions.open_canvases;
-    try values.open_canvases.ensureTotalCapacity(
-        values.allocator,
-        configured_open_canvases.len,
-    );
-    for (configured_open_canvases) |canvas| {
-        try values.open_canvases.append(values.allocator, .{
-            .instanceId = canvas.instance_id,
-            .extensionId = canvas.extension_id,
-            .extensionName = canvas.extension_name,
-            .canvasId = canvas.canvas_id,
-            .icon = canvas.icon,
-            .title = canvas.title,
-            .status = canvas.status,
-            .url = canvas.url,
-            .input = if (canvas.input_json) |json|
-                try values.parseJson(json)
-            else
-                null,
-        });
+    if (config.extensions.open_canvases) |configured_open_canvases| {
+        try values.open_canvases.ensureTotalCapacity(
+            values.allocator,
+            configured_open_canvases.len,
+        );
+        for (configured_open_canvases) |canvas| {
+            try values.open_canvases.append(values.allocator, .{
+                .instanceId = canvas.instance_id,
+                .extensionId = canvas.extension_id,
+                .extensionName = canvas.extension_name,
+                .canvasId = canvas.canvas_id,
+                .icon = canvas.icon,
+                .title = canvas.title,
+                .status = canvas.status,
+                .url = canvas.url,
+                .input = if (canvas.input_json) |json|
+                    try values.parseJson(json)
+                else
+                    null,
+            });
+        }
     }
     try provider.validateCapabilities(config.model_capabilities);
     return .{
@@ -4034,7 +4035,7 @@ fn buildPreparedResumeSessionRequest(
         .pluginDirectories = optionalSlice(features.plugin_directories),
         .disabledSkills = optionalSlice(features.skills.disabled),
         .disabledMcpServers = optionalSlice(features.mcp.disabled_servers),
-        .openCanvases = if (values.open_canvases.items.len > 0)
+        .openCanvases = if (config.extensions.open_canvases != null)
             values.open_canvases.items
         else
             null,
@@ -5551,6 +5552,65 @@ test "resume request places provider without suppressing resume by default" {
     const provider_value = request_params.get("provider").?.object;
     try std.testing.expectEqualStrings("anthropic", provider_value.get("type").?.string);
     try std.testing.expectEqualStrings("key", provider_value.get("apiKey").?.string);
+}
+
+test "resume request preserves omitted and explicitly empty open canvases" {
+    const allocator = std.testing.allocator;
+
+    var omitted_values = ExtensionWireValues.init(allocator);
+    defer omitted_values.deinit();
+    const omitted_request = try buildResumeSessionRequest(
+        "session-1",
+        .{},
+        &.{},
+        &omitted_values,
+        &.{},
+    );
+    const omitted_encoded = try json_rpc.encodeRequest(
+        allocator,
+        11,
+        "session.resume",
+        omitted_request,
+    );
+    defer allocator.free(omitted_encoded);
+    const omitted = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        omitted_encoded,
+        .{},
+    );
+    defer omitted.deinit();
+    try std.testing.expect(
+        !omitted.value.object.get("params").?.object.contains("openCanvases"),
+    );
+
+    var empty_values = ExtensionWireValues.init(allocator);
+    defer empty_values.deinit();
+    const empty_request = try buildResumeSessionRequest(
+        "session-1",
+        .{ .extensions = .{ .open_canvases = &.{} } },
+        &.{},
+        &empty_values,
+        &.{},
+    );
+    const empty_encoded = try json_rpc.encodeRequest(
+        allocator,
+        12,
+        "session.resume",
+        empty_request,
+    );
+    defer allocator.free(empty_encoded);
+    const empty = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        empty_encoded,
+        .{},
+    );
+    defer empty.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        empty.value.object.get("params").?.object.get("openCanvases").?.array.items.len,
+    );
 }
 
 test "createSession and resumeSession preserve deep partial model capability overrides" {
