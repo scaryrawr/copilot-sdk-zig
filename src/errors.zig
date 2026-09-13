@@ -68,6 +68,7 @@ pub const Failure = struct {
                 .invalid_config => |detail| detail.message,
                 .reentrant_call => |detail| detail.message,
                 .request_cancelled => |detail| detail.message,
+                .operation_rejected => |detail| detail.message,
                 .stop => null,
             },
             .protocol => |value| switch (value) {
@@ -223,7 +224,17 @@ pub const ClientFailure = union(enum) {
     invalid_config: struct { field: ?[]u8, message: []u8 },
     reentrant_call: struct { method: []u8, message: []u8 },
     request_cancelled: struct { method: []u8, request_id: u64, message: []u8 },
+    operation_rejected: struct {
+        operation: SessionOperation,
+        session_id: []u8,
+        message: ?[]u8,
+    },
     stop: struct { failures: []Failure },
+};
+
+pub const SessionOperation = enum {
+    delete,
+    set_foreground,
 };
 
 pub const ClientOperation = enum {
@@ -446,6 +457,10 @@ fn deinitDetail(allocator: std.mem.Allocator, detail: *FailureDetail) void {
             .request_cancelled => |item| {
                 allocator.free(item.method);
                 allocator.free(item.message);
+            },
+            .operation_rejected => |item| {
+                allocator.free(item.session_id);
+                freeOptional(allocator, item.message);
             },
             .stop => |item| {
                 for (item.failures) |*failure| failure.deinit();

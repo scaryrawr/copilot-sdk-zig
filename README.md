@@ -63,6 +63,34 @@ const weather_tool = schema.defineTool(WeatherArguments, .{
 });
 ```
 
+## Client administration
+
+`Client` has typed methods for health, status, authentication, session catalog,
+session deletion, and foreground selection. Each method also has a `Detailed`
+form.
+
+```zig
+var pong = try client.ping("health check");
+defer pong.deinit();
+
+var status = try client.getStatus();
+defer status.deinit();
+
+var auth = try client.getAuthStatus();
+defer auth.deinit();
+
+var catalog = try client.listSessions(.{
+    .repository = "scaryrawr/copilot-sdk-zig",
+    .branch = "main",
+});
+defer catalog.deinit();
+```
+
+Input strings are borrowed until the call returns. Administration results own
+their strings and slices. Call `deinit` once on each owned result. Moving a
+result transfers cleanup responsibility. Copying a result does not copy its
+owned memory.
+
 ## Send a prompt
 
 Pass a `std.Io` implementation to `Client.init`. The client starts
@@ -131,6 +159,39 @@ data until `send` or `sendAndWait` returns. These inputs require no `deinit`.
 in use. `SessionEvent` values and the message ID from `send` own memory from the
 client allocator. `Session.disconnect` releases the client-side session
 resources while preserving the session state so it can be resumed later.
+
+## Read session history and lifecycle events
+
+`Session.getEvents` returns the persisted event history in transport order. The
+history owns its event slice and each `SessionEvent`.
+
+```zig
+var history = try session.getEvents();
+defer history.deinit();
+```
+
+`Client.nextLifecycleEvent` blocks until a client-wide lifecycle delivery is
+available. The SDK uses a pull API instead of callbacks so user code cannot
+reenter the single transport reader.
+
+```zig
+var delivery = try client.nextLifecycleEvent();
+defer delivery.deinit();
+
+switch (delivery) {
+    .event => |event| {
+        _ = event;
+    },
+    .overflow => |overflow| {
+        std.log.warn("dropped {d} lifecycle events", .{overflow.dropped_count});
+    },
+}
+```
+
+Lifecycle deliveries own their strings. Unknown lifecycle types are successful
+`.unknown` events. An `.overflow` delivery reports a contiguous dropped suffix.
+It does not close the client. Rebuild the catalog and foreground state after an
+overflow.
 
 ## Inspect detailed failures
 

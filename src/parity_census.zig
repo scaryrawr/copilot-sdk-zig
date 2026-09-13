@@ -74,6 +74,7 @@ pub const CaseId = enum {
     invalid_config,
     connect_rejected,
     reentrant_rpc,
+    client_operation_rejected,
     unsupported_protocol_version,
     invalid_protocol_version,
     root_sdk_error_export,
@@ -87,6 +88,7 @@ pub const FailureClass = enum {
     client_json,
     client_invalid_config,
     client_reentrant_call,
+    client_operation_rejected,
     protocol_missing_content_length,
     protocol_invalid_content_length,
     protocol_frame_too_large,
@@ -141,6 +143,7 @@ pub const Evidence = enum {
     shutdown_behavior,
     shutdown_dropped_behavior,
     connect_rejection_dispatch,
+    client_operation_rejection,
     protocol_version_dispatch,
     root_export_compile,
 };
@@ -192,6 +195,7 @@ const executable_evidence = [_]EvidenceSpec{
     .{ .id = .shutdown_dropped_behavior, .source_file = "src/client.zig", .test_filter = "stopDetailed reports allocation-free dropped diagnostics", .kind = .detailed_behavior },
     .{ .id = .connect_rejection_dispatch, .source_file = "src/client.zig", .test_filter = "connect rejection preserves legacy and detailed classification", .kind = .detailed_behavior },
     .{ .id = .protocol_version_dispatch, .source_file = "src/client.zig", .test_filter = "connect validates the protocol version", .kind = .detailed_behavior },
+    .{ .id = .client_operation_rejection, .source_file = "src/client.zig", .test_filter = "session operation rejection is owned and legacy methods collapse it", .kind = .detailed_behavior },
     .{ .id = .root_export_compile, .source_file = "testdata/root_export_consumer.zig", .test_filter = "external consumer imports root SdkError export", .kind = .compile, .package_root = "src/root.zig" },
 };
 
@@ -209,7 +213,7 @@ const TaxonomyEntry = struct {
 
 const taxonomy = [_]TaxonomyEntry{
     .{ .type_name = "FailureDetail", .variant = "process", .status = .{ .emitted = "process_spawn,process_exit,process_terminate" } },
-    .{ .type_name = "FailureDetail", .variant = "client", .status = .{ .emitted = "transport_read,transport_write,json_conversion,invalid_config,reentrant_rpc" } },
+    .{ .type_name = "FailureDetail", .variant = "client", .status = .{ .emitted = "transport_read,transport_write,json_conversion,invalid_config,reentrant_rpc,client_operation_rejected" } },
     .{ .type_name = "FailureDetail", .variant = "protocol", .status = .{ .emitted = "missing_content_length,invalid_content_length,frame_too_large,truncated_frame,invalid_json,non_object_envelope,unexpected_response,unsupported_protocol_version" } },
     .{ .type_name = "FailureDetail", .variant = "rpc", .status = .{ .emitted = "generic_rpc_rejection,session_rpc_rejection" } },
     .{ .type_name = "FailureDetail", .variant = "session", .status = .{ .emitted = "missing_session_rpc_rejection,session_agent_error,session_detach_failed" } },
@@ -231,6 +235,7 @@ const taxonomy = [_]TaxonomyEntry{
     .{ .type_name = "ClientFailure", .variant = "invalid_config", .status = .{ .emitted = "invalid_config,connect_rejected" } },
     .{ .type_name = "ClientFailure", .variant = "reentrant_call", .status = .{ .emitted = "reentrant_rpc" } },
     .{ .type_name = "ClientFailure", .variant = "request_cancelled", .status = .{ .declared_not_emitted = "cancellation is declared for a future cancellable RPC path" } },
+    .{ .type_name = "ClientFailure", .variant = "operation_rejected", .status = .{ .emitted = "client_operation_rejected" } },
     .{ .type_name = "ClientFailure", .variant = "stop", .status = .{ .declared_not_emitted = "legacy stop aggregation was superseded by ShutdownFailure" } },
 
     .{ .type_name = "ProtocolFailure", .variant = "missing_content_length", .status = .{ .emitted = "missing_content_length" } },
@@ -284,7 +289,7 @@ const taxonomy = [_]TaxonomyEntry{
     .{ .type_name = "EnvelopeViolation", .variant = "malformed_field_type", .status = .{ .emitted = "session_event_malformed_field" } },
     .{ .type_name = "EnvelopeViolation", .variant = "invalid_session_status", .status = .{ .emitted = "session_event_invalid_status" } },
 
-    .{ .type_name = "SdkError", .variant = "ClientFailure", .status = .{ .emitted = "process_spawn,process_terminate,transport_read,transport_write,shutdown_aggregate,shutdown_diagnostics_dropped,json_conversion,invalid_config,connect_rejected,reentrant_rpc" } },
+    .{ .type_name = "SdkError", .variant = "ClientFailure", .status = .{ .emitted = "process_spawn,process_terminate,transport_read,transport_write,shutdown_aggregate,shutdown_diagnostics_dropped,json_conversion,invalid_config,connect_rejected,reentrant_rpc,client_operation_rejected" } },
     .{ .type_name = "SdkError", .variant = "ProcessExited", .status = .{ .emitted = "process_exit" } },
     .{ .type_name = "SdkError", .variant = "ProtocolFailure", .status = .{ .emitted = "missing_content_length,invalid_content_length,frame_too_large,truncated_frame,invalid_json,non_object_envelope,invalid_jsonrpc_version,missing_response_id,invalid_response_id,missing_result_and_error,result_and_error,invalid_error_object,invalid_error_code,invalid_error_message,invalid_request_method,session_event_missing_params,session_event_malformed_field,session_event_invalid_status,unexpected_response" } },
     .{ .type_name = "SdkError", .variant = "ProtocolMismatch", .status = .{ .emitted = "unsupported_protocol_version,invalid_protocol_version" } },
@@ -375,6 +380,7 @@ pub const rows = [_]Row{
     .{ .id = .invalid_config, .boundary = .client, .operation = "create or resume session", .trigger = "configuration validation fails", .legacy = "InvalidArgument", .detailed = "client.invalid_config", .violation = "invalid_config", .retained = "field and message", .cleanup = "Failure.deinit frees owned fields", .outcome = .{ .failure = .client_invalid_config }, .evidence = .failure_constructor_ownership },
     .{ .id = .connect_rejected, .boundary = .client, .operation = "connect", .trigger = "CLI returns ok=false", .legacy = "ConnectRejected", .detailed = "client.invalid_config", .violation = "connect_rejected", .retained = "literal rejection message", .cleanup = "Failure.deinit frees message", .outcome = .{ .failure = .client_invalid_config }, .evidence = .connect_rejection_dispatch },
     .{ .id = .reentrant_rpc, .boundary = .client, .operation = "call RPC from callback", .trigger = "handler starts a nested RPC", .legacy = "ReentrantRpcCall", .detailed = "client.reentrant_call", .violation = "reentrant_call", .retained = "method and message", .cleanup = "Failure.deinit frees owned fields", .outcome = .{ .failure = .client_reentrant_call }, .evidence = .failure_constructor_ownership },
+    .{ .id = .client_operation_rejected, .boundary = .client, .operation = "delete or select foreground session", .trigger = "successful RPC response contains success=false", .legacy = "CopilotClientError", .detailed = "client.operation_rejected", .violation = "operation_rejected", .retained = "operation, session id, and optional server message", .cleanup = "Failure.deinit frees owned strings", .outcome = .{ .failure = .client_operation_rejected }, .evidence = .client_operation_rejection },
 
     .{ .id = .unsupported_protocol_version, .boundary = .protocol_version, .operation = "connect", .trigger = "server version is outside the supported version", .legacy = "ProtocolVersionMismatch", .detailed = "protocol.mismatch.unsupported", .violation = "unsupported", .retained = "server, minimum, maximum", .cleanup = "Failure.deinit", .outcome = .{ .failure = .protocol_mismatch }, .evidence = .protocol_version_dispatch },
     .{ .id = .invalid_protocol_version, .boundary = .protocol_version, .operation = "connect", .trigger = "server version is not a nonnegative integer", .legacy = "ProtocolVersionMismatch", .detailed = "protocol.mismatch.invalid_server_version", .violation = "invalid_server_version", .retained = "canonical server value JSON", .cleanup = "Failure.deinit frees server JSON", .outcome = .{ .failure = .protocol_mismatch }, .evidence = .protocol_version_dispatch },

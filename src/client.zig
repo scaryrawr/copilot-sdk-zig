@@ -1,4 +1,5 @@
 const std = @import("std");
+const admin = @import("client_admin.zig");
 const errors = @import("errors.zig");
 const json_rpc = @import("json_rpc.zig");
 const models = @import("models.zig");
@@ -600,6 +601,24 @@ fn recordDetachFailure(
         .rpc = null,
         .message = message,
     } } });
+}
+
+fn recordSessionOperationRejected(
+    allocator: std.mem.Allocator,
+    operation: errors.SessionOperation,
+    session_id: []const u8,
+    message: ?[]const u8,
+) !errors.Failure {
+    const owned_session_id = try allocator.dupe(u8, session_id);
+    errdefer allocator.free(owned_session_id);
+    const owned_message = try dupeOptional(allocator, message);
+    return recordFailure(allocator, error.CopilotClientError, .{ .client = .{
+        .operation_rejected = .{
+            .operation = operation,
+            .session_id = owned_session_id,
+            .message = owned_message,
+        },
+    } });
 }
 
 fn recordPermissionNotAccepted(
@@ -1594,6 +1613,7 @@ pub const Client = struct {
     next_request_id: u64 = 1,
     session_ids: std.ArrayList([]u8) = .empty,
     events: std.ArrayList(EventDelivery) = .empty,
+    lifecycle_events: admin.LifecycleQueue = .{},
     tools: std.ArrayList(RegisteredTool) = .empty,
     user_input_handlers: std.ArrayList(RegisteredUserInputHandler) = .empty,
     permission_handlers: std.ArrayList(RegisteredPermissionHandler) = .empty,
@@ -1761,6 +1781,7 @@ pub const Client = struct {
         }
         for (self.events.items) |*event| event.deinit(self.allocator);
         self.events.deinit(self.allocator);
+        self.lifecycle_events.deinit();
         for (self.tools.items) |tool| tool.deinit(self.allocator);
         self.tools.deinit(self.allocator);
         self.user_input_handlers.deinit(self.allocator);
@@ -2596,6 +2617,443 @@ pub const Client = struct {
         }, .generic);
     }
 
+    fn callOwned(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+        comptime Wire: type,
+        comptime Owned: type,
+        method: []const u8,
+        params: anytype,
+        context: OperationContext,
+        comptime convert: anytype,
+    ) errors.DetailedError!PolicyResult(failure_policy, Owned) {
+        const parsed = switch (try self.callImpl(
+            failure_policy,
+            Wire,
+            method,
+            params,
+            context,
+        )) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
+        defer parsed.deinit();
+        return .{ .success = try convert(self.allocator, parsed.value) };
+    }
+
+    pub fn ping(self: *Client, message: ?[]const u8) !admin.PingResponse {
+        return legacyResult(admin.PingResponse, self.pingImpl(.legacy, message));
+    }
+
+    pub fn pingDetailed(
+        self: *Client,
+        message: ?[]const u8,
+    ) errors.DetailedError!errors.DetailedResult(admin.PingResponse) {
+        return self.pingImpl(.detailed, message);
+    }
+
+    fn pingImpl(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+        message: ?[]const u8,
+    ) errors.DetailedError!PolicyResult(failure_policy, admin.PingResponse) {
+        return self.callOwned(
+            failure_policy,
+            admin.PingResult,
+            admin.PingResponse,
+            "ping",
+            admin.PingParams{ .message = message },
+            .generic,
+            admin.ownPing,
+        );
+    }
+
+    pub fn getStatus(self: *Client) !admin.ClientStatus {
+        return legacyResult(admin.ClientStatus, self.getStatusImpl(.legacy));
+    }
+
+    pub fn getStatusDetailed(
+        self: *Client,
+    ) errors.DetailedError!errors.DetailedResult(admin.ClientStatus) {
+        return self.getStatusImpl(.detailed);
+    }
+
+    fn getStatusImpl(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+    ) errors.DetailedError!PolicyResult(failure_policy, admin.ClientStatus) {
+        return self.callOwned(
+            failure_policy,
+            admin.StatusGetResult,
+            admin.ClientStatus,
+            "status.get",
+            admin.EmptyParams{},
+            .generic,
+            admin.ownStatus,
+        );
+    }
+
+    pub fn getAuthStatus(self: *Client) !admin.AuthStatus {
+        return legacyResult(admin.AuthStatus, self.getAuthStatusImpl(.legacy));
+    }
+
+    pub fn getAuthStatusDetailed(
+        self: *Client,
+    ) errors.DetailedError!errors.DetailedResult(admin.AuthStatus) {
+        return self.getAuthStatusImpl(.detailed);
+    }
+
+    fn getAuthStatusImpl(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+    ) errors.DetailedError!PolicyResult(failure_policy, admin.AuthStatus) {
+        return self.callOwned(
+            failure_policy,
+            admin.AuthGetStatusResult,
+            admin.AuthStatus,
+            "auth.getStatus",
+            admin.EmptyParams{},
+            .generic,
+            admin.ownAuthStatus,
+        );
+    }
+
+    pub fn getLastSessionId(self: *Client) !?admin.SessionId {
+        return legacyResult(?admin.SessionId, self.getLastSessionIdImpl(.legacy));
+    }
+
+    pub fn getLastSessionIdDetailed(
+        self: *Client,
+    ) errors.DetailedError!errors.DetailedResult(?admin.SessionId) {
+        return self.getLastSessionIdImpl(.detailed);
+    }
+
+    fn getLastSessionIdImpl(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+    ) errors.DetailedError!PolicyResult(failure_policy, ?admin.SessionId) {
+        return self.callOwned(
+            failure_policy,
+            admin.OptionalSessionIdResult,
+            ?admin.SessionId,
+            "session.getLastId",
+            admin.EmptyParams{},
+            .generic,
+            admin.ownSessionId,
+        );
+    }
+
+    pub fn deleteSession(self: *Client, session_id: []const u8) !void {
+        return legacyResult(void, self.deleteSessionImpl(.legacy, session_id));
+    }
+
+    pub fn deleteSessionDetailed(
+        self: *Client,
+        session_id: []const u8,
+    ) errors.DetailedError!errors.DetailedResult(void) {
+        return self.deleteSessionImpl(.detailed, session_id);
+    }
+
+    pub fn listSessions(
+        self: *Client,
+        filter: ?admin.SessionListFilter,
+    ) !admin.SessionCatalog {
+        return legacyResult(admin.SessionCatalog, self.listSessionsImpl(.legacy, filter));
+    }
+
+    pub fn listSessionsDetailed(
+        self: *Client,
+        filter: ?admin.SessionListFilter,
+    ) errors.DetailedError!errors.DetailedResult(admin.SessionCatalog) {
+        return self.listSessionsImpl(.detailed, filter);
+    }
+
+    fn listSessionsImpl(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+        filter: ?admin.SessionListFilter,
+    ) errors.DetailedError!PolicyResult(failure_policy, admin.SessionCatalog) {
+        return self.callOwned(
+            failure_policy,
+            admin.SessionListResult,
+            admin.SessionCatalog,
+            "session.list",
+            admin.lowerFilter(filter),
+            .generic,
+            admin.ownCatalog,
+        );
+    }
+
+    pub fn getSessionMetadata(
+        self: *Client,
+        session_id: []const u8,
+    ) !?admin.SessionMetadata {
+        return legacyResult(
+            ?admin.SessionMetadata,
+            self.getSessionMetadataImpl(.legacy, session_id),
+        );
+    }
+
+    pub fn getSessionMetadataDetailed(
+        self: *Client,
+        session_id: []const u8,
+    ) errors.DetailedError!errors.DetailedResult(?admin.SessionMetadata) {
+        return self.getSessionMetadataImpl(.detailed, session_id);
+    }
+
+    fn getSessionMetadataImpl(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+        session_id: []const u8,
+    ) errors.DetailedError!PolicyResult(failure_policy, ?admin.SessionMetadata) {
+        return self.callOwned(
+            failure_policy,
+            admin.SessionGetMetadataResult,
+            ?admin.SessionMetadata,
+            "session.getMetadata",
+            admin.SessionIdParams{ .sessionId = session_id },
+            .{ .session = .{ .session_id = session_id } },
+            admin.ownOptionalMetadata,
+        );
+    }
+
+    pub fn getForegroundSessionId(self: *Client) !?admin.SessionId {
+        return legacyResult(?admin.SessionId, self.getForegroundSessionIdImpl(.legacy));
+    }
+
+    pub fn getForegroundSessionIdDetailed(
+        self: *Client,
+    ) errors.DetailedError!errors.DetailedResult(?admin.SessionId) {
+        return self.getForegroundSessionIdImpl(.detailed);
+    }
+
+    fn getForegroundSessionIdImpl(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+    ) errors.DetailedError!PolicyResult(failure_policy, ?admin.SessionId) {
+        return self.callOwned(
+            failure_policy,
+            admin.OptionalSessionIdResult,
+            ?admin.SessionId,
+            "session.getForeground",
+            admin.EmptyParams{},
+            .generic,
+            admin.ownSessionId,
+        );
+    }
+
+    pub fn setForegroundSessionId(
+        self: *Client,
+        session_id: []const u8,
+    ) !void {
+        return legacyResult(void, self.sessionOperationImpl(
+            .legacy,
+            "session.setForeground",
+            .set_foreground,
+            session_id,
+        ));
+    }
+
+    pub fn setForegroundSessionIdDetailed(
+        self: *Client,
+        session_id: []const u8,
+    ) errors.DetailedError!errors.DetailedResult(void) {
+        return self.sessionOperationImpl(
+            .detailed,
+            "session.setForeground",
+            .set_foreground,
+            session_id,
+        );
+    }
+
+    fn sessionOperationImpl(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+        method: []const u8,
+        operation: errors.SessionOperation,
+        session_id: []const u8,
+    ) errors.DetailedError!PolicyResult(failure_policy, void) {
+        const parsed = switch (try self.callImpl(
+            failure_policy,
+            admin.SuccessResult,
+            method,
+            admin.SessionIdParams{ .sessionId = session_id },
+            .{ .session = .{ .session_id = session_id } },
+        )) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
+        defer parsed.deinit();
+        if (!parsed.value.success) return .{ .failure = try policyFailure(
+            failure_policy,
+            error.CopilotClientError,
+            recordSessionOperationRejected,
+            .{ self.allocator, operation, session_id, parsed.value.@"error" },
+        ) };
+        return .{ .success = {} };
+    }
+
+    const McpOAuthInterestReleaseState = enum {
+        no_interest,
+        released,
+    };
+
+    fn findAttachedExtensionRuntimeIndex(
+        self: *Client,
+        session_id: []const u8,
+    ) ?usize {
+        for (self.extension_runtimes.items, 0..) |runtime, index| {
+            const runtime_session_id = runtime.session_id orelse continue;
+            if (std.mem.eql(u8, runtime_session_id, session_id)) return index;
+        }
+        return null;
+    }
+
+    fn releaseAttachedMcpOAuthInterest(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+        session_id: []const u8,
+    ) errors.DetailedError!PolicyResult(
+        failure_policy,
+        McpOAuthInterestReleaseState,
+    ) {
+        const runtime_index = self.findAttachedExtensionRuntimeIndex(session_id) orelse
+            return .{ .success = .no_interest };
+        const handle = self.extension_runtimes.items[runtime_index].mcp_oauth_interest_handle orelse
+            return .{ .success = .no_interest };
+        const owned_handle = try self.allocator.dupe(u8, handle);
+        defer self.allocator.free(owned_handle);
+        const parsed = switch (try self.callImpl(
+            failure_policy,
+            struct { success: bool },
+            "session.eventLog.releaseInterest",
+            .{
+                .sessionId = session_id,
+                .handle = owned_handle,
+            },
+            .{ .session = .{ .session_id = session_id } },
+        )) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
+        defer parsed.deinit();
+        if (!parsed.value.success) return .{ .failure = try policyFailure(
+            failure_policy,
+            error.EventInterestNotReleased,
+            recordClientIo,
+            .{ self.allocator, .callback, error.EventInterestNotReleased },
+        ) };
+
+        const current_index = self.findAttachedExtensionRuntimeIndex(session_id) orelse
+            return .{ .success = .released };
+        const current_handle =
+            self.extension_runtimes.items[current_index].mcp_oauth_interest_handle orelse
+            return .{ .success = .released };
+        if (!std.mem.eql(u8, current_handle, owned_handle))
+            return .{ .success = .released };
+        self.allocator.free(current_handle);
+        self.extension_runtimes.items[current_index].mcp_oauth_interest_handle = null;
+        return .{ .success = .released };
+    }
+
+    fn restoreAttachedMcpOAuthInterestDetailed(
+        self: *Client,
+        session_id: []const u8,
+    ) errors.DetailedError!errors.DetailedResult(void) {
+        const runtime_index = self.findAttachedExtensionRuntimeIndex(session_id) orelse
+            return .{ .success = {} };
+        if (self.extension_runtimes.items[runtime_index].mcp_oauth_interest_handle != null)
+            return .{ .success = {} };
+
+        const parsed = switch (try self.callImpl(
+            .detailed,
+            struct { handle: []const u8 },
+            "session.eventLog.registerInterest",
+            .{
+                .sessionId = session_id,
+                .eventType = "mcp.oauth_required",
+            },
+            .{ .session = .{ .session_id = session_id } },
+        )) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
+        defer parsed.deinit();
+        const owned_handle = try self.allocator.dupe(u8, parsed.value.handle);
+        const current_index = self.findAttachedExtensionRuntimeIndex(session_id) orelse {
+            self.allocator.free(owned_handle);
+            return .{ .success = {} };
+        };
+        if (self.extension_runtimes.items[current_index].mcp_oauth_interest_handle) |_| {
+            self.allocator.free(owned_handle);
+        } else {
+            self.extension_runtimes.items[current_index].mcp_oauth_interest_handle =
+                owned_handle;
+        }
+        return .{ .success = {} };
+    }
+
+    fn restoreReleasedMcpOAuthInterest(
+        self: *Client,
+        release_state: McpOAuthInterestReleaseState,
+        session_id: []const u8,
+    ) void {
+        if (release_state != .released) return;
+        const result = self.restoreAttachedMcpOAuthInterestDetailed(session_id) catch |err| {
+            std.log.warn(
+                "failed to restore MCP OAuth interest after session.delete failure for {s}: {s}",
+                .{ session_id, @errorName(err) },
+            );
+            self.removeSession(session_id);
+            return;
+        };
+        switch (result) {
+            .success => {},
+            .failure => |failure_value| {
+                var failure = failure_value;
+                defer failure.deinit();
+                std.log.warn(
+                    "failed to restore MCP OAuth interest after session.delete failure for {s}: {s}",
+                    .{ session_id, @errorName(failure.native_error) },
+                );
+                self.removeSession(session_id);
+            },
+        }
+    }
+
+    fn deleteSessionImpl(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+        session_id: []const u8,
+    ) errors.DetailedError!PolicyResult(failure_policy, void) {
+        const release_state = switch (try self.releaseAttachedMcpOAuthInterest(
+            failure_policy,
+            session_id,
+        )) {
+            .success => |state| state,
+            .failure => |failure| return .{ .failure = failure },
+        };
+        const deletion = self.sessionOperationImpl(
+            failure_policy,
+            "session.delete",
+            .delete,
+            session_id,
+        ) catch |err| {
+            self.restoreReleasedMcpOAuthInterest(release_state, session_id);
+            return err;
+        };
+        return switch (deletion) {
+            .success => {
+                self.removeSession(session_id);
+                return .{ .success = {} };
+            },
+            .failure => |failure| {
+                self.restoreReleasedMcpOAuthInterest(release_state, session_id);
+                return .{ .failure = failure };
+            },
+        };
+    }
+
     /// Registers a synchronous handler for an inbound RPC method.
     pub fn registerRpcHandler(
         self: *Client,
@@ -2741,26 +3199,18 @@ pub const Client = struct {
                     continue;
                 },
                 .notification => |notification| {
-                    if (std.mem.eql(u8, notification.method, "session.event")) {
-                        switch (try self.queueSessionEvent(
-                            failure_policy,
-                            body,
-                            notification.params orelse
-                                return .{ .failure = try policyFailure(
-                                    failure_policy,
-                                    error.InvalidJsonRpc,
-                                    recordInvalidEnvelope,
-                                    .{
-                                        self.allocator,
-                                        error.InvalidJsonRpc,
-                                        .missing_params,
-                                        value.value,
-                                    },
-                                ) },
-                        )) {
-                            .success => |retained| body_owned = !retained,
-                            .failure => |failure| return .{ .failure = failure },
-                        }
+                    switch (try self.routeNotification(
+                        failure_policy,
+                        body,
+                        notification.method,
+                        notification.params,
+                        value.value,
+                    )) {
+                        .success => |disposition| body_owned = switch (disposition) {
+                            .reader_releases_frame => true,
+                            .router_retains_frame => false,
+                        },
+                        .failure => |failure| return .{ .failure = failure },
                     }
                     continue;
                 },
@@ -3676,6 +4126,81 @@ pub const Client = struct {
         return .{ .success = agent_view != null };
     }
 
+    fn queueLifecycleEvent(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+        params_value: std.json.Value,
+    ) errors.DetailedError!PolicyResult(failure_policy, void) {
+        const event = admin.parseLifecycleEvent(self.allocator, params_value) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.MissingField, error.MalformedFieldType => return .{
+                .failure = try policyFailure(
+                    failure_policy,
+                    error.InvalidSessionEvent,
+                    recordInvalidEvent,
+                    .{
+                        self.allocator,
+                        if (err == error.MissingField)
+                            errors.EnvelopeViolation.missing_params
+                        else
+                            errors.EnvelopeViolation.malformed_field_type,
+                        params_value,
+                    },
+                ),
+            },
+        };
+        self.lifecycle_events.push(event);
+        return .{ .success = {} };
+    }
+
+    const NotificationFrameDisposition = enum {
+        reader_releases_frame,
+        router_retains_frame,
+    };
+
+    fn routeNotification(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+        frame: []u8,
+        method: []const u8,
+        params: ?std.json.Value,
+        envelope: std.json.Value,
+    ) errors.DetailedError!PolicyResult(
+        failure_policy,
+        NotificationFrameDisposition,
+    ) {
+        if (!std.mem.eql(u8, method, "session.event") and
+            !std.mem.eql(u8, method, "session.lifecycle"))
+        {
+            return .{ .success = .reader_releases_frame };
+        }
+        const params_value = params orelse
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                error.InvalidJsonRpc,
+                recordInvalidEnvelope,
+                .{
+                    self.allocator,
+                    error.InvalidJsonRpc,
+                    .missing_params,
+                    envelope,
+                },
+            ) };
+        if (std.mem.eql(u8, method, "session.event")) {
+            return switch (try self.queueSessionEvent(failure_policy, frame, params_value)) {
+                .success => |retained| .{ .success = if (retained)
+                    .router_retains_frame
+                else
+                    .reader_releases_frame },
+                .failure => |failure| .{ .failure = failure },
+            };
+        }
+        return switch (try self.queueLifecycleEvent(failure_policy, params_value)) {
+            .success => .{ .success = .reader_releases_frame },
+            .failure => |failure| .{ .failure = failure },
+        };
+    }
+
     fn findExtensionRuntime(self: *Client, session_id: []const u8) ?*SessionExtensionRuntime {
         if (self.pending_extension_runtime) |*runtime| {
             if (runtime.session_id) |id| {
@@ -4121,6 +4646,120 @@ pub const Client = struct {
         return self.findUserInputHandler(session_id);
     }
 
+    pub fn nextLifecycleEvent(self: *Client) !admin.SessionLifecycleDelivery {
+        return legacyResult(
+            admin.SessionLifecycleDelivery,
+            self.nextLifecycleEventImpl(.legacy),
+        );
+    }
+
+    pub fn nextLifecycleEventDetailed(
+        self: *Client,
+    ) errors.DetailedError!errors.DetailedResult(admin.SessionLifecycleDelivery) {
+        return self.nextLifecycleEventImpl(.detailed);
+    }
+
+    fn nextLifecycleEventImpl(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+    ) errors.DetailedError!PolicyResult(failure_policy, admin.SessionLifecycleDelivery) {
+        while (true) {
+            if (self.lifecycle_events.popDelivery()) |delivery| {
+                return .{ .success = delivery };
+            }
+
+            const body = if (comptime failure_policy == .legacy)
+                json_rpc.readFrame(self.allocator, &self.reader.interface) catch |err|
+                    return .{ .failure = .{ .native_error = err } }
+            else switch (try json_rpc.readFrameDetailed(
+                self.allocator,
+                &self.reader.interface,
+            )) {
+                .success => |value| value,
+                .failure => |failure_value| {
+                    var frame_failure = failure_value;
+                    if (isTransportEndOfStream(&frame_failure)) {
+                        frame_failure.deinit();
+                        return .{ .failure = try self.recordReadFailure(error.EndOfStream) };
+                    }
+                    return .{ .failure = frame_failure };
+                },
+            };
+            var body_owned = true;
+            defer if (body_owned) {
+                wipeSecret(body);
+                self.allocator.free(body);
+            };
+            const value = std.json.parseFromSlice(
+                std.json.Value,
+                self.allocator,
+                body,
+                .{},
+            ) catch |err| {
+                if (err == error.OutOfMemory) return error.OutOfMemory;
+                return .{ .failure = try policyFailure(
+                    failure_policy,
+                    err,
+                    recordInvalidJson,
+                    .{ self.allocator, err },
+                ) };
+            };
+            defer {
+                wipeJsonStrings(value.value);
+                value.deinit();
+            }
+            const inbound = switch (try parseInboundMessage(
+                failure_policy,
+                self.allocator,
+                value.value,
+            )) {
+                .success => |message| message,
+                .failure => |failure| return .{ .failure = failure },
+            };
+            switch (inbound) {
+                .request => |request| {
+                    var operation: errors.ClientOperation = .callback;
+                    self.dispatchServerRequestTracked(
+                        &self.writer.interface,
+                        request.id,
+                        request.method,
+                        request.params,
+                        &operation,
+                    ) catch |err| {
+                        if (err == error.OutOfMemory) return error.OutOfMemory;
+                        return .{ .failure = try policyFailure(
+                            failure_policy,
+                            err,
+                            recordClientIo,
+                            .{ self.allocator, operation, err },
+                        ) };
+                    };
+                },
+                .notification => |notification| {
+                    switch (try self.routeNotification(
+                        failure_policy,
+                        body,
+                        notification.method,
+                        notification.params,
+                        value.value,
+                    )) {
+                        .success => |disposition| body_owned = switch (disposition) {
+                            .reader_releases_frame => true,
+                            .router_retains_frame => false,
+                        },
+                        .failure => |failure| return .{ .failure = failure },
+                    }
+                },
+                .response => |response| return .{ .failure = try policyFailure(
+                    failure_policy,
+                    error.UnexpectedResponse,
+                    recordUnexpectedResponse,
+                    .{ self.allocator, 0, response.id_value },
+                ) },
+            }
+        }
+    }
+
     fn nextEventImpl(
         self: *Client,
         comptime failure_policy: FailurePolicy,
@@ -4196,26 +4835,18 @@ pub const Client = struct {
                     };
                 },
                 .notification => |notification| {
-                    if (std.mem.eql(u8, notification.method, "session.event")) {
-                        switch (try self.queueSessionEvent(
-                            failure_policy,
-                            body,
-                            notification.params orelse
-                                return .{ .failure = try policyFailure(
-                                    failure_policy,
-                                    error.InvalidJsonRpc,
-                                    recordInvalidEnvelope,
-                                    .{
-                                        self.allocator,
-                                        error.InvalidJsonRpc,
-                                        .missing_params,
-                                        value.value,
-                                    },
-                                ) },
-                        )) {
-                            .success => |retained| body_owned = !retained,
-                            .failure => |failure| return .{ .failure = failure },
-                        }
+                    switch (try self.routeNotification(
+                        failure_policy,
+                        body,
+                        notification.method,
+                        notification.params,
+                        value.value,
+                    )) {
+                        .success => |disposition| body_owned = switch (disposition) {
+                            .reader_releases_frame => true,
+                            .router_retains_frame => false,
+                        },
+                        .failure => |failure| return .{ .failure = failure },
                     }
                 },
                 .response => |response| return .{ .failure = try policyFailure(
@@ -4264,6 +4895,78 @@ pub const Session = struct {
         };
         defer parsed.deinit();
         return .{ .success = try self.client.allocator.dupe(u8, parsed.value.messageId) };
+    }
+
+    pub fn getEvents(self: Session) !session_types.SessionEventHistory {
+        return legacyResult(
+            session_types.SessionEventHistory,
+            self.getEventsImpl(.legacy),
+        );
+    }
+
+    pub fn getEventsDetailed(
+        self: Session,
+    ) errors.DetailedError!errors.DetailedResult(session_types.SessionEventHistory) {
+        return self.getEventsImpl(.detailed);
+    }
+
+    fn getEventsImpl(
+        self: Session,
+        comptime failure_policy: FailurePolicy,
+    ) errors.DetailedError!PolicyResult(failure_policy, session_types.SessionEventHistory) {
+        const parsed = switch (try self.client.callImpl(
+            failure_policy,
+            admin.SessionGetMessagesResult,
+            "session.getMessages",
+            admin.SessionIdParams{ .sessionId = self.id },
+            .{ .session = .{ .session_id = self.id } },
+        )) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
+        defer parsed.deinit();
+
+        const events = try self.client.allocator.alloc(
+            session_types.SessionEvent,
+            parsed.value.events.len,
+        );
+        var initialized: usize = 0;
+        for (parsed.value.events, events) |value, *event| {
+            event.* = session_types.parseEventClassified(
+                self.client.allocator,
+                value,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => {
+                    for (events[0..initialized]) |*owned_event|
+                        owned_event.deinit(self.client.allocator);
+                    self.client.allocator.free(events);
+                    return error.OutOfMemory;
+                },
+                error.MissingField, error.MalformedFieldType => {
+                    for (events[0..initialized]) |*owned_event|
+                        owned_event.deinit(self.client.allocator);
+                    self.client.allocator.free(events);
+                    return .{ .failure = try policyFailure(
+                        failure_policy,
+                        error.InvalidSessionEvent,
+                        recordInvalidEvent,
+                        .{
+                            self.client.allocator,
+                            if (err == error.MissingField)
+                                errors.EnvelopeViolation.missing_params
+                            else
+                                errors.EnvelopeViolation.malformed_field_type,
+                            value,
+                        },
+                    ) };
+                },
+            };
+            initialized += 1;
+        }
+        return .{ .success = .{
+            .allocator = self.client.allocator,
+            .events = events,
+        } };
     }
 
     pub fn sendAndWait(
@@ -13539,6 +14242,7 @@ fn deinitTestClientRegistries(client: *Client) void {
     if (client.pending_provider_tokens) |registered| registered.deinit(client.allocator);
     for (client.events.items) |*event| event.deinit(client.allocator);
     client.events.deinit(client.allocator);
+    client.lifecycle_events.deinit();
     for (client.tools.items) |tool| tool.deinit(client.allocator);
     client.tools.deinit(client.allocator);
     client.user_input_handlers.deinit(client.allocator);
@@ -14084,5 +14788,964 @@ test "client deinit frees provider token registrations" {
             .token_provider = .{ .callback = failingProviderTokenCallback },
         }},
     );
+    client.deinit();
+}
+
+fn appendTestFrame(
+    allocator: std.mem.Allocator,
+    frames: *std.ArrayList(u8),
+    body: []const u8,
+) !void {
+    const frame = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ body.len, body },
+    );
+    defer allocator.free(frame);
+    try frames.appendSlice(allocator, frame);
+}
+
+fn deleteTestMcpAuthHandler(
+    _: std.mem.Allocator,
+    _: ext.McpAuthRequest,
+    _: ?*anyopaque,
+) !ext.McpAuthResult {
+    return .cancelled;
+}
+
+fn deleteTestToolHandler(
+    allocator: std.mem.Allocator,
+    _: []const u8,
+    _: ?*anyopaque,
+) ![]u8 {
+    return allocator.dupe(u8, "{}");
+}
+
+fn deleteTestUserInputHandler(
+    allocator: std.mem.Allocator,
+    _: session_types.UserInputRequest,
+    _: ?*anyopaque,
+) !session_types.UserInputResponse {
+    return .{
+        .answer = try allocator.dupe(u8, "answer"),
+        .was_freeform = false,
+    };
+}
+
+fn attachDeleteTestState(client: *Client, session_id: []const u8) !void {
+    try client.registerOwnedSession(
+        try client.allocator.dupe(u8, session_id),
+        .{
+            .tools = &.{.{
+                .name = "delete-test-tool",
+                .handler = deleteTestToolHandler,
+            }},
+            .on_permission_request = session_types.approveAll,
+            .on_user_input_request = deleteTestUserInputHandler,
+        },
+        &.{.{
+            .provider_name = "provider",
+            .token_provider = .{ .callback = failingProviderTokenCallback },
+        }},
+    );
+    try client.beginExtensionRuntime(
+        session_id,
+        session_types.ResumeSessionConfig{},
+        &.{},
+    );
+    try client.commitExtensionRuntime(session_id, .{}, &.{});
+    const runtime = client.findExtensionRuntime(session_id).?;
+    runtime.mcp_auth_handler = deleteTestMcpAuthHandler;
+    runtime.mcp_oauth_interest_handle =
+        try client.allocator.dupe(u8, "interest-1");
+    try client.events.append(client.allocator, .{
+        .session_id = try client.allocator.dupe(u8, session_id),
+        .event = .{ .session_idle = .{} },
+    });
+}
+
+fn expectDeleteTestState(client: *Client, session_id: []const u8, present: bool) !void {
+    const expected: usize = @intFromBool(present);
+    try std.testing.expectEqual(expected, client.session_ids.items.len);
+    try std.testing.expectEqual(expected, client.extension_runtimes.items.len);
+    try std.testing.expectEqual(expected, client.events.items.len);
+    try std.testing.expectEqual(expected, client.tools.items.len);
+    try std.testing.expectEqual(expected, client.user_input_handlers.items.len);
+    try std.testing.expectEqual(expected, client.permission_handlers.items.len);
+    try std.testing.expectEqual(expected, client.provider_tokens.items.len);
+    try std.testing.expectEqual(present, client.findExtensionRuntime(session_id) != null);
+}
+
+fn expectRequestBodies(
+    allocator: std.mem.Allocator,
+    tmp: *std.testing.TmpDir,
+    expected: []const []const u8,
+) !void {
+    const written = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "requests",
+        allocator,
+        .limited(8192),
+    );
+    defer allocator.free(written);
+    var request_reader = std.Io.Reader.fixed(written);
+    for (expected) |expected_body| {
+        const actual = try json_rpc.readFrame(allocator, &request_reader);
+        defer allocator.free(actual);
+        try std.testing.expectEqualStrings(expected_body, actual);
+    }
+    try std.testing.expectEqualStrings("", request_reader.buffered());
+}
+
+test "delete session releases interest before remote success and removes registries" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"success\":true}}",
+    );
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"success\":true}}",
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [2048]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestClientRegistries(&client);
+    try attachDeleteTestState(&client, "delete-session");
+
+    try client.deleteSession("delete-session");
+    try expectDeleteTestState(&client, "delete-session", false);
+
+    try writer.interface.flush();
+    try expectRequestBodies(allocator, &tmp, &.{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.eventLog.releaseInterest\",\"params\":{\"sessionId\":\"delete-session\",\"handle\":\"interest-1\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session.delete\",\"params\":{\"sessionId\":\"delete-session\"}}",
+    });
+}
+
+test "delete session release failure retains state and prevents delete" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"success\":false}}",
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [2048]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestClientRegistries(&client);
+    try attachDeleteTestState(&client, "delete-session");
+
+    var failure = switch (try client.deleteSessionDetailed("delete-session")) {
+        .success => return error.TestExpectedClientFailure,
+        .failure => |failure_value| failure_value,
+    };
+    defer failure.deinit();
+    try std.testing.expectEqual(error.EventInterestNotReleased, failure.native_error);
+    switch (failure.detail.client) {
+        .io => |io_failure| try std.testing.expectEqual(
+            errors.ClientOperation.callback,
+            io_failure.operation,
+        ),
+        else => return error.TestExpectedClientFailure,
+    }
+    try expectDeleteTestState(&client, "delete-session", true);
+    try std.testing.expectEqualStrings(
+        "interest-1",
+        client.findExtensionRuntime("delete-session").?.mcp_oauth_interest_handle.?,
+    );
+
+    try writer.interface.flush();
+    try expectRequestBodies(allocator, &tmp, &.{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.eventLog.releaseInterest\",\"params\":{\"sessionId\":\"delete-session\",\"handle\":\"interest-1\"}}",
+    });
+}
+
+test "delete session rejection restores interest and retains state" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    const responses = [_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"success\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"success\":false,\"error\":\"delete refused\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"handle\":\"interest-2\"}}",
+    };
+    for (responses) |body| try appendTestFrame(allocator, &frames, body);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [2048]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestClientRegistries(&client);
+    try attachDeleteTestState(&client, "delete-session");
+
+    var failure = switch (try client.deleteSessionDetailed("delete-session")) {
+        .success => return error.TestExpectedClientFailure,
+        .failure => |failure_value| failure_value,
+    };
+    defer failure.deinit();
+    try std.testing.expectEqual(error.CopilotClientError, failure.native_error);
+    switch (failure.detail.client) {
+        .operation_rejected => |rejected| {
+            try std.testing.expectEqual(errors.SessionOperation.delete, rejected.operation);
+            try std.testing.expectEqualStrings("delete refused", rejected.message.?);
+        },
+        else => return error.TestExpectedClientFailure,
+    }
+    try expectDeleteTestState(&client, "delete-session", true);
+    try std.testing.expectEqualStrings(
+        "interest-2",
+        client.findExtensionRuntime("delete-session").?.mcp_oauth_interest_handle.?,
+    );
+
+    try writer.interface.flush();
+    try expectRequestBodies(allocator, &tmp, &.{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.eventLog.releaseInterest\",\"params\":{\"sessionId\":\"delete-session\",\"handle\":\"interest-1\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session.delete\",\"params\":{\"sessionId\":\"delete-session\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"session.eventLog.registerInterest\",\"params\":{\"sessionId\":\"delete-session\",\"eventType\":\"mcp.oauth_required\"}}",
+    });
+}
+
+test "delete session transport failure removes state when restore also fails" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"success\":true}}",
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [2048]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestClientRegistries(&client);
+    try attachDeleteTestState(&client, "delete-session");
+
+    var failure = switch (try client.deleteSessionDetailed("delete-session")) {
+        .success => return error.TestExpectedClientFailure,
+        .failure => |failure_value| failure_value,
+    };
+    defer failure.deinit();
+    try std.testing.expectEqual(error.EndOfStream, failure.native_error);
+    switch (failure.detail.client) {
+        .io => |io_failure| try std.testing.expectEqual(
+            errors.ClientOperation.read,
+            io_failure.operation,
+        ),
+        else => return error.TestExpectedClientFailure,
+    }
+    try expectDeleteTestState(&client, "delete-session", false);
+
+    try writer.interface.flush();
+    try expectRequestBodies(allocator, &tmp, &.{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.eventLog.releaseInterest\",\"params\":{\"sessionId\":\"delete-session\",\"handle\":\"interest-1\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session.delete\",\"params\":{\"sessionId\":\"delete-session\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"session.eventLog.registerInterest\",\"params\":{\"sessionId\":\"delete-session\",\"eventType\":\"mcp.oauth_required\"}}",
+    });
+}
+
+test "client administration and history use exact wire requests and owned results" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    const responses = [_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"message\":\"pong-one\",\"timestamp\":\"2026-01-01T00:00:00Z\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"message\":\"pong-two\",\"timestamp\":\"2026-01-02T00:00:00Z\",\"protocolVersion\":9223372036854775808}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"version\":\"1.2.3\",\"protocolVersion\":3}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"isAuthenticated\":true,\"authType\":\"future-auth\",\"host\":\"github.com\",\"login\":\"octocat\",\"statusMessage\":\"ready\",\"future\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"sessionId\":\"last-session\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{\"success\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"sessions\":[]}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":8,\"result\":{\"sessions\":[{\"sessionId\":\"catalog-session\",\"startTime\":\"start\",\"modifiedTime\":\"modified\",\"summary\":\"summary\",\"isRemote\":false,\"context\":{\"cwd\":\"/work\",\"gitRoot\":\"/work\",\"repository\":\"owner/repo\",\"branch\":\"main\"}}]}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":9,\"result\":{\"session\":{\"sessionId\":\"metadata-session\",\"startTime\":\"start-2\",\"modifiedTime\":\"modified-2\",\"isRemote\":true}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":10,\"result\":{\"sessionId\":\"foreground-session\",\"workspacePath\":\"/ignored\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":11,\"result\":{\"success\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":12,\"result\":{\"events\":[{\"type\":\"assistant.message\",\"data\":{\"content\":\"history\",\"messageId\":\"m1\"}},{\"type\":\"future.event\",\"data\":{\"newField\":true}}]}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":13,\"result\":{\"version\":\"2.0.0\",\"protocolVersion\":4}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":14,\"result\":{\"isAuthenticated\":false}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":15,\"result\":{}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":16,\"result\":{\"success\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":17,\"result\":{\"sessions\":[]}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":18,\"result\":{}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":19,\"result\":{}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"result\":{\"success\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":21,\"result\":{\"events\":[]}}",
+    };
+    for (responses) |body| try appendTestFrame(allocator, &frames, body);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [8192]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [8192]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestClientRegistries(&client);
+
+    var first_ping = try client.ping(null);
+    defer first_ping.deinit();
+    try std.testing.expectEqualStrings("pong-one", first_ping.message);
+    try std.testing.expect(first_ping.protocol_version == null);
+
+    var second_ping = switch (try client.pingDetailed("hello")) {
+        .success => |value| value,
+        .failure => |failure_value| {
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    };
+    defer second_ping.deinit();
+    try std.testing.expectEqual(@as(?u64, 9_223_372_036_854_775_808), second_ping.protocol_version);
+
+    var status = try client.getStatus();
+    defer status.deinit();
+    try std.testing.expectEqualStrings("1.2.3", status.version);
+
+    var auth = try client.getAuthStatus();
+    defer auth.deinit();
+    try std.testing.expectEqualStrings("future-auth", auth.auth_type.?);
+    try std.testing.expectEqualStrings("octocat", auth.login.?);
+
+    var last_id = (try client.getLastSessionId()).?;
+    defer last_id.deinit();
+    try std.testing.expectEqualStrings("last-session", last_id.value);
+
+    try client.deleteSession("delete-session");
+
+    var empty_catalog = try client.listSessions(null);
+    defer empty_catalog.deinit();
+    try std.testing.expectEqual(@as(usize, 0), empty_catalog.sessions.len);
+
+    var catalog = try client.listSessions(.{
+        .cwd = "/work",
+        .git_root = "/work",
+        .repository = "owner/repo",
+        .branch = "main",
+    });
+    defer catalog.deinit();
+    try std.testing.expectEqualStrings("catalog-session", catalog.sessions[0].session_id);
+    try std.testing.expectEqualStrings("owner/repo", catalog.sessions[0].context.?.repository.?);
+
+    var metadata = (try client.getSessionMetadata("metadata-session")).?;
+    defer metadata.deinit();
+    try std.testing.expectEqualStrings("modified-2", metadata.modified_time);
+    try std.testing.expect(metadata.context == null);
+
+    var foreground = (try client.getForegroundSessionId()).?;
+    defer foreground.deinit();
+    try std.testing.expectEqualStrings("foreground-session", foreground.value);
+
+    try client.setForegroundSessionId("new-foreground");
+
+    var history = try (Session{ .client = &client, .id = "history-session" }).getEvents();
+    defer history.deinit();
+    try std.testing.expectEqual(@as(usize, 2), history.events.len);
+    try std.testing.expectEqualStrings("history", history.events[0].assistant_message.content);
+    try std.testing.expectEqualStrings("future.event", history.events[1].unknown.event_type);
+
+    var detailed_status = switch (try client.getStatusDetailed()) {
+        .success => |value| value,
+        .failure => |failure_value| {
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    };
+    defer detailed_status.deinit();
+    var detailed_auth = switch (try client.getAuthStatusDetailed()) {
+        .success => |value| value,
+        .failure => |failure_value| {
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    };
+    defer detailed_auth.deinit();
+    try std.testing.expect(!detailed_auth.is_authenticated);
+    try std.testing.expect(detailed_auth.auth_type == null);
+    const detailed_last = switch (try client.getLastSessionIdDetailed()) {
+        .success => |value| value,
+        .failure => |failure_value| {
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    };
+    try std.testing.expect(detailed_last == null);
+    switch (try client.deleteSessionDetailed("delete-detailed")) {
+        .success => {},
+        .failure => |failure_value| {
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    }
+    var detailed_catalog = switch (try client.listSessionsDetailed(.{
+        .repository = "owner/repo",
+    })) {
+        .success => |value| value,
+        .failure => |failure_value| {
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    };
+    defer detailed_catalog.deinit();
+    const detailed_metadata = switch (try client.getSessionMetadataDetailed("missing")) {
+        .success => |value| value,
+        .failure => |failure_value| {
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    };
+    try std.testing.expect(detailed_metadata == null);
+    const detailed_foreground = switch (try client.getForegroundSessionIdDetailed()) {
+        .success => |value| value,
+        .failure => |failure_value| {
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    };
+    try std.testing.expect(detailed_foreground == null);
+    switch (try client.setForegroundSessionIdDetailed("foreground-detailed")) {
+        .success => {},
+        .failure => |failure_value| {
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    }
+    var detailed_history = switch (try (Session{
+        .client = &client,
+        .id = "history-detailed",
+    }).getEventsDetailed()) {
+        .success => |value| value,
+        .failure => |failure_value| {
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    };
+    defer detailed_history.deinit();
+
+    try writer.interface.flush();
+    const written = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "requests",
+        allocator,
+        .limited(32 * 1024),
+    );
+    defer allocator.free(written);
+    var request_reader = std.Io.Reader.fixed(written);
+    const expected = [_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"params\":{}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\",\"params\":{\"message\":\"hello\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"status.get\",\"params\":{}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"auth.getStatus\",\"params\":{}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"session.getLastId\",\"params\":{}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"session.delete\",\"params\":{\"sessionId\":\"delete-session\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"session.list\",\"params\":{}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"session.list\",\"params\":{\"filter\":{\"cwd\":\"/work\",\"gitRoot\":\"/work\",\"repository\":\"owner/repo\",\"branch\":\"main\"}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"session.getMetadata\",\"params\":{\"sessionId\":\"metadata-session\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"session.getForeground\",\"params\":{}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"session.setForeground\",\"params\":{\"sessionId\":\"new-foreground\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"session.getMessages\",\"params\":{\"sessionId\":\"history-session\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"status.get\",\"params\":{}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"auth.getStatus\",\"params\":{}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"session.getLastId\",\"params\":{}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"session.delete\",\"params\":{\"sessionId\":\"delete-detailed\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"session.list\",\"params\":{\"filter\":{\"repository\":\"owner/repo\"}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":18,\"method\":\"session.getMetadata\",\"params\":{\"sessionId\":\"missing\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":19,\"method\":\"session.getForeground\",\"params\":{}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"session.setForeground\",\"params\":{\"sessionId\":\"foreground-detailed\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"session.getMessages\",\"params\":{\"sessionId\":\"history-detailed\"}}",
+    };
+    for (expected) |expected_body| {
+        const actual = try json_rpc.readFrame(allocator, &request_reader);
+        defer allocator.free(actual);
+        try std.testing.expectEqualStrings(expected_body, actual);
+    }
+    try std.testing.expectEqualStrings("", request_reader.buffered());
+}
+
+test "session operation rejection is owned and legacy methods collapse it" {
+    std.debug.print("\nCENSUS_PROBE client_operation_rejection\n", .{});
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"success\":false,\"error\":\"delete refused\"}}",
+    );
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"success\":false,\"error\":\"foreground refused\"}}",
+    );
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"success\":false}}",
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [2048]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+
+    var delete_failure = switch (try client.deleteSessionDetailed("delete-me")) {
+        .success => return error.TestExpectedClientFailure,
+        .failure => |failure| failure,
+    };
+    defer delete_failure.deinit();
+    try std.testing.expectEqual(error.CopilotClientError, delete_failure.native_error);
+    try std.testing.expectEqual(error.ClientFailure, delete_failure.errorTag());
+    switch (delete_failure.detail.client) {
+        .operation_rejected => |rejected| {
+            try std.testing.expectEqual(errors.SessionOperation.delete, rejected.operation);
+            try std.testing.expectEqualStrings("delete-me", rejected.session_id);
+            try std.testing.expectEqualStrings("delete refused", rejected.message.?);
+        },
+        else => return error.TestExpectedClientFailure,
+    }
+
+    var foreground_failure = switch (try client.setForegroundSessionIdDetailed("foreground-me")) {
+        .success => return error.TestExpectedClientFailure,
+        .failure => |failure| failure,
+    };
+    defer foreground_failure.deinit();
+    switch (foreground_failure.detail.client) {
+        .operation_rejected => |rejected| {
+            try std.testing.expectEqual(errors.SessionOperation.set_foreground, rejected.operation);
+            try std.testing.expectEqualStrings("foreground-me", rejected.session_id);
+            try std.testing.expectEqualStrings("foreground refused", rejected.message.?);
+        },
+        else => return error.TestExpectedClientFailure,
+    }
+
+    try std.testing.expectError(error.CopilotClientError, client.deleteSession("legacy"));
+}
+
+test "all three read loops share lifecycle and session event routing" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    const messages = [_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.lifecycle\",\"params\":{\"type\":\"session.created\",\"sessionId\":\"created-session\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"message\":\"ok\",\"timestamp\":\"now\"}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.lifecycle\",\"params\":{\"type\":\"session.updated\",\"sessionId\":\"updated-session\",\"metadata\":null}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.event\",\"params\":{\"sessionId\":\"event-session\",\"event\":{\"type\":\"session.idle\",\"data\":{}}}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.event\",\"params\":{\"sessionId\":\"event-session\",\"event\":{\"type\":\"assistant.message\",\"data\":{\"content\":\"queued\",\"messageId\":\"m2\"}}}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.lifecycle\",\"params\":{\"type\":\"future.lifecycle\",\"sessionId\":\"future-session\",\"metadata\":{\"startTime\":\"start\",\"modifiedTime\":\"modified\",\"summary\":\"future\"},\"additive\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.lifecycle\",\"params\":{\"type\":\"session.deleted\",\"sessionId\":\"deleted-session\"}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.lifecycle\",\"params\":{\"type\":\"session.foreground\",\"sessionId\":\"foreground-session\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"events\":[{\"type\":\"assistant.message\",\"data\":{\"content\":\"queued\",\"messageId\":\"m2\"}}]}}",
+    };
+    for (messages) |body| try appendTestFrame(allocator, &frames, body);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestClientRegistries(&client);
+
+    var ping_result = try client.ping(null);
+    defer ping_result.deinit();
+    var from_call = try client.nextLifecycleEvent();
+    defer from_call.deinit();
+    try std.testing.expect(from_call.event.event_type == .created);
+    try std.testing.expectEqualStrings("created-session", from_call.event.session_id);
+
+    const session = Session{ .client = &client, .id = "event-session" };
+    var idle = try session.nextEvent();
+    defer idle.deinit(allocator);
+    try std.testing.expect(idle == .session_idle);
+    var from_session = try client.nextLifecycleEvent();
+    defer from_session.deinit();
+    try std.testing.expect(from_session.event.event_type == .updated);
+
+    var from_lifecycle = try client.nextLifecycleEvent();
+    defer from_lifecycle.deinit();
+    try std.testing.expect(from_lifecycle.event.event_type == .unknown);
+    try std.testing.expectEqualStrings(
+        "future.lifecycle",
+        from_lifecycle.event.event_type.unknown,
+    );
+    try std.testing.expectEqualStrings(
+        "modified",
+        from_lifecycle.event.metadata.?.modified_time,
+    );
+
+    var deleted = try client.nextLifecycleEvent();
+    defer deleted.deinit();
+    try std.testing.expect(deleted.event.event_type == .deleted);
+    var foreground = try client.nextLifecycleEvent();
+    defer foreground.deinit();
+    try std.testing.expect(foreground.event.event_type == .foreground);
+
+    var queued = try session.nextEvent();
+    defer queued.deinit(allocator);
+    try std.testing.expectEqualStrings("queued", queued.assistant_message.content);
+
+    var history = try session.getEvents();
+    defer history.deinit();
+    try std.testing.expectEqual(std.meta.activeTag(queued), std.meta.activeTag(history.events[0]));
+    try std.testing.expectEqualStrings(
+        queued.assistant_message.content,
+        history.events[0].assistant_message.content,
+    );
+}
+
+test "lifecycle overflow through an RPC preserves prefix marker and next epoch" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    for (0..admin.lifecycle_queue_capacity + 2) |index| {
+        const body = try std.fmt.allocPrint(
+            allocator,
+            "{{\"jsonrpc\":\"2.0\",\"method\":\"session.lifecycle\",\"params\":{{\"type\":\"session.created\",\"sessionId\":\"s-{d}\"}}}}",
+            .{index},
+        );
+        defer allocator.free(body);
+        try appendTestFrame(allocator, &frames, body);
+    }
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"message\":\"ok\",\"timestamp\":\"now\"}}",
+    );
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.lifecycle\",\"params\":{\"type\":\"session.background\",\"sessionId\":\"next-epoch\"}}",
+    );
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.lifecycle\",\"params\":{\"type\":\"session.created\",\"sessionId\":\"saturated-drop\"}}",
+    );
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"message\":\"again\",\"timestamp\":\"later\"}}",
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [8192]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestClientRegistries(&client);
+
+    var pong = try client.ping(null);
+    defer pong.deinit();
+    for (0..admin.lifecycle_queue_capacity) |index| {
+        var delivery = try client.nextLifecycleEvent();
+        defer delivery.deinit();
+        const expected = try std.fmt.allocPrint(allocator, "s-{d}", .{index});
+        defer allocator.free(expected);
+        try std.testing.expectEqualStrings(expected, delivery.event.session_id);
+    }
+    const overflow = try client.nextLifecycleEvent();
+    try std.testing.expectEqual(@as(usize, 2), overflow.overflow.dropped_count);
+    var next = try client.nextLifecycleEvent();
+    defer next.deinit();
+    try std.testing.expectEqualStrings("next-epoch", next.event.session_id);
+
+    client.lifecycle_events.dropped_count = std.math.maxInt(usize);
+    var second_pong = try client.ping(null);
+    defer second_pong.deinit();
+    const saturated = try client.nextLifecycleEvent();
+    try std.testing.expectEqual(
+        std.math.maxInt(usize),
+        saturated.overflow.dropped_count,
+    );
+}
+
+test "lifecycle malformed payload and saturated loss retain detailed classification" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.lifecycle\",\"params\":{\"type\":\"session.created\",\"sessionId\":7}}",
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestClientRegistries(&client);
+
+    var failure = switch (try client.nextLifecycleEventDetailed()) {
+        .success => |delivery_value| {
+            var delivery = delivery_value;
+            delivery.deinit();
+            return error.TestExpectedProtocolFailure;
+        },
+        .failure => |failure_value| failure_value,
+    };
+    defer failure.deinit();
+    try std.testing.expectEqual(error.InvalidSessionEvent, failure.native_error);
+    switch (failure.detail) {
+        .protocol => |protocol_failure| switch (protocol_failure) {
+            .invalid_envelope => |invalid| try std.testing.expectEqual(
+                errors.EnvelopeViolation.malformed_field_type,
+                invalid.reason,
+            ),
+            else => return error.TestExpectedProtocolFailure,
+        },
+        else => return error.TestExpectedProtocolFailure,
+    }
+}
+
+test "getEvents cleans a parsed prefix and classifies malformed history" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"events\":[{\"type\":\"assistant.message\",\"data\":{\"content\":\"valid\",\"messageId\":\"m1\"}},{\"type\":\"assistant.message\",\"data\":{\"content\":7}}]}}",
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [2048]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestClientRegistries(&client);
+
+    var failure = switch (try (Session{
+        .client = &client,
+        .id = "history-session",
+    }).getEventsDetailed()) {
+        .success => |history_value| {
+            var history = history_value;
+            history.deinit();
+            return error.TestExpectedProtocolFailure;
+        },
+        .failure => |failure_value| failure_value,
+    };
+    defer failure.deinit();
+    try std.testing.expectEqual(error.InvalidSessionEvent, failure.native_error);
+    switch (failure.detail) {
+        .protocol => |protocol_failure| switch (protocol_failure) {
+            .invalid_envelope => |invalid| try std.testing.expectEqual(
+                errors.EnvelopeViolation.malformed_field_type,
+                invalid.reason,
+            ),
+            else => return error.TestExpectedProtocolFailure,
+        },
+        else => return error.TestExpectedProtocolFailure,
+    }
+}
+
+test "Client.deinit releases queued lifecycle ownership" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const input_file = try tmp.dir.createFile(std.testing.io, "input", .{ .read = true });
+    defer input_file.close(std.testing.io);
+    const output_file = try tmp.dir.createFile(std.testing.io, "output", .{});
+    defer output_file.close(std.testing.io);
+    const reader_buffer = try allocator.alloc(u8, 64);
+    const writer_buffer = try allocator.alloc(u8, 64);
+    const reader = try allocator.create(std.Io.File.Reader);
+    const writer = try allocator.create(std.Io.File.Writer);
+    reader.* = input_file.readerStreaming(std.testing.io, reader_buffer);
+    writer.* = output_file.writer(std.testing.io, writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = reader,
+        .writer = writer,
+        .reader_buffer = reader_buffer,
+        .writer_buffer = writer_buffer,
+    };
+    client.lifecycle_events.push(.{
+        .allocator = allocator,
+        .event_type = .{ .unknown = try allocator.dupe(u8, "future") },
+        .session_id = try allocator.dupe(u8, "session"),
+        .metadata = .{
+            .allocator = allocator,
+            .start_time = try allocator.dupe(u8, "start"),
+            .modified_time = try allocator.dupe(u8, "modified"),
+            .summary = try allocator.dupe(u8, "summary"),
+        },
+    });
     client.deinit();
 }

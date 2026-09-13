@@ -51,6 +51,7 @@ json_conversion	client	encode request or decode result
 invalid_config	client	create or resume session
 connect_rejected	client	connect
 reentrant_rpc	client	call RPC from callback
+client_operation_rejected	client	delete or select foreground session
 unsupported_protocol_version	protocol_version	connect
 invalid_protocol_version	protocol_version	connect
 root_sdk_error_export	public_api	import copilot_sdk root module
