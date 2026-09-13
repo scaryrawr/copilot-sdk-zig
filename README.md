@@ -152,7 +152,11 @@ canvas state. Configuration is validated before a lifecycle RPC.
 MCP OAuth uses the pinned runtime's real flow: set
 `mcp.on_auth_request`, receive `mcp.oauth_required`, and return an allocated
 token or cancellation. Select `.oauth_token_storage = .persistent` to request
-OS-keychain storage; the default is runtime-owned in-memory storage.
+OS-keychain storage; the default is runtime-owned in-memory storage. The SDK
+handles the event on receipt and keeps it queued. Its `automatic_handling`
+field distinguishes handler failure, invalid token output, and response
+delivery failure. Only an explicit `.cancelled` callback result sends the
+protocol cancellation response.
 
 Canvas and MCP Apps methods fail closed until the create/resume response
 advertises their capability. Capability state is `unknown`, `unsupported`, or
@@ -464,7 +468,10 @@ When `session.capabilities().supports(.elicitation)` is true, `session.ui()`
 provides `elicitation`, `confirm`, `select`, and `input`. `select` and `input`
 return caller-owned strings that must be freed with the client allocator.
 `input` validates defaults and accepted values against the configured character
-limits and the `email`, `uri`, `date`, or `date-time` format.
+limits and the `email`, `uri`, `date`, or `date-time` format. Email validation
+uses an ASCII dot-atom local part and DNS-style domain labels. Quoted addresses,
+Unicode addresses, local parts over 64 bytes, labels over 63 bytes, domains over
+253 bytes, and complete addresses over 254 bytes are rejected.
 
 ## GitHub authentication and remote sessions
 
@@ -473,6 +480,10 @@ provider receives a typed `.initial` or `.refresh` reason and returns either
 `.cancelled` or an owned token. Token bytes and an optional token type must be
 allocated with the callback allocator; the SDK wipes and frees both after every
 outcome. `expires_in_seconds` must be at least 3601.
+
+Before a server-assigned cloud session ID exists, `gitHubToken.getToken` may
+omit `sessionId` and is routed only by its opaque registration ID. After the
+runtime is bound, both the registration ID and exact session ID are required.
 
 ```zig
 const session = try client.createSession(.{

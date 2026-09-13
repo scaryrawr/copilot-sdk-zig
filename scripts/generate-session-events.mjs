@@ -90,6 +90,15 @@ const richOverrides = new Map([
     ],
     methods: [],
   }],
+  ["mcp.oauth_required", {
+    payload: "McpOauthRequired",
+    parser: "parseMcpOauthRequired",
+    fields: [
+      "    automatic_handling: payloads.AutomaticInteractionHandling = .not_configured,",
+      "    raw: payloads.RawEvent = .{},",
+    ],
+    methods: [],
+  }],
   ["permission.requested", {
     payload: "PermissionRequested",
     parser: "parsePermissionRequested",

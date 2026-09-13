@@ -3391,7 +3391,6 @@ pub const HookStartEventPayload = OwnedPayload(HookStartData, wipeHookStartData)
 pub const McpHeadersRefreshCompletedEventPayload = OwnedPayload(McpHeadersRefreshCompletedData, wipeMcpHeadersRefreshCompletedData);
 pub const McpHeadersRefreshRequiredEventPayload = OwnedPayload(McpHeadersRefreshRequiredData, wipeMcpHeadersRefreshRequiredData);
 pub const McpOauthCompletedEventPayload = OwnedPayload(McpOauthCompletedData, wipeMcpOauthCompletedData);
-pub const McpOauthRequiredEventPayload = OwnedPayload(McpOauthRequiredData, wipeMcpOauthRequiredData);
 pub const McpPromptsListChangedEventPayload = OwnedPayload(McpListChangedData, wipeMcpListChangedData);
 pub const McpResourcesListChangedEventPayload = OwnedPayload(McpListChangedData, wipeMcpListChangedData);
 pub const McpToolsListChangedEventPayload = OwnedPayload(McpListChangedData, wipeMcpListChangedData);
@@ -3673,6 +3672,32 @@ pub const ExternalToolRequested = struct {
     }
 };
 
+pub const McpOauthRequired = struct {
+    request_id: []const u8,
+    server_name: []const u8,
+    server_url: []const u8,
+    static_client_config: ?McpOauthRequiredStaticClientConfig = null,
+    www_authenticate_params: ?McpOauthWWWAuthenticateParams = null,
+    http_response: ?McpOauthHttpResponse = null,
+    resource_metadata: ?[]const u8 = null,
+    reason: McpOauthRequestReason,
+    automatic_handling: payloads.AutomaticInteractionHandling = .not_configured,
+    raw: payloads.RawEvent = .{},
+    arena: ?std.heap.ArenaAllocator = null,
+
+    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        var owned = self;
+        if (owned.arena) |*arena| {
+            wipeMcpOauthRequiredDataFields(&owned);
+            arena.deinit();
+        } else {
+            freeMcpOauthRequiredDataFields(&owned, allocator);
+        }
+
+        owned.raw.deinit(allocator);
+    }
+};
+
 pub const PermissionRequested = struct {
     request_id: []const u8,
     permission_request: ?PermissionRequest = null,
@@ -3811,7 +3836,7 @@ pub const SessionEvent = union(enum) {
     mcp_headers_refresh_completed: McpHeadersRefreshCompletedEventPayload,
     mcp_headers_refresh_required: McpHeadersRefreshRequiredEventPayload,
     mcp_oauth_completed: McpOauthCompletedEventPayload,
-    mcp_oauth_required: McpOauthRequiredEventPayload,
+    mcp_oauth_required: McpOauthRequired,
     mcp_prompts_list_changed: McpPromptsListChangedEventPayload,
     mcp_resources_list_changed: McpResourcesListChangedEventPayload,
     mcp_tools_list_changed: McpToolsListChangedEventPayload,
@@ -4101,7 +4126,7 @@ pub const SessionEvent = union(enum) {
             .mcp_headers_refresh_completed => |value| value.data_json,
             .mcp_headers_refresh_required => |value| value.data_json,
             .mcp_oauth_completed => |value| value.data_json,
-            .mcp_oauth_required => |value| value.data_json,
+            .mcp_oauth_required => |value| value.raw.data_json,
             .mcp_prompts_list_changed => |value| value.data_json,
             .mcp_resources_list_changed => |value| value.data_json,
             .mcp_tools_list_changed => |value| value.data_json,
@@ -29441,6 +29466,25 @@ fn wipeExternalToolRequestedDataFields(value: *ExternalToolRequested) void {
     }
 }
 
+fn wipeMcpOauthRequiredDataFields(value: *McpOauthRequired) void {
+    wipeString(value.request_id);
+    wipeString(value.server_name);
+    wipeString(value.server_url);
+    if (value.static_client_config) |*present| {
+        wipeMcpOauthRequiredStaticClientConfig(&present.*);
+    }
+    if (value.www_authenticate_params) |*present| {
+        wipeMcpOauthWWWAuthenticateParams(&present.*);
+    }
+    if (value.http_response) |*present| {
+        wipeMcpOauthHttpResponse(&present.*);
+    }
+    if (value.resource_metadata) |*present| {
+        wipeString(present.*);
+    }
+    wipeMcpOauthRequestReason(&value.reason);
+}
+
 fn wipePermissionRequestedDataFields(value: *PermissionRequested) void {
     wipeString(value.request_id);
     if (value.permission_request) |*present| {
@@ -29675,6 +29719,32 @@ fn freeExternalToolRequestedDataFields(
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+}
+
+fn freeMcpOauthRequiredDataFields(
+    value: *McpOauthRequired,
+    allocator: std.mem.Allocator,
+) void {
+    wipeString(value.request_id);
+    allocator.free(@constCast(value.request_id));
+    wipeString(value.server_name);
+    allocator.free(@constCast(value.server_name));
+    wipeString(value.server_url);
+    allocator.free(@constCast(value.server_url));
+    if (value.static_client_config) |*present| {
+        freeMcpOauthRequiredStaticClientConfig(&present.*, allocator);
+    }
+    if (value.www_authenticate_params) |*present| {
+        freeMcpOauthWWWAuthenticateParams(&present.*, allocator);
+    }
+    if (value.http_response) |*present| {
+        freeMcpOauthHttpResponse(&present.*, allocator);
+    }
+    if (value.resource_metadata) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    freeMcpOauthRequestReason(&value.reason, allocator);
 }
 
 fn freePermissionRequestedDataFields(
@@ -29937,6 +30007,31 @@ fn parseExternalToolRequested(
         .traceparent = parsed.traceparent,
         .tracestate = parsed.tracestate,
         .arguments_json = helper_json,
+        .raw = raw.take(),
+        .arena = arena,
+    };
+}
+
+fn parseMcpOauthRequired(
+    allocator: std.mem.Allocator,
+    data: std.json.ObjectMap,
+    raw: *payloads.RawEvent,
+) !McpOauthRequired {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    var parsed = try parseMcpOauthRequiredData(arena.allocator(), .{ .object = data });
+    errdefer wipeMcpOauthRequiredData(&parsed);
+
+    return .{
+        .request_id = parsed.request_id,
+        .server_name = parsed.server_name,
+        .server_url = parsed.server_url,
+        .static_client_config = parsed.static_client_config,
+        .www_authenticate_params = parsed.www_authenticate_params,
+        .http_response = parsed.http_response,
+        .resource_metadata = parsed.resource_metadata,
+        .reason = parsed.reason,
+
         .raw = raw.take(),
         .arena = arena,
     };
@@ -30576,16 +30671,7 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
                 .arena = arena,
             } };
         },
-        .mcp_oauth_required => {
-            var arena = std.heap.ArenaAllocator.init(allocator);
-            errdefer arena.deinit();
-            const typed = try parseMcpOauthRequiredData(arena.allocator(), data_value);
-            return .{ .mcp_oauth_required = .{
-                .data = typed,
-                .data_json = raw.takeData(),
-                .arena = arena,
-            } };
-        },
+        .mcp_oauth_required => return .{ .mcp_oauth_required = try parseMcpOauthRequired(allocator, data, &raw) },
         .mcp_prompts_list_changed => {
             var arena = std.heap.ArenaAllocator.init(allocator);
             errdefer arena.deinit();

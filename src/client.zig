@@ -133,6 +133,57 @@ const RuntimeCommand = struct {
     context: ?*anyopaque,
 };
 
+const WireMcpOAuthInterest = struct {
+    handle: []const u8,
+};
+
+const OwnedMcpOAuthInterest = struct {
+    response: std.json.Parsed(WireMcpOAuthInterest),
+
+    fn handle(self: *const OwnedMcpOAuthInterest) []const u8 {
+        return self.response.value.handle;
+    }
+
+    fn deinitSecure(self: *OwnedMcpOAuthInterest) void {
+        wipeSecret(self.response.value.handle);
+        self.response.deinit();
+        self.* = undefined;
+    }
+};
+
+const McpOAuthInterest = union(enum) {
+    none,
+    registering: enum {
+        initial,
+        restore,
+    },
+    registered: OwnedMcpOAuthInterest,
+    releasing: OwnedMcpOAuthInterest,
+    restore_required,
+};
+
+const McpOAuthRuntimeLocation = union(enum) {
+    pending,
+    committed,
+    external: *SessionExtensionRuntime,
+};
+
+fn testMcpOAuthInterest(
+    allocator: std.mem.Allocator,
+    handle: []const u8,
+) !McpOAuthInterest {
+    const json = try std.fmt.allocPrint(allocator, "{{\"handle\":\"{s}\"}}", .{handle});
+    defer allocator.free(json);
+    return .{ .registered = .{
+        .response = try std.json.parseFromSlice(
+            WireMcpOAuthInterest,
+            allocator,
+            json,
+            .{ .allocate = .alloc_always },
+        ),
+    } };
+}
+
 const SessionExtensionRuntime = struct {
     session_id: ?[]u8 = null,
     hooks: ext.SessionHooks,
@@ -160,7 +211,7 @@ const SessionExtensionRuntime = struct {
     provider_tokens: ?[]RegisteredProviderToken = null,
     credentials_quarantined: bool = false,
     granted_environment_variables: std.ArrayList(ext.EnvironmentGrant) = .empty,
-    mcp_oauth_interest_handle: ?[]u8 = null,
+    mcp_oauth_interest: McpOAuthInterest = .none,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -288,7 +339,10 @@ const SessionExtensionRuntime = struct {
             allocator.free(grant.value);
         }
         self.granted_environment_variables.deinit(allocator);
-        if (self.mcp_oauth_interest_handle) |handle| allocator.free(handle);
+        switch (self.mcp_oauth_interest) {
+            .registered, .releasing => |*interest| interest.deinitSecure(),
+            .none, .registering, .restore_required => {},
+        }
     }
 
     fn quarantineCredentials(self: *SessionExtensionRuntime, allocator: std.mem.Allocator) void {
@@ -302,6 +356,8 @@ const SessionExtensionRuntime = struct {
             self.git_hub_token_registration_id = null;
         }
         self.git_hub_token_provider = null;
+        self.mcp_auth_handler = null;
+        self.mcp_auth_context = null;
         self.credentials_quarantined = true;
     }
 };
@@ -663,8 +719,13 @@ pub const Client = struct {
         if (self.pending_extension_runtime) |*runtime| {
             self.releaseMcpOAuthInterest(runtime) catch {};
         }
-        for (self.extension_runtimes.items) |*runtime| {
-            self.releaseMcpOAuthInterest(runtime) catch {};
+        var remaining_runtimes = self.extension_runtimes.items.len;
+        while (remaining_runtimes > 0) {
+            remaining_runtimes -= 1;
+            if (remaining_runtimes >= self.extension_runtimes.items.len) continue;
+            self.releaseMcpOAuthInterest(
+                &self.extension_runtimes.items[remaining_runtimes],
+            ) catch {};
         }
         for (self.events.items) |*event| event.deinit(self.allocator);
         self.events.deinit(self.allocator);
@@ -803,24 +864,40 @@ pub const Client = struct {
             &extension_values,
             prepared_providers,
         );
-        const parsed = try self.call(
+        var detach_on_error: ?[]const u8 = owned_session_id;
+        var lifecycle_rpc_dispatched = false;
+        errdefer {
+            self.quarantinePendingCredentials();
+            if (lifecycle_rpc_dispatched) {
+                if (detach_on_error) |session_id| self.detachSessionBestEffort(session_id);
+            }
+        }
+        lifecycle_rpc_dispatched = true;
+        var rpc_rejected = false;
+        const parsed = self.callTrackingRpcRejection(
             WireSessionLifecycleResponse,
             "session.create",
             request,
-        );
+            &rpc_rejected,
+        ) catch |err| {
+            if (rpc_rejected) lifecycle_rpc_dispatched = false;
+            return err;
+        };
         defer {
             wipeLifecycleResponseSecrets(parsed.value);
             parsed.deinit();
         }
-        var detach_on_error: ?[]const u8 = null;
+        var response_detach_on_error: ?[]const u8 = null;
         errdefer {
             self.quarantinePendingCredentials();
-            if (detach_on_error) |session_id| self.detachSessionBestEffort(session_id);
+            if (response_detach_on_error) |session_id|
+                self.detachSessionBestEffort(session_id);
         }
         const returned_id = parsed.value.sessionId orelse return error.MissingSessionId;
         if (owned_session_id) |session_id| if (!std.mem.eql(u8, session_id, returned_id)) {
             if (!self.hasSession(returned_id)) {
-                detach_on_error = returned_id;
+                detach_on_error = null;
+                response_detach_on_error = returned_id;
             }
             return error.SessionIdMismatch;
         };
@@ -829,16 +906,15 @@ pub const Client = struct {
         if (server_assigned) {
             if (returned_id.len == 0 or self.hasSession(returned_id))
                 return error.InvalidServerAssignedSessionId;
-            detach_on_error = returned_id;
+            response_detach_on_error = returned_id;
             const copy = try self.allocator.dupe(u8, returned_id);
             self.session_ids.append(self.allocator, copy) catch |err| {
                 self.allocator.free(copy);
                 return err;
             };
             adopted_session_id = copy;
+            detach_on_error = null;
             try self.bindPendingRuntimeSessionId(copy);
-        } else {
-            detach_on_error = returned_id;
         }
         errdefer if (adopted_session_id) |session_id| self.removeSession(session_id);
         try self.applyExtensionRuntimeResponse(parsed.value, &.{});
@@ -932,27 +1008,48 @@ pub const Client = struct {
             requested_environment_variables,
             prepared_providers,
         );
-        const parsed = try self.call(WireSessionLifecycleResponse, "session.resume", request);
+        var detach_on_error: ?[]const u8 =
+            if (existing_session_id == null) runtime_session_id else null;
+        var quarantine_on_error = true;
+        var lifecycle_rpc_dispatched = false;
+        errdefer {
+            if (quarantine_on_error)
+                self.quarantineSessionCredentials(runtime_session_id);
+            if (lifecycle_rpc_dispatched) {
+                if (detach_on_error) |detached_session_id|
+                    self.detachSessionBestEffort(detached_session_id);
+            }
+        }
+        lifecycle_rpc_dispatched = true;
+        var rpc_rejected = false;
+        const parsed = self.callTrackingRpcRejection(
+            WireSessionLifecycleResponse,
+            "session.resume",
+            request,
+            &rpc_rejected,
+        ) catch |err| {
+            if (rpc_rejected) lifecycle_rpc_dispatched = false;
+            return err;
+        };
         defer {
             wipeLifecycleResponseSecrets(parsed.value);
             parsed.deinit();
         }
-        var detach_on_error: ?[]const u8 = null;
-        var quarantine_on_error = true;
+        var response_detach_on_error: ?[]const u8 = null;
         errdefer {
             if (quarantine_on_error)
                 self.quarantineSessionCredentials(runtime_session_id);
-            if (detach_on_error) |detached_session_id|
+            if (response_detach_on_error) |detached_session_id|
                 self.detachSessionBestEffort(detached_session_id);
         }
         const returned_id = parsed.value.sessionId orelse return error.MissingSessionId;
         if (!std.mem.eql(u8, runtime_session_id, returned_id)) {
             if (!self.hasSession(returned_id)) {
-                detach_on_error = returned_id;
+                detach_on_error = null;
+                response_detach_on_error = returned_id;
             }
             return error.SessionIdMismatch;
         }
-        if (existing_session_id == null) detach_on_error = returned_id;
 
         try self.applyExtensionRuntimeResponse(parsed.value, requested_environment_variables);
         try self.updateStableSessionOptions(returned_id, config);
@@ -1047,7 +1144,7 @@ pub const Client = struct {
     fn rollbackExtensionRuntime(self: *Client) void {
         self.quarantinePendingCredentials();
         if (self.pending_extension_runtime) |*runtime| {
-            std.debug.assert(runtime.mcp_oauth_interest_handle == null);
+            std.debug.assert(runtime.mcp_oauth_interest == .none);
             runtime.deinit(self.allocator);
         }
         self.pending_extension_runtime = null;
@@ -1171,7 +1268,7 @@ pub const Client = struct {
                 std.mem.eql(u8, existing.session_id.?, session_id))
             {
                 if (runtime.mcp_auth_handler != null and
-                    existing.mcp_oauth_interest_handle == null)
+                    existing.mcp_oauth_interest == .none)
                 {
                     try self.registerMcpOAuthInterest(runtime);
                 }
@@ -1192,16 +1289,18 @@ pub const Client = struct {
             if (existing.session_id != null and
                 std.mem.eql(u8, existing.session_id.?, session_id))
             {
-                if (existing.mcp_oauth_interest_handle != null and
-                    runtime.mcp_oauth_interest_handle == null)
-                {
-                    if (runtime.mcp_auth_handler == null) {
-                        self.releaseMcpOAuthInterest(existing) catch
-                            return error.EventInterestNotReleased;
-                    } else {
-                        runtime.mcp_oauth_interest_handle =
-                            existing.mcp_oauth_interest_handle;
-                        existing.mcp_oauth_interest_handle = null;
+                if (runtime.mcp_auth_handler == null) {
+                    self.releaseMcpOAuthInterest(existing) catch
+                        return error.EventInterestNotReleased;
+                } else if (runtime.mcp_oauth_interest == .none) {
+                    switch (existing.mcp_oauth_interest) {
+                        .registered => |interest| {
+                            runtime.mcp_oauth_interest = .{ .registered = interest };
+                            existing.mcp_oauth_interest = .none;
+                        },
+                        .restore_required => return error.EventInterestRestoreRequired,
+                        .registering, .releasing => return error.EventInterestOperationInProgress,
+                        .none => {},
                     }
                 }
                 const replacement = self.pending_extension_runtime.?;
@@ -1220,45 +1319,140 @@ pub const Client = struct {
         self: *Client,
         runtime: *SessionExtensionRuntime,
     ) !void {
-        if (runtime.mcp_oauth_interest_handle != null) return;
+        if (runtime.mcp_oauth_interest == .registered) return;
+        const prior_state: @TypeOf(@as(McpOAuthInterest, undefined).registering) =
+            switch (runtime.mcp_oauth_interest) {
+                .none => .initial,
+                .restore_required => .restore,
+                .registering, .releasing => return error.EventInterestOperationInProgress,
+                .registered => unreachable,
+            };
         const session_id = runtime.session_id orelse return error.MissingSessionId;
-        const parsed = try self.call(struct {
-            handle: []const u8,
-        }, "session.eventLog.registerInterest", .{
-            .sessionId = session_id,
+        const runtime_location = self.mcpOAuthRuntimeLocation(runtime);
+        const owned_session_id = try self.allocator.dupe(u8, session_id);
+        defer self.allocator.free(owned_session_id);
+        runtime.mcp_oauth_interest = .{ .registering = prior_state };
+        errdefer if (self.resolveMcpOAuthRuntime(owned_session_id, runtime_location)) |current| {
+            if (current.mcp_oauth_interest == .registering) {
+                current.mcp_oauth_interest = switch (prior_state) {
+                    .initial => .none,
+                    .restore => .restore_required,
+                };
+            }
+        };
+        const parsed = try self.call(WireMcpOAuthInterest, "session.eventLog.registerInterest", .{
+            .sessionId = owned_session_id,
             .eventType = "mcp.oauth_required",
         });
-        defer parsed.deinit();
-        runtime.mcp_oauth_interest_handle =
-            self.allocator.dupe(u8, parsed.value.handle) catch |err| {
-                const released = self.call(struct {
-                    success: bool,
-                }, "session.eventLog.releaseInterest", .{
-                    .sessionId = session_id,
-                    .handle = parsed.value.handle,
-                }) catch return err;
-                released.deinit();
-                return err;
-            };
+        self.adoptMcpOAuthInterest(
+            owned_session_id,
+            runtime_location,
+            parsed,
+        );
+    }
+
+    fn adoptMcpOAuthInterest(
+        self: *Client,
+        session_id: []const u8,
+        runtime_location: McpOAuthRuntimeLocation,
+        parsed: std.json.Parsed(WireMcpOAuthInterest),
+    ) void {
+        const current = self.resolveMcpOAuthRuntime(
+            session_id,
+            runtime_location,
+        ) orelse unreachable;
+        std.debug.assert(current.mcp_oauth_interest == .registering);
+        current.mcp_oauth_interest = .{ .registered = .{ .response = parsed } };
     }
 
     fn releaseMcpOAuthInterest(
         self: *Client,
         runtime: *SessionExtensionRuntime,
     ) !void {
-        const handle = runtime.mcp_oauth_interest_handle orelse return;
+        const interest = switch (runtime.mcp_oauth_interest) {
+            .none => return,
+            .restore_required => return error.EventInterestRestoreRequired,
+            .registering, .releasing => return error.EventInterestOperationInProgress,
+            .registered => |owned| owned,
+        };
         const session_id = runtime.session_id orelse
             return error.MissingSessionId;
+        const runtime_location = self.mcpOAuthRuntimeLocation(runtime);
+        const owned_session_id = try self.allocator.dupe(u8, session_id);
+        defer self.allocator.free(owned_session_id);
+        runtime.mcp_oauth_interest = .{ .releasing = interest };
+        errdefer if (self.resolveMcpOAuthRuntime(owned_session_id, runtime_location)) |current| {
+            if (current.mcp_oauth_interest == .releasing) {
+                const retained = current.mcp_oauth_interest.releasing;
+                current.mcp_oauth_interest = .{ .registered = retained };
+            }
+        };
+        try self.releaseMcpOAuthInterestOwner(
+            owned_session_id,
+            &interest,
+        );
+        const current = self.resolveMcpOAuthRuntime(
+            owned_session_id,
+            runtime_location,
+        ) orelse unreachable;
+        std.debug.assert(current.mcp_oauth_interest == .releasing);
+        var released = current.mcp_oauth_interest.releasing;
+        current.mcp_oauth_interest = .none;
+        released.deinitSecure();
+    }
+
+    fn releaseMcpOAuthInterestOwner(
+        self: *Client,
+        session_id: []const u8,
+        interest: *const OwnedMcpOAuthInterest,
+    ) !void {
         const parsed = try self.call(struct {
             success: bool,
         }, "session.eventLog.releaseInterest", .{
             .sessionId = session_id,
-            .handle = handle,
+            .handle = interest.handle(),
         });
         defer parsed.deinit();
         if (!parsed.value.success) return error.EventInterestNotReleased;
-        self.allocator.free(handle);
-        runtime.mcp_oauth_interest_handle = null;
+    }
+
+    fn resolveMcpOAuthRuntime(
+        self: *Client,
+        session_id: []const u8,
+        location: McpOAuthRuntimeLocation,
+    ) ?*SessionExtensionRuntime {
+        switch (location) {
+            .pending => {
+                const pending = if (self.pending_extension_runtime) |*runtime|
+                    runtime
+                else
+                    return null;
+                const pending_session_id = pending.session_id orelse return null;
+                if (!std.mem.eql(u8, pending_session_id, session_id)) return null;
+                return pending;
+            },
+            .committed => {
+                for (self.extension_runtimes.items) |*runtime| {
+                    const runtime_session_id = runtime.session_id orelse continue;
+                    if (std.mem.eql(u8, runtime_session_id, session_id)) return runtime;
+                }
+                return null;
+            },
+            .external => |runtime| return runtime,
+        }
+    }
+
+    fn mcpOAuthRuntimeLocation(
+        self: *Client,
+        runtime: *SessionExtensionRuntime,
+    ) McpOAuthRuntimeLocation {
+        if (self.pending_extension_runtime) |*pending| {
+            if (pending == runtime) return .pending;
+        }
+        for (self.extension_runtimes.items) |*committed| {
+            if (committed == runtime) return .committed;
+        }
+        return .{ .external = runtime };
     }
 
     /// Joins a parent-selected extension session. The session id is injected by
@@ -1351,6 +1545,23 @@ pub const Client = struct {
         method: []const u8,
         params: anytype,
     ) !std.json.Parsed(Result) {
+        var ignored_rpc_rejection = false;
+        return self.callTrackingRpcRejection(
+            Result,
+            method,
+            params,
+            &ignored_rpc_rejection,
+        );
+    }
+
+    fn callTrackingRpcRejection(
+        self: *Client,
+        comptime Result: type,
+        method: []const u8,
+        params: anytype,
+        rpc_rejected: *bool,
+    ) !std.json.Parsed(Result) {
+        rpc_rejected.* = false;
         if (self.dispatching_rpc_handler) return error.ReentrantRpcCall;
         if (self.active_request_count == self.active_request_ids.len)
             return error.RpcNestingLimitExceeded;
@@ -1438,7 +1649,10 @@ pub const Client = struct {
                 continue;
             }
             if (object.get("error")) |rpc_error| {
-                if (rpc_error != .null) return error.JsonRpcError;
+                if (rpc_error != .null) {
+                    rpc_rejected.* = true;
+                    return error.JsonRpcError;
+                }
             }
             const result = object.get("result") orelse return error.MissingResult;
             const result_json = try std.json.Stringify.valueAlloc(self.allocator, result, .{});
@@ -1631,6 +1845,8 @@ pub const Client = struct {
         const runtime = self.findExtensionRuntime(session_id) orelse
             return self.writeServerRequestError(writer, id, -32000, "session not registered");
         const base = parseHookBase(input) catch
+            return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
+        if (!std.mem.eql(u8, session_id, base.runtime_session_id))
             return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
         const invocation = ext.HookInvocation{ .session_id = session_id };
         self.dispatching_rpc_handler = true;
@@ -2123,11 +2339,13 @@ pub const Client = struct {
 
         const runtime = self.findGitHubTokenRuntime(parsed.value.registrationId) orelse
             return self.writeServerRequestError(writer, id, -32602, "unknown GitHub token registration");
-        if (parsed.value.sessionId) |requested_session_id| {
-            const registered_session_id = runtime.session_id orelse
+        if (runtime.session_id) |registered_session_id| {
+            const requested_session_id = parsed.value.sessionId orelse
                 return self.writeServerRequestError(writer, id, -32602, "GitHub token registration mismatch");
             if (!std.mem.eql(u8, registered_session_id, requested_session_id))
                 return self.writeServerRequestError(writer, id, -32602, "GitHub token registration mismatch");
+        } else if (parsed.value.sessionId != null) {
+            return self.writeServerRequestError(writer, id, -32602, "GitHub token registration mismatch");
         }
         const provider_config = runtime.git_hub_token_provider orelse
             return self.writeServerRequestError(writer, id, -32602, "unknown GitHub token registration");
@@ -2346,6 +2564,10 @@ pub const Client = struct {
         try self.applyExtensionEvent(session_id, &queued.event);
         const automatically_handled = switch (queued.event) {
             .command_execute, .elicitation_requested => true,
+            .mcp_oauth_required => if (self.findExtensionRuntime(session_id)) |runtime|
+                !runtime.credentials_quarantined and runtime.mcp_auth_handler != null
+            else
+                false,
             else => false,
         };
         var queue_overflowed = false;
@@ -2381,6 +2603,10 @@ pub const Client = struct {
                 target,
             ),
             .elicitation_requested => self.handleElicitationEvent(
+                session_id,
+                target,
+            ),
+            .mcp_oauth_required => self.handleMcpAuthEvent(
                 session_id,
                 target,
             ),
@@ -2432,6 +2658,15 @@ pub const Client = struct {
     ) void {
         const event = self.automaticEvent(target) orelse return;
         event.elicitation_requested.automatic_handling = handling;
+    }
+
+    fn setMcpAuthAutomaticHandling(
+        self: *Client,
+        target: AutomaticEventTarget,
+        handling: session_types.AutomaticInteractionHandling,
+    ) void {
+        const event = self.automaticEvent(target) orelse return;
+        event.mcp_oauth_required.automatic_handling = handling;
     }
 
     fn handleCommandEvent(
@@ -2625,6 +2860,132 @@ pub const Client = struct {
         };
         defer parsed.deinit();
         if (!parsed.value.success) return error.ElicitationResultNotAccepted;
+    }
+
+    fn handleMcpAuthEvent(
+        self: *Client,
+        session_id: []const u8,
+        target: AutomaticEventTarget,
+    ) void {
+        const runtime = self.findExtensionRuntime(session_id) orelse return;
+        if (runtime.credentials_quarantined) return;
+        const handler = runtime.mcp_auth_handler orelse return;
+        const payload = (self.automaticEvent(target) orelse return).mcp_oauth_required;
+        const parsed = std.json.parseFromSlice(
+            WireMcpAuthRequest,
+            self.allocator,
+            payload.raw.data_json,
+            .{ .allocate = .alloc_always, .ignore_unknown_fields = true },
+        ) catch {
+            self.setMcpAuthAutomaticHandling(target, .invalid_result);
+            return;
+        };
+        defer {
+            wipeSecret(parsed.value.requestId);
+            wipeSecret(parsed.value.serverName);
+            wipeSecret(parsed.value.serverUrl);
+            if (parsed.value.resourceMetadata) |value| wipeSecret(value);
+            if (parsed.value.wwwAuthenticateParams) |value| wipeJsonStrings(value);
+            if (parsed.value.httpResponse) |value| wipeJsonStrings(value);
+            if (parsed.value.staticClientConfig) |value| wipeJsonStrings(value);
+            parsed.deinit();
+        }
+        const www_json = if (parsed.value.wwwAuthenticateParams) |value|
+            std.json.Stringify.valueAlloc(self.allocator, value, .{}) catch |err| {
+                self.setMcpAuthAutomaticHandling(target, .{ .delivery_failed = err });
+                return;
+            }
+        else
+            null;
+        defer if (www_json) |value| {
+            wipeSecret(value);
+            self.allocator.free(value);
+        };
+        const http_json = if (parsed.value.httpResponse) |value|
+            std.json.Stringify.valueAlloc(self.allocator, value, .{}) catch |err| {
+                self.setMcpAuthAutomaticHandling(target, .{ .delivery_failed = err });
+                return;
+            }
+        else
+            null;
+        defer if (http_json) |value| {
+            wipeSecret(value);
+            self.allocator.free(value);
+        };
+        const static_json = if (parsed.value.staticClientConfig) |value|
+            std.json.Stringify.valueAlloc(self.allocator, value, .{}) catch |err| {
+                self.setMcpAuthAutomaticHandling(target, .{ .delivery_failed = err });
+                return;
+            }
+        else
+            null;
+        defer if (static_json) |value| {
+            wipeSecret(value);
+            self.allocator.free(value);
+        };
+        var result = handler(self.allocator, .{
+            .request_id = parsed.value.requestId,
+            .server_name = parsed.value.serverName,
+            .server_url = parsed.value.serverUrl,
+            .reason = parsed.value.reason,
+            .resource_metadata = parsed.value.resourceMetadata,
+            .www_authenticate_json = www_json,
+            .http_response_json = http_json,
+            .static_client_config_json = static_json,
+        }, runtime.mcp_auth_context) catch |err| {
+            self.setMcpAuthAutomaticHandling(target, .{ .handler_failed = err });
+            return;
+        };
+        defer switch (result) {
+            .token => |*token| token.deinitSecure(self.allocator),
+            .cancelled => {},
+        };
+        const response = switch (result) {
+            .cancelled => self.call(
+                RpcSuccess,
+                "session.mcp.oauth.handlePendingRequest",
+                .{
+                    .sessionId = session_id,
+                    .requestId = parsed.value.requestId,
+                    .result = .{ .kind = "cancelled" },
+                },
+            ),
+            .token => |token| blk: {
+                if (token.expires_in_seconds) |expires_in_seconds| {
+                    if (expires_in_seconds == 0) {
+                        self.setMcpAuthAutomaticHandling(target, .invalid_result);
+                        return;
+                    }
+                }
+                break :blk self.call(
+                    RpcSuccess,
+                    "session.mcp.oauth.handlePendingRequest",
+                    .{
+                        .sessionId = session_id,
+                        .requestId = parsed.value.requestId,
+                        .result = .{
+                            .kind = "token",
+                            .accessToken = token.access_token,
+                            .tokenType = token.token_type,
+                            .expiresIn = token.expires_in_seconds,
+                        },
+                    },
+                );
+            },
+        };
+        const accepted = response catch |err| {
+            self.setMcpAuthAutomaticHandling(target, .{ .delivery_failed = err });
+            return;
+        };
+        defer accepted.deinit();
+        if (!accepted.value.success) {
+            self.setMcpAuthAutomaticHandling(
+                target,
+                .{ .delivery_failed = error.McpAuthNotAccepted },
+            );
+            return;
+        }
+        self.setMcpAuthAutomaticHandling(target, .handled);
     }
 
     fn findExtensionRuntime(self: *Client, session_id: []const u8) ?*SessionExtensionRuntime {
@@ -3188,9 +3549,6 @@ pub const Session = struct {
     pub fn nextEvent(self: Session) !session_types.SessionEvent {
         var event = try self.client.nextEvent(self.id);
         errdefer event.deinit(self.client.allocator);
-        if (event == .mcp_oauth_required) {
-            try self.handleMcpAuthEvent(event.mcp_oauth_required.data_json);
-        }
         if (event == .external_tool_requested) {
             const request = event.external_tool_requested;
             if (self.client.findToolHandler(self.id, request.tool_name)) |tool| {
@@ -3405,134 +3763,56 @@ pub const Session = struct {
         return .{ .allocator = allocator, .items = items };
     }
 
-    fn handleMcpAuthEvent(self: Session, data_json: []const u8) !void {
-        const runtime = self.client.findExtensionRuntime(self.id) orelse return;
-        const handler = runtime.mcp_auth_handler orelse return;
-        const parsed = try std.json.parseFromSlice(
-            WireMcpAuthRequest,
-            self.client.allocator,
-            data_json,
-            .{ .allocate = .alloc_always, .ignore_unknown_fields = true },
-        );
-        defer {
-            wipeSecret(parsed.value.requestId);
-            wipeSecret(parsed.value.serverName);
-            wipeSecret(parsed.value.serverUrl);
-            if (parsed.value.resourceMetadata) |value| wipeSecret(value);
-            if (parsed.value.wwwAuthenticateParams) |value| wipeJsonStrings(value);
-            if (parsed.value.httpResponse) |value| wipeJsonStrings(value);
-            if (parsed.value.staticClientConfig) |value| wipeJsonStrings(value);
-            parsed.deinit();
-        }
-        const www_json = if (parsed.value.wwwAuthenticateParams) |value|
-            try std.json.Stringify.valueAlloc(self.client.allocator, value, .{})
-        else
-            null;
-        defer if (www_json) |value| {
-            wipeSecret(value);
-            self.client.allocator.free(value);
-        };
-        const http_json = if (parsed.value.httpResponse) |value|
-            try std.json.Stringify.valueAlloc(self.client.allocator, value, .{})
-        else
-            null;
-        defer if (http_json) |value| {
-            wipeSecret(value);
-            self.client.allocator.free(value);
-        };
-        const static_json = if (parsed.value.staticClientConfig) |value|
-            try std.json.Stringify.valueAlloc(self.client.allocator, value, .{})
-        else
-            null;
-        defer if (static_json) |value| {
-            wipeSecret(value);
-            self.client.allocator.free(value);
-        };
-        var outcome = invokeMcpAuthHandler(handler, self.client.allocator, .{
-            .request_id = parsed.value.requestId,
-            .server_name = parsed.value.serverName,
-            .server_url = parsed.value.serverUrl,
-            .reason = parsed.value.reason,
-            .resource_metadata = parsed.value.resourceMetadata,
-            .www_authenticate_json = www_json,
-            .http_response_json = http_json,
-            .static_client_config_json = static_json,
-        }, runtime.mcp_auth_context);
-        const response = switch (outcome.result) {
-            .cancelled => self.client.call(
-                RpcSuccess,
-                "session.mcp.oauth.handlePendingRequest",
-                .{
-                    .sessionId = self.id,
-                    .requestId = parsed.value.requestId,
-                    .result = .{ .kind = "cancelled" },
-                },
-            ),
-            .token => |*token| blk: {
-                defer token.deinitSecure(self.client.allocator);
-                if (token.expires_in_seconds) |expires_in_seconds| {
-                    if (expires_in_seconds == 0) {
-                        outcome.handler_error = error.InvalidMcpAuthTokenExpiration;
-                        break :blk self.client.call(
-                            RpcSuccess,
-                            "session.mcp.oauth.handlePendingRequest",
-                            .{
-                                .sessionId = self.id,
-                                .requestId = parsed.value.requestId,
-                                .result = .{ .kind = "cancelled" },
-                            },
-                        );
-                    }
-                }
-                break :blk self.client.call(
-                    RpcSuccess,
-                    "session.mcp.oauth.handlePendingRequest",
-                    .{
-                        .sessionId = self.id,
-                        .requestId = parsed.value.requestId,
-                        .result = .{
-                            .kind = "token",
-                            .accessToken = token.access_token,
-                            .tokenType = token.token_type,
-                            .expiresIn = token.expires_in_seconds,
-                        },
-                    },
-                );
-            },
-        };
-        const accepted = try response;
-        defer accepted.deinit();
-        if (!accepted.value.success) return error.McpAuthNotAccepted;
-        if (outcome.handler_error) |handler_error| return handler_error;
-    }
-
     pub fn disconnect(self: Session) !void {
         var released_oauth_interest = false;
         if (self.client.findExtensionRuntime(self.id)) |runtime| {
-            released_oauth_interest = runtime.mcp_oauth_interest_handle != null;
-            try self.client.releaseMcpOAuthInterest(runtime);
-        }
-        errdefer if (released_oauth_interest) {
-            if (self.client.findExtensionRuntime(self.id)) |runtime| {
-                if (runtime.mcp_auth_handler != null) {
-                    self.client.registerMcpOAuthInterest(runtime) catch {};
-                }
+            if (runtime.mcp_oauth_interest == .restore_required) {
+                self.client.registerMcpOAuthInterest(runtime) catch
+                    return error.McpOAuthInterestRestoreFailed;
             }
-        };
+            const current = self.client.findExtensionRuntime(self.id) orelse
+                return error.MissingExtensionRuntime;
+            released_oauth_interest = current.mcp_oauth_interest == .registered;
+            try self.client.releaseMcpOAuthInterest(current);
+        }
         for (0..2) |_| {
-            const parsed = try self.client.call(struct {
+            const parsed = self.client.call(struct {
                 success: bool,
                 @"error": ?[]const u8 = null,
             }, "session.detach", .{
                 .sessionId = self.id,
-            });
+            }) catch |detach_error| {
+                try self.restoreMcpOAuthInterestAfterDetachFailure(released_oauth_interest);
+                return detach_error;
+            };
             defer parsed.deinit();
             if (parsed.value.success) {
                 self.client.removeSession(self.id);
                 return;
             }
         }
+        try self.restoreMcpOAuthInterestAfterDetachFailure(released_oauth_interest);
         return error.SessionDetachFailed;
+    }
+
+    fn restoreMcpOAuthInterestAfterDetachFailure(
+        self: Session,
+        released_oauth_interest: bool,
+    ) !void {
+        if (!released_oauth_interest) return;
+        const runtime = self.client.findExtensionRuntime(self.id) orelse
+            return error.MissingExtensionRuntime;
+        if (runtime.mcp_auth_handler == null) return;
+        switch (runtime.mcp_oauth_interest) {
+            .none => runtime.mcp_oauth_interest = .restore_required,
+            .restore_required => {},
+            .registered => return,
+            .registering, .releasing => return error.EventInterestOperationInProgress,
+        }
+        const current = self.client.findExtensionRuntime(self.id) orelse
+            return error.MissingExtensionRuntime;
+        self.client.registerMcpOAuthInterest(current) catch
+            return error.McpOAuthInterestRestoreFailed;
     }
 
     pub fn setAutoTier(
@@ -4002,11 +4282,13 @@ fn uiInputValueIsValid(
 }
 
 fn isValidEmail(value: []const u8) bool {
+    if (value.len > 254) return false;
     const separator = std.mem.indexOfScalar(u8, value, '@') orelse return false;
     if (separator == 0 or separator + 1 == value.len) return false;
     if (std.mem.indexOfScalarPos(u8, value, separator + 1, '@') != null) return false;
     const local = value[0..separator];
     const domain = value[separator + 1 ..];
+    if (local.len > 64 or domain.len > 253) return false;
     if (local[0] == '.' or local[local.len - 1] == '.' or
         domain[0] == '.' or domain[domain.len - 1] == '.' or
         std.mem.indexOf(u8, local, "..") != null or
@@ -4014,12 +4296,12 @@ fn isValidEmail(value: []const u8) bool {
     {
         return false;
     }
-    for (value) |byte| {
-        if (std.ascii.isWhitespace(byte) or std.ascii.isControl(byte)) return false;
+    for (local) |byte| {
+        if (!isEmailAtomByte(byte) and byte != '.') return false;
     }
     var labels = std.mem.splitScalar(u8, domain, '.');
     while (labels.next()) |label| {
-        if (label.len == 0 or
+        if (label.len == 0 or label.len > 63 or
             !std.ascii.isAlphanumeric(label[0]) or
             !std.ascii.isAlphanumeric(label[label.len - 1]))
         {
@@ -4032,6 +4314,33 @@ fn isValidEmail(value: []const u8) bool {
         }
     }
     return true;
+}
+
+fn isEmailAtomByte(byte: u8) bool {
+    if (std.ascii.isAlphanumeric(byte)) return true;
+    return switch (byte) {
+        '!',
+        '#',
+        '$',
+        '%',
+        '&',
+        '\'',
+        '*',
+        '+',
+        '-',
+        '/',
+        '=',
+        '?',
+        '^',
+        '_',
+        '`',
+        '{',
+        '|',
+        '}',
+        '~',
+        => true,
+        else => false,
+    };
 }
 
 fn isValidUri(value: []const u8) bool {
@@ -4150,6 +4459,28 @@ test "UI input validation enforces lengths and every supported format" {
     try std.testing.expect(!uiInputValueIsValid("a..b@example.com", .{ .format = .email }));
     try std.testing.expect(!uiInputValueIsValid("a@-", .{ .format = .email }));
     try std.testing.expect(!uiInputValueIsValid("a@foo-.com", .{ .format = .email }));
+    try std.testing.expect(!uiInputValueIsValid("a(b)@example.com", .{ .format = .email }));
+    try std.testing.expect(!uiInputValueIsValid("a,b@example.com", .{ .format = .email }));
+    try std.testing.expect(!uiInputValueIsValid("\"a\"@example.com", .{ .format = .email }));
+    try std.testing.expect(!uiInputValueIsValid("ü@example.com", .{ .format = .email }));
+    try std.testing.expect(!uiInputValueIsValid("a@exämple.com", .{ .format = .email }));
+    const max_local = ([_]u8{'a'} ** 64) ++ "@example.com";
+    const oversized_local = ([_]u8{'a'} ** 65) ++ "@example.com";
+    try std.testing.expect(uiInputValueIsValid(max_local[0..], .{ .format = .email }));
+    try std.testing.expect(!uiInputValueIsValid(oversized_local[0..], .{ .format = .email }));
+    const max_label = "a@" ++ ([_]u8{'b'} ** 63) ++ ".com";
+    const oversized_label = "a@" ++ ([_]u8{'b'} ** 64) ++ ".com";
+    try std.testing.expect(uiInputValueIsValid(max_label[0..], .{ .format = .email }));
+    try std.testing.expect(!uiInputValueIsValid(oversized_label[0..], .{ .format = .email }));
+    const max_address =
+        ([_]u8{'a'} ** 64) ++ "@" ++
+        ([_]u8{'b'} ** 63) ++ "." ++
+        ([_]u8{'c'} ** 63) ++ "." ++
+        ([_]u8{'d'} ** 61);
+    const oversized_address = max_address ++ "d";
+    try std.testing.expectEqual(@as(usize, 254), max_address.len);
+    try std.testing.expect(uiInputValueIsValid(max_address[0..], .{ .format = .email }));
+    try std.testing.expect(!uiInputValueIsValid(oversized_address[0..], .{ .format = .email }));
     try std.testing.expect(uiInputValueIsValid("https://127.0.0.1:8080/path", .{ .format = .uri }));
     try std.testing.expect(!uiInputValueIsValid("example.com/path", .{ .format = .uri }));
     try std.testing.expect(uiInputValueIsValid("2024-02-29", .{ .format = .date }));
@@ -4356,23 +4687,6 @@ fn parseOptionalJson(
 ) !?std.json.Parsed(std.json.Value) {
     const json = source orelse return null;
     return try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
-}
-
-const McpAuthOutcome = struct {
-    result: ext.McpAuthResult,
-    handler_error: ?anyerror = null,
-};
-
-fn invokeMcpAuthHandler(
-    handler: ext.McpAuthHandler,
-    allocator: std.mem.Allocator,
-    request: ext.McpAuthRequest,
-    context: ?*anyopaque,
-) McpAuthOutcome {
-    return .{
-        .result = handler(allocator, request, context) catch |err|
-            return .{ .result = .cancelled, .handler_error = err },
-    };
 }
 
 fn completesSendAndWait(idle: session_types.SessionIdle) bool {
@@ -6039,19 +6353,40 @@ test "GitHub token callbacks route by registration and session and validate life
     try std.testing.expectEqual(@as(usize, 1), pending_state.calls);
     try std.testing.expectEqual(session_types.GitHubTokenReason.initial, pending_state.last_reason.?);
 
+    const missing_pending_session_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"registrationId":"pending-registration","host":"github.com","reason":"initial"}
+    ,
+        .{},
+    );
+    defer missing_pending_session_params.deinit();
+    var missing_pending_session_output: std.Io.Writer.Allocating = .init(allocator);
+    defer missing_pending_session_output.deinit();
+    try client.dispatchServerRequest(
+        &missing_pending_session_output.writer,
+        .{ .integer = 2 },
+        "gitHubToken.getToken",
+        missing_pending_session_params.value,
+    );
+    try std.testing.expectEqual(
+        @as(i64, -32602),
+        try responseErrorCode(allocator, missing_pending_session_output.written()),
+    );
+
     pending_state.expires_in_seconds = 3601;
     var valid_output: std.Io.Writer.Allocating = .init(allocator);
     defer valid_output.deinit();
     try client.dispatchServerRequest(
         &valid_output.writer,
-        .{ .integer = 2 },
+        .{ .integer = 3 },
         "gitHubToken.getToken",
         invalid_lifetime_params.value,
     );
     const valid_body = try framedBody(allocator, valid_output.written());
     defer allocator.free(valid_body);
     try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":2,"result":{"kind":"token","accessToken":"secret-token","tokenType":"bearer","expiresIn":3601}}
+        \\{"jsonrpc":"2.0","id":3,"result":{"kind":"token","accessToken":"secret-token","tokenType":"bearer","expiresIn":3601}}
     , valid_body);
 
     const committed_params = try std.json.parseFromSlice(
@@ -6067,17 +6402,38 @@ test "GitHub token callbacks route by registration and session and validate life
     defer cancelled_output.deinit();
     try client.dispatchServerRequest(
         &cancelled_output.writer,
-        .{ .integer = 3 },
+        .{ .integer = 4 },
         "gitHubToken.getToken",
         committed_params.value,
     );
     const cancelled_body = try framedBody(allocator, cancelled_output.written());
     defer allocator.free(cancelled_body);
     try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":3,"result":{"kind":"cancelled"}}
+        \\{"jsonrpc":"2.0","id":4,"result":{"kind":"cancelled"}}
     , cancelled_body);
     try std.testing.expectEqualStrings("committed", committed_state.last_session_id.?);
     try std.testing.expectEqual(session_types.GitHubTokenReason.refresh, committed_state.last_reason.?);
+
+    const missing_committed_session_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"registrationId":"committed-registration","host":"github.example","reason":"refresh"}
+    ,
+        .{},
+    );
+    defer missing_committed_session_params.deinit();
+    var missing_committed_session_output: std.Io.Writer.Allocating = .init(allocator);
+    defer missing_committed_session_output.deinit();
+    try client.dispatchServerRequest(
+        &missing_committed_session_output.writer,
+        .{ .integer = 5 },
+        "gitHubToken.getToken",
+        missing_committed_session_params.value,
+    );
+    try std.testing.expectEqual(
+        @as(i64, -32602),
+        try responseErrorCode(allocator, missing_committed_session_output.written()),
+    );
 
     const mismatched_params = try std.json.parseFromSlice(
         std.json.Value,
@@ -6091,13 +6447,33 @@ test "GitHub token callbacks route by registration and session and validate life
     defer mismatched_output.deinit();
     try client.dispatchServerRequest(
         &mismatched_output.writer,
-        .{ .integer = 4 },
+        .{ .integer = 6 },
         "gitHubToken.getToken",
         mismatched_params.value,
     );
     try std.testing.expectEqual(
         @as(i64, -32602),
         try responseErrorCode(allocator, mismatched_output.written()),
+    );
+    const reverse_mismatched_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"registrationId":"committed-registration","host":"github.com","sessionId":"pending","reason":"refresh"}
+    ,
+        .{},
+    );
+    defer reverse_mismatched_params.deinit();
+    var reverse_mismatched_output: std.Io.Writer.Allocating = .init(allocator);
+    defer reverse_mismatched_output.deinit();
+    try client.dispatchServerRequest(
+        &reverse_mismatched_output.writer,
+        .{ .integer = 7 },
+        "gitHubToken.getToken",
+        reverse_mismatched_params.value,
+    );
+    try std.testing.expectEqual(
+        @as(i64, -32602),
+        try responseErrorCode(allocator, reverse_mismatched_output.written()),
     );
 
     const unknown_params = try std.json.parseFromSlice(
@@ -6112,7 +6488,7 @@ test "GitHub token callbacks route by registration and session and validate life
     defer unknown_output.deinit();
     try client.dispatchServerRequest(
         &unknown_output.writer,
-        .{ .integer = 5 },
+        .{ .integer = 8 },
         "gitHubToken.getToken",
         unknown_params.value,
     );
@@ -7428,6 +7804,86 @@ test "cloud create preserves a caller session id and rolls back mismatches" {
     , detach_body);
 }
 
+test "known-id create detaches after a malformed lifecycle result" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const malformed_response =
+        \\{"jsonrpc":"2.0","id":1,"result":[]}
+    ;
+    const detach_response =
+        \\{"jsonrpc":"2.0","id":2,"result":{"success":true}}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            malformed_response.len,
+            malformed_response,
+            detach_response.len,
+            detach_response,
+        },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = responses });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{ .mode = .read_only });
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.session_ids.items) |id| allocator.free(id);
+        client.session_ids.deinit(allocator);
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+    }
+
+    var failed = false;
+    _ = client.createSession(.{
+        .cloud = .{},
+        .session_id = "known",
+    }) catch {
+        failed = true;
+    };
+    try std.testing.expect(failed);
+    try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
+    try writer.interface.flush();
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "requests",
+        allocator,
+        .limited(4096),
+    );
+    defer allocator.free(requests);
+    var frames = std.Io.Reader.fixed(requests);
+    const create_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(create_body);
+    const detach_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(detach_body);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        detach_body,
+        "\"method\":\"session.detach\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        detach_body,
+        "\"sessionId\":\"known\"",
+    ) != null);
+}
+
 test "ExP assignment lowering rejects duplicate record keys" {
     const allocator = std.testing.allocator;
     var values = ExtensionWireValues.init(allocator);
@@ -7503,9 +7959,12 @@ test "post-response lifecycle failure detaches creates and quarantines resumed c
         const token_request =
             \\{"jsonrpc":"2.0","id":77,"method":"providerToken.getToken","params":{"sessionId":"new-session","providerName":"model-provider"}}
         ;
+        const oauth_event =
+            \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"new-session","event":{"type":"mcp.oauth_required","data":{"requestId":"oauth-1","serverName":"server","serverUrl":"https://example.test","reason":"initial"}}}}
+        ;
         const responses = try std.fmt.allocPrint(
             allocator,
-            "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+            "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
             .{
                 create_response.len,
                 create_response,
@@ -7513,6 +7972,8 @@ test "post-response lifecycle failure detaches creates and quarantines resumed c
                 update_response,
                 token_request.len,
                 token_request,
+                oauth_event.len,
+                oauth_event,
                 detach_response.len,
                 detach_response,
             },
@@ -7541,18 +8002,39 @@ test "post-response lifecycle failure detaches creates and quarantines resumed c
             client.session_ids.deinit(allocator);
             for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
             client.extension_runtimes.deinit(allocator);
+            for (client.events.items) |*event| event.deinit(allocator);
+            client.events.deinit(allocator);
         }
         var model_state = ProviderTokenTestContext{
             .token = "model-token",
             .expected_session_id = "new-session",
             .expected_provider_name = "model-provider",
         };
+        const McpState = struct {
+            calls: usize = 0,
+        };
+        var mcp_state = McpState{};
+        const mcp_handler = struct {
+            fn handle(
+                _: std.mem.Allocator,
+                _: ext.McpAuthRequest,
+                context: ?*anyopaque,
+            ) !ext.McpAuthResult {
+                const state: *McpState = @ptrCast(@alignCast(context.?));
+                state.calls += 1;
+                return error.UnexpectedMcpAuthCallback;
+            }
+        }.handle;
 
         try std.testing.expectError(
             error.SessionOptionsNotAccepted,
             client.createSession(.{
                 .cloud = .{},
                 .coauthor_enabled = true,
+                .extensions = .{ .common = .{ .mcp = .{
+                    .on_auth_request = mcp_handler,
+                    .auth_context = &mcp_state,
+                } } },
                 .provider = .{
                     .base_url = "https://example.test",
                     .provider_name = "model-provider",
@@ -7566,6 +8048,12 @@ test "post-response lifecycle failure detaches creates and quarantines resumed c
         try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
         try std.testing.expectEqual(@as(usize, 0), client.extension_runtimes.items.len);
         try std.testing.expectEqual(@as(usize, 0), model_state.calls);
+        try std.testing.expectEqual(@as(usize, 0), mcp_state.calls);
+        try std.testing.expectEqual(@as(usize, 1), client.events.items.len);
+        try std.testing.expect(
+            client.events.items[0].event.mcp_oauth_required.automatic_handling ==
+                .not_configured,
+        );
         try writer.interface.flush();
         const requests = try tmp.dir.readFileAlloc(
             std.testing.io,
@@ -7585,6 +8073,9 @@ test "post-response lifecycle failure detaches creates and quarantines resumed c
         defer allocator.free(token_body);
         try std.testing.expect(
             std.mem.indexOf(u8, detach_body, "\"method\":\"session.detach\"") != null,
+        );
+        try std.testing.expect(
+            std.mem.indexOf(u8, detach_body, "\"sessionId\":\"new-session\"") != null,
         );
         try std.testing.expectEqualStrings(
             \\{"jsonrpc":"2.0","id":77,"error":{"code":-32000,"message":"bearer token provider not registered"}}
@@ -10539,6 +11030,67 @@ test "invalid required hook fields receive an invalid-params response" {
     );
 }
 
+test "all hook paths reject a forged nested session identity" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+    }
+    try client.extension_runtimes.append(
+        allocator,
+        try SessionExtensionRuntime.init(
+            allocator,
+            "registered",
+            session_types.ResumeSessionConfig{},
+            &.{},
+        ),
+    );
+
+    const hook_types = [_][]const u8{
+        "preToolUse",
+        "preMcpToolCall",
+        "postToolUse",
+        "postToolUseFailure",
+        "userPromptSubmitted",
+        "userPromptTransformed",
+        "sessionStart",
+        "sessionEnd",
+        "errorOccurred",
+        "agentStop",
+    };
+    for (hook_types, 0..) |hook_type, index| {
+        const json = try std.fmt.allocPrint(
+            allocator,
+            "{{\"sessionId\":\"registered\",\"hookType\":\"{s}\",\"input\":{{\"sessionId\":\"forged\",\"timestamp\":1,\"cwd\":\"/repo\"}}}}",
+            .{hook_type},
+        );
+        defer allocator.free(json);
+        const params = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+        defer params.deinit();
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        defer output.deinit();
+        try client.dispatchServerRequest(
+            &output.writer,
+            .{ .integer = @intCast(index + 1) },
+            "hooks.invoke",
+            params.value,
+        );
+        try std.testing.expectEqual(
+            @as(i64, -32602),
+            try responseErrorCode(allocator, output.written()),
+        );
+    }
+}
+
 test "resident resume prefers and commits replacement runtime" {
     const allocator = std.testing.allocator;
     var client = Client{
@@ -10786,10 +11338,10 @@ test "MCP OAuth event interest is retained and released" {
     try client.registerMcpOAuthInterest(runtime);
     try std.testing.expectEqualStrings(
         "interest-1",
-        runtime.mcp_oauth_interest_handle.?,
+        runtime.mcp_oauth_interest.registered.handle(),
     );
     try client.releaseMcpOAuthInterest(runtime);
-    try std.testing.expect(runtime.mcp_oauth_interest_handle == null);
+    try std.testing.expect(runtime.mcp_oauth_interest == .none);
     for (writer_buffer) |byte| {
         try std.testing.expectEqual(@as(u8, 0), byte);
     }
@@ -10819,6 +11371,48 @@ test "MCP OAuth event interest is retained and released" {
             release_body,
             "\"method\":\"session.eventLog.releaseInterest\"",
         ) != null,
+    );
+}
+
+test "OAuth interest adoption cannot fail after the typed response is owned" {
+    const allocator = std.testing.allocator;
+    var failing_allocator = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    var client: Client = undefined;
+    client.allocator = failing_allocator.allocator();
+    client.pending_extension_runtime = null;
+    client.extension_runtimes = .empty;
+    defer {
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+    }
+    var runtime = try SessionExtensionRuntime.init(
+        allocator,
+        "s1",
+        session_types.ResumeSessionConfig{},
+        &.{},
+    );
+    runtime.mcp_oauth_interest = .{ .registering = .initial };
+    try client.extension_runtimes.append(allocator, runtime);
+    const parsed = try std.json.parseFromSlice(
+        WireMcpOAuthInterest,
+        allocator,
+        \\{"handle":"interest-1"}
+    ,
+        .{ .allocate = .alloc_always },
+    );
+
+    client.adoptMcpOAuthInterest(
+        "s1",
+        .committed,
+        parsed,
+    );
+    try std.testing.expect(!failing_allocator.has_induced_failure);
+    try std.testing.expectEqualStrings(
+        "interest-1",
+        client.extension_runtimes.items[0].mcp_oauth_interest.registered.handle(),
     );
 }
 
@@ -10876,7 +11470,7 @@ test "failed OAuth release preserves the committed runtime for retry" {
         },
         &.{},
     );
-    original.mcp_oauth_interest_handle = try allocator.dupe(u8, "interest-1");
+    original.mcp_oauth_interest = try testMcpOAuthInterest(allocator, "interest-1");
     try client.extension_runtimes.append(allocator, original);
     try client.beginExtensionRuntime(
         "s1",
@@ -10893,7 +11487,7 @@ test "failed OAuth release preserves the committed runtime for retry" {
     try std.testing.expect(client.pending_extension_runtime != null);
     try std.testing.expectEqualStrings(
         "interest-1",
-        client.extension_runtimes.items[0].mcp_oauth_interest_handle.?,
+        client.extension_runtimes.items[0].mcp_oauth_interest.registered.handle(),
     );
     try std.testing.expectEqual(
         @as(?*anyopaque, &old_context),
@@ -10903,7 +11497,7 @@ test "failed OAuth release preserves the committed runtime for retry" {
     try client.commitPreparedExtensionRuntime("s1");
     try std.testing.expect(client.pending_extension_runtime == null);
     try std.testing.expect(
-        client.findExtensionRuntime("s1").?.mcp_oauth_interest_handle == null,
+        client.findExtensionRuntime("s1").?.mcp_oauth_interest == .none,
     );
     try std.testing.expectEqual(
         @as(?*anyopaque, &new_context),
@@ -10930,6 +11524,268 @@ test "failed OAuth release preserves the committed runtime for retry" {
         defer allocator.free(expected);
         try std.testing.expectEqualStrings(expected, body);
     }
+}
+
+test "every OAuth release failure keeps the owned handle retryable" {
+    const allocator = std.testing.allocator;
+    const response_bodies = [_][]const u8{
+        "",
+        "Content-Length: 75\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"release failed\"}}",
+        "Content-Length: 1\r\n\r\n{",
+        "Content-Length: 51\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"success\":false}}",
+    };
+    for (response_bodies) |response_body| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(std.testing.io, .{
+            .sub_path = "responses",
+            .data = response_body,
+        });
+        const response_file = try tmp.dir.openFile(
+            std.testing.io,
+            "responses",
+            .{ .mode = .read_only },
+        );
+        defer response_file.close(std.testing.io);
+        var reader_buffer: [512]u8 = undefined;
+        var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+        const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+        defer request_file.close(std.testing.io);
+        var writer_buffer: [512]u8 = undefined;
+        var writer = request_file.writer(std.testing.io, &writer_buffer);
+        var client = Client{
+            .allocator = allocator,
+            .io = std.testing.io,
+            .child = null,
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        };
+        defer {
+            for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+            client.extension_runtimes.deinit(allocator);
+        }
+        var runtime = try SessionExtensionRuntime.init(
+            allocator,
+            "s1",
+            session_types.ResumeSessionConfig{},
+            &.{},
+        );
+        runtime.mcp_oauth_interest = try testMcpOAuthInterest(allocator, "interest-1");
+        try client.extension_runtimes.append(allocator, runtime);
+
+        var failed = false;
+        client.releaseMcpOAuthInterest(&client.extension_runtimes.items[0]) catch {
+            failed = true;
+        };
+        try std.testing.expect(failed);
+        try std.testing.expectEqualStrings(
+            "interest-1",
+            client.extension_runtimes.items[0].mcp_oauth_interest.registered.handle(),
+        );
+    }
+}
+
+test "reentrant disconnect cannot invalidate an OAuth release" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const event =
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"s1","event":{"type":"mcp.oauth_required","data":{"requestId":"oauth-1","serverName":"server","serverUrl":"https://example.test","reason":"initial"}}}}
+    ;
+    const auth_response =
+        \\{"jsonrpc":"2.0","id":2,"result":{"success":true}}
+    ;
+    const release_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"success":true}}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            event.len,
+            event,
+            auth_response.len,
+            auth_response,
+            release_response.len,
+            release_response,
+        },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = responses });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{ .mode = .read_only });
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.events.items) |*queued| queued.deinit(allocator);
+        client.events.deinit(allocator);
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+    }
+    const HandlerState = struct {
+        session: Session,
+        called: bool = false,
+    };
+    var state = HandlerState{ .session = .{ .client = &client, .id = "s1" } };
+    const handler = struct {
+        fn handle(
+            _: std.mem.Allocator,
+            _: ext.McpAuthRequest,
+            context: ?*anyopaque,
+        ) !ext.McpAuthResult {
+            const handler_state: *HandlerState = @ptrCast(@alignCast(context.?));
+            try std.testing.expectError(
+                error.EventInterestOperationInProgress,
+                handler_state.session.disconnect(),
+            );
+            handler_state.called = true;
+            return .cancelled;
+        }
+    }.handle;
+    var runtime = try SessionExtensionRuntime.init(
+        allocator,
+        "s1",
+        session_types.ResumeSessionConfig{
+            .extensions = .{ .common = .{ .mcp = .{
+                .on_auth_request = handler,
+                .auth_context = &state,
+            } } },
+        },
+        &.{},
+    );
+    runtime.mcp_oauth_interest = try testMcpOAuthInterest(allocator, "interest-1");
+    try client.extension_runtimes.append(allocator, runtime);
+
+    try client.releaseMcpOAuthInterest(&client.extension_runtimes.items[0]);
+    try std.testing.expect(state.called);
+    try std.testing.expect(
+        client.extension_runtimes.items[0].mcp_oauth_interest == .none,
+    );
+    try std.testing.expect(
+        client.events.items[0].event.mcp_oauth_required.automatic_handling == .handled,
+    );
+}
+
+test "disconnecting another session cannot invalidate an OAuth release" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const event =
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"s1","event":{"type":"mcp.oauth_required","data":{"requestId":"oauth-1","serverName":"server","serverUrl":"https://example.test","reason":"initial"}}}}
+    ;
+    const detach_response =
+        \\{"jsonrpc":"2.0","id":2,"result":{"success":true}}
+    ;
+    const auth_response =
+        \\{"jsonrpc":"2.0","id":3,"result":{"success":true}}
+    ;
+    const release_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"success":true}}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            event.len,
+            event,
+            detach_response.len,
+            detach_response,
+            auth_response.len,
+            auth_response,
+            release_response.len,
+            release_response,
+        },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = responses });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{ .mode = .read_only });
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.events.items) |*queued| queued.deinit(allocator);
+        client.events.deinit(allocator);
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+        for (client.session_ids.items) |id| allocator.free(id);
+        client.session_ids.deinit(allocator);
+    }
+    const HandlerState = struct {
+        other: Session,
+        called: bool = false,
+    };
+    var state = HandlerState{ .other = .{ .client = &client, .id = "s2" } };
+    const handler = struct {
+        fn handle(
+            _: std.mem.Allocator,
+            _: ext.McpAuthRequest,
+            context: ?*anyopaque,
+        ) !ext.McpAuthResult {
+            const handler_state: *HandlerState = @ptrCast(@alignCast(context.?));
+            try handler_state.other.disconnect();
+            handler_state.called = true;
+            return .cancelled;
+        }
+    }.handle;
+    const s2_id = try allocator.dupe(u8, "s2");
+    try client.session_ids.append(allocator, s2_id);
+    var s2 = try SessionExtensionRuntime.init(
+        allocator,
+        "s2",
+        session_types.ResumeSessionConfig{},
+        &.{},
+    );
+    try client.extension_runtimes.append(allocator, s2);
+    s2 = undefined;
+    var s1 = try SessionExtensionRuntime.init(
+        allocator,
+        "s1",
+        session_types.ResumeSessionConfig{
+            .extensions = .{ .common = .{ .mcp = .{
+                .on_auth_request = handler,
+                .auth_context = &state,
+            } } },
+        },
+        &.{},
+    );
+    s1.mcp_oauth_interest = try testMcpOAuthInterest(allocator, "interest-1");
+    try client.extension_runtimes.append(allocator, s1);
+    s1 = undefined;
+
+    try client.releaseMcpOAuthInterest(client.findExtensionRuntime("s1").?);
+    try std.testing.expect(state.called);
+    try std.testing.expect(client.findExtensionRuntime("s2") == null);
+    try std.testing.expect(
+        client.findExtensionRuntime("s1").?.mcp_oauth_interest == .none,
+    );
 }
 
 test "disconnect releases OAuth interest before detaching" {
@@ -11044,6 +11900,255 @@ test "disconnect releases OAuth interest before detaching" {
     );
 }
 
+test "detach restoration failures remain observable and retryable" {
+    const allocator = std.testing.allocator;
+    const release_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"success":true}}
+    ;
+    const first_detach_response =
+        \\{"jsonrpc":"2.0","id":2,"result":{"success":false}}
+    ;
+    const second_detach_response =
+        \\{"jsonrpc":"2.0","id":3,"result":{"success":false}}
+    ;
+    const restore_responses = [_]?[]const u8{
+        null,
+        \\{"jsonrpc":"2.0","id":4,"error":{"code":-32000,"message":"restore failed"}}
+        ,
+        "{",
+        \\{"jsonrpc":"2.0","id":4,"result":{"success":false}}
+        ,
+    };
+    for (restore_responses) |restore_response| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var responses: std.ArrayList(u8) = .empty;
+        defer responses.deinit(allocator);
+        const fixed_responses = [_][]const u8{
+            release_response,
+            first_detach_response,
+            second_detach_response,
+        };
+        for (fixed_responses) |response| {
+            try responses.print(
+                allocator,
+                "Content-Length: {d}\r\n\r\n{s}",
+                .{ response.len, response },
+            );
+        }
+        if (restore_response) |response| {
+            try responses.print(
+                allocator,
+                "Content-Length: {d}\r\n\r\n{s}",
+                .{ response.len, response },
+            );
+        }
+        try tmp.dir.writeFile(std.testing.io, .{
+            .sub_path = "responses",
+            .data = responses.items,
+        });
+        const response_file = try tmp.dir.openFile(
+            std.testing.io,
+            "responses",
+            .{ .mode = .read_only },
+        );
+        defer response_file.close(std.testing.io);
+        var reader_buffer: [1024]u8 = undefined;
+        var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+        const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+        defer request_file.close(std.testing.io);
+        var writer_buffer: [1024]u8 = undefined;
+        var writer = request_file.writer(std.testing.io, &writer_buffer);
+        var client = Client{
+            .allocator = allocator,
+            .io = std.testing.io,
+            .child = null,
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        };
+        defer {
+            for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+            client.extension_runtimes.deinit(allocator);
+        }
+        const handler = struct {
+            fn handle(
+                _: std.mem.Allocator,
+                _: ext.McpAuthRequest,
+                _: ?*anyopaque,
+            ) !ext.McpAuthResult {
+                return .cancelled;
+            }
+        }.handle;
+        var runtime = try SessionExtensionRuntime.init(
+            allocator,
+            "s1",
+            session_types.ResumeSessionConfig{
+                .extensions = .{ .common = .{ .mcp = .{
+                    .on_auth_request = handler,
+                } } },
+            },
+            &.{},
+        );
+        runtime.mcp_oauth_interest = try testMcpOAuthInterest(allocator, "interest-1");
+        try client.extension_runtimes.append(allocator, runtime);
+
+        try std.testing.expectError(
+            error.McpOAuthInterestRestoreFailed,
+            (Session{ .client = &client, .id = "s1" }).disconnect(),
+        );
+        try std.testing.expect(client.findExtensionRuntime("s1") != null);
+        try std.testing.expect(
+            client.findExtensionRuntime("s1").?.mcp_oauth_interest == .restore_required,
+        );
+    }
+}
+
+test "disconnect retries pending OAuth restoration before detach" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const register_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"handle":"interest-2"}}
+    ;
+    const release_response =
+        \\{"jsonrpc":"2.0","id":2,"result":{"success":true}}
+    ;
+    const detach_response =
+        \\{"jsonrpc":"2.0","id":3,"result":{"success":true}}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            register_response.len,
+            register_response,
+            release_response.len,
+            release_response,
+            detach_response.len,
+            detach_response,
+        },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = responses });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{ .mode = .read_only });
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+    }
+    const handler = struct {
+        fn handle(
+            _: std.mem.Allocator,
+            _: ext.McpAuthRequest,
+            _: ?*anyopaque,
+        ) !ext.McpAuthResult {
+            return .cancelled;
+        }
+    }.handle;
+    var runtime = try SessionExtensionRuntime.init(
+        allocator,
+        "s1",
+        session_types.ResumeSessionConfig{
+            .extensions = .{ .common = .{ .mcp = .{
+                .on_auth_request = handler,
+            } } },
+        },
+        &.{},
+    );
+    runtime.mcp_oauth_interest = .restore_required;
+    try client.extension_runtimes.append(allocator, runtime);
+
+    try (Session{ .client = &client, .id = "s1" }).disconnect();
+    try std.testing.expect(client.findExtensionRuntime("s1") == null);
+    try writer.interface.flush();
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "requests",
+        allocator,
+        .limited(4096),
+    );
+    defer allocator.free(requests);
+    var frames = std.Io.Reader.fixed(requests);
+    const register_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(register_body);
+    const release_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(release_body);
+    const detach_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(detach_body);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        register_body,
+        "\"method\":\"session.eventLog.registerInterest\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        release_body,
+        "\"method\":\"session.eventLog.releaseInterest\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        detach_body,
+        "\"method\":\"session.detach\"",
+    ) != null);
+}
+
+test "detach recovery preserves an interest restored during nested dispatch" {
+    const allocator = std.testing.allocator;
+    var client: Client = undefined;
+    client.allocator = allocator;
+    client.pending_extension_runtime = null;
+    client.extension_runtimes = .empty;
+    defer {
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+    }
+    const handler = struct {
+        fn handle(
+            _: std.mem.Allocator,
+            _: ext.McpAuthRequest,
+            _: ?*anyopaque,
+        ) !ext.McpAuthResult {
+            return .cancelled;
+        }
+    }.handle;
+    var runtime = try SessionExtensionRuntime.init(
+        allocator,
+        "s1",
+        session_types.ResumeSessionConfig{
+            .extensions = .{ .common = .{ .mcp = .{
+                .on_auth_request = handler,
+            } } },
+        },
+        &.{},
+    );
+    runtime.mcp_oauth_interest = try testMcpOAuthInterest(allocator, "interest-2");
+    try client.extension_runtimes.append(allocator, runtime);
+
+    try (Session{ .client = &client, .id = "s1" })
+        .restoreMcpOAuthInterestAfterDetachFailure(true);
+    try std.testing.expectEqualStrings(
+        "interest-2",
+        client.extension_runtimes.items[0].mcp_oauth_interest.registered.handle(),
+    );
+}
+
 test "client teardown releases OAuth interests before event storage" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -11094,8 +12199,8 @@ test "client teardown releases OAuth interests before event storage" {
         &.{},
     );
     try client.commitExtensionRuntime("s1", .{}, &.{});
-    client.findExtensionRuntime("s1").?.mcp_oauth_interest_handle =
-        try allocator.dupe(u8, "interest-1");
+    client.findExtensionRuntime("s1").?.mcp_oauth_interest =
+        try testMcpOAuthInterest(allocator, "interest-1");
 
     client.deinit();
 }
@@ -11120,7 +12225,7 @@ test "transport buffer teardown wipes reader and writer storage" {
     }
 }
 
-test "zero OAuth token lifetime cancels the pending request" {
+test "invalid MCP OAuth token remains observable without cancellation" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -11130,19 +12235,14 @@ test "zero OAuth token lifetime cancels the pending request" {
     const event =
         \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"s1","event":{"type":"mcp.oauth_required","data":{"requestId":"oauth-1","serverName":"server","serverUrl":"https://example.test","reason":"initial"}}}}
     ;
-    const cancel_response =
-        \\{"jsonrpc":"2.0","id":2,"result":{"success":true}}
-    ;
     const responses = try std.fmt.allocPrint(
         allocator,
-        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
         .{
             register_response.len,
             register_response,
             event.len,
             event,
-            cancel_response.len,
-            cancel_response,
         },
     );
     defer allocator.free(responses);
@@ -11198,9 +12298,10 @@ test "zero OAuth token lifetime cancels the pending request" {
     try client.commitExtensionRuntime("s1", .{}, &.{});
 
     const session = Session{ .client = &client, .id = "s1" };
-    try std.testing.expectError(
-        error.InvalidMcpAuthTokenExpiration,
-        session.nextEvent(),
+    var oauth_event = try session.nextEvent();
+    defer oauth_event.deinit(allocator);
+    try std.testing.expect(
+        oauth_event.mcp_oauth_required.automatic_handling == .invalid_result,
     );
     try writer.interface.flush();
     const requests = try tmp.dir.readFileAlloc(
@@ -11211,10 +12312,181 @@ test "zero OAuth token lifetime cancels the pending request" {
     );
     defer allocator.free(requests);
     try std.testing.expect(
-        std.mem.indexOf(u8, requests, "\"kind\":\"cancelled\"") != null,
+        std.mem.indexOf(u8, requests, "session.mcp.oauth.handlePendingRequest") == null,
     );
     try std.testing.expect(
         std.mem.indexOf(u8, requests, "\"accessToken\"") == null,
+    );
+}
+
+test "MCP OAuth handler failure remains observable without cancellation" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const event =
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"s1","event":{"type":"mcp.oauth_required","data":{"requestId":"oauth-1","serverName":"server","serverUrl":"https://example.test","reason":"initial"}}}}
+    ;
+    const outer_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"value":"done"}}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{ event.len, event, outer_response.len, outer_response },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "responses",
+        .data = responses,
+    });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{ .mode = .read_only });
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [128]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [256]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.events.items) |*queued| queued.deinit(allocator);
+        client.events.deinit(allocator);
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+    }
+    const handler = struct {
+        fn handle(
+            _: std.mem.Allocator,
+            _: ext.McpAuthRequest,
+            _: ?*anyopaque,
+        ) !ext.McpAuthResult {
+            return error.LoginFailed;
+        }
+    }.handle;
+    try client.extension_runtimes.append(
+        allocator,
+        try SessionExtensionRuntime.init(
+            allocator,
+            "s1",
+            session_types.ResumeSessionConfig{
+                .extensions = .{ .common = .{ .mcp = .{
+                    .on_auth_request = handler,
+                } } },
+            },
+            &.{},
+        ),
+    );
+    const outer = try client.callRpc(struct { value: []const u8 }, "test.outer", .{});
+    defer outer.deinit();
+
+    try std.testing.expectEqualStrings("done", outer.value.value);
+    try std.testing.expectEqual(@as(usize, 1), client.events.items.len);
+    const handling = client.events.items[0].event.mcp_oauth_required.automatic_handling;
+    try std.testing.expect(handling == .handler_failed);
+    try std.testing.expect(handling.handler_failed == error.LoginFailed);
+    try writer.interface.flush();
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "requests",
+        allocator,
+        .limited(256),
+    );
+    defer allocator.free(requests);
+    try std.testing.expect(
+        std.mem.indexOf(u8, requests, "session.mcp.oauth.handlePendingRequest") == null,
+    );
+}
+
+test "explicit MCP OAuth cancellation sends the cancellation response" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"success":true}}
+    ;
+    const framed = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ response.len, response },
+    );
+    defer allocator.free(framed);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = framed });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{ .mode = .read_only });
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [256]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [512]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.events.items) |*queued| queued.deinit(allocator);
+        client.events.deinit(allocator);
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+    }
+    const handler = struct {
+        fn handle(
+            _: std.mem.Allocator,
+            _: ext.McpAuthRequest,
+            _: ?*anyopaque,
+        ) !ext.McpAuthResult {
+            return .cancelled;
+        }
+    }.handle;
+    try client.extension_runtimes.append(
+        allocator,
+        try SessionExtensionRuntime.init(
+            allocator,
+            "s1",
+            session_types.ResumeSessionConfig{
+                .extensions = .{ .common = .{ .mcp = .{
+                    .on_auth_request = handler,
+                } } },
+            },
+            &.{},
+        ),
+    );
+    const params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"s1","event":{"type":"mcp.oauth_required","data":{"requestId":"oauth-1","serverName":"server","serverUrl":"https://example.test","reason":"initial"}}}
+    ,
+        .{},
+    );
+    defer params.deinit();
+    try client.queueSessionEvent(params.value);
+
+    try std.testing.expect(
+        client.events.items[0].event.mcp_oauth_required.automatic_handling == .handled,
+    );
+    try writer.interface.flush();
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "requests",
+        allocator,
+        .limited(1024),
+    );
+    defer allocator.free(requests);
+    try std.testing.expect(
+        std.mem.indexOf(u8, requests, "\"kind\":\"cancelled\"") != null,
     );
 }
 
@@ -11302,24 +12574,7 @@ test "review regressions preserve protocol semantics" {
     try std.testing.expect(!stdio.value.object.contains("workingDirectory"));
 }
 
-test "OAuth errors cancel and canvas identity is instance-only" {
-    const outcome = invokeMcpAuthHandler(struct {
-        fn handle(
-            _: std.mem.Allocator,
-            _: ext.McpAuthRequest,
-            _: ?*anyopaque,
-        ) !ext.McpAuthResult {
-            return error.LoginFailed;
-        }
-    }.handle, std.testing.allocator, .{
-        .request_id = "request-1",
-        .server_name = "tickets",
-        .server_url = "https://example.test",
-        .reason = .initial,
-    }, null);
-    try std.testing.expect(outcome.result == .cancelled);
-    try std.testing.expect(outcome.handler_error.? == error.LoginFailed);
-
+test "canvas identity is instance-only" {
     const allocator = std.testing.allocator;
     var runtime = try SessionExtensionRuntime.init(
         allocator,
@@ -12684,6 +13939,17 @@ test "failed create and resume roll back provider token routes" {
         }
         try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
         try std.testing.expectEqual(@as(usize, 0), client.provider_tokens.items.len);
+        try writer.interface.flush();
+        const requests = try tmp.dir.readFileAlloc(
+            std.testing.io,
+            "request",
+            allocator,
+            .limited(4096),
+        );
+        defer allocator.free(requests);
+        try std.testing.expect(
+            std.mem.indexOf(u8, requests, "\"method\":\"session.detach\"") == null,
+        );
     }
 }
 
