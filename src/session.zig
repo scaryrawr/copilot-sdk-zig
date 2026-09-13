@@ -526,6 +526,17 @@ pub const RawEvent = event_payloads.RawEvent;
 pub const UnknownEvent = event_payloads.UnknownEvent;
 pub const SessionEvent = session_events.SessionEvent;
 pub const SessionEventTag = session_events.SessionEventTag;
+
+pub const SessionEventHistory = struct {
+    allocator: std.mem.Allocator,
+    events: []SessionEvent,
+
+    pub fn deinit(self: *SessionEventHistory) void {
+        for (self.events) |*event| event.deinit(self.allocator);
+        self.allocator.free(self.events);
+        self.* = undefined;
+    }
+};
 pub const parseEvent = session_events.parseEvent;
 
 pub const ClassifiedParseError = error{
