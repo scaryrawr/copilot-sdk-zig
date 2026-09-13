@@ -232,12 +232,16 @@ pub const EventLog = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         const inspection = try self.tracker.inspectDetailed(token);
+        const failure = if (inspection.failure_detail_id) |failure_detail_id|
+            self.takeTurnFailureLocked(failure_detail_id) catch |err| {
+                self.discardTurnFailureLocked(failure_detail_id);
+                return err;
+            }
+        else
+            null;
         return .{
             .read = inspection.read,
-            .failure = if (inspection.failure_detail_id) |failure_detail_id|
-                try self.takeTurnFailureLocked(failure_detail_id)
-            else
-                null,
+            .failure = failure,
         };
     }
 
@@ -891,6 +895,21 @@ test "discarded waiters release retained turn diagnostics" {
     try log.failTurnsDetailed(try testSessionFailure(allocator, "legacy"));
     const legacy_read = try log.inspectTurn(legacy);
     try std.testing.expect(legacy_read == .failure);
+    try std.testing.expectEqual(@as(usize, 0), log.turn_failure_details.items.len);
+}
+
+test "failed diagnostic clones release the consumed receipt share" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var log = try EventLog.init(failing.allocator(), std.testing.io, "s1", 1, 2, 2);
+    defer log.deinit();
+
+    const receipt = try log.reserveTurn(.waited);
+    try log.failTurnsDetailed(try testSessionFailure(failing.allocator(), "failure"));
+    try std.testing.expectEqual(@as(usize, 1), log.turn_failure_details.items.len);
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, log.inspectTurnDetailed(receipt));
+    try std.testing.expect(failing.has_induced_failure);
     try std.testing.expectEqual(@as(usize, 0), log.turn_failure_details.items.len);
 }
 

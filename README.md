@@ -211,9 +211,10 @@ var event = try observer.nextEvent();
 defer event.deinit(allocator);
 ```
 
-A subscription receives events appended after `subscribe` returns. A slow
-subscriber receives `error.EventLogOverflow` once, then resumes at the oldest
-retained event.
+A subscription allocates its cursor before starting the event pump, so it can
+receive events drained during startup before `subscribe` returns, as well as
+later events. A slow subscriber receives `error.EventLogOverflow` once, then
+resumes at the oldest retained event.
 
 `Session` borrows its `Client`. Keep the client alive while a session handle is
 in use. `SessionEvent` values and the message ID from `send` own memory from the
