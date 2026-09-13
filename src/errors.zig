@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const SdkError = error{
     ClientFailure,
@@ -389,11 +390,28 @@ fn deinitCause(allocator: std.mem.Allocator, cause: Cause) void {
     freeOptional(allocator, cause.message);
 }
 
+var rpc_data_wipe_observer: ?*const fn ([]const u8) void = null;
+
+pub fn setRpcDataWipeObserverForTest(observer: ?*const fn ([]const u8) void) void {
+    if (!builtin.is_test) @compileError("RPC wipe observers are test-only");
+    rpc_data_wipe_observer = observer;
+}
+
+pub fn freeRpcData(allocator: std.mem.Allocator, value: []u8) void {
+    std.crypto.secureZero(u8, value);
+    if (builtin.is_test) {
+        if (rpc_data_wipe_observer) |observer| observer(value);
+    }
+    allocator.free(value);
+}
+
 fn deinitRpc(allocator: std.mem.Allocator, rpc: RpcFailure) void {
     allocator.free(rpc.method);
     freeOptional(allocator, rpc.machine_code);
     allocator.free(rpc.message);
-    freeOptional(allocator, rpc.data_json);
+    if (rpc.data_json) |data_json| {
+        freeRpcData(allocator, data_json);
+    }
     switch (rpc.context) {
         .generic => {},
         .session => |context| allocator.free(context.session_id),

@@ -191,7 +191,7 @@ const executable_evidence = [_]EvidenceSpec{
     .{ .id = .permission_handler_behavior, .source_file = "src/client.zig", .test_filter = "permission handler failures leave requests available for manual handling", .kind = .detailed_behavior },
     .{ .id = .tool_handler_behavior, .source_file = "src/client.zig", .test_filter = "nextEventDetailed reports automatic tool handler failure", .kind = .detailed_behavior },
     .{ .id = .process_write_ownership, .source_file = "src/client.zig", .test_filter = "process terminate and client write constructors own fields and deinit", .kind = .ownership },
-    .{ .id = .shutdown_behavior, .source_file = "src/client.zig", .test_filter = "stopDetailed aggregates owned failures and attempt counts", .kind = .detailed_behavior },
+    .{ .id = .shutdown_behavior, .source_file = "src/client.zig", .test_filter = "stopDetailed retains detach RPC failure details and completes cleanup", .kind = .detailed_behavior },
     .{ .id = .shutdown_dropped_behavior, .source_file = "src/client.zig", .test_filter = "stopDetailed reports allocation-free dropped diagnostics", .kind = .detailed_behavior },
     .{ .id = .connect_rejection_dispatch, .source_file = "src/client.zig", .test_filter = "connect rejection preserves legacy and detailed classification", .kind = .detailed_behavior },
     .{ .id = .protocol_version_dispatch, .source_file = "src/client.zig", .test_filter = "connect validates the protocol version", .kind = .detailed_behavior },
