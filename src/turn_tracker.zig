@@ -20,7 +20,6 @@ pub const ReceiptRead = union(enum) {
 const Receipt = struct {
     active: bool = false,
     generation: u64 = 0,
-    kind: ReceiptKind = .raw,
     waiter_attached: bool = false,
     message_id: ?[]u8 = null,
     turn_id: ?[]u8 = null,
@@ -91,7 +90,6 @@ pub const TurnTracker = struct {
             receipt.* = .{
                 .active = true,
                 .generation = generation,
-                .kind = kind,
                 .waiter_attached = kind == .waited,
             };
             return .{ .slot = @intCast(index), .generation = generation };
@@ -116,6 +114,7 @@ pub const TurnTracker = struct {
             }
             try self.bindTurn(receipt, user_turn.turn_id);
         }
+        self.clearOrphansIfNoUnboundReceipt();
     }
 
     pub fn failReceipt(
@@ -173,7 +172,7 @@ pub const TurnTracker = struct {
                 const turn_id = payload.data.turn_id orelse return;
                 if (self.findByMessage(message_id)) |receipt| {
                     try self.bindTurn(receipt, turn_id);
-                } else {
+                } else if (self.hasUnboundReceipt()) {
                     try self.storeUserTurn(message_id, turn_id);
                 }
             },
@@ -181,7 +180,7 @@ pub const TurnTracker = struct {
                 const turn_id = message.turn_id orelse return;
                 if (self.findByTurn(turn_id)) |receipt| {
                     try self.replaceAssistant(receipt, event);
-                } else {
+                } else if (self.hasUnboundReceipt()) {
                     try self.storeAssistant(turn_id, event);
                 }
             },
@@ -189,7 +188,7 @@ pub const TurnTracker = struct {
                 const turn_id = payload.data.turn_id;
                 if (self.findByTurn(turn_id)) |receipt| {
                     self.completeReceipt(receipt);
-                } else {
+                } else if (self.hasUnboundReceipt()) {
                     try self.storeTurnEnd(turn_id);
                 }
             },
@@ -263,8 +262,11 @@ pub const TurnTracker = struct {
             if (!std.mem.eql(u8, item.turn_id, turn_id)) return error.InvalidTurnCorrelation;
             return;
         }
-        if (self.orphan_users.items.len == self.orphan_limit)
-            return error.TurnCorrelationOverflow;
+        if (self.orphan_users.items.len == self.orphan_limit) {
+            const evicted = self.orphan_users.orderedRemove(0);
+            self.allocator.free(evicted.message_id);
+            self.allocator.free(evicted.turn_id);
+        }
         const owned_message_id = try self.allocator.dupe(u8, message_id);
         errdefer self.allocator.free(owned_message_id);
         try self.orphan_users.append(self.allocator, .{
@@ -284,8 +286,10 @@ pub const TurnTracker = struct {
             facts.latest_assistant = cloned.assistant_message;
             return;
         }
-        if (self.orphan_turns.items.len == self.orphan_limit)
-            return error.TurnCorrelationOverflow;
+        if (self.orphan_turns.items.len == self.orphan_limit) {
+            var evicted = self.orphan_turns.orderedRemove(0);
+            self.deinitTurnFacts(&evicted);
+        }
         const owned_turn_id = try self.allocator.dupe(u8, turn_id);
         errdefer self.allocator.free(owned_turn_id);
         var cloned = try session.cloneEvent(self.allocator, event);
@@ -301,8 +305,10 @@ pub const TurnTracker = struct {
             facts.completed = true;
             return;
         }
-        if (self.orphan_turns.items.len == self.orphan_limit)
-            return error.TurnCorrelationOverflow;
+        if (self.orphan_turns.items.len == self.orphan_limit) {
+            var evicted = self.orphan_turns.orderedRemove(0);
+            self.deinitTurnFacts(&evicted);
+        }
         try self.orphan_turns.append(self.allocator, .{
             .turn_id = try self.allocator.dupe(u8, turn_id),
             .completed = true,
@@ -316,6 +322,24 @@ pub const TurnTracker = struct {
             if (std.mem.eql(u8, candidate, message_id)) return receipt;
         }
         return null;
+    }
+
+    fn hasUnboundReceipt(self: *TurnTracker) bool {
+        for (self.receipts) |receipt| {
+            if (receipt.active and receipt.message_id == null) return true;
+        }
+        return false;
+    }
+
+    fn clearOrphansIfNoUnboundReceipt(self: *TurnTracker) void {
+        if (self.hasUnboundReceipt()) return;
+        for (self.orphan_users.items) |item| {
+            self.allocator.free(item.message_id);
+            self.allocator.free(item.turn_id);
+        }
+        self.orphan_users.clearRetainingCapacity();
+        for (self.orphan_turns.items) |*item| self.deinitTurnFacts(item);
+        self.orphan_turns.clearRetainingCapacity();
     }
 
     fn findByTurn(self: *TurnTracker, turn_id: []const u8) ?*Receipt {
@@ -458,6 +482,26 @@ test "a prior raw send cannot satisfy a later waiter" {
     var message = result.completed.?;
     defer message.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("waited", message.content);
+}
+
+test "unrelated completed turns are bounded and do not fail active waits" {
+    var tracker = try TurnTracker.init(std.testing.allocator, std.testing.io, 2, 2);
+    defer tracker.deinit();
+
+    const waiting = try tracker.reserve(.waited);
+    try observeTurn(&tracker, "other-1", "turn-1", "one");
+    try observeTurn(&tracker, "other-2", "turn-2", "two");
+    try observeTurn(&tracker, "message-3", "turn-3", "three");
+    try std.testing.expectEqual(@as(usize, 2), tracker.orphan_users.items.len);
+    try std.testing.expectEqual(@as(usize, 2), tracker.orphan_turns.items.len);
+
+    try tracker.bindMessageId(waiting, "message-3");
+    const result = try tracker.inspect(waiting);
+    var message = result.completed.?;
+    defer message.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("three", message.content);
+    try std.testing.expectEqual(@as(usize, 0), tracker.orphan_users.items.len);
+    try std.testing.expectEqual(@as(usize, 0), tracker.orphan_turns.items.len);
 }
 
 test "conflicting raw turn correlation releases its receipt" {

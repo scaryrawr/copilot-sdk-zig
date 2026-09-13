@@ -1,4 +1,5 @@
 const std = @import("std");
+const errors = @import("errors.zig");
 const session = @import("session.zig");
 const turn_tracker = @import("turn_tracker.zig");
 
@@ -34,19 +35,17 @@ pub const EventLog = struct {
     session_id: []u8,
     generation: u64,
     mutex: std.Io.Mutex = .init,
-    processing_mutex: std.Io.Mutex = .init,
     tracker: turn_tracker.TurnTracker,
     entries: []?Entry,
     subscribers: []Subscriber,
     base_sequence: u64 = 0,
     next_sequence: u64 = 0,
     terminal_error: ?anyerror = null,
+    terminal_detail: ?errors.Failure = null,
     accepting_ingress: bool = true,
     ingress_count: usize = 0,
     operation_references: usize = 0,
-    active_callbacks: usize = 0,
     ingress_drained: std.Io.Event = .is_set,
-    callbacks_drained: std.Io.Event = .is_set,
     is_closed: bool = false,
 
     pub fn init(
@@ -88,6 +87,7 @@ pub const EventLog = struct {
             if (entry.*) |*value| value.event.deinit(self.allocator);
         }
         self.tracker.deinit();
+        if (self.terminal_detail) |*failure| failure.deinit();
         self.allocator.free(self.session_id);
         self.allocator.free(self.entries);
         self.allocator.free(self.subscribers);
@@ -134,34 +134,6 @@ pub const EventLog = struct {
         self.operation_references -= 1;
     }
 
-    pub fn retainCallback(self: *EventLog, admitted: bool) bool {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (!admitted and (!self.accepting_ingress or self.is_closed))
-            return false;
-        self.active_callbacks += 1;
-        self.callbacks_drained.reset();
-        return true;
-    }
-
-    pub fn releaseCallback(self: *EventLog) void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        std.debug.assert(self.active_callbacks > 0);
-        self.active_callbacks -= 1;
-        if (self.active_callbacks == 0) self.callbacks_drained.set(self.io);
-    }
-
-    pub fn waitCallbacksDrainedUncancelable(self: *EventLog) void {
-        self.callbacks_drained.waitUncancelable(self.io);
-    }
-
-    pub fn hasActiveCallbacks(self: *EventLog) bool {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        return self.active_callbacks != 0;
-    }
-
     pub fn beginClose(self: *EventLog) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -171,10 +143,6 @@ pub const EventLog = struct {
 
     pub fn waitIngressDrained(self: *EventLog) !void {
         try self.ingress_drained.wait(self.io);
-    }
-
-    pub fn waitIngressDrainedUncancelable(self: *EventLog) void {
-        self.ingress_drained.waitUncancelable(self.io);
     }
 
     pub fn reserveTurn(
@@ -324,6 +292,62 @@ pub const EventLog = struct {
         if (fail_tracker) self.tracker.failAll(err);
     }
 
+    pub fn failAdmitted(self: *EventLog, err: anyerror) void {
+        self.mutex.lockUncancelable(self.io);
+        self.terminal_error = err;
+        if (self.terminal_detail) |*failure| failure.deinit();
+        self.terminal_detail = null;
+        const fail_tracker = self.ingress_count == 0;
+        if (fail_tracker) for (self.subscribers) |*subscriber| {
+            if (subscriber.active) subscriber.ready.set(self.io);
+        };
+        self.mutex.unlock(self.io);
+        if (fail_tracker) self.tracker.failAll(err);
+    }
+
+    pub fn failDetailed(self: *EventLog, failure_value: errors.Failure) void {
+        var failure = failure_value;
+        const native_error = failure.native_error;
+        self.mutex.lockUncancelable(self.io);
+        if (self.terminal_error == null) self.terminal_error = native_error;
+        if (self.terminal_detail == null) {
+            self.terminal_detail = failure;
+        } else {
+            failure.deinit();
+        }
+        const fail_tracker = self.ingress_count == 0;
+        if (fail_tracker) for (self.subscribers) |*subscriber| {
+            if (subscriber.active) subscriber.ready.set(self.io);
+        };
+        self.mutex.unlock(self.io);
+        if (fail_tracker) self.tracker.failAll(native_error);
+    }
+
+    pub fn detailedFailure(self: *EventLog) !?errors.Failure {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const failure = &(self.terminal_detail orelse return null);
+        return switch (failure.detail) {
+            .session => |session_failure| switch (session_failure) {
+                .agent => |agent| try cloneSessionAgentFailure(
+                    self.allocator,
+                    failure.native_error,
+                    agent,
+                ),
+                else => blk: {
+                    const owned = failure.*;
+                    self.terminal_detail = null;
+                    break :blk owned;
+                },
+            },
+            else => blk: {
+                const owned = failure.*;
+                self.terminal_detail = null;
+                break :blk owned;
+            },
+        };
+    }
+
     pub fn close(self: *EventLog) void {
         self.mutex.lockUncancelable(self.io);
         self.is_closed = true;
@@ -335,21 +359,10 @@ pub const EventLog = struct {
         self.tracker.failAll(error.SessionDisconnected);
     }
 
-    pub fn isReclaimable(self: *EventLog) bool {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (!self.is_closed or
-            self.base_sequence != self.next_sequence or
-            self.ingress_count != 0 or
-            self.operation_references != 0 or
-            self.active_callbacks != 0)
-        {
-            return false;
-        }
-        for (self.subscribers[1..]) |subscriber| {
-            if (subscriber.active) return false;
-        }
-        return true;
+    pub fn drainAndClose(self: *EventLog) void {
+        self.beginClose();
+        self.ingress_drained.waitUncancelable(self.io);
+        self.close();
     }
 
     pub fn isDiscardableClosed(self: *EventLog) bool {
@@ -357,8 +370,7 @@ pub const EventLog = struct {
         defer self.mutex.unlock(self.io);
         if (!self.is_closed or
             self.ingress_count != 0 or
-            self.operation_references != 0 or
-            self.active_callbacks != 0)
+            self.operation_references != 0)
         {
             return false;
         }
@@ -366,12 +378,6 @@ pub const EventLog = struct {
             if (subscriber.active) return false;
         }
         return true;
-    }
-
-    pub fn isAcceptingIngress(self: *EventLog) bool {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        return self.accepting_ingress and !self.is_closed;
     }
 
     fn getSubscriber(self: *EventLog, token: SubscriberToken) ?*Subscriber {
@@ -424,6 +430,59 @@ pub const EventLog = struct {
         }
     }
 };
+
+fn cloneSessionAgentFailure(
+    allocator: std.mem.Allocator,
+    native_error: anyerror,
+    agent: errors.SessionAgentFailure,
+) !errors.Failure {
+    var owned: errors.SessionAgentFailure = .{
+        .session_id = try allocator.dupe(u8, agent.session_id),
+        .error_type = undefined,
+        .error_code = null,
+        .message = undefined,
+        .status_code = agent.status_code,
+        .provider_call_id = null,
+        .service_request_id = null,
+        .remediation_json = null,
+        .url = null,
+        .stack = null,
+        .eligible_for_auto_switch = agent.eligible_for_auto_switch,
+    };
+    errdefer allocator.free(owned.session_id);
+    owned.error_type = try allocator.dupe(u8, agent.error_type);
+    errdefer allocator.free(owned.error_type);
+    owned.error_code = if (agent.error_code) |value|
+        try allocator.dupe(u8, value)
+    else
+        null;
+    errdefer if (owned.error_code) |value| allocator.free(value);
+    owned.message = try allocator.dupe(u8, agent.message);
+    errdefer allocator.free(owned.message);
+    owned.provider_call_id = if (agent.provider_call_id) |value|
+        try allocator.dupe(u8, value)
+    else
+        null;
+    errdefer if (owned.provider_call_id) |value| allocator.free(value);
+    owned.service_request_id = if (agent.service_request_id) |value|
+        try allocator.dupe(u8, value)
+    else
+        null;
+    errdefer if (owned.service_request_id) |value| allocator.free(value);
+    owned.remediation_json = if (agent.remediation_json) |value|
+        try allocator.dupe(u8, value)
+    else
+        null;
+    errdefer if (owned.remediation_json) |value| allocator.free(value);
+    owned.url = if (agent.url) |value| try allocator.dupe(u8, value) else null;
+    errdefer if (owned.url) |value| allocator.free(value);
+    owned.stack = if (agent.stack) |value| try allocator.dupe(u8, value) else null;
+    return .{
+        .allocator = allocator,
+        .native_error = native_error,
+        .detail = .{ .session = .{ .agent = owned } },
+    };
+}
 
 fn parsedEvent(allocator: std.mem.Allocator, content: []const u8) !session.SessionEvent {
     const json = try std.fmt.allocPrint(
@@ -549,4 +608,52 @@ test "close waits for admitted work before exposing disconnect" {
     defer retained.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("queued", retained.assistant_message.content);
     try std.testing.expect((try log.inspect(observer)) == .closed);
+}
+
+test "closed log ignores unread compatibility events when deciding reclamation" {
+    var log = try EventLog.init(std.testing.allocator, std.testing.io, "s1", 1, 2, 2);
+    defer log.deinit();
+
+    try log.append(try parsedEvent(std.testing.allocator, "unread"));
+    log.close();
+
+    try std.testing.expect(log.isDiscardableClosed());
+}
+
+test "session agent diagnostics can be cloned for multiple detailed waiters" {
+    const allocator = std.testing.allocator;
+    var log = try EventLog.init(allocator, std.testing.io, "s1", 1, 2, 2);
+    defer log.deinit();
+    log.failDetailed(.{
+        .allocator = allocator,
+        .native_error = error.CopilotSessionError,
+        .detail = .{ .session = .{ .agent = .{
+            .session_id = try allocator.dupe(u8, "s1"),
+            .error_type = try allocator.dupe(u8, "provider"),
+            .error_code = try allocator.dupe(u8, "rate_limit"),
+            .message = try allocator.dupe(u8, "retry later"),
+            .status_code = 429,
+            .provider_call_id = try allocator.dupe(u8, "call-1"),
+            .service_request_id = try allocator.dupe(u8, "request-1"),
+            .remediation_json = try allocator.dupe(u8, "{\"retry\":true}"),
+            .url = try allocator.dupe(u8, "https://example.invalid"),
+            .stack = try allocator.dupe(u8, "stack"),
+            .eligible_for_auto_switch = true,
+        } } },
+    });
+
+    var first = (try log.detailedFailure()).?;
+    defer first.deinit();
+    var second = (try log.detailedFailure()).?;
+    defer second.deinit();
+
+    const first_agent = first.detail.session.agent;
+    const second_agent = second.detail.session.agent;
+    try std.testing.expectEqualStrings("rate_limit", first_agent.error_code.?);
+    try std.testing.expectEqualStrings("rate_limit", second_agent.error_code.?);
+    try std.testing.expect(first_agent.message.ptr != second_agent.message.ptr);
+    try std.testing.expectEqualStrings(
+        "{\"retry\":true}",
+        second_agent.remediation_json.?,
+    );
 }

@@ -1,5 +1,6 @@
 const std = @import("std");
 const provider = @import("provider.zig");
+const runtime = @import("runtime.zig");
 const ModelCapabilitiesOverride = @import("models.zig").CapabilitiesOverride;
 const extensibility = @import("extensibility.zig");
 const event_payloads = @import("session_event_payloads.zig");
@@ -37,6 +38,46 @@ pub const InitialAgent = union(enum) {
     custom_agent: []const u8,
 };
 
+pub const LargeOutputConfig = struct {
+    enabled: ?bool = null,
+    max_size_bytes: ?u64 = null,
+    output_directory: ?[]const u8 = null,
+};
+
+pub const InfiniteSessionConfig = struct {
+    enabled: ?bool = null,
+    background_compaction_threshold: ?f64 = null,
+    buffer_exhaustion_threshold: ?f64 = null,
+};
+
+pub const MemoryConfiguration = struct {
+    enabled: bool,
+};
+
+pub const EmbeddingCacheStorage = enum {
+    persistent,
+    in_memory,
+};
+
+pub const CapiSessionOptions = struct {
+    auto_tier: ?AutoTier = null,
+    enable_websocket_responses: ?bool = null,
+};
+
+pub const RemoteSessionMode = enum {
+    off,
+    @"export",
+    on,
+
+    pub fn wireValue(self: RemoteSessionMode) []const u8 {
+        return switch (self) {
+            .off => "off",
+            .@"export" => "export",
+            .on => "on",
+        };
+    }
+};
+
 pub const CreateSessionConfig = struct {
     session_id: ?[]const u8 = null,
     model: ?[]const u8 = null,
@@ -68,7 +109,26 @@ pub const CreateSessionConfig = struct {
     permission_context: ?*anyopaque = null,
     on_user_input_request: ?UserInputHandler = null,
     user_input_context: ?*anyopaque = null,
+    remote_session: ?RemoteSessionMode = null,
+    create_session_filesystem_provider: ?runtime.SessionFilesystemProviderFactory = null,
     extensions: extensibility.CreateExtensions = .{},
+    client_name: ?[]const u8 = null,
+    reasoning_effort: ?ReasoningEffort = null,
+    reasoning_summary: ?ReasoningSummary = null,
+    enable_experimental_mode: ?bool = null,
+    context_tier: ?ContextTier = null,
+    large_output: ?LargeOutputConfig = null,
+    config_directory: ?[]const u8 = null,
+    capi: ?CapiSessionOptions = null,
+    additional_directories: ?[]const []const u8 = null,
+    infinite_sessions: ?InfiniteSessionConfig = null,
+    memory: ?MemoryConfiguration = null,
+    skip_embedding_retrieval: ?bool = null,
+    embedding_cache_storage: ?EmbeddingCacheStorage = null,
+    organization_custom_instructions: ?[]const u8 = null,
+    enable_file_hooks: ?bool = null,
+    enable_host_git_operations: ?bool = null,
+    enable_session_store: ?bool = null,
 };
 
 pub const ResumeSessionConfig = struct {
@@ -103,7 +163,26 @@ pub const ResumeSessionConfig = struct {
     user_input_context: ?*anyopaque = null,
     suppress_resume_event: bool = false,
     continue_pending_work: bool = false,
+    remote_session: ?RemoteSessionMode = null,
+    create_session_filesystem_provider: ?runtime.SessionFilesystemProviderFactory = null,
     extensions: extensibility.ResumeExtensions = .{},
+    client_name: ?[]const u8 = null,
+    reasoning_effort: ?ReasoningEffort = null,
+    reasoning_summary: ?ReasoningSummary = null,
+    enable_experimental_mode: ?bool = null,
+    context_tier: ?ContextTier = null,
+    large_output: ?LargeOutputConfig = null,
+    config_directory: ?[]const u8 = null,
+    capi: ?CapiSessionOptions = null,
+    additional_directories: ?[]const []const u8 = null,
+    infinite_sessions: ?InfiniteSessionConfig = null,
+    memory: ?MemoryConfiguration = null,
+    skip_embedding_retrieval: ?bool = null,
+    embedding_cache_storage: ?EmbeddingCacheStorage = null,
+    organization_custom_instructions: ?[]const u8 = null,
+    enable_file_hooks: ?bool = null,
+    enable_host_git_operations: ?bool = null,
+    enable_session_store: ?bool = null,
 };
 
 pub const JoinSessionConfig = struct {
@@ -138,7 +217,26 @@ pub const JoinSessionConfig = struct {
     user_input_context: ?*anyopaque = null,
     suppress_resume_event: bool = true,
     continue_pending_work: bool = false,
+    remote_session: ?RemoteSessionMode = null,
+    create_session_filesystem_provider: ?runtime.SessionFilesystemProviderFactory = null,
     extensions: extensibility.JoinExtensions = .{},
+    client_name: ?[]const u8 = null,
+    reasoning_effort: ?ReasoningEffort = null,
+    reasoning_summary: ?ReasoningSummary = null,
+    enable_experimental_mode: ?bool = null,
+    context_tier: ?ContextTier = null,
+    large_output: ?LargeOutputConfig = null,
+    config_directory: ?[]const u8 = null,
+    capi: ?CapiSessionOptions = null,
+    additional_directories: ?[]const []const u8 = null,
+    infinite_sessions: ?InfiniteSessionConfig = null,
+    memory: ?MemoryConfiguration = null,
+    skip_embedding_retrieval: ?bool = null,
+    embedding_cache_storage: ?EmbeddingCacheStorage = null,
+    organization_custom_instructions: ?[]const u8 = null,
+    enable_file_hooks: ?bool = null,
+    enable_host_git_operations: ?bool = null,
+    enable_session_store: ?bool = null,
 };
 
 /// Compatibility alias for callers constructing create-session options.
@@ -197,7 +295,7 @@ pub const Cancellation = struct {
     }
 };
 
-/// A borrowed attachment sent with a user message. No deinit is required.
+/// A borrowed stable attachment sent with a user message. No deinit is required.
 pub const MessageAttachment = union(enum) {
     file: File,
     directory: Directory,
@@ -238,7 +336,168 @@ pub const MessageAttachment = union(enum) {
     };
 };
 
-pub const Attachment = MessageAttachment;
+/// Compatibility attachment model retained for inbound/protocol-shaped values.
+/// Outbound messages accept only `MessageAttachment`.
+pub const Attachment = union(enum) {
+    file: File,
+    directory: Directory,
+    selection: Selection,
+    blob: Blob,
+    github_reference: GitHubReference,
+    github_commit: GitHubCommit,
+    github_release: GitHubRelease,
+    github_actions_job: GitHubActionsJob,
+    github_repository: GitHubRepository,
+    github_file_diff: GitHubFileDiff,
+    github_tree_comparison: GitHubTreeComparison,
+    github_url: GitHubUrl,
+    github_file: GitHubFile,
+    github_snippet: GitHubSnippet,
+
+    pub const LineRange = struct {
+        start: u32,
+        end: u32,
+    };
+
+    pub const SelectionPosition = struct {
+        line: u32,
+        character: u32,
+    };
+
+    pub const SelectionRange = struct {
+        start: SelectionPosition,
+        end: SelectionPosition,
+    };
+
+    pub const GitHubReferenceType = enum {
+        issue,
+        pr,
+        discussion,
+    };
+
+    pub const GitHubRepoPointer = struct {
+        id: ?i64 = null,
+        name: []const u8,
+        owner: []const u8,
+    };
+
+    pub const GitHubFileDiffSide = struct {
+        path: []const u8,
+        git_ref: []const u8,
+        repo: GitHubRepoPointer,
+    };
+
+    pub const GitHubTreeComparisonSide = struct {
+        repo: GitHubRepoPointer,
+        revision: []const u8,
+    };
+
+    pub const GitHubSnippetLineRange = struct {
+        start: i64,
+        end: i64,
+    };
+
+    pub const File = struct {
+        path: []const u8,
+        display_name: ?[]const u8 = null,
+        line_range: ?LineRange = null,
+    };
+
+    pub const Directory = struct {
+        path: []const u8,
+        display_name: ?[]const u8 = null,
+    };
+
+    pub const Selection = struct {
+        file_path: []const u8,
+        text: []const u8,
+        display_name: ?[]const u8 = null,
+        selection: SelectionRange,
+    };
+
+    pub const Blob = struct {
+        data: []const u8,
+        mime_type: []const u8,
+        display_name: ?[]const u8 = null,
+    };
+
+    pub const GitHubReference = struct {
+        number: u64,
+        title: []const u8,
+        reference_type: GitHubReferenceType,
+        state: []const u8,
+        url: []const u8,
+    };
+
+    pub const GitHubCommit = struct {
+        message: []const u8,
+        oid: []const u8,
+        repo: GitHubRepoPointer,
+        url: []const u8,
+    };
+
+    pub const GitHubRelease = struct {
+        name: []const u8,
+        repo: GitHubRepoPointer,
+        tag_name: []const u8,
+        url: []const u8,
+    };
+
+    pub const GitHubActionsJob = struct {
+        conclusion: ?[]const u8 = null,
+        job_id: i64,
+        job_name: []const u8,
+        repo: GitHubRepoPointer,
+        url: []const u8,
+        workflow_name: []const u8,
+    };
+
+    pub const GitHubRepository = struct {
+        description: ?[]const u8 = null,
+        git_ref: ?[]const u8 = null,
+        repo: GitHubRepoPointer,
+        url: []const u8,
+    };
+
+    pub const GitHubFileDiff = struct {
+        sides: Sides,
+        url: []const u8,
+
+        pub const Sides = union(enum) {
+            added: GitHubFileDiffSide,
+            deleted: GitHubFileDiffSide,
+            modified: struct {
+                base: GitHubFileDiffSide,
+                head: GitHubFileDiffSide,
+            },
+        };
+    };
+
+    pub const GitHubTreeComparison = struct {
+        base: GitHubTreeComparisonSide,
+        head: GitHubTreeComparisonSide,
+        url: []const u8,
+    };
+
+    pub const GitHubUrl = struct {
+        url: []const u8,
+    };
+
+    pub const GitHubFile = struct {
+        path: []const u8,
+        git_ref: []const u8,
+        repo: GitHubRepoPointer,
+        url: []const u8,
+    };
+
+    pub const GitHubSnippet = struct {
+        line_range: GitHubSnippetLineRange,
+        path: []const u8,
+        git_ref: []const u8,
+        repo: GitHubRepoPointer,
+        url: []const u8,
+    };
+};
 
 pub const AutoTier = enum {
     efficiency,
@@ -452,6 +711,17 @@ pub const RawEvent = event_payloads.RawEvent;
 pub const UnknownEvent = event_payloads.UnknownEvent;
 pub const SessionEvent = session_events.SessionEvent;
 pub const SessionEventTag = session_events.SessionEventTag;
+
+pub const SessionEventHistory = struct {
+    allocator: std.mem.Allocator,
+    events: []SessionEvent,
+
+    pub fn deinit(self: *SessionEventHistory) void {
+        for (self.events) |*event| event.deinit(self.allocator);
+        self.allocator.free(self.events);
+        self.* = undefined;
+    }
+};
 pub const parseEvent = session_events.parseEvent;
 
 pub fn cloneEvent(
@@ -477,12 +747,148 @@ pub fn cloneEvent(
         .{},
     );
     defer envelope.deinit();
-    var cloned = try parseEvent(allocator, envelope.value);
+    var cloned = parseEvent(allocator, envelope.value) catch |err| {
+        if (event != .session_error or event.session_error.remediation != null)
+            return err;
+        const source = event.session_error;
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+        const arena_allocator = arena.allocator();
+        const raw_json = try allocator.dupe(u8, source.raw.data_json);
+        errdefer allocator.free(raw_json);
+        return .{ .session_error = .{
+            .error_type = try arena_allocator.dupe(u8, source.error_type),
+            .error_code = if (source.error_code) |value|
+                try arena_allocator.dupe(u8, value)
+            else
+                null,
+            .eligible_for_auto_switch = source.eligible_for_auto_switch,
+            .message = try arena_allocator.dupe(u8, source.message),
+            .remediation = null,
+            .stack = if (source.stack) |value|
+                try arena_allocator.dupe(u8, value)
+            else
+                null,
+            .status_code = source.status_code,
+            .provider_call_id = if (source.provider_call_id) |value|
+                try arena_allocator.dupe(u8, value)
+            else
+                null,
+            .service_request_id = if (source.service_request_id) |value|
+                try arena_allocator.dupe(u8, value)
+            else
+                null,
+            .url = if (source.url) |value|
+                try arena_allocator.dupe(u8, value)
+            else
+                null,
+            .raw = .{ .data_json = raw_json, .owns_data = true },
+            .arena = arena,
+        } };
+    };
     if (event == .permission_requested) {
         cloned.permission_requested.automatic_handling =
             event.permission_requested.automatic_handling;
     }
     return cloned;
+}
+
+pub const ClassifiedParseError = error{
+    MissingField,
+    MalformedFieldType,
+    OutOfMemory,
+};
+
+fn classifyRequiredString(
+    object: std.json.ObjectMap,
+    name: []const u8,
+) ClassifiedParseError!void {
+    return switch (object.get(name) orelse return error.MissingField) {
+        .string => {},
+        else => error.MalformedFieldType,
+    };
+}
+
+fn classifyOptionalString(
+    object: std.json.ObjectMap,
+    name: []const u8,
+) ClassifiedParseError!void {
+    return switch (object.get(name) orelse return) {
+        .string, .null => {},
+        else => error.MalformedFieldType,
+    };
+}
+
+fn classifyOptionalBool(
+    object: std.json.ObjectMap,
+    name: []const u8,
+) ClassifiedParseError!void {
+    return switch (object.get(name) orelse return) {
+        .bool, .null => {},
+        else => error.MalformedFieldType,
+    };
+}
+
+fn classifyFocusedEvent(value: std.json.Value) ClassifiedParseError!void {
+    const object = switch (value) {
+        .object => |object| object,
+        else => return error.MalformedFieldType,
+    };
+    try classifyRequiredString(object, "type");
+    const event_type = object.get("type").?.string;
+    const data_value: std.json.Value = object.get("data") orelse .{ .object = .empty };
+    const data = switch (data_value) {
+        .object => |data| data,
+        else => return error.MalformedFieldType,
+    };
+
+    if (std.mem.eql(u8, event_type, "assistant.message")) {
+        try classifyRequiredString(data, "content");
+        try classifyOptionalString(data, "messageId");
+    } else if (std.mem.eql(u8, event_type, "assistant.message_delta")) {
+        try classifyRequiredString(data, "deltaContent");
+        try classifyRequiredString(data, "messageId");
+    } else if (std.mem.eql(u8, event_type, "assistant.reasoning")) {
+        try classifyRequiredString(data, "reasoningId");
+        try classifyRequiredString(data, "content");
+        try classifyOptionalBool(data, "rte");
+    } else if (std.mem.eql(u8, event_type, "assistant.reasoning_delta")) {
+        try classifyRequiredString(data, "reasoningId");
+        try classifyRequiredString(data, "deltaContent");
+    } else if (std.mem.eql(u8, event_type, "session.idle")) {
+        try classifyOptionalBool(data, "aborted");
+        try classifyOptionalString(data, "mode");
+    } else if (std.mem.eql(u8, event_type, "session.error")) {
+        try classifyRequiredString(data, "message");
+    } else if (std.mem.eql(u8, event_type, "permission.requested")) {
+        try classifyRequiredString(data, "requestId");
+        const permission_request = data.get("permissionRequest") orelse
+            return error.MissingField;
+        const permission_object = switch (permission_request) {
+            .object => |permission_object| permission_object,
+            else => return error.MalformedFieldType,
+        };
+        if (permission_object.get("managedApprovalRequired")) |managed| {
+            if (managed != .bool) return error.MalformedFieldType;
+        }
+    } else if (std.mem.eql(u8, event_type, "external_tool.requested")) {
+        try classifyRequiredString(data, "requestId");
+        try classifyRequiredString(data, "toolCallId");
+        try classifyRequiredString(data, "toolName");
+    }
+}
+
+pub fn parseEventClassified(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) ClassifiedParseError!SessionEvent {
+    return session_events.parseEvent(allocator, value) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.InvalidSessionEvent => {
+            try classifyFocusedEvent(value);
+            return error.MalformedFieldType;
+        },
+    };
 }
 
 test "known and unknown events retain owned data" {
@@ -1001,10 +1407,58 @@ test "permission event rejects non-object request" {
     try std.testing.expectError(error.InvalidSessionEvent, parseEvent(allocator, parsed.value));
 }
 
+test "classified event parsing distinguishes missing fields from malformed types" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        json: []const u8,
+        classified_error: ClassifiedParseError,
+    }{
+        .{
+            .json =
+            \\{"type":"assistant.message","data":{}}
+            ,
+            .classified_error = error.MissingField,
+        },
+        .{
+            .json =
+            \\{"type":"assistant.message","data":{"content":7}}
+            ,
+            .classified_error = error.MalformedFieldType,
+        },
+        .{
+            .json =
+            \\{"type":"permission.requested","data":{"permissionRequest":{}}}
+            ,
+            .classified_error = error.MissingField,
+        },
+        .{
+            .json =
+            \\{"type":"permission.requested","data":{"requestId":7,"permissionRequest":{}}}
+            ,
+            .classified_error = error.MalformedFieldType,
+        },
+    };
+
+    for (cases) |case| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, case.json, .{});
+        defer parsed.deinit();
+        try std.testing.expectError(
+            case.classified_error,
+            parseEventClassified(allocator, parsed.value),
+        );
+        try std.testing.expectError(
+            error.InvalidSessionEvent,
+            parseEvent(allocator, parsed.value),
+        );
+    }
+}
+
 test "approveAll matches official permission semantics" {
+    var request_id_1 = "p1".*;
+    var request_json_1 = "{}".*;
     const ordinary = PermissionRequested{
-        .request_id = @constCast("p1"),
-        .permission_request_json = @constCast("{}"),
+        .request_id = &request_id_1,
+        .permission_request_json = &request_json_1,
     };
     try std.testing.expectEqual(
         PermissionDecision.approve_once,
@@ -1014,9 +1468,11 @@ test "approveAll matches official permission semantics" {
         }, null),
     );
 
+    var request_id_2 = "p2".*;
+    var request_json_2 = "{\"kind\":\"future-kind\"}".*;
     const unknown_kind = PermissionRequested{
-        .request_id = @constCast("p2"),
-        .permission_request_json = @constCast("{\"kind\":\"future-kind\"}"),
+        .request_id = &request_id_2,
+        .permission_request_json = &request_json_2,
     };
     try std.testing.expectEqual(
         PermissionDecision.approve_once,
@@ -1026,9 +1482,11 @@ test "approveAll matches official permission semantics" {
         }, null),
     );
 
+    var request_id_3 = "p3".*;
+    var request_json_3 = "{}".*;
     const managed = PermissionRequested{
-        .request_id = @constCast("p3"),
-        .permission_request_json = @constCast("{}"),
+        .request_id = &request_id_3,
+        .permission_request_json = &request_json_3,
         .managed_approval_required = true,
     };
     try std.testing.expectEqual(
@@ -1049,9 +1507,11 @@ test "approveAll matches official permission semantics" {
 }
 
 test "default join permission handler leaves requests pending" {
+    var request_id = "p1".*;
+    var request_json = "{}".*;
     const request = PermissionRequested{
-        .request_id = @constCast("p1"),
-        .permission_request_json = @constCast("{}"),
+        .request_id = &request_id,
+        .permission_request_json = &request_json,
     };
     try std.testing.expectEqual(
         PermissionDecision.no_result,

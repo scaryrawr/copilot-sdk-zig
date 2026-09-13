@@ -29,8 +29,8 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: zig fmt --check build.zig src examples
-      - run: zig build test --test-timeout 30s --summary all
+      - run: zig fmt --check build.zig src examples scripts/parity_census_runner.zig
+      - run: zig build test
       - run: zig build
       - name: Build examples
         run: |

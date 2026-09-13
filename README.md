@@ -63,12 +63,40 @@ const weather_tool = schema.defineTool(WeatherArguments, .{
 });
 ```
 
+## Client administration
+
+`Client` has typed methods for health, status, authentication, session catalog,
+session deletion, and foreground selection. Each method also has a `Detailed`
+form.
+
+```zig
+var pong = try client.ping("health check");
+defer pong.deinit();
+
+var status = try client.getStatus();
+defer status.deinit();
+
+var auth = try client.getAuthStatus();
+defer auth.deinit();
+
+var catalog = try client.listSessions(.{
+    .repository = "scaryrawr/copilot-sdk-zig",
+    .branch = "main",
+});
+defer catalog.deinit();
+```
+
+Input strings are borrowed until the call returns. Administration results own
+their strings and slices. Call `deinit` once on each owned result. Moving a
+result transfers cleanup responsibility. Copying a result does not copy its
+owned memory.
+
 ## Send a prompt
 
-Pass a `std.Io` implementation to `Client.init`. The client starts
-`copilot --headless --stdio --no-auto-update` and completes the `connect`
-handshake before it returns. Set `ClientOptions.client_info` to identify the
-integrating application and SDK surface in runtime telemetry.
+Pass a `std.Io` implementation to `Client.init`. With default options, the
+client starts `copilot --headless --stdio --no-auto-update` and completes the
+`connect` handshake before it returns. Set `ClientOptions.client_info` to
+identify the integrating application and SDK in runtime telemetry.
 
 ```zig
 const std = @import("std");
@@ -79,11 +107,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
     defer client.deinit();
 
     const session = try client.createSession(.{ .streaming = true });
-    var session_connected = true;
-    defer if (session_connected) {
-        session.disconnect() catch |err| {
-            std.log.err("failed to disconnect Copilot session: {s}", .{@errorName(err)});
-        };
+    defer session.disconnect() catch |err| {
+        std.log.err("session cleanup failed: {s}", .{@errorName(err)});
     };
 
     const message_id = try session.send(.{ .prompt = "Explain this repository." });
@@ -106,17 +131,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
             else => {},
         }
     }
-
-    try session.disconnect();
-    session_connected = false;
-    try client.shutdown();
 }
 ```
-
-Call `Client.shutdown` before `Client.deinit` to observe lifecycle cleanup
-failures. A failed shutdown retains pending detach and OAuth cleanup state, so
-you can call `shutdown` again. `deinit` performs a best-effort shutdown when
-the caller has not completed one, then releases local memory.
 
 Attach files or other typed context to a message:
 
@@ -171,16 +187,11 @@ const response = try session.sendAndWaitWithOptions(
 defer if (response) |message| message.deinit(allocator);
 ```
 
-Call `cancellation.cancel(io)` from another task to stop the wait. A timeout or
-cancellation does not call `session.abort`; it ends only the local wait. The
-timeout covers both the `session.send` RPC and the correlated turn wait. If a
-turn result has already committed when a local deadline or cancellation is
-observed, the turn result wins; otherwise cancellation wins over timeout.
-
-`sendAndWait` correlates the `messageId` returned by `session.send` with the
-matching `user.message` turn, then waits for that turn's
-`assistant.turn_end`. Unrelated sends, earlier timed-out waits, and
-`session.idle` events cannot complete it.
+Call `cancellation.cancel(io)` from another task to stop the wait. Timeout and
+cancellation do not call `session.abort`; they end only the local wait. The
+timeout covers the send RPC and the correlated turn. Correlation follows the
+returned `messageId` to its `user.message` `turnId`, then completes on the
+matching `assistant.turn_end`; `session.idle` does not complete the wait.
 
 Use a subscription when another consumer needs the same ordered event stream:
 
@@ -196,16 +207,300 @@ defer event.deinit(allocator);
 ```
 
 Each subscriber starts after the events retained when `subscribe` runs. A slow
-subscriber receives `error.EventLogOverflow` once when it falls behind the
-private retained-event limit, then resumes at the oldest retained event.
+subscriber receives `error.EventLogOverflow` once, then resumes at the oldest
+retained event.
 
 `Session` borrows its `Client`. Keep the client alive while a session handle is
 in use. `SessionEvent` values and the message ID from `send` own memory from the
 client allocator. `Session.disconnect` releases the client-side session
-resources while preserving the session state so it can be resumed later.
-If create, resume, or OAuth registration reports a cleanup failure,
-`Client.retryPendingCleanup` retries the retained remote session ID or interest
-handle. `Client.deinit` also attempts this cleanup before shutting down.
+resources while preserving the remote session state so it can be resumed later.
+The session ID and other borrowed session data remain valid only until
+disconnect, client deinitialization, or a successful resident resume. Handles
+are generation checked, so a disconnected or replaced handle remains inactive
+even when its internal record slot or session ID is reused.
+
+## Configure the runtime
+
+Omitting `.connection` preserves the original behavior and uses the legacy
+`cli_path`, `cli_args`, `working_directory`, and `connection_token` fields as a
+stdio connection. New code can select the transport explicitly:
+
+```zig
+var client = try copilot.Client.init(allocator, io, .{
+    .connection = .{ .stdio = .{
+        .path = "copilot",
+        .args = &.{"--verbose"},
+        .env = &.{.{
+            .name = "ACME_REGION",
+            .value = "us-east",
+        }},
+    } },
+    .mode = .copilot_cli,
+    .base_directory = "/srv/copilot",
+    .log_level = .info,
+    .use_logged_in_user = true,
+    .session_idle_timeout_seconds = 300,
+    .enable_remote_sessions = true,
+});
+defer client.deinit();
+```
+
+Use `.tcp` to spawn and own a runtime connected over a socket. Port `0`
+lets the runtime choose a port, and an omitted connection token is generated:
+
+```zig
+.connection = .{ .tcp = .{
+    .path = "copilot",
+    .port = 0,
+} },
+```
+
+Use `.uri` to connect to an already running runtime:
+
+```zig
+.connection = .{ .uri = .{
+    .url = "127.0.0.1:4321",
+    .token = "shared-secret",
+} },
+.mode = .empty,
+```
+
+A URI connection has no child-process fields. Deinitializing its client closes
+only the client-owned socket after bounded session detach attempts. It never
+shuts down the external runtime. URI connection setup has a ten-second
+deadline. The client keeps `.mode` active for URI session defaults. It ignores
+process-owned runtime settings because the external runtime owns that policy.
+It rejects `.github_token` and `.use_logged_in_user` because the external
+runtime also owns GitHub authentication. Stdio and TCP clients request
+`runtime.shutdown` for at most ten seconds, close the transport, then
+unconditionally terminate and reap their child.
+
+When `.connection` is omitted, `COPILOT_SDK_DEFAULT_CONNECTION` accepts
+`stdio`, `inprocess`, or no value. `stdio` and no value select the compatibility
+stdio connection. This SDK returns `error.UnsupportedInProcessConnection` for
+`inprocess`. Other values return `error.InvalidDefaultConnection`. An explicit
+`.connection` ignores this environment variable.
+
+Set `.github_token` and `.use_logged_in_user` on `ClientOptions`. If
+`.github_token` is set and `.use_logged_in_user` is omitted, the child uses only
+the token. If no token is set and `.use_logged_in_user` is omitted, the child
+uses the current Copilot login. These options apply only to SDK-owned stdio and
+TCP runtimes.
+
+Tokens are passed through a managed environment variable rather than argv.
+Raw `.env` entries cannot override SDK-owned connection,
+authentication, telemetry, empty-mode, or base-directory variables. All
+configuration is validated before a child is spawned or a socket is opened.
+Omit `.env` to inherit the parent environment. Set it to `&.{}` to
+start the child with only SDK-managed variables.
+
+Empty mode disables the runtime's normal disk-backed configuration:
+
+```zig
+.connection = .{ .stdio = .{} },
+.mode = .empty,
+.base_directory = "/srv/copilot",
+```
+
+For child connections, empty mode requires either `.base_directory` or
+`.session_filesystem`. A URI connection can select empty mode because the
+external runtime owns persistence. Every create or resume call must also set
+`.available_tools`, including an empty slice when the session needs no tools.
+
+Empty mode sends the runtime's restrictive defaults for session telemetry,
+embedding retrieval and storage, instruction discovery, file hooks, host Git
+operations, session storage, skills, memory, MCP OAuth token storage, custom
+agent discovery, experimental mode, and environment context. After create or
+resume, the client also disables coauthoring and schedule management and clears
+installed plugins. Existing `skip_custom_instructions`,
+`custom_agents_local_only`, and included built-in skill settings override their
+empty-mode defaults. `available_tools` remains required. Coauthoring and
+schedule-management opt-ins remain outside this API.
+
+## Configure session runtime options
+
+`CreateSessionConfig`, `ResumeSessionConfig`, and `JoinSessionConfig` expose the
+same stable runtime fields. `SessionConfig` remains an alias for
+`CreateSessionConfig`.
+
+```zig
+const session = try client.createSession(.{
+    .client_name = "acme-editor",
+    .reasoning_effort = .high,
+    .reasoning_summary = .concise,
+    .enable_experimental_mode = false,
+    .context_tier = .long_context,
+    .large_output = .{
+        .enabled = true,
+        .max_size_bytes = 64 * 1024,
+        .output_directory = "/var/lib/acme/copilot-output",
+    },
+    .config_directory = "/var/lib/acme/copilot",
+    .capi = .{
+        .auto_tier = .balance,
+        .enable_websocket_responses = false,
+    },
+    .additional_directories = &.{"/work/shared"},
+    .infinite_sessions = .{
+        .enabled = true,
+        .background_compaction_threshold = 0.80,
+        .buffer_exhaustion_threshold = 0.95,
+    },
+    .memory = .{ .enabled = false },
+    .skip_embedding_retrieval = true,
+    .embedding_cache_storage = .in_memory,
+    .organization_custom_instructions = "Use the release checklist.",
+    .enable_file_hooks = false,
+    .enable_host_git_operations = true,
+    .enable_session_store = false,
+});
+```
+
+Optional values preserve presence. `null` omits a field. Explicit `false`, an
+empty string, an empty slice, or an empty nested struct remains present in the
+request. In particular, `.additional_directories = &.{}` sends
+`"additionalDirectories":[]`.
+
+Configure runtime telemetry on a child connection:
+
+```zig
+.telemetry = .{
+    .otlp_endpoint = "http://127.0.0.1:4318",
+    .otlp_protocol = .http_json,
+    .file_path = "/var/log/copilot-traces.jsonl",
+    .exporter_type = "file",
+    .source_name = "acme-agent",
+    .capture_content = false,
+},
+```
+
+Client callbacks carry independent context pointers; no callback state is
+global. `on_get_trace_context` is consulted for session create, resume, and
+send calls. Callback failures are isolated and omit trace context. A model
+callback returns an owned `std.json.Parsed(copilot.models.ModelList)` using the
+provided allocator, preserving the same ownership contract as
+`Client.listModels`:
+
+```zig
+var client = try copilot.Client.init(allocator, io, .{
+    .on_list_models = .{
+        .handler = listModels,
+        .context = model_context,
+    },
+    .on_get_trace_context = .{
+        .handler = getTraceContext,
+        .context = trace_context,
+    },
+});
+```
+
+For virtual or remote workspaces, `.session_filesystem` supplies client-wide
+metadata. Each create, resume, or join config selects its provider factory.
+The factory receives the session ID and returns that session's file operations,
+optional SQLite operations, context, and optional `deinit` callback. Providers
+are routed by exact session ID and destroyed exactly once on rollback,
+replacement, disconnect, or client teardown:
+
+```zig
+.session_filesystem = .{
+    .initial_working_directory = "/workspace",
+    .session_state_path = "/state/sessions",
+    .conventions = .posix,
+    .capabilities = .{ .sqlite = true },
+},
+```
+
+```zig
+const session = try client.createSession(.{
+    .create_session_filesystem_provider = .{
+        .handler = createSessionFilesystem,
+        .context = filesystem_context,
+    },
+    .remote_session = .@"export",
+});
+```
+
+`remote_session` accepts `.off`, `.@"export"`, or `.on`. It controls one
+session and is separate from `ClientOptions.enable_remote_sessions`, which
+enables runtime-wide remote-session support for an owned child.
+
+Filesystem callbacks return owned byte slices or `std.json.Parsed` results
+with the allocator supplied by the SDK. Non-SQLite provider failures map
+`error.FileNotFound` to `ENOENT` and other errors to `UNKNOWN`. SQLite callback
+failures remain JSON-RPC errors, matching the upstream adapter. Malformed
+callback requests and structurally invalid SQLite results receive a correlated
+JSON-RPC error.
+
+### Read the workspace path
+
+`Session.workspacePath()` returns the response-derived workspace path or
+`null`. The returned slice is borrowed from the client. It remains valid until
+disconnect, client deinitialization, or a successful resident resume replaces
+the session record. Inactive handles return `error.SessionNotActive`.
+
+```zig
+if (try session.workspacePath()) |workspace_path| {
+    std.debug.print("workspace: {s}\n", .{workspace_path});
+}
+```
+
+## Read session history and lifecycle events
+
+`Session.getEvents` returns the persisted event history in transport order. The
+history owns its event slice and each `SessionEvent`.
+
+```zig
+var history = try session.getEvents();
+defer history.deinit();
+```
+
+`Client.nextLifecycleEvent` blocks until a client-wide lifecycle delivery is
+available. The SDK uses a pull API instead of callbacks so user code cannot
+reenter the single transport reader.
+
+```zig
+var delivery = try client.nextLifecycleEvent();
+defer delivery.deinit();
+
+switch (delivery) {
+    .event => |event| {
+        _ = event;
+    },
+    .overflow => |overflow| {
+        std.log.warn("dropped {d} lifecycle events", .{overflow.dropped_count});
+    },
+}
+```
+
+Lifecycle deliveries own their strings. Unknown lifecycle types are successful
+`.unknown` events. An `.overflow` delivery reports a contiguous dropped suffix.
+It does not close the client. Rebuild the catalog and foreground state after an
+overflow.
+
+## Inspect detailed failures
+
+Methods such as `send` return native Zig errors directly. Use the corresponding
+method whose name ends in `Detailed` when you also need the remote code, JSON
+data, identifiers, or process exit.
+
+```zig
+const joined = try client.resumeSessionDetailed("missing-session", .{});
+const session = switch (joined) {
+    .success => |value| value,
+    .failure => |failure_value| {
+        var failure = failure_value;
+        defer failure.deinit();
+        std.log.err("{s}", .{failure.message() orelse @errorName(failure.native_error)});
+        return;
+    },
+};
+_ = session;
+```
+
+The `Failure` variant of `DetailedResult(T)` stores its allocator and owns every
+string in its detail. You can inspect the failure after the client has been
+deinitialized. Call `Failure.deinit()` when you finish. The `Success` variant
+follows the ownership contract of the underlying method.
 
 ## Configure extensions
 
@@ -256,15 +551,16 @@ host-owned OAuth token-store callbacks are not present in the pinned contract;
 see `sync/extensibility-contract.json` for the reproducible compatibility
 classification.
 
-Use `SessionConfig.available_tools` and `SessionConfig.excluded_tools` to
-constrain the model-visible tool set for each created or resumed session. Tool
-filters use source-qualified names such as `builtin:ask_user`, `custom:*`, and
+Use `CreateSessionConfig.available_tools` and
+`ResumeSessionConfig.available_tools`, with their matching `excluded_tools`
+fields, to constrain the model-visible tool set. Tool filters use
+source-qualified names such as `builtin:ask_user`, `custom:*`, and
 `mcp:server-tool`; a bare `*` does not match all sources. The SDK sends
 `toolFilterPrecedence: "excluded"` so an exclusion still applies when both
 lists are present. Process-level CLI arguments do not replace these
 session-level fields in headless SDK mode.
 
-Set `.enable_config_discovery = true` when creating or joining a session to
+Set `.enable_config_discovery = true` when creating or resuming a session to
 discover MCP server configurations (`.mcp.json` and `.vscode/mcp.json`) and
 skill directories from the working directory. Treat enabling discovery as a
 trust decision because discovered MCP servers may be started by the session.
@@ -306,9 +602,8 @@ const session = try client.createSession(.{
     .agent = .{ .custom_agent = "reviewer" },
     .excluded_builtin_agents = &.{"explore"},
 });
-defer session.disconnect() catch |err| {
-    std.log.err("failed to disconnect Copilot session: {s}", .{@errorName(err)});
-};
+defer session.disconnect() catch |err|
+    std.log.err("failed to disconnect session: {s}", .{@errorName(err)});
 ```
 
 A null custom-agent `tools` field inherits the session tools. An empty slice
@@ -401,8 +696,9 @@ client is deinitialized. A dynamic token takes precedence over a static bearer
 token and an API key. Singular providers always use the callback route
 `"default"`. `provider_name` only supplies provider attribution.
 
-Use `SessionConfig.providers` and `SessionConfig.models` to add named provider
-connections and selectable models:
+Use `CreateSessionConfig.providers` and `CreateSessionConfig.models` to add
+named provider connections and selectable models. The same fields are
+available on `ResumeSessionConfig`:
 
 ```zig
 const session = try client.createSession(.{
@@ -465,8 +761,9 @@ has `vision`, `reasoningEffort`, and `adaptive_thinking`; `ModelLimitsOverride`
 has `max_prompt_tokens`, `max_output_tokens`, `max_context_window_tokens`, and
 optional `vision`. `ModelVisionLimitsOverride` has optional
 `supported_media_types`, `max_prompt_images`, and `max_prompt_image_size`.
-When supplied, `max_prompt_images` must be at least 1; both session APIs return
-`error.InvalidMaxPromptImages` for zero before sending an RPC.
+When supplied, `max_prompt_images` must be at least 1. Both session APIs return
+`error.InvalidMaxPromptImages` for zero before sending an RPC. Their detailed
+counterparts return the same native error in `Failure`.
 Capability overrides require a runtime that supports `modelCapabilities`; they
 do not add image support to a text-only model.
 
@@ -578,22 +875,20 @@ responding manually:
 
 ```zig
 .permission_requested => |request| switch (request.automatic_handling) {
-    .handled => {}, // The automatic response succeeded; do not respond again.
+    .handled => {},
     .not_configured, .no_result, .handler_failed => {
         try handlePermissionManually(session, request);
     },
     .delivery_failed => |err| {
-        // Delivery may be indeterminate. Surface or reconcile the failure
-        // instead of blindly sending a duplicate response.
         std.log.err("permission response failed: {s}", .{@errorName(err)});
     },
 },
 ```
 
 `.no_result` preserves the request for manual handling.
-`.handler_failed` also occurs before any response is attempted and carries the
-handler error. `.delivery_failed` carries response preparation, transport, RPC,
-or rejection errors; it does not promise that retrying is safe.
+`.handler_failed` occurs before the SDK attempts a response and carries the
+native handler cause. `.delivery_failed` carries the native delivery error. Do
+not retry a delivery failure without reconciling the request state.
 
 ## Examples
 
@@ -615,7 +910,7 @@ tests verify protocol behavior without requiring Copilot credentials.
 
 ## RPC coverage
 
-The SDK supports only the stdio transport. Typed high-level methods implement:
+Typed high-level methods implement:
 
 - `connect`
 - `plugins.builtin.set`
@@ -676,7 +971,6 @@ every parsed event. The `unknown` variant is only for discriminators that are
 absent from the pinned schema. Keep an `else` branch in a switch that must
 compile after a schema sync adds event tags.
 
-The SDK does not support an external CLI server URL.
 `sync/schema-snapshot.json` records every method by direction and scope.
 `sync/public-rpc-surface.json` separately records direct RPC calls made by the
 pinned upstream Node client and session implementations. The sync checks fail
@@ -692,7 +986,7 @@ returns `error.EventQueueFull` when callers leave other sessions undrained.
 Run the checks from the repository root:
 
 ```sh
-zig fmt --check build.zig src examples
+zig fmt --check build.zig src examples scripts/parity_census_runner.zig
 zig build test
 zig build
 for example in basic custom-tools external-tools permissions prompt-customization send-and-wait join-session; do
