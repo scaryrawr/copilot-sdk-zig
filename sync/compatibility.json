@@ -294,8 +294,7 @@
         }
       },
       "hasBearerTokenProvider": {
-        "status": "deferred",
-        "reason": "Requires inbound providerToken.getToken callback dispatch.",
+        "status": "supported",
         "contract": {
           "type": "boolean"
         }
@@ -310,8 +309,7 @@
         }
       },
       "maxContextWindowTokens": {
-        "status": "deferred",
-        "reason": "Absent from the pinned official singular Node and Go provider APIs.",
+        "status": "supported",
         "contract": {
           "type": "number"
         }
@@ -329,8 +327,7 @@
         }
       },
       "modelCapabilities": {
-        "status": "deferred",
-        "reason": "Absent from the pinned official singular Node and Go provider APIs.",
+        "status": "supported",
         "contract": {
           "ref": "ModelCapabilitiesOverride"
         }
@@ -342,8 +339,7 @@
         }
       },
       "providerName": {
-        "status": "deferred",
-        "reason": "Absent from the pinned official singular Node and Go provider APIs.",
+        "status": "supported",
         "contract": {
           "type": "string"
         }

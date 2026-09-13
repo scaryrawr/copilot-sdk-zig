@@ -82,11 +82,16 @@ pub fn encodeErrorResponse(
 pub fn encodeSuccessResponse(
     allocator: std.mem.Allocator,
     id: std.json.Value,
-    result: std.json.Value,
+    result: anytype,
 ) ![]u8 {
+    const TypedSuccessResponseFrame = struct {
+        jsonrpc: []const u8 = "2.0",
+        id: std.json.Value,
+        result: @TypeOf(result),
+    };
     return std.json.Stringify.valueAlloc(
         allocator,
-        SuccessResponseFrame{
+        TypedSuccessResponseFrame{
             .id = id,
             .result = result,
         },
@@ -178,18 +183,27 @@ test "error responses preserve the request id" {
     try std.testing.expectEqual(@as(i64, -32601), parsed.value.@"error".code);
 }
 
-test "success responses preserve the request id and result" {
+test "success responses encode typed results and preserve Value compatibility" {
     const allocator = std.testing.allocator;
-    const body = try encodeSuccessResponse(
+    const typed_body = try encodeSuccessResponse(
         allocator,
         .{ .integer = 12 },
-        .{ .bool = true },
+        .{ .accepted = true },
     );
-    defer allocator.free(body);
+    defer allocator.free(typed_body);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":12,\"result\":{\"accepted\":true}}",
+        typed_body,
+    );
 
-    const parsed = try std.json.parseFromSlice(SuccessResponseFrame, allocator, body, .{});
-    defer parsed.deinit();
-
-    try std.testing.expectEqual(@as(i64, 12), parsed.value.id.integer);
-    try std.testing.expect(parsed.value.result.bool);
+    const value_body = try encodeSuccessResponse(
+        allocator,
+        .{ .string = "request-13" },
+        std.json.Value{ .bool = true },
+    );
+    defer allocator.free(value_body);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":\"request-13\",\"result\":true}",
+        value_body,
+    );
 }

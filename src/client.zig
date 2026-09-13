@@ -229,6 +229,25 @@ const SessionExtensionRuntime = struct {
     }
 };
 
+const RegisteredProviderToken = struct {
+    provider_name: []u8,
+    token_provider: provider.BearerTokenProvider,
+
+    fn deinit(self: RegisteredProviderToken, allocator: std.mem.Allocator) void {
+        allocator.free(self.provider_name);
+    }
+};
+
+const RegisteredProviderTokens = struct {
+    session_id: []const u8,
+    providers: []RegisteredProviderToken,
+
+    fn deinit(self: RegisteredProviderTokens, allocator: std.mem.Allocator) void {
+        for (self.providers) |registered| registered.deinit(allocator);
+        allocator.free(self.providers);
+    }
+};
+
 pub const RpcHandler = *const fn (
     allocator: std.mem.Allocator,
     params_json: ?[]const u8,
@@ -468,6 +487,8 @@ pub const Client = struct {
     permission_handlers: std.ArrayList(RegisteredPermissionHandler) = .empty,
     extension_runtimes: std.ArrayList(SessionExtensionRuntime) = .empty,
     pending_extension_runtime: ?SessionExtensionRuntime = null,
+    provider_tokens: std.ArrayList(RegisteredProviderTokens) = .empty,
+    pending_provider_tokens: ?RegisteredProviderTokens = null,
     rpc_handlers: std.ArrayList(RegisteredRpcHandler) = .empty,
     dispatching_rpc_handler: bool = false,
 
@@ -577,6 +598,11 @@ pub const Client = struct {
             runtime.deinit(self.allocator);
         }
         self.extension_runtimes.deinit(self.allocator);
+        if (self.pending_provider_tokens) |registered| {
+            registered.deinit(self.allocator);
+        }
+        for (self.provider_tokens.items) |registered| registered.deinit(self.allocator);
+        self.provider_tokens.deinit(self.allocator);
         for (self.rpc_handlers.items) |handler| handler.deinit(self.allocator);
         self.rpc_handlers.deinit(self.allocator);
         for (self.session_ids.items) |id| self.allocator.free(id);
@@ -636,6 +662,30 @@ pub const Client = struct {
         try validateCustomAgents(config.custom_agents, config.agent);
         try ext.validate(config.extensions.common);
         try validateCustomAgentMcpServers(config.custom_agents);
+        try provider.validateCapabilities(config.model_capabilities);
+
+        var prepared_providers = try provider.prepareSessionProviders(
+            self.allocator,
+            config.provider,
+            config.providers,
+            config.models,
+        );
+        defer prepared_providers.deinit(self.allocator);
+
+        const owned_session_id = if (config.session_id) |requested|
+            try self.allocator.dupe(u8, requested)
+        else
+            try generateSessionId(self.allocator, self.io);
+        if (self.hasSession(owned_session_id)) {
+            self.allocator.free(owned_session_id);
+            return error.SessionAlreadyActive;
+        }
+        self.session_ids.append(self.allocator, owned_session_id) catch |err| {
+            self.allocator.free(owned_session_id);
+            return err;
+        };
+        errdefer self.removeSession(owned_session_id);
+
         var extension_values = ExtensionWireValues.init(self.allocator);
         defer extension_values.deinit();
         try extension_values.lowerCustomAgents(config.custom_agents);
@@ -647,11 +697,19 @@ pub const Client = struct {
         var tools: std.ArrayList(WireTool) = .empty;
         defer tools.deinit(self.allocator);
         try appendWireTools(self.allocator, config.tools, &parsed_parameters, &tools);
-        try self.beginExtensionRuntime(null, config, &.{});
+        try extension_values.lower(config.extensions.common);
+        try self.beginProviderTokens(owned_session_id, prepared_providers.token_bindings);
+        errdefer self.rollbackProviderTokens();
+        try self.beginExtensionRuntime(owned_session_id, config, &.{});
         errdefer self.rollbackExtensionRuntime();
 
-        try extension_values.lower(config.extensions.common);
-        const request = try buildCreateSessionRequest(config, tools.items, &extension_values);
+        const request = try buildPreparedCreateSessionRequest(
+            owned_session_id,
+            config,
+            tools.items,
+            &extension_values,
+            prepared_providers,
+        );
         const parsed = try self.call(
             WireSessionLifecycleResponse,
             "session.create",
@@ -662,19 +720,17 @@ pub const Client = struct {
             parsed.deinit();
         }
         const returned_id = parsed.value.sessionId orelse return error.MissingSessionId;
-        errdefer {
-            self.rollbackExtensionRuntime();
-            self.detachSessionBestEffort(returned_id);
+        if (!std.mem.eql(u8, owned_session_id, returned_id)) {
+            if (!self.hasSession(returned_id)) {
+                self.detachSessionBestEffort(returned_id);
+            }
+            return error.SessionIdMismatch;
         }
+        errdefer self.detachSessionBestEffort(returned_id);
 
-        const id = try self.allocator.dupe(u8, returned_id);
-        self.session_ids.append(self.allocator, id) catch |err| {
-            self.allocator.free(id);
-            return err;
-        };
-        errdefer self.removeSessionId(id);
         try self.commitExtensionRuntime(returned_id, parsed.value, &.{});
-        return .{ .client = self, .id = id };
+        self.commitProviderTokens();
+        return .{ .client = self, .id = owned_session_id };
     }
 
     pub fn resumeSession(
@@ -703,10 +759,30 @@ pub const Client = struct {
         try validateCustomAgents(config.custom_agents, config.agent);
         try ext.validate(config.extensions.common);
         try validateCustomAgentMcpServers(config.custom_agents);
+        try provider.validateCapabilities(config.model_capabilities);
+
+        var prepared_providers = try provider.prepareSessionProviders(
+            self.allocator,
+            config.provider,
+            config.providers,
+            config.models,
+        );
+        defer prepared_providers.deinit(self.allocator);
+
+        const existing_session_id = self.findSessionId(session_id);
+        const runtime_session_id = existing_session_id orelse id: {
+            const copy = try self.allocator.dupe(u8, session_id);
+            self.session_ids.append(self.allocator, copy) catch |err| {
+                self.allocator.free(copy);
+                return err;
+            };
+            break :id copy;
+        };
+        errdefer if (existing_session_id == null) self.removeSession(runtime_session_id);
+
         var extension_values = ExtensionWireValues.init(self.allocator);
         defer extension_values.deinit();
         try extension_values.lowerCustomAgents(config.custom_agents);
-        const existing_session_id = self.findSessionId(session_id);
         var parsed_parameters: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty;
         defer {
             for (parsed_parameters.items) |parsed| parsed.deinit();
@@ -715,48 +791,46 @@ pub const Client = struct {
         var tools: std.ArrayList(WireTool) = .empty;
         defer tools.deinit(self.allocator);
         try appendWireTools(self.allocator, config.tools, &parsed_parameters, &tools);
+        try extension_values.lower(config.extensions.common);
+
+        try self.beginProviderTokens(runtime_session_id, prepared_providers.token_bindings);
+        errdefer self.rollbackProviderTokens();
         try self.beginExtensionRuntime(
-            session_id,
+            runtime_session_id,
             config,
             config.extensions.open_canvases,
         );
         errdefer self.rollbackExtensionRuntime();
 
-        try extension_values.lower(config.extensions.common);
-        const request = try buildResumeSessionRequest(
-            session_id,
+        const request = try buildPreparedResumeSessionRequest(
+            runtime_session_id,
             config,
             tools.items,
             &extension_values,
             requested_environment_variables,
+            prepared_providers,
         );
         const parsed = try self.call(WireSessionLifecycleResponse, "session.resume", request);
         defer {
             wipeLifecycleResponseSecrets(parsed.value);
             parsed.deinit();
         }
-        errdefer if (existing_session_id == null) {
-            self.rollbackExtensionRuntime();
-            self.detachSessionBestEffort(session_id);
-        };
+        const returned_id = parsed.value.sessionId orelse return error.MissingSessionId;
+        if (!std.mem.eql(u8, runtime_session_id, returned_id)) {
+            if (!self.hasSession(returned_id)) {
+                self.detachSessionBestEffort(returned_id);
+            }
+            return error.SessionIdMismatch;
+        }
+        errdefer if (existing_session_id == null) self.detachSessionBestEffort(returned_id);
 
-        var added_session_id = false;
-        const id = existing_session_id orelse id: {
-            const copy = try self.allocator.dupe(u8, session_id);
-            self.session_ids.append(self.allocator, copy) catch |err| {
-                self.allocator.free(copy);
-                return err;
-            };
-            added_session_id = true;
-            break :id copy;
-        };
-        errdefer if (added_session_id) self.removeSessionId(id);
         try self.commitExtensionRuntime(
-            session_id,
+            runtime_session_id,
             parsed.value,
             requested_environment_variables,
         );
-        return .{ .client = self, .id = id };
+        self.commitProviderTokens();
+        return .{ .client = self, .id = runtime_session_id };
     }
 
     fn detachSessionBestEffort(self: *Client, session_id: []const u8) void {
@@ -1116,6 +1190,11 @@ pub const Client = struct {
         {
             return self.dispatchCanvasRequest(writer, id, method, params);
         }
+        if (std.mem.eql(u8, method, "providerToken.getToken") and
+            self.findProviderTokenFromParams(params) != null)
+        {
+            return self.dispatchProviderTokenRequest(writer, id, params);
+        }
         if (std.mem.eql(u8, method, "userInput.request") and
             self.findUserInputHandlerFromParams(params) != null)
         {
@@ -1191,7 +1270,8 @@ pub const Client = struct {
         writer: *std.Io.Writer,
         id: std.json.Value,
     ) !void {
-        const response = try json_rpc.encodeSuccessResponse(self.allocator, id, .null);
+        const result: std.json.Value = .null;
+        const response = try json_rpc.encodeSuccessResponse(self.allocator, id, result);
         defer self.allocator.free(response);
         try json_rpc.writeFrame(writer, response);
     }
@@ -1625,6 +1705,49 @@ pub const Client = struct {
         return self.writeServerRequestError(writer, id, -32000, "canvas action not registered");
     }
 
+    fn dispatchProviderTokenRequest(
+        self: *Client,
+        writer: *std.Io.Writer,
+        id: std.json.Value,
+        params: ?std.json.Value,
+    ) !void {
+        const value = params orelse
+            return self.writeServerRequestError(writer, id, -32602, "invalid provider token request");
+        const parsed = std.json.parseFromValue(
+            WireProviderTokenRequest,
+            self.allocator,
+            value,
+            .{},
+        ) catch {
+            return self.writeServerRequestError(writer, id, -32602, "invalid provider token request");
+        };
+        defer parsed.deinit();
+
+        const token_provider = self.findProviderToken(
+            parsed.value.sessionId,
+            parsed.value.providerName,
+        ) orelse return self.writeServerRequestError(
+            writer,
+            id,
+            -32000,
+            "bearer token provider not registered",
+        );
+
+        self.dispatching_rpc_handler = true;
+        defer self.dispatching_rpc_handler = false;
+        const token = token_provider.callback(self.allocator, .{
+            .session_id = parsed.value.sessionId,
+            .provider_name = parsed.value.providerName,
+        }, token_provider.context) catch |err| {
+            return self.writeServerRequestError(writer, id, -32000, @errorName(err));
+        };
+        defer self.allocator.free(token);
+
+        const response = try json_rpc.encodeSuccessResponse(self.allocator, id, .{ .token = token });
+        defer self.allocator.free(response);
+        try json_rpc.writeFrame(writer, response);
+    }
+
     fn findRpcHandler(self: *Client, method: []const u8) ?RegisteredRpcHandler {
         for (self.rpc_handlers.items) |registered| {
             if (std.mem.eql(u8, registered.method, method)) return registered;
@@ -1638,15 +1761,13 @@ pub const Client = struct {
         id: std.json.Value,
         params: ?std.json.Value,
     ) !void {
-        const params_json = try stringifyRpcParams(self.allocator, params) orelse
+        const value = params orelse
             return self.writeServerRequestError(writer, id, -32602, "invalid user input request");
-        defer self.allocator.free(params_json);
-
-        const parsed = std.json.parseFromSlice(
+        const parsed = std.json.parseFromValue(
             WireUserInputRequest,
             self.allocator,
-            params_json,
-            .{ .allocate = .alloc_always, .ignore_unknown_fields = true },
+            value,
+            .{ .ignore_unknown_fields = true },
         ) catch {
             return self.writeServerRequestError(writer, id, -32602, "invalid user input request");
         };
@@ -1667,19 +1788,14 @@ pub const Client = struct {
         };
         defer self.allocator.free(response.answer);
 
-        const result_json = try std.json.Stringify.valueAlloc(self.allocator, .{
-            .answer = response.answer,
-            .wasFreeform = response.was_freeform,
-        }, .{});
-        defer self.allocator.free(result_json);
-        const result = try std.json.parseFromSlice(
-            std.json.Value,
+        const frame = try json_rpc.encodeSuccessResponse(
             self.allocator,
-            result_json,
-            .{},
+            id,
+            .{
+                .answer = response.answer,
+                .wasFreeform = response.was_freeform,
+            },
         );
-        defer result.deinit();
-        const frame = try json_rpc.encodeSuccessResponse(self.allocator, id, result.value);
         defer self.allocator.free(frame);
         try json_rpc.writeFrame(writer, frame);
     }
@@ -1749,7 +1865,30 @@ pub const Client = struct {
         session_id: []const u8,
         event: *const session_types.SessionEvent,
     ) !void {
-        const runtime = self.findExtensionRuntime(session_id) orelse return;
+        if (self.pending_extension_runtime) |*runtime| {
+            if (runtime.session_id) |id| {
+                if (std.mem.eql(u8, id, session_id)) {
+                    try applyExtensionEventToRuntime(self.allocator, runtime, event);
+                }
+            } else {
+                try applyExtensionEventToRuntime(self.allocator, runtime, event);
+            }
+        }
+        for (self.extension_runtimes.items) |*runtime| {
+            if (runtime.session_id) |id| {
+                if (std.mem.eql(u8, id, session_id)) {
+                    try applyExtensionEventToRuntime(self.allocator, runtime, event);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn applyExtensionEventToRuntime(
+        allocator: std.mem.Allocator,
+        runtime: *SessionExtensionRuntime,
+        event: *const session_types.SessionEvent,
+    ) !void {
         switch (event.*) {
             .capabilities_changed => |payload| {
                 if (payload.data.ui) |ui| {
@@ -1762,15 +1901,15 @@ pub const Client = struct {
                 }
             },
             .session_canvas_closed => |payload| {
-                removeOpenCanvas(runtime, self.allocator, payload.data.instance_id);
+                removeOpenCanvas(runtime, allocator, payload.data.instance_id);
             },
             .session_canvas_opened => |payload| {
                 const canvas = try cloneTypedOpenCanvas(
-                    self.allocator,
+                    allocator,
                     payload.data,
                 );
-                errdefer ext.freeOpenCanvas(self.allocator, canvas);
-                try upsertOpenCanvas(runtime, self.allocator, canvas);
+                errdefer ext.freeOpenCanvas(allocator, canvas);
+                try upsertOpenCanvas(runtime, allocator, canvas);
             },
             else => {},
         }
@@ -1835,6 +1974,20 @@ pub const Client = struct {
     }
 
     fn removeSessionId(self: *Client, session_id: []const u8) void {
+        var provider_token_index: usize = 0;
+        while (provider_token_index < self.provider_tokens.items.len) {
+            if (std.mem.eql(
+                u8,
+                self.provider_tokens.items[provider_token_index].session_id,
+                session_id,
+            )) {
+                const registered = self.provider_tokens.orderedRemove(provider_token_index);
+                registered.deinit(self.allocator);
+            } else {
+                provider_token_index += 1;
+            }
+        }
+
         for (self.session_ids.items, 0..) |id, session_index| {
             if (std.mem.eql(u8, id, session_id)) {
                 self.allocator.free(id);
@@ -1842,6 +1995,168 @@ pub const Client = struct {
                 return;
             }
         }
+    }
+
+    fn registerOwnedSession(
+        self: *Client,
+        owned_session_id: []u8,
+        config: session_types.SessionConfig,
+        token_bindings: []const provider.TokenBinding,
+    ) !void {
+        if (self.hasSession(owned_session_id)) {
+            self.allocator.free(owned_session_id);
+            return error.SessionAlreadyActive;
+        }
+
+        self.session_ids.append(self.allocator, owned_session_id) catch |err| {
+            self.allocator.free(owned_session_id);
+            return err;
+        };
+        errdefer self.removeSession(owned_session_id);
+
+        try self.registerToolHandlers(owned_session_id, config.tools);
+        try self.registerPermissionHandler(owned_session_id, config);
+        try self.registerUserInputHandler(
+            owned_session_id,
+            config.on_user_input_request,
+            config.user_input_context,
+        );
+        try self.registerProviderTokens(owned_session_id, token_bindings);
+    }
+
+    fn hasSession(self: *Client, session_id: []const u8) bool {
+        for (self.session_ids.items) |registered| {
+            if (std.mem.eql(u8, registered, session_id)) return true;
+        }
+        return false;
+    }
+
+    fn registerProviderTokens(
+        self: *Client,
+        session_id: []const u8,
+        bindings: []const provider.TokenBinding,
+    ) !void {
+        if (bindings.len == 0) return;
+        const registered = try self.allocator.alloc(RegisteredProviderToken, bindings.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (registered[0..initialized]) |value| value.deinit(self.allocator);
+            self.allocator.free(registered);
+        }
+        for (bindings, 0..) |binding, index| {
+            registered[index] = .{
+                .provider_name = try self.allocator.dupe(u8, binding.provider_name),
+                .token_provider = binding.token_provider,
+            };
+            initialized += 1;
+        }
+        try self.provider_tokens.append(self.allocator, .{
+            .session_id = session_id,
+            .providers = registered,
+        });
+    }
+
+    fn beginProviderTokens(
+        self: *Client,
+        session_id: []const u8,
+        bindings: []const provider.TokenBinding,
+    ) !void {
+        if (self.pending_provider_tokens != null) return error.ProviderTokensPending;
+        if (bindings.len != 0) {
+            try self.provider_tokens.ensureUnusedCapacity(self.allocator, 1);
+        }
+
+        const registered = try self.allocator.alloc(RegisteredProviderToken, bindings.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (registered[0..initialized]) |value| value.deinit(self.allocator);
+            self.allocator.free(registered);
+        }
+        for (bindings, 0..) |binding, index| {
+            registered[index] = .{
+                .provider_name = try self.allocator.dupe(u8, binding.provider_name),
+                .token_provider = binding.token_provider,
+            };
+            initialized += 1;
+        }
+        self.pending_provider_tokens = .{
+            .session_id = session_id,
+            .providers = registered,
+        };
+    }
+
+    fn rollbackProviderTokens(self: *Client) void {
+        const registered = self.pending_provider_tokens orelse return;
+        self.pending_provider_tokens = null;
+        registered.deinit(self.allocator);
+    }
+
+    fn commitProviderTokens(self: *Client) void {
+        const pending = self.pending_provider_tokens orelse return;
+        self.pending_provider_tokens = null;
+
+        for (self.provider_tokens.items, 0..) |registered, index| {
+            if (!std.mem.eql(u8, registered.session_id, pending.session_id)) continue;
+            registered.deinit(self.allocator);
+            if (pending.providers.len == 0) {
+                pending.deinit(self.allocator);
+                _ = self.provider_tokens.orderedRemove(index);
+                return;
+            }
+            self.provider_tokens.items[index] = pending;
+            return;
+        }
+        if (pending.providers.len == 0) {
+            pending.deinit(self.allocator);
+            return;
+        }
+        self.provider_tokens.appendAssumeCapacity(pending);
+    }
+
+    fn findProviderToken(
+        self: *Client,
+        session_id: []const u8,
+        provider_name: []const u8,
+    ) ?provider.BearerTokenProvider {
+        if (self.pending_provider_tokens) |pending| {
+            if (std.mem.eql(u8, pending.session_id, session_id)) {
+                for (pending.providers) |registered| {
+                    if (std.mem.eql(u8, registered.provider_name, provider_name)) {
+                        return registered.token_provider;
+                    }
+                }
+                return null;
+            }
+        }
+        for (self.provider_tokens.items) |session_providers| {
+            if (!std.mem.eql(u8, session_providers.session_id, session_id)) continue;
+            for (session_providers.providers) |registered| {
+                if (std.mem.eql(u8, registered.provider_name, provider_name)) {
+                    return registered.token_provider;
+                }
+            }
+            return null;
+        }
+        return null;
+    }
+
+    fn findProviderTokenFromParams(
+        self: *Client,
+        params: ?std.json.Value,
+    ) ?provider.BearerTokenProvider {
+        const object = switch (params orelse return null) {
+            .object => |object| object,
+            else => return null,
+        };
+        const session_id = switch (object.get("sessionId") orelse return null) {
+            .string => |value| value,
+            else => return null,
+        };
+        const provider_name = switch (object.get("providerName") orelse return null) {
+            .string => |value| value,
+            else => return null,
+        };
+        return self.findProviderToken(session_id, provider_name);
     }
 
     fn registerToolHandlers(
@@ -2844,6 +3159,11 @@ const WireUserInputRequest = struct {
     allowFreeform: ?bool = null,
 };
 
+const WireProviderTokenRequest = struct {
+    sessionId: []const u8,
+    providerName: []const u8,
+};
+
 const WireManagedSettingsPermissions = struct {
     disableBypassPermissionsMode: ?[]const u8 = null,
     deny: ?[]const []const u8 = null,
@@ -3282,6 +3602,8 @@ const CreateSessionRequest = struct {
     sessionId: ?[]const u8,
     model: ?[]const u8,
     provider: ?provider.WireProvider,
+    providers: ?[]const provider.WireNamedProvider,
+    models: ?[]const provider.WireProviderModel,
     modelCapabilities: ?models.CapabilitiesOverride,
     workingDirectory: ?[]const u8,
     streaming: bool,
@@ -3326,6 +3648,8 @@ const ResumeSessionRequest = struct {
     sessionId: []const u8,
     model: ?[]const u8,
     provider: ?provider.WireProvider,
+    providers: ?[]const provider.WireNamedProvider,
+    models: ?[]const provider.WireProviderModel,
     modelCapabilities: ?models.CapabilitiesOverride,
     workingDirectory: ?[]const u8,
     streaming: bool,
@@ -3393,6 +3717,8 @@ fn resumeConfigFromCreate(config: session_types.CreateSessionConfig) session_typ
     return .{
         .model = config.model,
         .provider = config.provider,
+        .providers = config.providers,
+        .models = config.models,
         .model_capabilities = config.model_capabilities,
         .working_directory = config.working_directory,
         .streaming = config.streaming,
@@ -3431,6 +3757,8 @@ fn resumeConfigFromJoin(config: session_types.JoinSessionConfig) session_types.R
     return .{
         .model = config.model,
         .provider = config.provider,
+        .providers = config.providers,
+        .models = config.models,
         .model_capabilities = config.model_capabilities,
         .working_directory = config.working_directory,
         .streaming = config.streaming,
@@ -3465,6 +3793,27 @@ fn resumeConfigFromJoin(config: session_types.JoinSessionConfig) session_types.R
             .open_canvases = config.extensions.open_canvases,
         },
     };
+}
+
+fn generateSessionId(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
+    var bytes: [16]u8 = undefined;
+    try std.Io.randomSecure(io, &bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    const id = try allocator.alloc(u8, 36);
+    const hex = "0123456789abcdef";
+    var output_index: usize = 0;
+    for (bytes, 0..) |byte, byte_index| {
+        if (byte_index == 4 or byte_index == 6 or byte_index == 8 or byte_index == 10) {
+            id[output_index] = '-';
+            output_index += 1;
+        }
+        id[output_index] = hex[byte >> 4];
+        id[output_index + 1] = hex[byte & 0x0f];
+        output_index += 2;
+    }
+    return id;
 }
 
 fn lowerManagedSettings(
@@ -3508,15 +3857,31 @@ fn buildCreateSessionRequest(
     tools: []const WireTool,
     values: *ExtensionWireValues,
 ) !CreateSessionRequest {
-    const features: ext.SessionFeatures = if (@hasField(@TypeOf(config), "extensions"))
-        config.extensions.common
-    else
-        .{};
+    return buildPreparedCreateSessionRequest(
+        config.session_id,
+        config,
+        tools,
+        values,
+        .{},
+    );
+}
+
+fn buildPreparedCreateSessionRequest(
+    session_id: ?[]const u8,
+    config: session_types.CreateSessionConfig,
+    tools: []const WireTool,
+    values: *ExtensionWireValues,
+    prepared_providers: provider.PreparedProviders,
+) !CreateSessionRequest {
+    const features = config.extensions.common;
+    try provider.validateCapabilities(config.model_capabilities);
     return .{
-        .sessionId = config.session_id,
+        .sessionId = session_id,
         .model = config.model,
-        .provider = if (config.provider) |value| try provider.lower(value) else null,
-        .modelCapabilities = try lowerModelCapabilities(config.model_capabilities),
+        .provider = prepared_providers.provider,
+        .providers = prepared_providers.providers,
+        .models = prepared_providers.models,
+        .modelCapabilities = config.model_capabilities,
         .workingDirectory = config.working_directory,
         .streaming = config.streaming,
         .tools = tools,
@@ -3573,6 +3938,24 @@ fn buildResumeSessionRequest(
     values: *ExtensionWireValues,
     requested_environment_variables: []const []const u8,
 ) !ResumeSessionRequest {
+    return buildPreparedResumeSessionRequest(
+        session_id,
+        config,
+        tools,
+        values,
+        requested_environment_variables,
+        .{},
+    );
+}
+
+fn buildPreparedResumeSessionRequest(
+    session_id: []const u8,
+    config: session_types.ResumeSessionConfig,
+    tools: []const WireTool,
+    values: *ExtensionWireValues,
+    requested_environment_variables: []const []const u8,
+    prepared_providers: provider.PreparedProviders,
+) !ResumeSessionRequest {
     const features = config.extensions.common;
     const configured_open_canvases = config.extensions.open_canvases;
     try values.open_canvases.ensureTotalCapacity(
@@ -3595,11 +3978,14 @@ fn buildResumeSessionRequest(
                 null,
         });
     }
+    try provider.validateCapabilities(config.model_capabilities);
     return .{
         .sessionId = session_id,
         .model = config.model,
-        .provider = if (config.provider) |value| try provider.lower(value) else null,
-        .modelCapabilities = try lowerModelCapabilities(config.model_capabilities),
+        .provider = prepared_providers.provider,
+        .providers = prepared_providers.providers,
+        .models = prepared_providers.models,
+        .modelCapabilities = config.model_capabilities,
         .workingDirectory = config.working_directory,
         .streaming = config.streaming,
         .tools = tools,
@@ -5092,13 +5478,27 @@ test "create request places the lowered provider in params" {
     const allocator = std.testing.allocator;
     var extension_values = ExtensionWireValues.init(allocator);
     defer extension_values.deinit();
-    const params = try buildCreateSessionRequest(.{
+    const config = session_types.CreateSessionConfig{
         .provider = .{
             .base_url = "https://api.openai.com/v1",
             .protocol = .{ .openai = .{ .responses = .websockets } },
             .authentication = .{ .bearer_token = "token" },
         },
-    }, &.{}, &extension_values);
+    };
+    var prepared = try provider.prepareSessionProviders(
+        allocator,
+        config.provider,
+        config.providers,
+        config.models,
+    );
+    defer prepared.deinit(allocator);
+    const params = try buildPreparedCreateSessionRequest(
+        config.session_id,
+        config,
+        &.{},
+        &extension_values,
+        prepared,
+    );
     const encoded = try json_rpc.encodeRequest(allocator, 9, "session.create", params);
     defer allocator.free(encoded);
 
@@ -5117,13 +5517,28 @@ test "resume request places provider without suppressing resume by default" {
     const allocator = std.testing.allocator;
     var extension_values = ExtensionWireValues.init(allocator);
     defer extension_values.deinit();
-    const params = try buildResumeSessionRequest("session-1", .{
+    const config = session_types.ResumeSessionConfig{
         .provider = .{
             .base_url = "https://api.anthropic.com",
             .protocol = .anthropic,
             .authentication = .{ .api_key = "key" },
         },
-    }, &.{}, &extension_values, &.{});
+    };
+    var prepared = try provider.prepareSessionProviders(
+        allocator,
+        config.provider,
+        config.providers,
+        config.models,
+    );
+    defer prepared.deinit(allocator);
+    const params = try buildPreparedResumeSessionRequest(
+        "session-1",
+        config,
+        &.{},
+        &extension_values,
+        &.{},
+        prepared,
+    );
     const encoded = try json_rpc.encodeRequest(allocator, 10, "session.resume", params);
     defer allocator.free(encoded);
 
@@ -5192,7 +5607,7 @@ test "createSession and resumeSession preserve deep partial model capability ove
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         const create_response = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"sessionId\":\"created-session\"}}";
-        const resume_response = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}";
+        const resume_response = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"existing-session\"}}";
         const responses = try std.fmt.allocPrint(
             allocator,
             "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
@@ -5224,6 +5639,7 @@ test "createSession and resumeSession preserve deep partial model capability ove
             client.extension_runtimes.deinit(allocator);
         }
         const config = session_types.SessionConfig{
+            .session_id = "created-session",
             .model = "local-vision-model",
             .provider = .{
                 .base_url = "http://localhost:8000/v1",
@@ -5260,7 +5676,7 @@ test "createSession and resumeSession preserve deep partial model capability ove
         const expected_create = try std.fmt.allocPrint(
             allocator,
             "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.create\",\"params\":{{{s}{s}{s}}}}}",
-            .{ model_and_provider, case.wire, defaults },
+            .{ "\"sessionId\":\"created-session\"," ++ model_and_provider, case.wire, defaults },
         );
         defer allocator.free(expected_create);
         const create_body = try json_rpc.readFrame(allocator, &frames);
@@ -7110,8 +7526,8 @@ test "create resume and parent join lower custom agents to literal lifecycle JSO
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const create_response = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"sessionId\":\"created\"}}";
-    const resume_response = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}";
-    const join_response = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}";
+    const resume_response = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"session-1\"}}";
+    const join_response = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"sessionId\":\"parent-session\"}}";
     const responses = try std.fmt.allocPrint(
         allocator,
         "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
@@ -7151,6 +7567,7 @@ test "create resume and parent join lower custom agents to literal lifecycle JSO
     }
 
     const created = try client.createSession(.{
+        .session_id = "created",
         .custom_agents = &.{.{
             .name = "reviewer",
             .display_name = "Code reviewer",
@@ -7234,7 +7651,7 @@ test "create resume and parent join lower custom agents to literal lifecycle JSO
     const create_body = try json_rpc.readFrame(allocator, &frames);
     defer allocator.free(create_body);
     try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":1,"method":"session.create","params":{"streaming":false,"tools":[],"customAgents":[{"name":"reviewer","displayName":"Code reviewer","description":"Reviews code.","tools":["read"],"prompt":"Review.","mcpServers":{"docs":{"type":"stdio","command":"docs-mcp","args":["--stdio"],"env":{"TOKEN":"secret"},"cwd":"/repo","tools":["lookup"],"timeout":25}},"infer":false,"skills":["review"],"model":"gpt-5.4","reasoningEffort":"xhigh"}],"defaultAgent":{"excludedTools":["deploy"]},"agent":"reviewer","customAgentsLocalOnly":true,"excludedBuiltinAgents":["explore"],"toolFilterPrecedence":"excluded","requestPermission":false,"requestUserInput":false,"enableManagedSettings":false}}
+        \\{"jsonrpc":"2.0","id":1,"method":"session.create","params":{"sessionId":"created","streaming":false,"tools":[],"customAgents":[{"name":"reviewer","displayName":"Code reviewer","description":"Reviews code.","tools":["read"],"prompt":"Review.","mcpServers":{"docs":{"type":"stdio","command":"docs-mcp","args":["--stdio"],"env":{"TOKEN":"secret"},"cwd":"/repo","tools":["lookup"],"timeout":25}},"infer":false,"skills":["review"],"model":"gpt-5.4","reasoningEffort":"xhigh"}],"defaultAgent":{"excludedTools":["deploy"]},"agent":"reviewer","customAgentsLocalOnly":true,"excludedBuiltinAgents":["explore"],"toolFilterPrecedence":"excluded","requestPermission":false,"requestUserInput":false,"enableManagedSettings":false}}
     , create_body);
     const resume_body = try json_rpc.readFrame(allocator, &frames);
     defer allocator.free(resume_body);
@@ -7452,4 +7869,927 @@ test "create and join mappings preserve custom agent configuration" {
         try std.testing.expectEqual(false, mapped.custom_agents_local_only.?);
         try std.testing.expectEqualStrings("explore", mapped.excluded_builtin_agents.?[0]);
     }
+}
+
+test "resume request places provider in params and disables nested resume" {
+    const allocator = std.testing.allocator;
+    var extension_values = ExtensionWireValues.init(allocator);
+    defer extension_values.deinit();
+    const config = session_types.SessionConfig{
+        .provider = .{
+            .base_url = "https://api.anthropic.com",
+            .protocol = .anthropic,
+            .authentication = .{ .api_key = "key" },
+        },
+    };
+    var prepared = try provider.prepareSessionProviders(
+        allocator,
+        config.provider,
+        config.providers,
+        config.models,
+    );
+    defer prepared.deinit(allocator);
+    const params = try buildPreparedResumeSessionRequest(
+        "session-1",
+        resumeConfigFromCreate(config),
+        &.{},
+        &extension_values,
+        &.{},
+        prepared,
+    );
+    const encoded = try json_rpc.encodeRequest(allocator, 10, "session.resume", params);
+    defer allocator.free(encoded);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqualStrings("session.resume", root.get("method").?.string);
+    const request_params = root.get("params").?.object;
+    try std.testing.expect(request_params.get("disableResume").?.bool);
+    const provider_value = request_params.get("provider").?.object;
+    try std.testing.expectEqualStrings("anthropic", provider_value.get("type").?.string);
+    try std.testing.expectEqualStrings("key", provider_value.get("apiKey").?.string);
+}
+
+test "create and resume requests encode complete provider graphs exactly" {
+    const allocator = std.testing.allocator;
+    var create_extension_values = ExtensionWireValues.init(allocator);
+    defer create_extension_values.deinit();
+    var resume_extension_values = ExtensionWireValues.init(allocator);
+    defer resume_extension_values.deinit();
+    const token_callback = struct {
+        fn get(
+            inner_allocator: std.mem.Allocator,
+            _: provider.ProviderTokenRequest,
+            _: ?*anyopaque,
+        ) ![]u8 {
+            return inner_allocator.dupe(u8, "dynamic");
+        }
+    }.get;
+    const config = session_types.SessionConfig{
+        .session_id = "session-provider-graph",
+        .providers = &.{
+            .{
+                .name = "openai",
+                .base_url = "https://api.openai.com/v1",
+                .protocol = .{ .openai = .{ .responses = .websockets } },
+                .authentication = .{ .api_key_and_bearer_token = .{
+                    .api_key = "key",
+                    .bearer_token = "static",
+                } },
+                .bearer_token_provider = .{ .callback = token_callback },
+                .headers = &.{.{ .name = "X-Tenant", .value = "acme" }},
+            },
+        },
+        .models = &.{
+            .{
+                .id = "reasoner",
+                .provider = "openai",
+                .wire_model = "deployment",
+                .model_id = "gpt-4.1",
+                .name = "Reasoner",
+                .max_prompt_tokens = 100,
+                .max_context_window_tokens = 200,
+                .max_output_tokens = 50,
+                .capabilities = .{ .supports = .{ .reasoningEffort = true } },
+            },
+        },
+    };
+    var prepared = try provider.prepareSessionProviders(
+        allocator,
+        config.provider,
+        config.providers,
+        config.models,
+    );
+    defer prepared.deinit(allocator);
+
+    const create = try json_rpc.encodeRequest(
+        allocator,
+        21,
+        "session.create",
+        try buildPreparedCreateSessionRequest(
+            config.session_id,
+            config,
+            &.{},
+            &create_extension_values,
+            prepared,
+        ),
+    );
+    defer allocator.free(create);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"session.create\",\"params\":{\"sessionId\":\"session-provider-graph\",\"providers\":[{\"name\":\"openai\",\"type\":\"openai\",\"wireApi\":\"responses\",\"transport\":\"websockets\",\"baseUrl\":\"https://api.openai.com/v1\",\"apiKey\":\"key\",\"bearerToken\":\"static\",\"headers\":{\"X-Tenant\":\"acme\"},\"hasBearerTokenProvider\":true}],\"models\":[{\"id\":\"reasoner\",\"provider\":\"openai\",\"wireModel\":\"deployment\",\"modelId\":\"gpt-4.1\",\"name\":\"Reasoner\",\"maxPromptTokens\":100,\"maxContextWindowTokens\":200,\"maxOutputTokens\":50,\"capabilities\":{\"supports\":{\"reasoningEffort\":true}}}],\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false}}",
+        create,
+    );
+
+    const resume_encoded = try json_rpc.encodeRequest(
+        allocator,
+        22,
+        "session.resume",
+        try buildPreparedResumeSessionRequest(
+            "session-provider-graph",
+            resumeConfigFromCreate(config),
+            &.{},
+            &resume_extension_values,
+            &.{},
+            prepared,
+        ),
+    );
+    defer allocator.free(resume_encoded);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"session-provider-graph\",\"providers\":[{\"name\":\"openai\",\"type\":\"openai\",\"wireApi\":\"responses\",\"transport\":\"websockets\",\"baseUrl\":\"https://api.openai.com/v1\",\"apiKey\":\"key\",\"bearerToken\":\"static\",\"headers\":{\"X-Tenant\":\"acme\"},\"hasBearerTokenProvider\":true}],\"models\":[{\"id\":\"reasoner\",\"provider\":\"openai\",\"wireModel\":\"deployment\",\"modelId\":\"gpt-4.1\",\"name\":\"Reasoner\",\"maxPromptTokens\":100,\"maxContextWindowTokens\":200,\"maxOutputTokens\":50,\"capabilities\":{\"supports\":{\"reasoningEffort\":true}}}],\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false,\"disableResume\":true}}",
+        resume_encoded,
+    );
+}
+
+test "singular create request encodes every provider field and default callback routing" {
+    const allocator = std.testing.allocator;
+    var create_extension_values = ExtensionWireValues.init(allocator);
+    defer create_extension_values.deinit();
+    var resume_extension_values = ExtensionWireValues.init(allocator);
+    defer resume_extension_values.deinit();
+    const callback = struct {
+        fn get(
+            inner_allocator: std.mem.Allocator,
+            _: provider.ProviderTokenRequest,
+            _: ?*anyopaque,
+        ) ![]u8 {
+            return inner_allocator.dupe(u8, "dynamic");
+        }
+    }.get;
+    const config = session_types.SessionConfig{
+        .session_id = "singular",
+        .provider = .{
+            .base_url = "https://api.example.test",
+            .protocol = .{ .openai = .{ .responses = .websockets } },
+            .authentication = .{ .api_key_and_bearer_token = .{
+                .api_key = "key",
+                .bearer_token = "static",
+            } },
+            .bearer_token_provider = .{ .callback = callback },
+            .headers = &.{.{ .name = "X-Region", .value = "west" }},
+            .model_id = "gpt-4.1",
+            .model_capabilities = .{ .supports = .{ .vision = true } },
+            .provider_name = "telemetry",
+            .wire_model = "deployment",
+            .max_prompt_tokens = 100,
+            .max_context_window_tokens = 200,
+            .max_output_tokens = 50,
+        },
+    };
+    var prepared = try provider.prepareSessionProviders(
+        allocator,
+        config.provider,
+        config.providers,
+        config.models,
+    );
+    defer prepared.deinit(allocator);
+    try std.testing.expectEqualStrings("default", prepared.token_bindings[0].provider_name);
+
+    const encoded = try json_rpc.encodeRequest(
+        allocator,
+        23,
+        "session.create",
+        try buildPreparedCreateSessionRequest(
+            "singular",
+            config,
+            &.{},
+            &create_extension_values,
+            prepared,
+        ),
+    );
+    defer allocator.free(encoded);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"session.create\",\"params\":{\"sessionId\":\"singular\",\"provider\":{\"type\":\"openai\",\"wireApi\":\"responses\",\"transport\":\"websockets\",\"baseUrl\":\"https://api.example.test\",\"apiKey\":\"key\",\"bearerToken\":\"static\",\"headers\":{\"X-Region\":\"west\"},\"modelId\":\"gpt-4.1\",\"modelCapabilities\":{\"supports\":{\"vision\":true}},\"providerName\":\"telemetry\",\"wireModel\":\"deployment\",\"maxPromptTokens\":100,\"maxContextWindowTokens\":200,\"maxOutputTokens\":50,\"hasBearerTokenProvider\":true},\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false}}",
+        encoded,
+    );
+
+    const resume_encoded = try json_rpc.encodeRequest(
+        allocator,
+        24,
+        "session.resume",
+        try buildPreparedResumeSessionRequest(
+            "singular",
+            resumeConfigFromCreate(config),
+            &.{},
+            &resume_extension_values,
+            &.{},
+            prepared,
+        ),
+    );
+    defer allocator.free(resume_encoded);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"singular\",\"provider\":{\"type\":\"openai\",\"wireApi\":\"responses\",\"transport\":\"websockets\",\"baseUrl\":\"https://api.example.test\",\"apiKey\":\"key\",\"bearerToken\":\"static\",\"headers\":{\"X-Region\":\"west\"},\"modelId\":\"gpt-4.1\",\"modelCapabilities\":{\"supports\":{\"vision\":true}},\"providerName\":\"telemetry\",\"wireModel\":\"deployment\",\"maxPromptTokens\":100,\"maxContextWindowTokens\":200,\"maxOutputTokens\":50,\"hasBearerTokenProvider\":true},\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false,\"disableResume\":true}}",
+        resume_encoded,
+    );
+}
+
+test "createSession and joinSession preserve deep partial model capability overrides" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        capabilities: ?models.CapabilitiesOverride,
+        wire: []const u8,
+    }{
+        .{ .capabilities = null, .wire = "" },
+        .{ .capabilities = .{}, .wire = ",\"modelCapabilities\":{}" },
+        .{
+            .capabilities = .{ .supports = .{} },
+            .wire = ",\"modelCapabilities\":{\"supports\":{}}",
+        },
+        .{
+            .capabilities = .{ .supports = .{ .vision = true } },
+            .wire = ",\"modelCapabilities\":{\"supports\":{\"vision\":true}}",
+        },
+        .{
+            .capabilities = .{ .supports = .{ .vision = false } },
+            .wire = ",\"modelCapabilities\":{\"supports\":{\"vision\":false}}",
+        },
+        .{
+            .capabilities = .{ .supports = .{ .reasoningEffort = false, .adaptive_thinking = .optional } },
+            .wire = ",\"modelCapabilities\":{\"supports\":{\"reasoningEffort\":false,\"adaptive_thinking\":\"optional\"}}",
+        },
+        .{
+            .capabilities = .{ .limits = .{ .vision = .{ .max_prompt_images = 1 } } },
+            .wire = ",\"modelCapabilities\":{\"limits\":{\"vision\":{\"max_prompt_images\":1}}}",
+        },
+        .{
+            .capabilities = .{ .limits = .{ .vision = .{ .supported_media_types = &.{} } } },
+            .wire = ",\"modelCapabilities\":{\"limits\":{\"vision\":{\"supported_media_types\":[]}}}",
+        },
+        .{
+            .capabilities = .{
+                .supports = .{ .vision = true, .reasoningEffort = true, .adaptive_thinking = .required },
+                .limits = .{
+                    .max_prompt_tokens = 0,
+                    .max_output_tokens = 4096,
+                    .max_context_window_tokens = 32768,
+                    .vision = .{
+                        .supported_media_types = &.{ "image/png", "image/jpeg" },
+                        .max_prompt_images = 8,
+                        .max_prompt_image_size = 10485760,
+                    },
+                },
+            },
+            .wire = ",\"modelCapabilities\":{\"supports\":{\"vision\":true,\"reasoningEffort\":true,\"adaptive_thinking\":\"required\"},\"limits\":{\"max_prompt_tokens\":0,\"max_output_tokens\":4096,\"max_context_window_tokens\":32768,\"vision\":{\"supported_media_types\":[\"image/png\",\"image/jpeg\"],\"max_prompt_images\":8,\"max_prompt_image_size\":10485760}}}",
+        },
+    };
+
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const create_response = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"sessionId\":\"created-session\"}}";
+        const resume_response = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"existing-session\"}}";
+        const responses = try std.fmt.allocPrint(
+            allocator,
+            "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+            .{ create_response.len, create_response, resume_response.len, resume_response },
+        );
+        defer allocator.free(responses);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = responses });
+        const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+        defer response_file.close(std.testing.io);
+        var reader_buffer: [1024]u8 = undefined;
+        var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+        const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+        defer request_file.close(std.testing.io);
+        var writer_buffer: [1024]u8 = undefined;
+        var writer = request_file.writer(std.testing.io, &writer_buffer);
+        var client = Client{
+            .allocator = allocator,
+            .io = std.testing.io,
+            .child = null,
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        };
+        defer deinitTestClientRegistries(&client);
+        const config = session_types.SessionConfig{
+            .session_id = "created-session",
+            .model = "local-vision-model",
+            .provider = .{
+                .base_url = "http://localhost:8000/v1",
+                .model_id = "local-vision-model",
+                .wire_model = "local-vision-model",
+            },
+            .model_capabilities = case.capabilities,
+        };
+        const created = try client.createSession(config);
+        try std.testing.expectEqualStrings("created-session", created.id);
+        const joined = try client.joinSession("existing-session", config);
+        try std.testing.expectEqualStrings("existing-session", joined.id);
+
+        var invalid_config = config;
+        invalid_config.model_capabilities = .{ .limits = .{ .vision = .{ .max_prompt_images = 0 } } };
+        try std.testing.expectError(error.InvalidMaxPromptImages, client.createSession(invalid_config));
+        try std.testing.expectError(error.InvalidMaxPromptImages, client.joinSession("existing-session", invalid_config));
+
+        const requests = try tmp.dir.readFileAlloc(std.testing.io, "requests", allocator, .limited(8192));
+        defer allocator.free(requests);
+        var frames = std.Io.Reader.fixed(requests);
+        const model_and_provider = "\"model\":\"local-vision-model\",\"provider\":{\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"http://localhost:8000/v1\",\"modelId\":\"local-vision-model\",\"wireModel\":\"local-vision-model\"}";
+        const defaults = ",\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false";
+        const expected_create = try std.fmt.allocPrint(
+            allocator,
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.create\",\"params\":{{{s}{s}{s}}}}}",
+            .{ "\"sessionId\":\"created-session\"," ++ model_and_provider, case.wire, defaults },
+        );
+        defer allocator.free(expected_create);
+        const create_body = try json_rpc.readFrame(allocator, &frames);
+        defer allocator.free(create_body);
+        try std.testing.expectEqualStrings(expected_create, create_body);
+        const expected_resume = try std.fmt.allocPrint(
+            allocator,
+            "{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session.resume\",\"params\":{{\"sessionId\":\"existing-session\",{s}{s}{s},\"disableResume\":true}}}}",
+            .{ model_and_provider, case.wire, defaults },
+        );
+        defer allocator.free(expected_resume);
+        const resume_body = try json_rpc.readFrame(allocator, &frames);
+        defer allocator.free(resume_body);
+        try std.testing.expectEqualStrings(expected_resume, resume_body);
+        try std.testing.expectEqualStrings("", frames.buffered());
+    }
+}
+
+const ProviderTokenTestContext = struct {
+    token: []const u8,
+    calls: usize = 0,
+    expected_session_id: []const u8,
+    expected_provider_name: []const u8,
+    matched: bool = false,
+};
+
+fn providerTokenTestCallback(
+    allocator: std.mem.Allocator,
+    request: provider.ProviderTokenRequest,
+    context_ptr: ?*anyopaque,
+) ![]u8 {
+    const context: *ProviderTokenTestContext = @ptrCast(@alignCast(context_ptr.?));
+    context.calls += 1;
+    context.matched =
+        std.mem.eql(u8, request.session_id, context.expected_session_id) and
+        std.mem.eql(u8, request.provider_name, context.expected_provider_name);
+    return allocator.dupe(u8, context.token);
+}
+
+fn failingProviderTokenCallback(
+    _: std.mem.Allocator,
+    _: provider.ProviderTokenRequest,
+    _: ?*anyopaque,
+) ![]u8 {
+    return error.TokenUnavailable;
+}
+
+fn deinitTestClientRegistries(client: *Client) void {
+    if (client.pending_extension_runtime) |*runtime| runtime.deinit(client.allocator);
+    for (client.extension_runtimes.items) |*runtime| runtime.deinit(client.allocator);
+    client.extension_runtimes.deinit(client.allocator);
+    if (client.pending_provider_tokens) |registered| registered.deinit(client.allocator);
+    for (client.events.items) |*event| event.deinit(client.allocator);
+    client.events.deinit(client.allocator);
+    for (client.tools.items) |tool| tool.deinit(client.allocator);
+    client.tools.deinit(client.allocator);
+    client.user_input_handlers.deinit(client.allocator);
+    client.permission_handlers.deinit(client.allocator);
+    for (client.provider_tokens.items) |registered| registered.deinit(client.allocator);
+    client.provider_tokens.deinit(client.allocator);
+    for (client.rpc_handlers.items) |handler| handler.deinit(client.allocator);
+    client.rpc_handlers.deinit(client.allocator);
+    for (client.session_ids.items) |id| client.allocator.free(id);
+    client.session_ids.deinit(client.allocator);
+}
+
+test "provider token callback is routable before create response" {
+    const allocator = std.testing.allocator;
+    var context = ProviderTokenTestContext{
+        .token = "create-token",
+        .expected_session_id = "early-create",
+        .expected_provider_name = "default",
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const callback_request =
+        \\{"jsonrpc":"2.0","id":41,"method":"providerToken.getToken","params":{"sessionId":"early-create","providerName":"default"}}
+    ;
+    const create_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"sessionId":"early-create"}}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{ callback_request.len, callback_request, create_response.len, create_response },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = responses });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [2048]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestClientRegistries(&client);
+
+    const created = try client.createSession(.{
+        .session_id = "early-create",
+        .provider = .{
+            .base_url = "https://example.test",
+            .provider_name = "attribution-only",
+            .bearer_token_provider = .{
+                .callback = providerTokenTestCallback,
+                .context = &context,
+            },
+        },
+    });
+    try std.testing.expectEqualStrings("early-create", created.id);
+    try std.testing.expectEqual(@as(usize, 1), context.calls);
+    try std.testing.expect(context.matched);
+
+    const requests = try tmp.dir.readFileAlloc(std.testing.io, "requests", allocator, .limited(8192));
+    defer allocator.free(requests);
+    var frames = std.Io.Reader.fixed(requests);
+    const create_frame = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(create_frame);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.create\",\"params\":{\"sessionId\":\"early-create\",\"provider\":{\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"https://example.test\",\"providerName\":\"attribution-only\",\"hasBearerTokenProvider\":true},\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false}}",
+        create_frame,
+    );
+    const token_frame = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(token_frame);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":41,\"result\":{\"token\":\"create-token\"}}",
+        token_frame,
+    );
+}
+
+test "two named provider callbacks are routable before resume response" {
+    const allocator = std.testing.allocator;
+    var first_context = ProviderTokenTestContext{
+        .token = "first-token",
+        .expected_session_id = "early-resume",
+        .expected_provider_name = "first",
+    };
+    var second_context = ProviderTokenTestContext{
+        .token = "second-token",
+        .expected_session_id = "early-resume",
+        .expected_provider_name = "second",
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const first_request =
+        \\{"jsonrpc":"2.0","id":51,"method":"providerToken.getToken","params":{"sessionId":"early-resume","providerName":"first"}}
+    ;
+    const second_request =
+        \\{"jsonrpc":"2.0","id":52,"method":"providerToken.getToken","params":{"sessionId":"early-resume","providerName":"second"}}
+    ;
+    const resume_response = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"sessionId\":\"early-resume\"}}";
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            first_request.len,
+            first_request,
+            second_request.len,
+            second_request,
+            resume_response.len,
+            resume_response,
+        },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = responses });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [4096]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestClientRegistries(&client);
+
+    const resumed = try client.joinSession("early-resume", .{
+        .providers = &.{
+            .{
+                .name = "first",
+                .base_url = "https://first.test",
+                .bearer_token_provider = .{
+                    .callback = providerTokenTestCallback,
+                    .context = &first_context,
+                },
+            },
+            .{
+                .name = "second",
+                .base_url = "https://second.test",
+                .bearer_token_provider = .{
+                    .callback = providerTokenTestCallback,
+                    .context = &second_context,
+                },
+            },
+        },
+        .models = &.{
+            .{ .id = "one", .provider = "first" },
+            .{ .id = "two", .provider = "second" },
+        },
+    });
+    try std.testing.expectEqualStrings("early-resume", resumed.id);
+    try std.testing.expectEqual(@as(usize, 1), first_context.calls);
+    try std.testing.expectEqual(@as(usize, 1), second_context.calls);
+    try std.testing.expect(first_context.matched);
+    try std.testing.expect(second_context.matched);
+
+    const requests = try tmp.dir.readFileAlloc(std.testing.io, "requests", allocator, .limited(16384));
+    defer allocator.free(requests);
+    var frames = std.Io.Reader.fixed(requests);
+    const resume_frame = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(resume_frame);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.resume\",\"params\":{\"sessionId\":\"early-resume\",\"providers\":[{\"name\":\"first\",\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"https://first.test\",\"hasBearerTokenProvider\":true},{\"name\":\"second\",\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"https://second.test\",\"hasBearerTokenProvider\":true}],\"models\":[{\"id\":\"one\",\"provider\":\"first\"},{\"id\":\"two\",\"provider\":\"second\"}],\"streaming\":false,\"tools\":[],\"toolFilterPrecedence\":\"excluded\",\"requestPermission\":false,\"requestUserInput\":false,\"enableManagedSettings\":false,\"disableResume\":true}}",
+        resume_frame,
+    );
+    const first_frame = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(first_frame);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":51,\"result\":{\"token\":\"first-token\"}}",
+        first_frame,
+    );
+    const second_frame = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(second_frame);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":52,\"result\":{\"token\":\"second-token\"}}",
+        second_frame,
+    );
+}
+
+test "provider token dispatch routes by session and provider and rejects invalid requests" {
+    const allocator = std.testing.allocator;
+    var first_context = ProviderTokenTestContext{
+        .token = "session-one-token",
+        .expected_session_id = "session-one",
+        .expected_provider_name = "shared",
+    };
+    var second_context = ProviderTokenTestContext{
+        .token = "session-two-token",
+        .expected_session_id = "session-two",
+        .expected_provider_name = "shared",
+    };
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestClientRegistries(&client);
+    try client.registerOwnedSession(
+        try allocator.dupe(u8, "session-one"),
+        .{},
+        &.{.{
+            .provider_name = "shared",
+            .token_provider = .{
+                .callback = providerTokenTestCallback,
+                .context = &first_context,
+            },
+        }},
+    );
+    try client.registerOwnedSession(
+        try allocator.dupe(u8, "session-two"),
+        .{},
+        &.{
+            .{
+                .provider_name = "shared",
+                .token_provider = .{
+                    .callback = providerTokenTestCallback,
+                    .context = &second_context,
+                },
+            },
+            .{
+                .provider_name = "failing",
+                .token_provider = .{ .callback = failingProviderTokenCallback },
+            },
+        },
+    );
+
+    const cases = [_]struct {
+        id: i64,
+        params_json: ?[]const u8,
+        expected: []const u8,
+    }{
+        .{
+            .id = 61,
+            .params_json = "{\"sessionId\":\"session-one\",\"providerName\":\"shared\"}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":61,\"result\":{\"token\":\"session-one-token\"}}",
+        },
+        .{
+            .id = 62,
+            .params_json = "{\"sessionId\":\"session-two\",\"providerName\":\"shared\"}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":62,\"result\":{\"token\":\"session-two-token\"}}",
+        },
+        .{
+            .id = 63,
+            .params_json = "{\"sessionId\":\"session-two\",\"providerName\":\"failing\"}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":63,\"error\":{\"code\":-32000,\"message\":\"TokenUnavailable\"}}",
+        },
+        .{
+            .id = 64,
+            .params_json = "{\"sessionId\":\"session-two\",\"providerName\":\"missing\"}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":64,\"error\":{\"code\":-32601,\"message\":\"method not found\"}}",
+        },
+        .{
+            .id = 65,
+            .params_json = "{\"sessionId\":\"session-two\"}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":65,\"error\":{\"code\":-32601,\"message\":\"method not found\"}}",
+        },
+        .{
+            .id = 66,
+            .params_json = "{\"sessionId\":\"session-two\",\"providerName\":\"shared\",\"extra\":true}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":66,\"error\":{\"code\":-32602,\"message\":\"invalid provider token request\"}}",
+        },
+        .{
+            .id = 67,
+            .params_json = null,
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":67,\"error\":{\"code\":-32601,\"message\":\"method not found\"}}",
+        },
+    };
+
+    for (cases) |case| {
+        var parsed_params: ?std.json.Parsed(std.json.Value) = if (case.params_json) |json|
+            try std.json.parseFromSlice(std.json.Value, allocator, json, .{})
+        else
+            null;
+        defer if (parsed_params) |*parsed| parsed.deinit();
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        defer output.deinit();
+        try client.dispatchServerRequest(
+            &output.writer,
+            .{ .integer = case.id },
+            "providerToken.getToken",
+            if (parsed_params) |parsed| parsed.value else null,
+        );
+        const body = try framedBody(allocator, output.written());
+        defer allocator.free(body);
+        try std.testing.expectEqualStrings(case.expected, body);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), first_context.calls);
+    try std.testing.expectEqual(@as(usize, 1), second_context.calls);
+    try std.testing.expect(first_context.matched);
+    try std.testing.expect(second_context.matched);
+
+    try client.registerRpcHandler("providerToken.getToken", struct {
+        fn handle(
+            inner_allocator: std.mem.Allocator,
+            params_json: ?[]const u8,
+            _: ?*anyopaque,
+        ) ![]u8 {
+            if (params_json == null or
+                !std.mem.eql(
+                    u8,
+                    params_json.?,
+                    "{\"sessionId\":\"session-two\",\"providerName\":\"untyped\"}",
+                ))
+            {
+                return error.UnexpectedParams;
+            }
+            return inner_allocator.dupe(u8, "{\"token\":\"generic-token\"}");
+        }
+    }.handle, null);
+    const fallback_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        "{\"sessionId\":\"session-two\",\"providerName\":\"untyped\"}",
+        .{},
+    );
+    defer fallback_params.deinit();
+    var fallback_output: std.Io.Writer.Allocating = .init(allocator);
+    defer fallback_output.deinit();
+    try client.dispatchServerRequest(
+        &fallback_output.writer,
+        .{ .integer = 68 },
+        "providerToken.getToken",
+        fallback_params.value,
+    );
+    const fallback_body = try framedBody(allocator, fallback_output.written());
+    defer allocator.free(fallback_body);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":68,\"result\":{\"token\":\"generic-token\"}}",
+        fallback_body,
+    );
+
+    try std.testing.expectError(
+        error.SessionAlreadyActive,
+        client.registerOwnedSession(
+            try allocator.dupe(u8, "session-one"),
+            .{},
+            &.{},
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 2), client.session_ids.items.len);
+}
+
+test "failed create and resume roll back provider token routes" {
+    const allocator = std.testing.allocator;
+    const callback = provider.BearerTokenProvider{ .callback = providerTokenTestCallback };
+    const operations = [_]bool{ false, true };
+
+    for (operations) |is_resume| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const rpc_error = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"failed\"}}";
+        const response = try std.fmt.allocPrint(
+            allocator,
+            "Content-Length: {d}\r\n\r\n{s}",
+            .{ rpc_error.len, rpc_error },
+        );
+        defer allocator.free(response);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = response });
+        const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+        defer response_file.close(std.testing.io);
+        var reader_buffer: [1024]u8 = undefined;
+        var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+        const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+        defer request_file.close(std.testing.io);
+        var writer_buffer: [1024]u8 = undefined;
+        var writer = request_file.writer(std.testing.io, &writer_buffer);
+        var client = Client{
+            .allocator = allocator,
+            .io = std.testing.io,
+            .child = null,
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        };
+        defer deinitTestClientRegistries(&client);
+        const config = session_types.SessionConfig{
+            .session_id = "rollback",
+            .provider = .{
+                .base_url = "https://example.test",
+                .bearer_token_provider = callback,
+            },
+        };
+
+        if (is_resume) {
+            try std.testing.expectError(
+                error.JsonRpcError,
+                client.joinSession("rollback", config),
+            );
+        } else {
+            try std.testing.expectError(error.JsonRpcError, client.createSession(config));
+        }
+        try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
+        try std.testing.expectEqual(@as(usize, 0), client.provider_tokens.items.len);
+    }
+}
+
+test "create rejects a mismatched runtime session id and rolls back" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const body =
+        \\{"jsonrpc":"2.0","id":1,"result":{"sessionId":"different"}}
+    ;
+    const response = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ body.len, body },
+    );
+    defer allocator.free(response);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = response });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestClientRegistries(&client);
+
+    try std.testing.expectError(error.SessionIdMismatch, client.createSession(.{
+        .session_id = "requested",
+        .provider = .{
+            .base_url = "https://example.test",
+            .bearer_token_provider = .{ .callback = failingProviderTokenCallback },
+        },
+    }));
+    try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_tokens.items.len);
+}
+
+test "disconnect removes provider token registrations" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const body =
+        \\{"jsonrpc":"2.0","id":1,"result":{"success":true}}
+    ;
+    const response = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ body.len, body },
+    );
+    defer allocator.free(response);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = response });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestClientRegistries(&client);
+    try client.registerOwnedSession(
+        try allocator.dupe(u8, "disconnect-session"),
+        .{},
+        &.{.{
+            .provider_name = "provider",
+            .token_provider = .{ .callback = failingProviderTokenCallback },
+        }},
+    );
+
+    try (Session{ .client = &client, .id = "disconnect-session" }).disconnect();
+    try std.testing.expectEqual(@as(usize, 0), client.session_ids.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_tokens.items.len);
+
+    const request = try tmp.dir.readFileAlloc(std.testing.io, "request", allocator, .limited(1024));
+    defer allocator.free(request);
+    const request_body = try framedBody(allocator, request);
+    defer allocator.free(request_body);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.detach\",\"params\":{\"sessionId\":\"disconnect-session\"}}",
+        request_body,
+    );
+}
+
+test "client deinit frees provider token registrations" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const input_file = try tmp.dir.createFile(std.testing.io, "input", .{ .read = true });
+    defer input_file.close(std.testing.io);
+    const output_file = try tmp.dir.createFile(std.testing.io, "output", .{});
+    defer output_file.close(std.testing.io);
+    const reader_buffer = try allocator.alloc(u8, 64);
+    const writer_buffer = try allocator.alloc(u8, 64);
+    const reader = try allocator.create(std.Io.File.Reader);
+    const writer = try allocator.create(std.Io.File.Writer);
+    reader.* = input_file.readerStreaming(std.testing.io, reader_buffer);
+    writer.* = output_file.writer(std.testing.io, writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = reader,
+        .writer = writer,
+        .reader_buffer = reader_buffer,
+        .writer_buffer = writer_buffer,
+    };
+    try client.registerOwnedSession(
+        try allocator.dupe(u8, "deinit-session"),
+        .{},
+        &.{.{
+            .provider_name = "provider",
+            .token_provider = .{ .callback = failingProviderTokenCallback },
+        }},
+    );
+    client.deinit();
 }

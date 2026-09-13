@@ -64,6 +64,13 @@ pub const McpAppToolCall = extensibility.McpAppToolCall;
 pub const EnvironmentGrant = extensibility.EnvironmentGrant;
 pub const EnvironmentGrants = extensibility.EnvironmentGrants;
 pub const ProviderConfig = provider.ProviderConfig;
+pub const Authentication = provider.Authentication;
+pub const Header = provider.Header;
+pub const BearerTokenCallback = provider.BearerTokenCallback;
+pub const BearerTokenProvider = provider.BearerTokenProvider;
+pub const ProviderTokenRequest = provider.ProviderTokenRequest;
+pub const NamedProviderConfig = provider.NamedProviderConfig;
+pub const ProviderModelConfig = provider.ProviderModelConfig;
 pub const MessageOptions = session.MessageOptions;
 pub const Attachment = session.Attachment;
 pub const SessionEvent = session.SessionEvent;
@@ -127,5 +134,12 @@ test {
     _ = DefaultAgentConfig;
     _ = InitialAgent;
     _ = ReasoningEffort;
+    _ = Authentication;
+    _ = Header;
+    _ = BearerTokenCallback;
+    _ = BearerTokenProvider;
+    _ = ProviderTokenRequest;
+    _ = NamedProviderConfig;
+    _ = ProviderModelConfig;
     _ = Attachment;
 }
