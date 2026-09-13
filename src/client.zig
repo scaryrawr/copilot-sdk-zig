@@ -1225,7 +1225,7 @@ const RetainedResponse = struct {
 };
 
 const QueuedLogEvent = struct {
-    log: *event_log.EventLog,
+    log: ?*event_log.EventLog,
     event_id: u64,
     delivery: EventDelivery,
     delivery_class: EventDeliveryClass,
@@ -3244,9 +3244,9 @@ pub const Client = struct {
 
     pub fn deinit(self: *Client) void {
         self.releaseInterestsAndDetachSessionsBounded();
+        self.stopEventWorker();
         self.shutdownOwnedRuntimeBounded();
         self.stopPump();
-        self.stopEventWorker();
         self.finishSendOperations();
         if (self.transport == .none and !self.transport_closed) {
             if (self.child) |*child| {
@@ -3484,6 +3484,13 @@ pub const Client = struct {
                 var frame_failure = failure_value;
                 if (isTransportEndOfStream(&frame_failure)) {
                     frame_failure.deinit();
+                    if (self.transport.eofIsIdle()) {
+                        return .{ .failure = try recordClientIo(
+                            self.allocator,
+                            .read,
+                            error.EndOfStream,
+                        ) };
+                    }
                     return .{ .failure = try self.recordReadFailure(error.EndOfStream) };
                 }
                 return .{ .failure = frame_failure };
@@ -4745,7 +4752,6 @@ pub const Client = struct {
         config: session_types.JoinSessionConfig,
     ) !JoinedSession {
         const resume_config = resumeConfigFromJoin(config);
-        // Extension SDK overrides are structurally impossible here.
         const session = try legacyResult(
             Session,
             self.resumeSessionWithEnvironment(
@@ -5457,11 +5463,12 @@ pub const Client = struct {
             break;
         }
         self.pending_mutex.unlock(self.io);
-        defer self.removePendingCall(&pending);
-        defer if (pending.response) |response| {
-            wipeSecret(response);
-            self.allocator.free(response);
-        };
+        defer {
+            if (self.removePendingCallAndTakeResponse(&pending)) |response| {
+                wipeSecret(response);
+                self.allocator.free(response);
+            }
+        }
 
         self.ensurePump() catch |err| return .{ .failure = try policyFailure(
             failure_policy,
@@ -5485,7 +5492,12 @@ pub const Client = struct {
             .{ self.allocator, .write, err },
         ) };
 
-        pending.completed.waitUncancelable(self.io);
+        pending.completed.wait(self.io) catch |err| return .{ .failure = try policyFailure(
+            failure_policy,
+            err,
+            recordClientIo,
+            .{ self.allocator, .read, err },
+        ) };
         self.pending_mutex.lockUncancelable(self.io);
         const response = pending.response;
         pending.response = null;
@@ -5622,7 +5634,10 @@ pub const Client = struct {
         return .{ .success = parsed };
     }
 
-    fn ensurePump(self: *Client) error{ OutOfMemory, ClientDeinitialized }!void {
+    fn ensurePump(
+        self: *Client,
+    ) error{ OutOfMemory, ClientDeinitialized, ReentrantRpcCall }!void {
+        const current_thread = std.Thread.getCurrentId();
         while (true) {
             self.pending_mutex.lockUncancelable(self.io);
             if (self.pump_closing) {
@@ -5634,6 +5649,10 @@ pub const Client = struct {
                 return;
             }
             if (self.direct_call_active) {
+                if (self.direct_call_owner == current_thread) {
+                    self.pending_mutex.unlock(self.io);
+                    return error.ReentrantRpcCall;
+                }
                 self.pending_mutex.unlock(self.io);
                 self.direct_call_done.waitUncancelable(self.io);
                 continue;
@@ -5725,14 +5744,20 @@ pub const Client = struct {
         self.finishPumpWithoutDetail(error.ClientDeinitialized);
     }
 
-    fn removePendingCall(self: *Client, pending: *PendingCall) void {
+    fn removePendingCallAndTakeResponse(
+        self: *Client,
+        pending: *PendingCall,
+    ) ?[]u8 {
         self.pending_mutex.lockUncancelable(self.io);
         defer self.pending_mutex.unlock(self.io);
         for (self.pending_calls.items, 0..) |candidate, index| {
             if (candidate != pending) continue;
             _ = self.pending_calls.orderedRemove(index);
-            return;
+            const response = pending.response;
+            pending.response = null;
+            return response;
         }
+        return null;
     }
 
     fn pumpMain(self: *Client) void {
@@ -7771,33 +7796,18 @@ pub const Client = struct {
             .external_tool_requested => .external_tool_request,
             else => .observation,
         };
-        const session_index = self.findSessionIndex(session_id);
-        var active_lease: ?EventLogLease = if (session_index) |index| blk: {
-            const record = &self.sessions.items[index];
-            break :blk self.acquireEventLog(
-                session_id,
-                record.generation,
-            ) catch if (self.pump_future != null)
-                self.ensureEventLogLease(session_id, record.generation) catch |err|
-                    return .{ .failure = try policyFailure(
-                        failure_policy,
-                        err,
-                        recordQueueFull,
-                        .{ self.allocator, session_id, null, max_queued_events },
-                    ) }
-            else
-                null;
-        } else null;
+        var active_lease = self.acquireLatestEventLog(session_id);
         defer if (active_lease) |*lease| lease.deinit();
         const active_log = if (active_lease) |lease| lease.log else null;
-        const retained_async = active_log != null and self.pump_future != null;
-        if (!retained_async and delivery_class == .automatic) {
+        const worker_async = self.pump_future != null and
+            (active_log != null or delivery_class == .automatic);
+        if (!worker_async and delivery_class == .automatic) {
             self.handleAutomaticSessionEvent(
                 session_id,
                 .{ .transient = &event },
             );
         }
-        var log_delivery: ?EventDelivery = if (retained_async)
+        var log_delivery: ?EventDelivery = if (worker_async)
             self.cloneEventDelivery(
                 event_id,
                 session_id,
@@ -7832,7 +7842,7 @@ pub const Client = struct {
             .session_id = owned_session_id,
             .event = event,
             .diagnostic_frame = diagnostic_frame,
-            .automatic_handling_in_progress = retained_async,
+            .automatic_handling_in_progress = worker_async,
         }) catch {
             self.events_mutex.unlock(self.io);
             self.handleUnretainedEvent(
@@ -7846,23 +7856,126 @@ pub const Client = struct {
         transferred = true;
         self.events_mutex.unlock(self.io);
 
-        if (active_log) |log| if (retained_async) {
-            log.beginIngress() catch |err| {
-                self.removeQueuedEvent(event_id);
-                return .{ .failure = try policyFailure(
-                    failure_policy,
-                    err,
-                    recordClientIo,
-                    .{ self.allocator, .read, err },
-                ) };
-            };
+        if (active_log) |log| {
+            if (worker_async) {
+                const admitted = blk: {
+                    log.beginIngress() catch |err| {
+                        if (err == error.SessionDisconnected) break :blk false;
+                        self.removeQueuedEvent(event_id);
+                        return .{ .failure = try policyFailure(
+                            failure_policy,
+                            err,
+                            recordClientIo,
+                            .{ self.allocator, .read, err },
+                        ) };
+                    };
+                    break :blk true;
+                };
+                if (!admitted) {
+                    if (delivery_class == .automatic) {
+                        self.enqueueLogEvent(.{
+                            .log = null,
+                            .event_id = event_id,
+                            .delivery = log_delivery.?,
+                            .delivery_class = delivery_class,
+                        }) catch |err| {
+                            if (err != error.SessionDisconnected) {
+                                self.removeQueuedEvent(event_id);
+                                return .{ .failure = try policyFailure(
+                                    failure_policy,
+                                    err,
+                                    recordClientIo,
+                                    .{ self.allocator, .read, err },
+                                ) };
+                            }
+                            self.setAutomaticDeliveryFailure(
+                                event_id,
+                                error.SessionDisconnected,
+                            );
+                            return .{ .success = agent_view != null };
+                        };
+                        log_delivery = null;
+                    } else {
+                        self.finishRetainedEvent(event_id, event, false);
+                    }
+                    return .{ .success = agent_view != null };
+                }
+                self.enqueueLogEvent(.{
+                    .log = log,
+                    .event_id = event_id,
+                    .delivery = log_delivery.?,
+                    .delivery_class = delivery_class,
+                }) catch |err| {
+                    log.finishIngress();
+                    if (err == error.SessionDisconnected) {
+                        if (delivery_class == .automatic)
+                            self.setAutomaticDeliveryFailure(event_id, err)
+                        else
+                            self.finishRetainedEvent(event_id, event, false);
+                        return .{ .success = agent_view != null };
+                    }
+                    self.removeQueuedEvent(event_id);
+                    return .{ .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordClientIo,
+                        .{ self.allocator, .read, err },
+                    ) };
+                };
+                log_delivery = null;
+            } else {
+                log.beginIngress() catch |err| {
+                    self.removeQueuedEvent(event_id);
+                    return .{ .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordClientIo,
+                        .{ self.allocator, .read, err },
+                    ) };
+                };
+                defer log.finishIngress();
+                var cloned = session_types.cloneEvent(self.allocator, event) catch |err| {
+                    self.removeQueuedEvent(event_id);
+                    return .{ .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordInvalidEvent,
+                        .{ self.allocator, .malformed_field_type, event_value },
+                    ) };
+                };
+                var cloned_owned = true;
+                defer if (cloned_owned) cloned.deinit(self.allocator);
+                log.observeTurnEvent(cloned) catch |err| {
+                    self.removeQueuedEvent(event_id);
+                    return .{ .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordClientIo,
+                        .{ self.allocator, .read, err },
+                    ) };
+                };
+                log.appendCompatibilityConsumed(cloned) catch |err| {
+                    self.removeQueuedEvent(event_id);
+                    return .{ .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordClientIo,
+                        .{ self.allocator, .read, err },
+                    ) };
+                };
+                cloned_owned = false;
+            }
+        } else if (worker_async) {
             self.enqueueLogEvent(.{
-                .log = log,
+                .log = null,
                 .event_id = event_id,
                 .delivery = log_delivery.?,
                 .delivery_class = delivery_class,
             }) catch |err| {
-                log.finishIngress();
+                if (err == error.SessionDisconnected) {
+                    self.setAutomaticDeliveryFailure(event_id, err);
+                    return .{ .success = agent_view != null };
+                }
                 self.removeQueuedEvent(event_id);
                 return .{ .failure = try policyFailure(
                     failure_policy,
@@ -7872,49 +7985,7 @@ pub const Client = struct {
                 ) };
             };
             log_delivery = null;
-        } else {
-            log.beginIngress() catch |err| {
-                self.removeQueuedEvent(event_id);
-                return .{ .failure = try policyFailure(
-                    failure_policy,
-                    err,
-                    recordClientIo,
-                    .{ self.allocator, .read, err },
-                ) };
-            };
-            defer log.finishIngress();
-            var cloned = session_types.cloneEvent(self.allocator, event) catch |err|
-                {
-                    self.removeQueuedEvent(event_id);
-                    return .{ .failure = try policyFailure(
-                        failure_policy,
-                        err,
-                        recordInvalidEvent,
-                        .{ self.allocator, .malformed_field_type, event_value },
-                    ) };
-                };
-            var cloned_owned = true;
-            defer if (cloned_owned) cloned.deinit(self.allocator);
-            log.observeTurnEvent(cloned) catch |err| {
-                self.removeQueuedEvent(event_id);
-                return .{ .failure = try policyFailure(
-                    failure_policy,
-                    err,
-                    recordClientIo,
-                    .{ self.allocator, .read, err },
-                ) };
-            };
-            log.appendCompatibilityConsumed(cloned) catch |err| {
-                self.removeQueuedEvent(event_id);
-                return .{ .failure = try policyFailure(
-                    failure_policy,
-                    err,
-                    recordClientIo,
-                    .{ self.allocator, .read, err },
-                ) };
-            };
-            cloned_owned = false;
-        };
+        }
         return .{ .success = agent_view != null };
     }
 
@@ -8043,6 +8114,23 @@ pub const Client = struct {
         return error.SessionDisconnected;
     }
 
+    fn acquireLatestEventLog(
+        self: *Client,
+        session_id: []const u8,
+    ) ?EventLogLease {
+        self.event_logs_mutex.lockUncancelable(self.io);
+        defer self.event_logs_mutex.unlock(self.io);
+        var index = self.event_logs.items.len;
+        while (index != 0) {
+            index -= 1;
+            const log = self.event_logs.items[index];
+            if (!std.mem.eql(u8, log.session_id, session_id)) continue;
+            if (!log.retainOperationIfAccepting()) continue;
+            return .{ .client = self, .log = log };
+        }
+        return null;
+    }
+
     fn reclaimClosedEventLogs(self: *Client) void {
         self.event_logs_mutex.lockUncancelable(self.io);
         defer self.event_logs_mutex.unlock(self.io);
@@ -8111,13 +8199,59 @@ pub const Client = struct {
             }
             var work = self.event_queue.orderedRemove(0);
             self.event_queue_mutex.unlock(self.io);
-            defer work.log.finishIngress();
+            defer if (work.log) |log| log.finishIngress();
             if (work.delivery_class == .automatic) {
                 self.handleAutomaticSessionEvent(
                     work.delivery.session_id,
                     .{ .transient = &work.delivery.event },
                 );
             }
+            if (work.delivery_class == .permission_request or
+                work.delivery_class == .external_tool_request)
+            {
+                const session = self.sessionForId(work.delivery.session_id) catch {
+                    self.finishRetainedEvent(
+                        work.event_id,
+                        .{ .session_idle = .{} },
+                        false,
+                    );
+                    work.delivery.deinit(self.allocator);
+                    continue;
+                };
+                const processed = session.processEventDelivery(
+                    .legacy,
+                    work.delivery,
+                ) catch |err| {
+                    self.finishRetainedEvent(
+                        work.event_id,
+                        .{ .session_idle = .{} },
+                        false,
+                    );
+                    if (work.log) |log| log.failAdmitted(err);
+                    continue;
+                };
+                work.delivery = switch (processed) {
+                    .success => |delivery| delivery,
+                    .failure => |failure| {
+                        self.finishRetainedEvent(
+                            work.event_id,
+                            .{ .session_idle = .{} },
+                            false,
+                        );
+                        if (work.log) |log| log.failAdmitted(failure.native_error);
+                        continue;
+                    },
+                };
+            }
+            const log = work.log orelse {
+                self.finishRetainedEvent(
+                    work.event_id,
+                    work.delivery.event,
+                    false,
+                );
+                work.delivery.deinit(self.allocator);
+                continue;
+            };
             if (work.delivery.event == .session_error and
                 work.delivery.diagnostic_frame != null)
             {
@@ -8131,10 +8265,10 @@ pub const Client = struct {
                         false,
                     );
                     work.delivery.deinit(self.allocator);
-                    work.log.failAdmitted(err);
+                    log.failAdmitted(err);
                     continue;
                 };
-                work.log.append(event) catch |err| {
+                log.append(event) catch |err| {
                     self.finishRetainedEvent(
                         work.event_id,
                         work.delivery.event,
@@ -8142,28 +8276,30 @@ pub const Client = struct {
                     );
                     event.deinit(self.allocator);
                     work.delivery.deinit(self.allocator);
-                    work.log.failAdmitted(err);
+                    log.failAdmitted(err);
                     continue;
                 };
                 self.finishRetainedEvent(work.event_id, event, true);
                 const failure = work.delivery.intoFailure(self.allocator) catch |err| {
-                    work.log.failAdmitted(err);
+                    log.failAdmitted(err);
                     continue;
                 };
-                work.log.failTurnsDetailed(failure);
+                log.failTurnsDetailed(failure) catch |err| {
+                    log.failAdmitted(err);
+                };
                 continue;
             }
             var event = work.delivery.intoEvent(self.allocator);
-            work.log.observeTurnEvent(event) catch |err| {
+            log.observeTurnEvent(event) catch |err| {
                 self.finishRetainedEvent(work.event_id, event, false);
                 event.deinit(self.allocator);
-                work.log.failAdmitted(err);
+                log.failAdmitted(err);
                 continue;
             };
-            work.log.append(event) catch |err| {
+            log.append(event) catch |err| {
                 self.finishRetainedEvent(work.event_id, event, false);
                 event.deinit(self.allocator);
-                work.log.failAdmitted(err);
+                log.failAdmitted(err);
                 continue;
             };
             self.finishRetainedEvent(work.event_id, event, true);
@@ -8177,11 +8313,15 @@ pub const Client = struct {
         var future = self.event_worker_future;
         self.event_worker_future = null;
         self.event_queue_mutex.unlock(self.io);
-        if (future) |*worker| worker.await(self.io);
+        if (future) |*worker| worker.cancel(self.io);
         while (self.event_queue.items.len != 0) {
             var work = self.event_queue.orderedRemove(0);
+            if (work.delivery_class == .automatic)
+                self.setAutomaticDeliveryFailure(work.event_id, error.Canceled)
+            else
+                self.finishRetainedEvent(work.event_id, work.delivery.event, false);
             work.delivery.deinit(self.allocator);
-            work.log.finishIngress();
+            if (work.log) |log| log.finishIngress();
         }
     }
 
@@ -8483,6 +8623,26 @@ pub const Client = struct {
     ) void {
         const event = self.automaticEvent(target) orelse return;
         event.mcp_oauth_required.automatic_handling = handling;
+    }
+
+    fn setAutomaticDeliveryFailure(
+        self: *Client,
+        event_id: u64,
+        err: anyerror,
+    ) void {
+        self.events_mutex.lockUncancelable(self.io);
+        defer self.events_mutex.unlock(self.io);
+        const queued = self.queuedEvent(event_id) orelse return;
+        switch (queued.event) {
+            .command_execute => queued.event.command_execute.automatic_handling =
+                .{ .delivery_failed = err },
+            .elicitation_requested => queued.event.elicitation_requested.automatic_handling =
+                .{ .delivery_failed = err },
+            .mcp_oauth_required => queued.event.mcp_oauth_required.automatic_handling =
+                .{ .delivery_failed = err },
+            else => {},
+        }
+        queued.automatic_handling_in_progress = false;
     }
 
     fn handleCommandEvent(
@@ -9362,16 +9522,20 @@ pub const Client = struct {
         const queued = self.lifecycle_events.popDelivery();
         self.lifecycle_events_mutex.unlock(self.io);
         if (queued) |delivery| return .{ .success = delivery };
-        if (!self.beginRpcCall()) {
-            defer self.endDirectRpcCall();
-            return self.nextLifecycleEventDirect(failure_policy);
-        }
-        self.ensurePump() catch |err| return .{ .failure = try policyFailure(
-            failure_policy,
-            err,
-            recordClientIo,
-            .{ self.allocator, .read, err },
-        ) };
+        self.ensurePump() catch |err| return .{ .failure = if (err == error.ReentrantRpcCall)
+            try policyFailure(
+                failure_policy,
+                err,
+                recordReentrant,
+                .{ self.allocator, "session.lifecycle" },
+            )
+        else
+            try policyFailure(
+                failure_policy,
+                err,
+                recordClientIo,
+                .{ self.allocator, .read, err },
+            ) };
         while (true) {
             self.lifecycle_events_mutex.lockUncancelable(self.io);
             const delivery = self.lifecycle_events.popDelivery();
@@ -10095,6 +10259,8 @@ pub const Session = struct {
             .{ self.client.allocator, .write, err },
         ) };
         operation_started = true;
+        var detach_operation = true;
+        defer if (detach_operation) self.client.detachSendOperation(operation);
 
         while (!operation.completed.isSet()) {
             const WaitResult = union(enum) {
@@ -10120,7 +10286,6 @@ pub const Session = struct {
             if (operation.completed.isSet()) break;
             if (wait_options.cancellation) |cancellation| {
                 if (cancellation.isCancelled()) {
-                    self.client.detachSendOperation(operation);
                     return .{ .failure = try policyFailure(
                         failure_policy,
                         error.Canceled,
@@ -10144,7 +10309,6 @@ pub const Session = struct {
                         recordClientIo,
                         .{ self.client.allocator, .read, err },
                     ) };
-                    self.client.detachSendOperation(operation);
                     return .{ .failure = try policyFailure(
                         failure_policy,
                         error.Canceled,
@@ -10159,7 +10323,6 @@ pub const Session = struct {
                         recordClientIo,
                         .{ self.client.allocator, .read, err },
                     ) };
-                    self.client.detachSendOperation(operation);
                     return .{ .failure = try policyFailure(
                         failure_policy,
                         error.Timeout,
@@ -10174,6 +10337,7 @@ pub const Session = struct {
             }
         }
         const completed = self.client.claimSendOperation(operation) orelse unreachable;
+        detach_operation = false;
         if (completed.future) |*future| future.await(self.client.io);
         if (completed.failure) |failure| {
             completed.failure = null;
@@ -10356,43 +10520,6 @@ pub const Session = struct {
                 .failure => |failure| failure.native_error,
             };
         }
-        if (self.client.findEventLog(resolved.id, self.generation) != null) {
-            var lease = try self.client.acquireEventLog(resolved.id, self.generation);
-            defer lease.deinit();
-            try self.client.ensurePump();
-            if (self.client.hasQueuedSessionEvent(resolved.id)) {
-                return switch (try self.nextEventDeliveryImpl(.legacy)) {
-                    .success => |delivery_value| {
-                        var delivery = delivery_value;
-                        return delivery.intoEvent(self.client.allocator);
-                    },
-                    .failure => |failure| failure.native_error,
-                };
-            }
-            const event = try self.client.nextSubscriberEvent(
-                lease.log,
-                lease.log.compatibilityToken(),
-                null,
-                null,
-            );
-            return switch (try self.processRetainedEvent(.legacy, lease.log.session_id, event)) {
-                .success => |delivery_value| {
-                    var delivery = delivery_value;
-                    return delivery.intoEvent(self.client.allocator);
-                },
-                .failure => |failure| failure.native_error,
-            };
-        }
-        if (!self.client.beginRpcCall()) {
-            defer self.client.endDirectRpcCall();
-            return switch (try self.nextEventDeliveryImpl(.legacy)) {
-                .success => |delivery_value| {
-                    var delivery = delivery_value;
-                    return delivery.intoEvent(self.client.allocator);
-                },
-                .failure => |failure| failure.native_error,
-            };
-        }
         var lease = try self.client.ensureEventLogLease(resolved.id, self.generation);
         defer lease.deinit();
         try self.client.ensurePump();
@@ -10405,12 +10532,16 @@ pub const Session = struct {
                 .failure => |failure| failure.native_error,
             };
         }
-        const event = try self.client.nextSubscriberEvent(
+        const event = self.client.nextSubscriberEvent(
             lease.log,
             lease.log.compatibilityToken(),
             null,
             null,
-        );
+        ) catch |err| {
+            if (self.client.transport_closed)
+                return (try self.client.closedTransportFailure(.legacy)).native_error;
+            return err;
+        };
         return switch (try self.processRetainedEvent(
             .legacy,
             lease.log.session_id,
@@ -10445,86 +10576,6 @@ pub const Session = struct {
                 .failure => |failure| .{ .failure = failure },
             };
         }
-        if (self.client.findEventLog(resolved.id, self.generation) != null) {
-            var lease = self.client.acquireEventLog(
-                resolved.id,
-                self.generation,
-            ) catch |err| return .{ .failure = try recordClientIo(
-                self.client.allocator,
-                .read,
-                err,
-            ) };
-            defer lease.deinit();
-            self.client.ensurePump() catch |err| return .{ .failure = try recordClientIo(
-                self.client.allocator,
-                .read,
-                err,
-            ) };
-            if (self.client.hasQueuedSessionEvent(resolved.id)) {
-                return switch (try self.nextEventDeliveryImpl(.detailed)) {
-                    .success => |delivery_value| {
-                        var delivery = delivery_value;
-                        switch (delivery.event) {
-                            .session_error => return .{ .failure = try delivery.intoFailure(
-                                self.client.allocator,
-                            ) },
-                            else => return .{ .success = delivery.intoEvent(self.client.allocator) },
-                        }
-                    },
-                    .failure => |failure| .{ .failure = failure },
-                };
-            }
-            var event = self.client.nextSubscriberEvent(
-                lease.log,
-                lease.log.compatibilityToken(),
-                null,
-                null,
-            ) catch |err| {
-                if (try lease.log.detailedFailure()) |failure|
-                    return .{ .failure = failure };
-                if (self.client.takePumpFailure()) |failure|
-                    return .{ .failure = failure };
-                return .{ .failure = try recordClientIo(
-                    self.client.allocator,
-                    .read,
-                    err,
-                ) };
-            };
-            if (event == .session_error) {
-                defer event.deinit(self.client.allocator);
-                return .{ .failure = try sessionFailureFromEvent(
-                    self.client.allocator,
-                    lease.log.session_id,
-                    event.session_error,
-                ) };
-            }
-            return switch (try self.processRetainedEvent(
-                .detailed,
-                lease.log.session_id,
-                event,
-            )) {
-                .success => |delivery_value| {
-                    var delivery = delivery_value;
-                    return .{ .success = delivery.intoEvent(self.client.allocator) };
-                },
-                .failure => |failure| .{ .failure = failure },
-            };
-        }
-        if (!self.client.beginRpcCall()) {
-            defer self.client.endDirectRpcCall();
-            return switch (try self.nextEventDeliveryImpl(.detailed)) {
-                .success => |delivery_value| {
-                    var delivery = delivery_value;
-                    switch (delivery.event) {
-                        .session_error => return .{ .failure = try delivery.intoFailure(
-                            self.client.allocator,
-                        ) },
-                        else => return .{ .success = delivery.intoEvent(self.client.allocator) },
-                    }
-                },
-                .failure => |failure| .{ .failure = failure },
-            };
-        }
         var lease = self.client.ensureEventLogLease(
             resolved.id,
             self.generation,
@@ -10534,11 +10585,15 @@ pub const Session = struct {
             err,
         ) };
         defer lease.deinit();
-        self.client.ensurePump() catch |err| return .{ .failure = try recordClientIo(
-            self.client.allocator,
-            .read,
-            err,
-        ) };
+        self.client.ensurePump() catch |err| return .{ .failure = if (err ==
+            error.ReentrantRpcCall)
+            try recordReentrant(self.client.allocator, "session.event")
+        else
+            try recordClientIo(
+                self.client.allocator,
+                .read,
+                err,
+            ) };
         if (self.client.hasQueuedSessionEvent(resolved.id)) {
             return switch (try self.nextEventDeliveryImpl(.detailed)) {
                 .success => |delivery_value| {
@@ -10563,6 +10618,8 @@ pub const Session = struct {
                 return .{ .failure = failure };
             if (self.client.takePumpFailure()) |failure|
                 return .{ .failure = failure };
+            if (self.client.transport_closed)
+                return .{ .failure = try self.client.closedTransportFailure(.detailed) };
             return .{ .failure = try recordClientIo(
                 self.client.allocator,
                 .read,
@@ -18921,8 +18978,8 @@ fn framedBody(allocator: std.mem.Allocator, framed: []const u8) ![]u8 {
 }
 
 fn deinitTestMessaging(client: *Client) void {
-    client.stopPump();
     client.stopEventWorker();
+    client.stopPump();
     client.finishSendOperations();
     for (client.event_logs.items) |log| {
         log.close();
@@ -18951,6 +19008,17 @@ fn captureRpcHandlerState(client: *Client, result: *bool) void {
     result.* = client.isRpcHandlerThread();
 }
 
+fn captureSessionEvent(
+    session: Session,
+    result: *?session_types.SessionEvent,
+    failure: *?anyerror,
+) void {
+    result.* = session.nextEvent() catch |err| {
+        failure.* = err;
+        return;
+    };
+}
+
 test "RPC handler reentrancy is scoped to the callback thread" {
     var client = Client{
         .allocator = std.testing.allocator,
@@ -18967,6 +19035,89 @@ test "RPC handler reentrancy is scoped to the callback thread" {
     );
     future.await(std.testing.io);
     try std.testing.expect(!other_thread_is_handler);
+}
+
+test "pump startup rejects same-thread direct-call reentrancy" {
+    var client = Client{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .direct_call_active = true,
+        .direct_call_owner = std.Thread.getCurrentId(),
+        .direct_call_done = .unset,
+    };
+    try std.testing.expectError(error.ReentrantRpcCall, client.ensurePump());
+}
+
+test "blocking nextEvent leaves the pump available to concurrent send" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"messageId\":\"message-1\"}}",
+    );
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.event\",\"params\":{\"sessionId\":\"session-1\",\"event\":{\"type\":\"session.idle\",\"data\":{}}}}",
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [2048]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+            .eof_is_idle = true,
+        } },
+    };
+    defer {
+        deinitTestMessaging(&client);
+        for (client.events.items) |*queued| queued.deinit(allocator);
+        client.events.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    const session = try addTestSession(&client, "session-1");
+    var event: ?session_types.SessionEvent = null;
+    defer if (event) |*value| value.deinit(allocator);
+    var event_failure: ?anyerror = null;
+    var future = try std.testing.io.concurrent(
+        captureSessionEvent,
+        .{ session, &event, &event_failure },
+    );
+    for (0..100) |_| {
+        client.pending_mutex.lockUncancelable(client.io);
+        const started = client.pump_future != null;
+        client.pending_mutex.unlock(client.io);
+        if (started) break;
+        try std.Io.sleep(client.io, .fromMilliseconds(1), .awake);
+    }
+    client.pending_mutex.lockUncancelable(client.io);
+    const pump_started = client.pump_future != null;
+    client.pending_mutex.unlock(client.io);
+    try std.testing.expect(pump_started);
+
+    const message_id = try session.send(.{ .prompt = "question" });
+    defer allocator.free(message_id);
+    future.await(std.testing.io);
+    try std.testing.expect(event_failure == null);
+    try std.testing.expect(event.? == .session_idle);
+    try std.testing.expectEqualStrings("message-1", message_id);
 }
 
 test "nested direct calls retain outer responses by request ID" {
@@ -19134,6 +19285,17 @@ test "failed send startup abandons its reserved turn receipt" {
         error.TooManyOutstandingTurns,
         log.reserveTurn(.raw),
     );
+    var message_id_buffer: [32]u8 = undefined;
+    for (receipts, 0..) |receipt, index| {
+        const message_id = try std.fmt.bufPrint(
+            &message_id_buffer,
+            "message-{d}",
+            .{index},
+        );
+        try log.bindTurnMessage(receipt, message_id);
+    }
+    const replacement = try log.reserveTurn(.raw);
+    log.abandonTurn(replacement);
     for (receipts) |receipt| log.abandonTurn(receipt);
 }
 
@@ -19713,6 +19875,87 @@ test "direct-reader handoff does not duplicate compatibility delivery" {
     try std.testing.expect(
         try log.inspect(log.compatibilityToken()) == .wait,
     );
+}
+
+test "sendAndWait services registered permission handlers" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    const messages = [_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"messageId\":\"message-1\"}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.event\",\"params\":{\"sessionId\":\"session-1\",\"event\":{\"type\":\"permission.requested\",\"data\":{\"requestId\":\"permission-1\",\"permissionRequest\":{\"kind\":\"shell\",\"fullCommandText\":\"pwd\",\"intention\":\"show directory\",\"commands\":[],\"possiblePaths\":[],\"possibleUrls\":[],\"hasWriteFileRedirection\":false,\"canOfferSessionApproval\":false}}}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"success\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.event\",\"params\":{\"sessionId\":\"session-1\",\"event\":{\"type\":\"user.message\",\"data\":{\"content\":\"question\",\"messageId\":\"message-1\",\"turnId\":\"turn-1\"}}}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.event\",\"params\":{\"sessionId\":\"session-1\",\"event\":{\"type\":\"assistant.message\",\"data\":{\"content\":\"answer\",\"messageId\":\"assistant-1\",\"turnId\":\"turn-1\"}}}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.event\",\"params\":{\"sessionId\":\"session-1\",\"event\":{\"type\":\"assistant.turn_end\",\"data\":{\"turnId\":\"turn-1\"}}}}",
+    };
+    for (messages) |body| try appendTestFrame(allocator, &frames, body);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [4096]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &writer_buffer,
+            .eof_is_idle = true,
+        } },
+    };
+    defer {
+        deinitTestMessaging(&client);
+        for (client.events.items) |*event| event.deinit(allocator);
+        client.events.deinit(allocator);
+        client.permission_handlers.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    const session = try addTestSession(&client, "session-1");
+    const handler = struct {
+        fn handle(
+            _: session_types.PermissionRequested,
+            _: session_types.PermissionInvocation,
+            called: ?*anyopaque,
+        ) !session_types.PermissionDecision {
+            @as(*bool, @ptrCast(@alignCast(called.?))).* = true;
+            return .approve_once;
+        }
+    }.handle;
+    var called = false;
+    try client.registerPermissionHandler("session-1", .{
+        .on_permission_request = handler,
+        .permission_context = &called,
+    });
+
+    const result = (try session.sendAndWait(.{ .prompt = "question" })).?;
+    defer result.deinit(allocator);
+    try std.testing.expect(called);
+    try std.testing.expectEqualStrings("answer", result.content);
+
+    try writer.interface.flush();
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "requests",
+        allocator,
+        .limited(8192),
+    );
+    defer allocator.free(requests);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        requests,
+        "session.permissions.handlePendingPermissionRequest",
+    ) != null);
 }
 
 test "sendAndWait timeout is local and does not abort the session" {
@@ -22398,13 +22641,15 @@ test "MCP OAuth handler failure remains observable without cancellation" {
     var client = Client{
         .allocator = allocator,
         .io = std.testing.io,
-        .child = null,
-        .reader = &reader,
-        .writer = &writer,
-        .reader_buffer = &.{},
-        .writer_buffer = &.{},
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        } },
     };
     defer {
+        deinitTestMessaging(&client);
         for (client.events.items) |*queued| queued.deinit(allocator);
         client.events.deinit(allocator);
         for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
@@ -23603,6 +23848,181 @@ test "session removal defers in-progress automatic event cleanup" {
     try std.testing.expectEqual(@as(usize, 0), client.events.items.len);
 }
 
+test "pump defers automatic events without a preexisting event log" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.event\",\"params\":{\"sessionId\":\"s1\",\"event\":{\"type\":\"command.execute\",\"data\":{\"requestId\":\"command-1\",\"command\":\"/ship\",\"commandName\":\"ship\",\"args\":\"\"}}}}",
+    );
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"success\":true}}",
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [2048]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+            .eof_is_idle = true,
+        } },
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+
+    try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{}, &.{});
+    try client.commitExtensionRuntime("s1", .{}, &.{});
+    try client.ensurePump();
+    for (0..100) |_| {
+        client.events_mutex.lockUncancelable(client.io);
+        const completed = client.events.items.len == 1 and
+            !client.events.items[0].automatic_handling_in_progress;
+        client.events_mutex.unlock(client.io);
+        if (completed) break;
+        try std.Io.sleep(client.io, .fromMilliseconds(1), .awake);
+    }
+    client.events_mutex.lockUncancelable(client.io);
+    const completed = client.events.items.len == 1 and
+        !client.events.items[0].automatic_handling_in_progress;
+    const handling = if (client.events.items.len == 1)
+        client.events.items[0].event.command_execute.automatic_handling
+    else
+        null;
+    client.events_mutex.unlock(client.io);
+    try std.testing.expect(completed);
+    try std.testing.expect(handling.? == .handled);
+
+    try writer.interface.flush();
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "requests",
+        allocator,
+        .limited(4096),
+    );
+    defer allocator.free(requests);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        requests,
+        "session.commands.handlePendingCommand",
+    ) != null);
+}
+
+test "event worker shutdown cancels a pending automatic RPC" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.event\",\"params\":{\"sessionId\":\"s1\",\"event\":{\"type\":\"command.execute\",\"data\":{\"requestId\":\"command-1\",\"command\":\"/ship\",\"commandName\":\"ship\",\"args\":\"\"}}}}",
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [2048]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+            .eof_is_idle = true,
+        } },
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+
+    try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{}, &.{});
+    try client.commitExtensionRuntime("s1", .{}, &.{});
+    try client.ensurePump();
+    for (0..100) |_| {
+        if ((try request_file.stat(std.testing.io)).size != 0) break;
+        try std.Io.sleep(client.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect((try request_file.stat(std.testing.io)).size != 0);
+
+    client.stopEventWorker();
+    client.events_mutex.lockUncancelable(client.io);
+    const handling = client.events.items[0].event.command_execute.automatic_handling;
+    client.events_mutex.unlock(client.io);
+    try std.testing.expect(handling == .delivery_failed);
+    try std.testing.expectEqual(error.Canceled, handling.delivery_failed);
+    client.pending_mutex.lockUncancelable(client.io);
+    const pending_count = client.pending_calls.items.len;
+    client.pending_mutex.unlock(client.io);
+    try std.testing.expectEqual(@as(usize, 0), pending_count);
+    try client.routePumpedResponse(1, try allocator.dupe(u8, "{}"));
+    try std.testing.expectEqual(@as(usize, 1), client.retained_responses.items.len);
+}
+
+test "late events skip closed retained logs" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        deinitTestMessaging(&client);
+        for (client.events.items) |*queued| queued.deinit(allocator);
+        client.events.deinit(allocator);
+    }
+    _ = try client.ensureEventLog("s1", 1);
+    client.closeEventLog("s1", 1);
+
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        "{\"sessionId\":\"s1\",\"event\":{\"type\":\"session.idle\",\"data\":{}}}",
+        .{},
+    );
+    defer parsed.deinit();
+    const frame = try allocator.dupe(u8, "{}");
+    const retained = switch (try client.queueSessionEvent(.detailed, frame, parsed.value)) {
+        .success => |value| value,
+        .failure => |failure_value| {
+            allocator.free(frame);
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    };
+    if (!retained) allocator.free(frame);
+    try std.testing.expectEqual(@as(usize, 1), client.events.items.len);
+    try std.testing.expect(client.events.items[0].event == .session_idle);
+}
+
 test "public RPC capture owns a specialized queue rejection" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -24716,6 +25136,7 @@ test "cross-session errors retain diagnostics without eager failure construction
         .writer_buffer = &.{},
     };
     defer {
+        deinitTestMessaging(&client);
         for (client.events.items) |*queued| queued.deinit(allocator);
         client.events.deinit(allocator);
         for (client.sessions.items) |*record| record.deinit(allocator);
@@ -24727,6 +25148,8 @@ test "cross-session errors retain diagnostics without eager failure construction
     var idle = try session_one.nextEvent();
     defer idle.deinit(allocator);
     try std.testing.expect(idle == .session_idle);
+    client.stopEventWorker();
+    client.stopPump();
 
     var failure = switch (try session_two.nextEventDetailed()) {
         .success => |event_value| {
@@ -24769,13 +25192,15 @@ test "nextEventDetailed retains framing diagnostics" {
     var client = Client{
         .allocator = allocator,
         .io = std.testing.io,
-        .child = null,
-        .reader = &reader,
-        .writer = &writer,
-        .reader_buffer = &.{},
-        .writer_buffer = &.{},
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        } },
     };
     defer {
+        deinitTestMessaging(&client);
         client.events.deinit(allocator);
         for (client.sessions.items) |*record| record.deinit(allocator);
         client.sessions.deinit(allocator);
@@ -24798,7 +25223,7 @@ test "nextEventDetailed retains framing diagnostics" {
     }
 }
 
-test "nextEvent preserves native framing error when diagnostics cannot allocate" {
+test "nextEvent reports allocation failure when pump diagnostics cannot allocate" {
     const allocator = std.testing.allocator;
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     var tmp = std.testing.tmpDir(.{});
@@ -24814,23 +25239,26 @@ test "nextEvent preserves native framing error when diagnostics cannot allocate"
     var client = Client{
         .allocator = allocator,
         .io = std.testing.io,
-        .child = null,
-        .reader = &reader,
-        .writer = &writer,
-        .reader_buffer = &.{},
-        .writer_buffer = &.{},
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        } },
     };
     const session = try addTestSession(&client, "session-1");
+    _ = try client.ensureEventLog("session-1", 1);
     client.allocator = failing.allocator();
     defer {
         client.events.deinit(failing.allocator());
         client.allocator = allocator;
+        deinitTestMessaging(&client);
         for (client.sessions.items) |*record| record.deinit(allocator);
         client.sessions.deinit(allocator);
     }
 
     try std.testing.expectError(
-        error.ReadFailed,
+        error.OutOfMemory,
         session.nextEvent(),
     );
 }
@@ -24867,17 +25295,19 @@ test "high-level clean EOF preserves legacy framing and detailed process exit" {
     var client = Client{
         .allocator = allocator,
         .io = std.testing.io,
-        .child = null,
         .child_wait = .{
             .context = &wait_probe,
             .wait = ChildWaitProbe.wait,
         },
-        .reader = &reader,
-        .writer = &writer,
-        .reader_buffer = &.{},
-        .writer_buffer = &.{},
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        } },
     };
     defer {
+        deinitTestMessaging(&client);
         for (client.sessions.items) |*record| record.deinit(allocator);
         client.sessions.deinit(allocator);
         client.events.deinit(allocator);
@@ -24975,17 +25405,19 @@ test "child wait error still closes transport and blocks later writes" {
     var client = Client{
         .allocator = allocator,
         .io = std.testing.io,
-        .child = null,
         .child_wait = .{
             .context = &wait_probe,
             .wait = ChildWaitProbe.wait,
         },
-        .reader = &reader,
-        .writer = &writer,
-        .reader_buffer = &.{},
-        .writer_buffer = &.{},
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        } },
     };
     defer {
+        deinitTestMessaging(&client);
         client.events.deinit(allocator);
         for (client.sessions.items) |*record| record.deinit(allocator);
         client.sessions.deinit(allocator);
@@ -27766,13 +28198,16 @@ test "all three read loops share lifecycle and session event routing" {
     var client = Client{
         .allocator = allocator,
         .io = std.testing.io,
-        .child = null,
-        .reader = &reader,
-        .writer = &writer,
-        .reader_buffer = &.{},
-        .writer_buffer = &.{},
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+            .eof_is_idle = true,
+        } },
     };
     defer deinitTestClientRegistries(&client);
+    defer deinitTestMessaging(&client);
 
     var ping_result = try client.ping(null);
     defer ping_result.deinit();
@@ -27870,13 +28305,16 @@ test "lifecycle overflow through an RPC preserves prefix marker and next epoch" 
     var client = Client{
         .allocator = allocator,
         .io = std.testing.io,
-        .child = null,
-        .reader = &reader,
-        .writer = &writer,
-        .reader_buffer = &.{},
-        .writer_buffer = &.{},
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+            .eof_is_idle = true,
+        } },
     };
     defer deinitTestClientRegistries(&client);
+    defer deinitTestMessaging(&client);
 
     var pong = try client.ping(null);
     defer pong.deinit();
@@ -27927,13 +28365,16 @@ test "lifecycle malformed payload and saturated loss retain detailed classificat
     var client = Client{
         .allocator = allocator,
         .io = std.testing.io,
-        .child = null,
-        .reader = &reader,
-        .writer = &writer,
-        .reader_buffer = &.{},
-        .writer_buffer = &.{},
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+            .eof_is_idle = true,
+        } },
     };
     defer deinitTestClientRegistries(&client);
+    defer deinitTestMessaging(&client);
 
     var failure = switch (try client.nextLifecycleEventDetailed()) {
         .success => |delivery_value| {

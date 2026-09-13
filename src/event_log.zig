@@ -34,6 +34,12 @@ const Subscriber = struct {
     ready: std.Io.Event = .unset,
 };
 
+const TurnFailureDetail = struct {
+    id: u64,
+    remaining: usize,
+    failure: errors.Failure,
+};
+
 pub const EventLog = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -47,7 +53,8 @@ pub const EventLog = struct {
     next_sequence: u64 = 0,
     terminal_error: ?anyerror = null,
     terminal_detail: ?errors.Failure = null,
-    turn_failure_detail: ?errors.Failure = null,
+    turn_failure_details: std.ArrayList(TurnFailureDetail) = .empty,
+    next_turn_failure_id: u64 = 1,
     accepting_ingress: bool = true,
     ingress_count: usize = 0,
     operation_references: usize = 0,
@@ -94,7 +101,8 @@ pub const EventLog = struct {
         }
         self.tracker.deinit();
         if (self.terminal_detail) |*failure| failure.deinit();
-        if (self.turn_failure_detail) |*failure| failure.deinit();
+        for (self.turn_failure_details.items) |*detail| detail.failure.deinit();
+        self.turn_failure_details.deinit(self.allocator);
         self.allocator.free(self.session_id);
         self.allocator.free(self.entries);
         self.allocator.free(self.subscribers);
@@ -134,6 +142,14 @@ pub const EventLog = struct {
         self.operation_references += 1;
     }
 
+    pub fn retainOperationIfAccepting(self: *EventLog) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (!self.accepting_ingress) return false;
+        self.operation_references += 1;
+        return true;
+    }
+
     pub fn releaseOperation(self: *EventLog) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -158,10 +174,6 @@ pub const EventLog = struct {
     ) !turn_tracker.ReceiptToken {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        if (!self.tracker.hasActiveReceipts()) {
-            if (self.turn_failure_detail) |*failure| failure.deinit();
-            self.turn_failure_detail = null;
-        }
         return self.tracker.reserve(kind);
     }
 
@@ -178,25 +190,39 @@ pub const EventLog = struct {
         token: turn_tracker.ReceiptToken,
         err: anyerror,
     ) void {
-        self.tracker.failReceipt(token, err);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.tracker.failReceipt(token, err)) |failure_detail_id|
+            self.discardTurnFailureLocked(failure_detail_id);
     }
 
     pub fn detachTurnWaiter(
         self: *EventLog,
         token: turn_tracker.ReceiptToken,
     ) void {
-        self.tracker.detachWaiter(token);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.tracker.detachWaiter(token)) |failure_detail_id|
+            self.discardTurnFailureLocked(failure_detail_id);
     }
 
     pub fn abandonTurn(self: *EventLog, token: turn_tracker.ReceiptToken) void {
-        self.tracker.abandon(token);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.tracker.abandon(token)) |failure_detail_id|
+            self.discardTurnFailureLocked(failure_detail_id);
     }
 
     pub fn inspectTurn(
         self: *EventLog,
         token: turn_tracker.ReceiptToken,
     ) !turn_tracker.ReceiptRead {
-        return self.tracker.inspect(token);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const inspection = try self.tracker.inspectDetailed(token);
+        if (inspection.failure_detail_id) |failure_detail_id|
+            self.discardTurnFailureLocked(failure_detail_id);
+        return inspection.read;
     }
 
     pub fn inspectTurnDetailed(
@@ -205,11 +231,11 @@ pub const EventLog = struct {
     ) !DetailedReceiptRead {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const read = try self.tracker.inspect(token);
+        const inspection = try self.tracker.inspectDetailed(token);
         return .{
-            .read = read,
-            .failure = if (read == .failure)
-                try self.cloneDetailedFailureLocked()
+            .read = inspection.read,
+            .failure = if (inspection.failure_detail_id) |failure_detail_id|
+                try self.takeTurnFailureLocked(failure_detail_id)
             else
                 null,
         };
@@ -345,8 +371,8 @@ pub const EventLog = struct {
         self.terminal_error = err;
         if (self.terminal_detail) |*failure| failure.deinit();
         self.terminal_detail = null;
-        if (self.turn_failure_detail) |*failure| failure.deinit();
-        self.turn_failure_detail = null;
+        for (self.turn_failure_details.items) |*detail| detail.failure.deinit();
+        self.turn_failure_details.clearRetainingCapacity();
         const fail_tracker = self.ingress_count == 0;
         if (fail_tracker) for (self.subscribers) |*subscriber| {
             if (subscriber.active) subscriber.ready.set(self.io);
@@ -373,26 +399,41 @@ pub const EventLog = struct {
         if (fail_tracker) self.tracker.failAll(native_error);
     }
 
-    pub fn failTurnsDetailed(self: *EventLog, failure_value: errors.Failure) void {
-        const native_error = failure_value.native_error;
+    pub fn failTurnsDetailed(self: *EventLog, failure_value: errors.Failure) !void {
+        var failure = failure_value;
+        errdefer failure.deinit();
+        const native_error = failure.native_error;
         self.mutex.lockUncancelable(self.io);
-        if (self.turn_failure_detail) |*failure| failure.deinit();
-        self.turn_failure_detail = failure_value;
-        self.tracker.failActive(native_error);
-        self.mutex.unlock(self.io);
+        defer self.mutex.unlock(self.io);
+        const failure_detail_id = self.next_turn_failure_id;
+        self.next_turn_failure_id +%= 1;
+        if (self.next_turn_failure_id == 0) self.next_turn_failure_id = 1;
+        try self.turn_failure_details.append(self.allocator, .{
+            .id = failure_detail_id,
+            .remaining = 0,
+            .failure = failure,
+        });
+        const detail = &self.turn_failure_details.items[
+            self.turn_failure_details.items.len - 1
+        ];
+        detail.remaining = self.tracker.failActiveDetailed(
+            native_error,
+            failure_detail_id,
+        );
+        if (detail.remaining == 0) {
+            var removed = self.turn_failure_details.pop().?;
+            removed.failure.deinit();
+        }
     }
 
     pub fn detailedFailure(self: *EventLog) !?errors.Failure {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return self.cloneDetailedFailureLocked();
+        return self.takeTerminalFailureLocked();
     }
 
-    fn cloneDetailedFailureLocked(self: *EventLog) !?errors.Failure {
-        const is_turn_failure = self.turn_failure_detail != null;
-        const failure = if (self.turn_failure_detail) |*value|
-            value
-        else if (self.terminal_detail) |*value|
+    fn takeTerminalFailureLocked(self: *EventLog) !?errors.Failure {
+        const failure = if (self.terminal_detail) |*value|
             value
         else
             return null;
@@ -405,24 +446,68 @@ pub const EventLog = struct {
                 ),
                 else => blk: {
                     const owned = failure.*;
-                    if (is_turn_failure) {
-                        self.turn_failure_detail = null;
-                    } else {
-                        self.terminal_detail = null;
-                    }
+                    self.terminal_detail = null;
                     break :blk owned;
                 },
             },
             else => blk: {
                 const owned = failure.*;
-                if (is_turn_failure) {
-                    self.turn_failure_detail = null;
-                } else {
-                    self.terminal_detail = null;
-                }
+                self.terminal_detail = null;
                 break :blk owned;
             },
         };
+    }
+
+    fn takeTurnFailureLocked(
+        self: *EventLog,
+        failure_detail_id: u64,
+    ) !?errors.Failure {
+        for (self.turn_failure_details.items, 0..) |*detail, index| {
+            if (detail.id != failure_detail_id) continue;
+            return switch (detail.failure.detail) {
+                .session => |session_failure| switch (session_failure) {
+                    .agent => |agent| blk: {
+                        const cloned = try cloneSessionAgentFailure(
+                            self.allocator,
+                            detail.failure.native_error,
+                            agent,
+                        );
+                        detail.remaining -= 1;
+                        if (detail.remaining == 0) {
+                            var removed = self.turn_failure_details.orderedRemove(index);
+                            removed.failure.deinit();
+                        }
+                        break :blk cloned;
+                    },
+                    else => self.takeUnclonableTurnFailure(index),
+                },
+                else => self.takeUnclonableTurnFailure(index),
+            };
+        }
+        return null;
+    }
+
+    fn takeUnclonableTurnFailure(
+        self: *EventLog,
+        index: usize,
+    ) errors.Failure {
+        const removed = self.turn_failure_details.orderedRemove(index);
+        return removed.failure;
+    }
+
+    fn discardTurnFailureLocked(
+        self: *EventLog,
+        failure_detail_id: u64,
+    ) void {
+        for (self.turn_failure_details.items, 0..) |*detail, index| {
+            if (detail.id != failure_detail_id) continue;
+            detail.remaining -= 1;
+            if (detail.remaining == 0) {
+                var removed = self.turn_failure_details.orderedRemove(index);
+                removed.failure.deinit();
+            }
+            return;
+        }
     }
 
     pub fn close(self: *EventLog) void {
@@ -733,4 +818,101 @@ test "session agent diagnostics can be cloned for multiple detailed waiters" {
         "{\"retry\":true}",
         second_agent.remediation_json.?,
     );
+}
+
+fn testSessionFailure(
+    allocator: std.mem.Allocator,
+    message: []const u8,
+) !errors.Failure {
+    const session_id = try allocator.dupe(u8, "s1");
+    errdefer allocator.free(session_id);
+    const error_type = try allocator.dupe(u8, "provider");
+    errdefer allocator.free(error_type);
+    const owned_message = try allocator.dupe(u8, message);
+    errdefer allocator.free(owned_message);
+    return .{
+        .allocator = allocator,
+        .native_error = error.CopilotSessionError,
+        .detail = .{ .session = .{ .agent = .{
+            .session_id = session_id,
+            .error_type = error_type,
+            .error_code = null,
+            .message = owned_message,
+            .status_code = null,
+            .provider_call_id = null,
+            .service_request_id = null,
+            .remediation_json = null,
+            .url = null,
+            .stack = null,
+            .eligible_for_auto_switch = null,
+        } } },
+    };
+}
+
+test "turn diagnostics remain correlated with their failed receipts" {
+    const allocator = std.testing.allocator;
+    var log = try EventLog.init(allocator, std.testing.io, "s1", 1, 2, 2);
+    defer log.deinit();
+
+    const first = try log.reserveTurn(.waited);
+    try log.failTurnsDetailed(try testSessionFailure(allocator, "first"));
+    const second = try log.reserveTurn(.waited);
+    try log.failTurnsDetailed(try testSessionFailure(allocator, "second"));
+
+    var first_read = try log.inspectTurnDetailed(first);
+    defer if (first_read.failure) |*failure| failure.deinit();
+    var second_read = try log.inspectTurnDetailed(second);
+    defer if (second_read.failure) |*failure| failure.deinit();
+
+    try std.testing.expect(first_read.read == .failure);
+    try std.testing.expect(second_read.read == .failure);
+    try std.testing.expectEqualStrings(
+        "first",
+        first_read.failure.?.detail.session.agent.message,
+    );
+    try std.testing.expectEqualStrings(
+        "second",
+        second_read.failure.?.detail.session.agent.message,
+    );
+}
+
+test "discarded waiters release retained turn diagnostics" {
+    const allocator = std.testing.allocator;
+    var log = try EventLog.init(allocator, std.testing.io, "s1", 1, 2, 2);
+    defer log.deinit();
+
+    const detached = try log.reserveTurn(.waited);
+    try log.failTurnsDetailed(try testSessionFailure(allocator, "detached"));
+    try std.testing.expectEqual(@as(usize, 1), log.turn_failure_details.items.len);
+    log.detachTurnWaiter(detached);
+    try std.testing.expectEqual(@as(usize, 0), log.turn_failure_details.items.len);
+
+    const legacy = try log.reserveTurn(.waited);
+    try log.failTurnsDetailed(try testSessionFailure(allocator, "legacy"));
+    const legacy_read = try log.inspectTurn(legacy);
+    try std.testing.expect(legacy_read == .failure);
+    try std.testing.expectEqual(@as(usize, 0), log.turn_failure_details.items.len);
+}
+
+test "unclonable turn diagnostics transfer once without trapping" {
+    const allocator = std.testing.allocator;
+    var log = try EventLog.init(allocator, std.testing.io, "s1", 1, 2, 2);
+    defer log.deinit();
+
+    const first = try log.reserveTurn(.waited);
+    const second = try log.reserveTurn(.waited);
+    try log.failTurnsDetailed(.{
+        .allocator = allocator,
+        .native_error = error.MissingContentLength,
+        .detail = .{ .protocol = .missing_content_length },
+    });
+
+    var first_read = try log.inspectTurnDetailed(first);
+    defer if (first_read.failure) |*failure| failure.deinit();
+    var second_read = try log.inspectTurnDetailed(second);
+    defer if (second_read.failure) |*failure| failure.deinit();
+    try std.testing.expect(first_read.failure != null);
+    try std.testing.expect(second_read.failure == null);
+    try std.testing.expect(first_read.read == .failure);
+    try std.testing.expect(second_read.read == .failure);
 }

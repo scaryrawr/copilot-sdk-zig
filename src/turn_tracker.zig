@@ -17,15 +17,22 @@ pub const ReceiptRead = union(enum) {
     failure: anyerror,
 };
 
+pub const DetailedReceiptRead = struct {
+    read: ReceiptRead,
+    failure_detail_id: ?u64 = null,
+};
+
 const Receipt = struct {
     active: bool = false,
     generation: u64 = 0,
     waiter_attached: bool = false,
+    reclaimable: bool = false,
     message_id: ?[]u8 = null,
     turn_id: ?[]u8 = null,
     latest_assistant: ?session.AssistantMessage = null,
     completed: bool = false,
     failure: ?anyerror = null,
+    failure_detail_id: ?u64 = null,
     ready: std.Io.Event = .unset,
 };
 
@@ -86,15 +93,30 @@ pub const TurnTracker = struct {
         if (self.terminal_error) |err| return err;
         for (self.receipts, 0..) |*receipt, index| {
             if (receipt.active) continue;
-            const generation = nextGeneration(receipt.generation);
-            receipt.* = .{
-                .active = true,
-                .generation = generation,
-                .waiter_attached = kind == .waited,
-            };
-            return .{ .slot = @intCast(index), .generation = generation };
+            return self.activateReceipt(receipt, index, kind);
+        }
+        for (self.receipts, 0..) |*receipt, index| {
+            if (!receipt.reclaimable) continue;
+            self.clearReceipt(receipt);
+            return self.activateReceipt(receipt, index, kind);
         }
         return error.TooManyOutstandingTurns;
+    }
+
+    fn activateReceipt(
+        self: *TurnTracker,
+        receipt: *Receipt,
+        index: usize,
+        kind: ReceiptKind,
+    ) ReceiptToken {
+        _ = self;
+        const generation = nextGeneration(receipt.generation);
+        receipt.* = .{
+            .active = true,
+            .generation = generation,
+            .waiter_attached = kind == .waited,
+        };
+        return .{ .slot = @intCast(index), .generation = generation };
     }
 
     pub fn hasActiveReceipts(self: *TurnTracker) bool {
@@ -116,6 +138,7 @@ pub const TurnTracker = struct {
         const receipt = self.getReceipt(token) orelse return error.InvalidTurnReceipt;
         if (receipt.message_id != null) return error.TurnReceiptAlreadyBound;
         receipt.message_id = try self.allocator.dupe(u8, message_id);
+        if (!receipt.waiter_attached) receipt.reclaimable = true;
         if (self.takeUserTurn(message_id)) |user_turn| {
             defer {
                 self.allocator.free(user_turn.message_id);
@@ -130,46 +153,65 @@ pub const TurnTracker = struct {
         self: *TurnTracker,
         token: ReceiptToken,
         err: anyerror,
-    ) void {
+    ) ?u64 {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const receipt = self.getReceipt(token) orelse return;
+        const receipt = self.getReceipt(token) orelse return null;
+        const failure_detail_id = receipt.failure_detail_id;
         receipt.failure = err;
+        receipt.failure_detail_id = null;
         receipt.ready.set(self.io);
         if (!receipt.waiter_attached) self.clearReceipt(receipt);
+        return failure_detail_id;
     }
 
-    pub fn detachWaiter(self: *TurnTracker, token: ReceiptToken) void {
+    pub fn detachWaiter(self: *TurnTracker, token: ReceiptToken) ?u64 {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const receipt = self.getReceipt(token) orelse return;
+        const receipt = self.getReceipt(token) orelse return null;
         receipt.waiter_attached = false;
-        if (receipt.completed or receipt.failure != null) self.clearReceipt(receipt);
+        if (receipt.completed or receipt.failure != null) {
+            const failure_detail_id = receipt.failure_detail_id;
+            self.clearReceipt(receipt);
+            return failure_detail_id;
+        }
+        receipt.reclaimable = true;
+        return null;
     }
 
-    pub fn abandon(self: *TurnTracker, token: ReceiptToken) void {
+    pub fn abandon(self: *TurnTracker, token: ReceiptToken) ?u64 {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const receipt = self.getReceipt(token) orelse return;
+        const receipt = self.getReceipt(token) orelse return null;
+        const failure_detail_id = receipt.failure_detail_id;
         self.clearReceipt(receipt);
+        return failure_detail_id;
     }
 
     pub fn inspect(self: *TurnTracker, token: ReceiptToken) !ReceiptRead {
+        return (try self.inspectDetailed(token)).read;
+    }
+
+    pub fn inspectDetailed(self: *TurnTracker, token: ReceiptToken) !DetailedReceiptRead {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         const receipt = self.getReceipt(token) orelse return error.InvalidTurnReceipt;
         if (receipt.failure) |err| {
+            const failure_detail_id = receipt.failure_detail_id;
             self.clearReceipt(receipt);
-            return .{ .failure = err };
+            return .{
+                .read = .{ .failure = err },
+                .failure_detail_id = failure_detail_id,
+            };
         }
         if (receipt.completed) {
             const result = receipt.latest_assistant;
             receipt.latest_assistant = null;
             self.clearReceipt(receipt);
-            return .{ .completed = result };
+            return .{ .read = .{ .completed = result } };
         }
         receipt.ready.reset();
-        return .{ .pending = &receipt.ready };
+        return .{ .read = .{ .pending = &receipt.ready } };
     }
 
     pub fn observe(self: *TurnTracker, event: session.SessionEvent) !void {
@@ -210,7 +252,10 @@ pub const TurnTracker = struct {
                     try self.storeTurnEnd(turn_id);
                 }
             },
-            .session_error => self.failAllLocked(error.CopilotSessionError),
+            .session_error => _ = self.failAllLocked(
+                error.CopilotSessionError,
+                null,
+            ),
             else => {},
         }
     }
@@ -219,23 +264,44 @@ pub const TurnTracker = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.terminal_error == null) self.terminal_error = err;
-        self.failAllLocked(err);
+        _ = self.failAllLocked(err, null);
     }
 
     pub fn failActive(self: *TurnTracker, err: anyerror) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        self.failAllLocked(err);
+        _ = self.failAllLocked(err, null);
     }
 
-    fn failAllLocked(self: *TurnTracker, err: anyerror) void {
+    pub fn failActiveDetailed(
+        self: *TurnTracker,
+        err: anyerror,
+        failure_detail_id: u64,
+    ) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.failAllLocked(err, failure_detail_id);
+    }
+
+    fn failAllLocked(
+        self: *TurnTracker,
+        err: anyerror,
+        failure_detail_id: ?u64,
+    ) usize {
+        var failed_count: usize = 0;
         for (self.receipts) |*receipt| {
             if (!receipt.active) continue;
-            if (receipt.completed) continue;
+            if (receipt.completed or receipt.failure != null) continue;
             receipt.failure = err;
+            receipt.failure_detail_id = if (receipt.waiter_attached)
+                failure_detail_id
+            else
+                null;
+            if (receipt.failure_detail_id != null) failed_count += 1;
             receipt.ready.set(self.io);
             if (!receipt.waiter_attached) self.clearReceipt(receipt);
         }
+        return failed_count;
     }
 
     fn bindTurn(self: *TurnTracker, receipt: *Receipt, turn_id: []const u8) !void {
@@ -473,7 +539,7 @@ test "timeout then retry keeps turns isolated" {
 
     const timed_out = try tracker.reserve(.waited);
     try tracker.bindMessageId(timed_out, "message-old");
-    tracker.detachWaiter(timed_out);
+    _ = tracker.detachWaiter(timed_out);
 
     const retry = try tracker.reserve(.waited);
     try tracker.bindMessageId(retry, "message-new");
@@ -483,6 +549,28 @@ test "timeout then retry keeps turns isolated" {
 
     try observeTurn(&tracker, "message-new", "turn-new", "new");
     const result = try tracker.inspect(retry);
+    var message = result.completed.?;
+    defer message.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("new", message.content);
+}
+
+test "detached waits are reclaimed when the receipt pool is full" {
+    var tracker = try TurnTracker.init(std.testing.allocator, std.testing.io, 2, 4);
+    defer tracker.deinit();
+
+    const first = try tracker.reserve(.waited);
+    try tracker.bindMessageId(first, "message-1");
+    _ = tracker.detachWaiter(first);
+    const second = try tracker.reserve(.waited);
+    try tracker.bindMessageId(second, "message-2");
+    _ = tracker.detachWaiter(second);
+
+    const replacement = try tracker.reserve(.waited);
+    try tracker.bindMessageId(replacement, "message-3");
+    try observeTurn(&tracker, "message-1", "turn-1", "old");
+    try std.testing.expect((try tracker.inspect(replacement)) == .pending);
+    try observeTurn(&tracker, "message-3", "turn-3", "new");
+    const result = try tracker.inspect(replacement);
     var message = result.completed.?;
     defer message.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("new", message.content);
@@ -631,7 +719,7 @@ test "failing active receipts does not reject future reservations" {
     }
 
     const next = try tracker.reserve(.raw);
-    tracker.abandon(next);
+    _ = tracker.abandon(next);
 }
 
 test "conflicting raw turn correlation releases its receipt" {
@@ -657,6 +745,6 @@ test "conflicting raw turn correlation releases its receipt" {
         error.TooManyOutstandingTurns,
         tracker.reserve(.raw),
     );
-    tracker.abandon(first_reused);
-    tracker.abandon(second_reused);
+    _ = tracker.abandon(first_reused);
+    _ = tracker.abandon(second_reused);
 }
