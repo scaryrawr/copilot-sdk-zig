@@ -15359,6 +15359,23 @@ fn expectDeleteTestState(client: *Client, session_id: []const u8, present: bool)
     try std.testing.expectEqual(expected, client.permission_handlers.items.len);
     try std.testing.expectEqual(expected, client.provider_tokens.items.len);
     try std.testing.expectEqual(present, client.findExtensionRuntime(session_id) != null);
+    if (!present) return;
+
+    try std.testing.expectEqualStrings(session_id, client.session_ids.items[0]);
+    try std.testing.expectEqualStrings(session_id, client.events.items[0].session_id);
+    try std.testing.expectEqualStrings("delete-test-tool", client.tools.items[0].name);
+    try std.testing.expectEqualStrings(
+        session_id,
+        client.provider_tokens.items[0].session_id,
+    );
+    try std.testing.expectEqualStrings(
+        "provider",
+        client.provider_tokens.items[0].providers[0].provider_name,
+    );
+    try std.testing.expectEqualStrings(
+        "interest-1",
+        client.findExtensionRuntime(session_id).?.mcp_oauth_interest_handle.?,
+    );
 }
 
 fn expectRequestBodies(
@@ -15382,7 +15399,48 @@ fn expectRequestBodies(
     try std.testing.expectEqualStrings("", request_reader.buffered());
 }
 
-test "delete session releases interest before remote success and removes registries" {
+test "delete session sends delete first and removes local state after success" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"success\":true}}",
+    );
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [2048]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestClientRegistries(&client);
+    try attachDeleteTestState(&client, "delete-session");
+
+    try client.deleteSession("delete-session");
+    try expectDeleteTestState(&client, "delete-session", false);
+
+    try writer.interface.flush();
+    try expectRequestBodies(allocator, &tmp, &.{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.delete\",\"params\":{\"sessionId\":\"delete-session\"}}",
+    });
+}
+
+test "delete session success is not blocked by a release failure" {
     const allocator = std.testing.allocator;
     var frames: std.ArrayList(u8) = .empty;
     defer frames.deinit(allocator);
@@ -15394,7 +15452,7 @@ test "delete session releases interest before remote success and removes registr
     try appendTestFrame(
         allocator,
         &frames,
-        "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"success\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"success\":false}}",
     );
 
     var tmp = std.testing.tmpDir(.{});
@@ -15425,79 +15483,19 @@ test "delete session releases interest before remote success and removes registr
 
     try writer.interface.flush();
     try expectRequestBodies(allocator, &tmp, &.{
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.eventLog.releaseInterest\",\"params\":{\"sessionId\":\"delete-session\",\"handle\":\"interest-1\"}}",
-        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session.delete\",\"params\":{\"sessionId\":\"delete-session\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.delete\",\"params\":{\"sessionId\":\"delete-session\"}}",
     });
 }
 
-test "delete session release failure retains state and prevents delete" {
+test "delete session rejection preserves all local state and detailed context" {
     const allocator = std.testing.allocator;
     var frames: std.ArrayList(u8) = .empty;
     defer frames.deinit(allocator);
     try appendTestFrame(
         allocator,
         &frames,
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"success\":false}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"success\":false,\"error\":\"delete refused\"}}",
     );
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
-    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
-    defer response_file.close(std.testing.io);
-    var reader_buffer: [2048]u8 = undefined;
-    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
-    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
-    defer request_file.close(std.testing.io);
-    var writer_buffer: [2048]u8 = undefined;
-    var writer = request_file.writer(std.testing.io, &writer_buffer);
-    var client = Client{
-        .allocator = allocator,
-        .io = std.testing.io,
-        .child = null,
-        .reader = &reader,
-        .writer = &writer,
-        .reader_buffer = &.{},
-        .writer_buffer = &.{},
-    };
-    defer deinitTestClientRegistries(&client);
-    try attachDeleteTestState(&client, "delete-session");
-
-    var failure = switch (try client.deleteSessionDetailed("delete-session")) {
-        .success => return error.TestExpectedClientFailure,
-        .failure => |failure_value| failure_value,
-    };
-    defer failure.deinit();
-    try std.testing.expectEqual(error.EventInterestNotReleased, failure.native_error);
-    switch (failure.detail.client) {
-        .io => |io_failure| try std.testing.expectEqual(
-            errors.ClientOperation.callback,
-            io_failure.operation,
-        ),
-        else => return error.TestExpectedClientFailure,
-    }
-    try expectDeleteTestState(&client, "delete-session", true);
-    try std.testing.expectEqualStrings(
-        "interest-1",
-        client.findExtensionRuntime("delete-session").?.mcp_oauth_interest_handle.?,
-    );
-
-    try writer.interface.flush();
-    try expectRequestBodies(allocator, &tmp, &.{
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.eventLog.releaseInterest\",\"params\":{\"sessionId\":\"delete-session\",\"handle\":\"interest-1\"}}",
-    });
-}
-
-test "delete session rejection restores interest and retains state" {
-    const allocator = std.testing.allocator;
-    var frames: std.ArrayList(u8) = .empty;
-    defer frames.deinit(allocator);
-    const responses = [_][]const u8{
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"success\":true}}",
-        "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"success\":false,\"error\":\"delete refused\"}}",
-        "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"handle\":\"interest-2\"}}",
-    };
-    for (responses) |body| try appendTestFrame(allocator, &frames, body);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -15531,33 +15529,23 @@ test "delete session rejection restores interest and retains state" {
     switch (failure.detail.client) {
         .operation_rejected => |rejected| {
             try std.testing.expectEqual(errors.SessionOperation.delete, rejected.operation);
+            try std.testing.expectEqualStrings("delete-session", rejected.session_id);
             try std.testing.expectEqualStrings("delete refused", rejected.message.?);
         },
         else => return error.TestExpectedClientFailure,
     }
     try expectDeleteTestState(&client, "delete-session", true);
-    try std.testing.expectEqualStrings(
-        "interest-2",
-        client.findExtensionRuntime("delete-session").?.mcp_oauth_interest_handle.?,
-    );
 
     try writer.interface.flush();
     try expectRequestBodies(allocator, &tmp, &.{
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.eventLog.releaseInterest\",\"params\":{\"sessionId\":\"delete-session\",\"handle\":\"interest-1\"}}",
-        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session.delete\",\"params\":{\"sessionId\":\"delete-session\"}}",
-        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"session.eventLog.registerInterest\",\"params\":{\"sessionId\":\"delete-session\",\"eventType\":\"mcp.oauth_required\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.delete\",\"params\":{\"sessionId\":\"delete-session\"}}",
     });
 }
 
-test "delete session transport failure removes state when restore also fails" {
+test "delete session transport failure preserves all local state" {
     const allocator = std.testing.allocator;
     var frames: std.ArrayList(u8) = .empty;
     defer frames.deinit(allocator);
-    try appendTestFrame(
-        allocator,
-        &frames,
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"success\":true}}",
-    );
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -15595,13 +15583,11 @@ test "delete session transport failure removes state when restore also fails" {
         ),
         else => return error.TestExpectedClientFailure,
     }
-    try expectDeleteTestState(&client, "delete-session", false);
+    try expectDeleteTestState(&client, "delete-session", true);
 
     try writer.interface.flush();
     try expectRequestBodies(allocator, &tmp, &.{
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.eventLog.releaseInterest\",\"params\":{\"sessionId\":\"delete-session\",\"handle\":\"interest-1\"}}",
-        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session.delete\",\"params\":{\"sessionId\":\"delete-session\"}}",
-        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"session.eventLog.registerInterest\",\"params\":{\"sessionId\":\"delete-session\",\"eventType\":\"mcp.oauth_required\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.delete\",\"params\":{\"sessionId\":\"delete-session\"}}",
     });
 }
 
