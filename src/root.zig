@@ -31,6 +31,7 @@ pub const ProviderTokenRequest = provider.ProviderTokenRequest;
 pub const NamedProviderConfig = provider.NamedProviderConfig;
 pub const ProviderModelConfig = provider.ProviderModelConfig;
 pub const MessageOptions = session.MessageOptions;
+pub const Attachment = session.Attachment;
 pub const SessionEvent = session.SessionEvent;
 pub const AssistantMessage = session.AssistantMessage;
 pub const AssistantMessageDelta = session.AssistantMessageDelta;
@@ -91,4 +92,5 @@ test {
     _ = ProviderTokenRequest;
     _ = NamedProviderConfig;
     _ = ProviderModelConfig;
+    _ = Attachment;
 }
