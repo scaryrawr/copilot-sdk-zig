@@ -30,7 +30,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: zig fmt --check build.zig src examples
-      - run: zig build test
+      - run: zig build test --test-timeout 30s --summary all
       - run: zig build
       - name: Build examples
         run: |
