@@ -673,7 +673,9 @@ pub const Client = struct {
         method: []const u8,
         params: ?std.json.Value,
     ) !void {
-        if (std.mem.eql(u8, method, "providerToken.getToken")) {
+        if (std.mem.eql(u8, method, "providerToken.getToken") and
+            self.findProviderTokenFromParams(params) != null)
+        {
             return self.dispatchProviderTokenRequest(writer, id, params);
         }
         if (std.mem.eql(u8, method, "userInput.request") and
@@ -1001,6 +1003,25 @@ pub const Client = struct {
             return null;
         }
         return null;
+    }
+
+    fn findProviderTokenFromParams(
+        self: *Client,
+        params: ?std.json.Value,
+    ) ?provider.BearerTokenProvider {
+        const object = switch (params orelse return null) {
+            .object => |object| object,
+            else => return null,
+        };
+        const session_id = switch (object.get("sessionId") orelse return null) {
+            .string => |value| value,
+            else => return null,
+        };
+        const provider_name = switch (object.get("providerName") orelse return null) {
+            .string => |value| value,
+            else => return null,
+        };
+        return self.findProviderToken(session_id, provider_name);
     }
 
     fn registerToolHandlers(
@@ -4388,12 +4409,12 @@ test "provider token dispatch routes by session and provider and rejects invalid
         .{
             .id = 64,
             .params_json = "{\"sessionId\":\"session-two\",\"providerName\":\"missing\"}",
-            .expected = "{\"jsonrpc\":\"2.0\",\"id\":64,\"error\":{\"code\":-32000,\"message\":\"bearer token provider not registered\"}}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":64,\"error\":{\"code\":-32601,\"message\":\"method not found\"}}",
         },
         .{
             .id = 65,
             .params_json = "{\"sessionId\":\"session-two\"}",
-            .expected = "{\"jsonrpc\":\"2.0\",\"id\":65,\"error\":{\"code\":-32602,\"message\":\"invalid provider token request\"}}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":65,\"error\":{\"code\":-32601,\"message\":\"method not found\"}}",
         },
         .{
             .id = 66,
@@ -4403,7 +4424,7 @@ test "provider token dispatch routes by session and provider and rejects invalid
         .{
             .id = 67,
             .params_json = null,
-            .expected = "{\"jsonrpc\":\"2.0\",\"id\":67,\"error\":{\"code\":-32602,\"message\":\"invalid provider token request\"}}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":67,\"error\":{\"code\":-32601,\"message\":\"method not found\"}}",
         },
     };
 
@@ -4430,6 +4451,46 @@ test "provider token dispatch routes by session and provider and rejects invalid
     try std.testing.expectEqual(@as(usize, 1), second_context.calls);
     try std.testing.expect(first_context.matched);
     try std.testing.expect(second_context.matched);
+
+    try client.registerRpcHandler("providerToken.getToken", struct {
+        fn handle(
+            inner_allocator: std.mem.Allocator,
+            params_json: ?[]const u8,
+            _: ?*anyopaque,
+        ) ![]u8 {
+            if (params_json == null or
+                !std.mem.eql(
+                    u8,
+                    params_json.?,
+                    "{\"sessionId\":\"session-two\",\"providerName\":\"untyped\"}",
+                ))
+            {
+                return error.UnexpectedParams;
+            }
+            return inner_allocator.dupe(u8, "{\"token\":\"generic-token\"}");
+        }
+    }.handle, null);
+    const fallback_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        "{\"sessionId\":\"session-two\",\"providerName\":\"untyped\"}",
+        .{},
+    );
+    defer fallback_params.deinit();
+    var fallback_output: std.Io.Writer.Allocating = .init(allocator);
+    defer fallback_output.deinit();
+    try client.dispatchServerRequest(
+        &fallback_output.writer,
+        .{ .integer = 68 },
+        "providerToken.getToken",
+        fallback_params.value,
+    );
+    const fallback_body = try framedBody(allocator, fallback_output.written());
+    defer allocator.free(fallback_body);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":68,\"result\":{\"token\":\"generic-token\"}}",
+        fallback_body,
+    );
 
     try std.testing.expectError(
         error.SessionAlreadyActive,
