@@ -290,10 +290,11 @@ session and is separate from `ClientOptions.enable_remote_sessions`, which
 enables runtime-wide remote-session support for an owned child.
 
 Filesystem callbacks return owned byte slices or `std.json.Parsed` results
-with the allocator supplied by the SDK. `error.FileNotFound` is reported to
-the runtime as `ENOENT`; other provider failures are reported as `UNKNOWN`.
-Malformed callback requests and structurally invalid SQLite results receive a
-correlated JSON-RPC error.
+with the allocator supplied by the SDK. Non-SQLite provider failures map
+`error.FileNotFound` to `ENOENT` and other errors to `UNKNOWN`. SQLite callback
+failures remain JSON-RPC errors, matching the upstream adapter. Malformed
+callback requests and structurally invalid SQLite results receive a correlated
+JSON-RPC error.
 
 ## Configure extensions
 

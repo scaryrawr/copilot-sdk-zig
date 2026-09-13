@@ -353,7 +353,6 @@ function verifyCustomAgentSourceContract(
     expected.reasoningEffort,
     "Zig ReasoningEffort values",
   );
-
   const base = sourceSection(
     typesSource,
     "export interface SessionConfigBase {",
@@ -791,6 +790,17 @@ function verifyCompatibility(apiSchema, eventSchema) {
       `Zig ${contract.zig} values`,
     );
   }
+  const remoteSessionModes = ["off", "export", "on"];
+  requireExactStrings(
+    stringEnum(apiSchema, "RemoteSessionMode"),
+    remoteSessionModes,
+    "RemoteSessionMode values",
+  );
+  requireExactStrings(
+    zigEnumValues(zigSessionSource, "RemoteSessionMode"),
+    remoteSessionModes,
+    "Zig RemoteSessionMode values",
+  );
   requireExactStrings(
     stringEnum(apiSchema, "SessionFsSqliteTransactionErrorClass"),
     ["busyOrLocked", "fatal", "postCommitAmbiguous"],
