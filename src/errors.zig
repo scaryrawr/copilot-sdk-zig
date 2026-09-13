@@ -236,6 +236,13 @@ pub const ClientFailure = union(enum) {
 pub const SessionOperation = enum {
     delete,
     set_foreground,
+
+    pub fn wireMethod(self: SessionOperation) []const u8 {
+        return switch (self) {
+            .delete => "session.delete",
+            .set_foreground => "session.setForeground",
+        };
+    }
 };
 
 pub const ClientOperation = enum {
@@ -576,5 +583,20 @@ fn deinitDetail(allocator: std.mem.Allocator, detail: *FailureDetail) void {
             for (item.failure_storage[0..item.failure_count]) |*failure| failure.deinit();
             if (item.failure_storage.len != 0) allocator.free(item.failure_storage);
         },
+    }
+}
+
+test "session operation wire methods" {
+    const cases = [_]struct {
+        operation: SessionOperation,
+        expected: []const u8,
+    }{
+        .{ .operation = .delete, .expected = "session.delete" },
+        .{ .operation = .set_foreground, .expected = "session.setForeground" },
+    };
+
+    try std.testing.expectEqual(std.meta.fields(SessionOperation).len, cases.len);
+    for (cases) |case| {
+        try std.testing.expectEqualStrings(case.expected, case.operation.wireMethod());
     }
 }

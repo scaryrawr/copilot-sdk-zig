@@ -2968,7 +2968,6 @@ pub const Client = struct {
     ) !void {
         return legacyResult(void, self.sessionOperationImpl(
             .legacy,
-            "session.setForeground",
             .set_foreground,
             session_id,
         ));
@@ -2980,7 +2979,6 @@ pub const Client = struct {
     ) errors.DetailedError!errors.DetailedResult(void) {
         return self.sessionOperationImpl(
             .detailed,
-            "session.setForeground",
             .set_foreground,
             session_id,
         );
@@ -2989,14 +2987,13 @@ pub const Client = struct {
     fn sessionOperationImpl(
         self: *Client,
         comptime failure_policy: FailurePolicy,
-        method: []const u8,
         operation: errors.SessionOperation,
         session_id: []const u8,
     ) errors.DetailedError!PolicyResult(failure_policy, void) {
         const parsed = switch (try self.callImpl(
             failure_policy,
             admin.SuccessResult,
-            method,
+            operation.wireMethod(),
             admin.SessionIdParams{ .sessionId = session_id },
             .{ .session = .{ .session_id = session_id } },
         )) {
@@ -3013,164 +3010,22 @@ pub const Client = struct {
         return .{ .success = {} };
     }
 
-    const McpOAuthInterestReleaseState = enum {
-        no_interest,
-        released,
-    };
-
-    fn findAttachedExtensionRuntimeIndex(
-        self: *Client,
-        session_id: []const u8,
-    ) ?usize {
-        for (self.extension_runtimes.items, 0..) |runtime, index| {
-            const runtime_session_id = runtime.session_id orelse continue;
-            if (std.mem.eql(u8, runtime_session_id, session_id)) return index;
-        }
-        return null;
-    }
-
-    fn releaseAttachedMcpOAuthInterest(
-        self: *Client,
-        comptime failure_policy: FailurePolicy,
-        session_id: []const u8,
-    ) errors.DetailedError!PolicyResult(
-        failure_policy,
-        McpOAuthInterestReleaseState,
-    ) {
-        const runtime_index = self.findAttachedExtensionRuntimeIndex(session_id) orelse
-            return .{ .success = .no_interest };
-        const handle = self.extension_runtimes.items[runtime_index].mcp_oauth_interest_handle orelse
-            return .{ .success = .no_interest };
-        const owned_handle = try self.allocator.dupe(u8, handle);
-        defer self.allocator.free(owned_handle);
-        const parsed = switch (try self.callImpl(
-            failure_policy,
-            struct { success: bool },
-            "session.eventLog.releaseInterest",
-            .{
-                .sessionId = session_id,
-                .handle = owned_handle,
-            },
-            .{ .session = .{ .session_id = session_id } },
-        )) {
-            .success => |value| value,
-            .failure => |failure| return .{ .failure = failure },
-        };
-        defer parsed.deinit();
-        if (!parsed.value.success) return .{ .failure = try policyFailure(
-            failure_policy,
-            error.EventInterestNotReleased,
-            recordClientIo,
-            .{ self.allocator, .callback, error.EventInterestNotReleased },
-        ) };
-
-        const current_index = self.findAttachedExtensionRuntimeIndex(session_id) orelse
-            return .{ .success = .released };
-        const current_handle =
-            self.extension_runtimes.items[current_index].mcp_oauth_interest_handle orelse
-            return .{ .success = .released };
-        if (!std.mem.eql(u8, current_handle, owned_handle))
-            return .{ .success = .released };
-        self.allocator.free(current_handle);
-        self.extension_runtimes.items[current_index].mcp_oauth_interest_handle = null;
-        return .{ .success = .released };
-    }
-
-    fn restoreAttachedMcpOAuthInterestDetailed(
-        self: *Client,
-        session_id: []const u8,
-    ) errors.DetailedError!errors.DetailedResult(void) {
-        const runtime_index = self.findAttachedExtensionRuntimeIndex(session_id) orelse
-            return .{ .success = {} };
-        if (self.extension_runtimes.items[runtime_index].mcp_oauth_interest_handle != null)
-            return .{ .success = {} };
-
-        const parsed = switch (try self.callImpl(
-            .detailed,
-            struct { handle: []const u8 },
-            "session.eventLog.registerInterest",
-            .{
-                .sessionId = session_id,
-                .eventType = "mcp.oauth_required",
-            },
-            .{ .session = .{ .session_id = session_id } },
-        )) {
-            .success => |value| value,
-            .failure => |failure| return .{ .failure = failure },
-        };
-        defer parsed.deinit();
-        const owned_handle = try self.allocator.dupe(u8, parsed.value.handle);
-        const current_index = self.findAttachedExtensionRuntimeIndex(session_id) orelse {
-            self.allocator.free(owned_handle);
-            return .{ .success = {} };
-        };
-        if (self.extension_runtimes.items[current_index].mcp_oauth_interest_handle) |_| {
-            self.allocator.free(owned_handle);
-        } else {
-            self.extension_runtimes.items[current_index].mcp_oauth_interest_handle =
-                owned_handle;
-        }
-        return .{ .success = {} };
-    }
-
-    fn restoreReleasedMcpOAuthInterest(
-        self: *Client,
-        release_state: McpOAuthInterestReleaseState,
-        session_id: []const u8,
-    ) void {
-        if (release_state != .released) return;
-        const result = self.restoreAttachedMcpOAuthInterestDetailed(session_id) catch |err| {
-            std.log.warn(
-                "failed to restore MCP OAuth interest after session.delete failure for {s}: {s}",
-                .{ session_id, @errorName(err) },
-            );
-            self.removeSession(session_id);
-            return;
-        };
-        switch (result) {
-            .success => {},
-            .failure => |failure_value| {
-                var failure = failure_value;
-                defer failure.deinit();
-                std.log.warn(
-                    "failed to restore MCP OAuth interest after session.delete failure for {s}: {s}",
-                    .{ session_id, @errorName(failure.native_error) },
-                );
-                self.removeSession(session_id);
-            },
-        }
-    }
-
     fn deleteSessionImpl(
         self: *Client,
         comptime failure_policy: FailurePolicy,
         session_id: []const u8,
     ) errors.DetailedError!PolicyResult(failure_policy, void) {
-        const release_state = switch (try self.releaseAttachedMcpOAuthInterest(
+        const deletion = try self.sessionOperationImpl(
             failure_policy,
-            session_id,
-        )) {
-            .success => |state| state,
-            .failure => |failure| return .{ .failure = failure },
-        };
-        const deletion = self.sessionOperationImpl(
-            failure_policy,
-            "session.delete",
             .delete,
             session_id,
-        ) catch |err| {
-            self.restoreReleasedMcpOAuthInterest(release_state, session_id);
-            return err;
-        };
+        );
         return switch (deletion) {
             .success => {
                 self.removeSession(session_id);
                 return .{ .success = {} };
             },
-            .failure => |failure| {
-                self.restoreReleasedMcpOAuthInterest(release_state, session_id);
-                return .{ .failure = failure };
-            },
+            .failure => |failure| .{ .failure = failure },
         };
     }
 
@@ -15399,7 +15254,7 @@ fn expectRequestBodies(
     try std.testing.expectEqualStrings("", request_reader.buffered());
 }
 
-test "delete session sends delete first and removes local state after success" {
+test "delete session sends delete as the first request" {
     const allocator = std.testing.allocator;
     var frames: std.ArrayList(u8) = .empty;
     defer frames.deinit(allocator);
@@ -15429,10 +15284,7 @@ test "delete session sends delete first and removes local state after success" {
         .writer_buffer = &.{},
     };
     defer deinitTestClientRegistries(&client);
-    try attachDeleteTestState(&client, "delete-session");
-
     try client.deleteSession("delete-session");
-    try expectDeleteTestState(&client, "delete-session", false);
 
     try writer.interface.flush();
     try expectRequestBodies(allocator, &tmp, &.{
@@ -15440,7 +15292,7 @@ test "delete session sends delete first and removes local state after success" {
     });
 }
 
-test "delete session success is not blocked by a release failure" {
+test "delete session with OAuth interest succeeds without a release RPC" {
     const allocator = std.testing.allocator;
     var frames: std.ArrayList(u8) = .empty;
     defer frames.deinit(allocator);
@@ -15449,12 +15301,6 @@ test "delete session success is not blocked by a release failure" {
         &frames,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"success\":true}}",
     );
-    try appendTestFrame(
-        allocator,
-        &frames,
-        "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"success\":false}}",
-    );
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
