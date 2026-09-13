@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import * as sourceContract from "./source-contract.mjs";
 import {
   exportedStringUnionValues,
   inheritedInterfacePropertySignatures,
@@ -8,6 +7,7 @@ import {
   interfaceMemberSignatures,
   interfaceBase,
   omitIntersectionAlias,
+  plainOmitAlias,
   requireExactInterfaceSignatures,
   requireExactPropertySignatures,
   requireExactTypeImportBinding,
@@ -489,6 +489,25 @@ const PrivateMode = enum {
   );
 });
 
+test("Zig enums preserve quoted tags and ignore methods", () => {
+  const source = `
+pub const RemoteSessionMode = enum {
+  off,
+  @"export",
+  on,
+
+  pub fn wireValue(self: RemoteSessionMode) []const u8 {
+    return @tagName(self);
+  }
+};
+`;
+
+  assert.deepEqual(
+    zigEnumValues(source, "RemoteSessionMode"),
+    ["off", "export", "on"],
+  );
+});
+
 test("Zig declaration lookup ignores comments and strings", () => {
   const source = `
 // pub const Example = struct { comment: bool, };
@@ -725,7 +744,7 @@ export type SessionFsFileInfo = Omit<
 `;
 
   assert.deepEqual(
-    sourceContract.plainOmitAlias(source, "SessionFsFileInfo"),
+    plainOmitAlias(source, "SessionFsFileInfo"),
     {
       base: "SessionFsStatResult",
       excluded: ["error"],
@@ -744,7 +763,7 @@ export type SessionFsFileInfo = Omit<
 `;
 
   assert.deepEqual(
-    sourceContract.plainOmitAlias(source, "SessionFsFileInfo"),
+    plainOmitAlias(source, "SessionFsFileInfo"),
     {
       base: "SessionFsStatResult",
       excluded: ["error"],
@@ -754,14 +773,14 @@ export type SessionFsFileInfo = Omit<
 
 test("plain Omit aliases reject intersections and trailing syntax", () => {
   assert.throws(
-    () => sourceContract.plainOmitAlias(
+    () => plainOmitAlias(
       'export type SessionFsFileInfo = Omit<SessionFsStatResult, "error"> & {};',
       "SessionFsFileInfo",
     ),
     /trailing syntax/,
   );
   assert.throws(
-    () => sourceContract.plainOmitAlias(
+    () => plainOmitAlias(
       'export type SessionFsFileInfo = Omit<SessionFsStatResult, "error"> extra;',
       "SessionFsFileInfo",
     ),

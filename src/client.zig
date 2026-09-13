@@ -1466,43 +1466,44 @@ fn connectToHost(io: std.Io, host: []const u8, port: u16) !std.Io.net.Stream {
     return last_error;
 }
 
-const SessionLifecycleKind = enum {
-    create,
-    resumed,
-};
-
 const SessionRecord = struct {
-    id: []u8,
+    id: ?[]u8 = null,
     active: bool = true,
+    generation: u64 = 1,
     workspace_path: ?[]u8 = null,
 
     fn deactivate(self: *SessionRecord, allocator: std.mem.Allocator) void {
         if (!self.active) return;
+        allocator.free(self.id.?);
         if (self.workspace_path) |path| allocator.free(path);
         self.active = false;
+        self.id = null;
         self.workspace_path = null;
     }
 
     fn deinit(self: *SessionRecord, allocator: std.mem.Allocator) void {
         self.deactivate(allocator);
-        allocator.free(self.id);
         self.* = undefined;
     }
 };
 
 const PendingSessionRecord = struct {
-    kind: SessionLifecycleKind,
     id: []u8,
-    owns_id: bool,
-    prior_record_index: ?usize = null,
+    record_index: usize,
+    generation: u64,
     workspace_path: ?[]u8 = null,
 
     fn deinit(self: *PendingSessionRecord, allocator: std.mem.Allocator) void {
         if (self.workspace_path) |path| allocator.free(path);
-        if (self.owns_id) allocator.free(self.id);
+        allocator.free(self.id);
         self.* = undefined;
     }
 };
+
+fn nextSessionGeneration(generation: u64) !u64 {
+    return std.math.add(u64, generation, 1) catch
+        error.SessionGenerationExhausted;
+}
 
 pub const Client = struct {
     allocator: std.mem.Allocator,
@@ -1655,7 +1656,7 @@ pub const Client = struct {
     }
 
     fn releaseInterestsAndDetachSessionsBounded(self: *Client) void {
-        if (!self.hasMcpOAuthInterests() and self.sessions.items.len == 0) return;
+        if (!self.hasMcpOAuthInterests() and !self.hasActiveSessions()) return;
         const Result = union(enum) {
             released: void,
             timeout: anyerror!void,
@@ -1685,6 +1686,13 @@ pub const Client = struct {
         return false;
     }
 
+    fn hasActiveSessions(self: *const Client) bool {
+        for (self.sessions.items) |session| {
+            if (session.active) return true;
+        }
+        return false;
+    }
+
     fn releaseInterestsAndDetachSessions(self: *Client) void {
         if (self.pending_extension_runtime) |*runtime| {
             self.releaseMcpOAuthInterest(runtime) catch {};
@@ -1693,7 +1701,7 @@ pub const Client = struct {
             self.releaseMcpOAuthInterest(runtime) catch {};
         }
         for (self.sessions.items) |session| {
-            if (session.active) self.detachSessionBestEffort(session.id);
+            if (session.active) self.detachSessionBestEffort(session.id.?);
         }
     }
 
@@ -1812,7 +1820,7 @@ pub const Client = struct {
             self.allocator.free(owned_session_id);
             return error.SessionAlreadyActive;
         }
-        try self.beginSessionRecord(.create, owned_session_id, true);
+        try self.beginSessionRecord(owned_session_id, null);
         errdefer self.rollbackSessionRecord();
 
         var extension_values = ExtensionWireValues.init(self.allocator);
@@ -1869,11 +1877,7 @@ pub const Client = struct {
         self.session_filesystems.commitReplacement(self.allocator, returned_id);
         self.commitProviderTokens();
         const session_index = self.commitSessionRecord();
-        return .{
-            .client = self,
-            .id = self.sessions.items[session_index].id,
-            .record_index = session_index,
-        };
+        return self.sessionHandle(session_index);
     }
 
     pub fn resumeSession(
@@ -1914,15 +1918,9 @@ pub const Client = struct {
         );
         defer prepared_providers.deinit(self.allocator);
 
-        const existing_session = self.findSession(session_id);
-        const candidate_session_id = if (existing_session) |session| session.id else id: {
-            break :id try self.allocator.dupe(u8, session_id);
-        };
-        try self.beginSessionRecord(
-            .resumed,
-            candidate_session_id,
-            existing_session == null,
-        );
+        const existing_session_index = self.findSessionIndex(session_id);
+        const candidate_session_id = try self.allocator.dupe(u8, session_id);
+        try self.beginSessionRecord(candidate_session_id, existing_session_index);
         errdefer self.rollbackSessionRecord();
         const runtime_session_id = self.pending_session.?.id;
 
@@ -1974,7 +1972,7 @@ pub const Client = struct {
             }
             return error.SessionIdMismatch;
         }
-        errdefer if (existing_session == null) self.detachSessionBestEffort(returned_id);
+        errdefer if (existing_session_index == null) self.detachSessionBestEffort(returned_id);
 
         try self.prepareSessionCommit(runtime_session_id, parsed.value.workspacePath);
         try self.updateSessionOptionsForMode(runtime_session_id, config);
@@ -1986,11 +1984,7 @@ pub const Client = struct {
         self.session_filesystems.commitReplacement(self.allocator, runtime_session_id);
         self.commitProviderTokens();
         const session_index = self.commitSessionRecord();
-        return .{
-            .client = self,
-            .id = self.sessions.items[session_index].id,
-            .record_index = session_index,
-        };
+        return self.sessionHandle(session_index);
     }
 
     fn updateSessionOptionsForMode(
@@ -3633,25 +3627,36 @@ pub const Client = struct {
 
     fn beginSessionRecord(
         self: *Client,
-        kind: SessionLifecycleKind,
         session_id: []u8,
-        owns_id: bool,
+        prior_record_index: ?usize,
     ) !void {
-        if (self.pending_session != null)
+        errdefer self.allocator.free(session_id);
+        if (self.pending_session != null) {
             return error.SessionLifecycleAlreadyInProgress;
-        const prior_record_index = if (kind == .resumed)
-            self.findSessionIndex(session_id)
+        }
+        if (prior_record_index) |index| {
+            if (index >= self.sessions.items.len or
+                !self.sessions.items[index].active or
+                !std.mem.eql(u8, self.sessions.items[index].id.?, session_id))
+            {
+                return error.SessionNotActive;
+            }
+        }
+        const record_index = prior_record_index orelse index: {
+            for (self.sessions.items, 0..) |record, index| {
+                if (!record.active) break :index index;
+            }
+            try self.sessions.ensureUnusedCapacity(self.allocator, 1);
+            break :index self.sessions.items.len;
+        };
+        const generation = if (record_index < self.sessions.items.len)
+            try nextSessionGeneration(self.sessions.items[record_index].generation)
         else
-            null;
-        const pending_id = if (prior_record_index != null and !owns_id)
-            try self.allocator.dupe(u8, session_id)
-        else
-            session_id;
+            1;
         self.pending_session = .{
-            .kind = kind,
-            .id = pending_id,
-            .owns_id = owns_id or prior_record_index != null,
-            .prior_record_index = prior_record_index,
+            .id = session_id,
+            .record_index = record_index,
+            .generation = generation,
         };
     }
 
@@ -3676,29 +3681,47 @@ pub const Client = struct {
         else
             null;
         errdefer if (replacement_path) |path| self.allocator.free(path);
-        try self.sessions.ensureUnusedCapacity(self.allocator, 1);
         if (pending.workspace_path) |path| self.allocator.free(path);
         pending.workspace_path = replacement_path;
     }
 
     fn commitSessionRecord(self: *Client) usize {
-        var pending = self.pending_session.?;
+        const pending = self.pending_session.?;
         self.pending_session = null;
-        self.sessions.appendAssumeCapacity(.{
+        const record = SessionRecord{
             .id = pending.id,
+            .active = true,
+            .generation = pending.generation,
             .workspace_path = pending.workspace_path,
-        });
-        const session_index = self.sessions.items.len - 1;
-        pending.owns_id = false;
-        pending.workspace_path = null;
-        if (pending.prior_record_index) |index|
-            self.sessions.items[index].deactivate(self.allocator);
-        return session_index;
+        };
+        if (pending.record_index == self.sessions.items.len) {
+            self.sessions.appendAssumeCapacity(record);
+        } else {
+            self.sessions.items[pending.record_index].deactivate(self.allocator);
+            self.sessions.items[pending.record_index] = record;
+        }
+        return pending.record_index;
+    }
+
+    fn sessionHandle(self: *Client, record_index: usize) Session {
+        const record = self.sessions.items[record_index];
+        std.debug.assert(record.active);
+        return .{
+            .client = self,
+            .id = record.id.?,
+            .record_index = record_index,
+            .generation = record.generation,
+        };
+    }
+
+    fn sessionForId(self: *Client, session_id: []const u8) !Session {
+        return self.sessionHandle(self.findSessionIndex(session_id) orelse
+            return error.SessionNotActive);
     }
 
     fn findSessionIndex(self: *Client, session_id: []const u8) ?usize {
         for (self.sessions.items, 0..) |session, index| {
-            if (session.active and std.mem.eql(u8, session.id, session_id))
+            if (session.active and std.mem.eql(u8, session.id.?, session_id))
                 return index;
         }
         return null;
@@ -3778,7 +3801,7 @@ pub const Client = struct {
         if (record_index >= self.sessions.items.len) return;
         const record = &self.sessions.items[record_index];
         if (!record.active) return;
-        self.removeSessionState(record.id);
+        self.removeSessionState(record.id.?);
         record.deactivate(self.allocator);
     }
 
@@ -3798,17 +3821,19 @@ pub const Client = struct {
             return error.SessionAlreadyActive;
         }
 
-        try self.sessions.append(self.allocator, .{ .id = owned_session_id });
-        errdefer self.removeSession(owned_session_id);
+        try self.beginSessionRecord(owned_session_id, null);
+        const record_index = self.commitSessionRecord();
+        errdefer self.removeSessionAt(record_index);
 
-        try self.registerToolHandlers(owned_session_id, config.tools);
-        try self.registerPermissionHandler(owned_session_id, config);
+        const session_id = self.sessions.items[record_index].id.?;
+        try self.registerToolHandlers(session_id, config.tools);
+        try self.registerPermissionHandler(session_id, config);
         try self.registerUserInputHandler(
-            owned_session_id,
+            session_id,
             config.on_user_input_request,
             config.user_input_context,
         );
-        try self.registerProviderTokens(owned_session_id, token_bindings);
+        try self.registerProviderTokens(session_id, token_bindings);
     }
 
     fn hasSession(self: *Client, session_id: []const u8) bool {
@@ -4119,28 +4144,16 @@ const ResolvedSession = struct {
 pub const Session = struct {
     client: *Client,
     id: []const u8,
-    record_index: ?usize = null,
+    record_index: usize = std.math.maxInt(usize),
+    generation: u64 = 0,
 
     fn resolve(self: Session) !ResolvedSession {
-        if (self.record_index) |record_index| {
-            if (record_index >= self.client.sessions.items.len)
-                return error.SessionNotActive;
-            const record = &self.client.sessions.items[record_index];
-            if (!record.active or !std.mem.eql(u8, self.id, record.id))
-                return error.SessionNotActive;
-            return .{ .record_index = record_index, .id = record.id };
-        }
-
-        var matching_index: ?usize = null;
-        for (self.client.sessions.items, 0..) |record, record_index| {
-            if (!std.mem.eql(u8, self.id, record.id)) continue;
-            if (matching_index != null) return error.SessionNotActive;
-            matching_index = record_index;
-        }
-        const record_index = matching_index orelse return error.SessionNotActive;
-        const record = &self.client.sessions.items[record_index];
-        if (!record.active) return error.SessionNotActive;
-        return .{ .record_index = record_index, .id = record.id };
+        if (self.record_index >= self.client.sessions.items.len)
+            return error.SessionNotActive;
+        const record = &self.client.sessions.items[self.record_index];
+        if (!record.active or record.generation != self.generation)
+            return error.SessionNotActive;
+        return .{ .record_index = self.record_index, .id = record.id.? };
     }
 
     pub fn send(self: Session, options: session_types.MessageOptions) ![]u8 {
@@ -6816,36 +6829,86 @@ test "workspace paths are copied and session handles are generation safe" {
     }
 
     const first_id = try allocator.dupe(u8, "session");
-    try client.beginSessionRecord(.create, first_id, true);
+    try client.beginSessionRecord(first_id, null);
     var first_path = [_]u8{ '/', 'o', 'l', 'd' };
     try client.prepareSessionCommit("session", &first_path);
     const first_index = client.commitSessionRecord();
-    const first = Session{
-        .client = &client,
-        .id = client.sessions.items[first_index].id,
-        .record_index = first_index,
-    };
+    const first = client.sessionHandle(first_index);
     first_path[1] = 'X';
     try std.testing.expectEqualStrings("/old", (try first.workspacePath()).?);
 
     try client.beginSessionRecord(
-        .resumed,
-        client.sessions.items[first_index].id,
-        false,
+        try allocator.dupe(u8, client.sessions.items[first_index].id.?),
+        first_index,
     );
     try client.prepareSessionCommit("session", "/replacement");
     const replacement_index = client.commitSessionRecord();
-    const replacement = Session{
-        .client = &client,
-        .id = client.sessions.items[replacement_index].id,
-        .record_index = replacement_index,
-    };
+    const replacement = client.sessionHandle(replacement_index);
 
+    try std.testing.expectEqual(first_index, replacement_index);
+    try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
+    try std.testing.expect(first.generation != replacement.generation);
     try std.testing.expectError(error.SessionNotActive, first.workspacePath());
     try std.testing.expectEqualStrings(
         "/replacement",
         (try replacement.workspacePath()).?,
     );
+}
+
+test "inactive session record slots are reused without stale id access" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+    };
+    defer {
+        if (client.pending_session) |*pending| pending.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+
+    try client.beginSessionRecord(try allocator.dupe(u8, "first"), null);
+    try client.prepareSessionCommit("first", "/first");
+    const first = client.sessionHandle(client.commitSessionRecord());
+    client.removeSessionAt(first.record_index);
+
+    try client.beginSessionRecord(try allocator.dupe(u8, "second"), null);
+    try client.prepareSessionCommit("second", "/second");
+    const second = client.sessionHandle(client.commitSessionRecord());
+
+    try std.testing.expectEqual(first.record_index, second.record_index);
+    try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
+    try std.testing.expect(first.generation != second.generation);
+    try std.testing.expectError(error.SessionNotActive, first.workspacePath());
+    try std.testing.expectEqualStrings("/second", (try second.workspacePath()).?);
+
+    client.removeSessionAt(second.record_index);
+    for (0..8) |index| {
+        const id = try std.fmt.allocPrint(allocator, "reuse-{d}", .{index});
+        try client.beginSessionRecord(id, null);
+        const current = client.sessionHandle(client.commitSessionRecord());
+        try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
+        client.removeSessionAt(current.record_index);
+    }
+}
+
+test "inactive session slots skip bounded shutdown work" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+    };
+    defer {
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    try client.sessions.append(allocator, .{
+        .active = false,
+        .generation = 7,
+    });
+
+    try std.testing.expect(!client.hasActiveSessions());
+    client.releaseInterestsAndDetachSessionsBounded();
 }
 
 test "remote session mode lowers for create and resume and omits null" {
@@ -9467,7 +9530,7 @@ test "permission handler receives events and can leave requests pending" {
         .event = try session_types.parseEvent(allocator, parsed_event.value),
     });
 
-    const session = Session{ .client = &client, .id = "session-1" };
+    const session = try client.sessionForId("session-1");
     var event = try session.nextEvent();
     defer event.deinit(allocator);
     try std.testing.expect(called);
@@ -9532,7 +9595,7 @@ test "permission handler receives injected managed settings metadata" {
         .event = try session_types.parseEvent(allocator, parsed_event.value),
     });
 
-    const session = Session{ .client = &client, .id = "session-1" };
+    const session = try client.sessionForId("session-1");
     var event = try session.nextEvent();
     defer event.deinit(allocator);
     try std.testing.expect(called);
@@ -9581,7 +9644,7 @@ test "permission handler failures leave requests available for manual handling" 
         .event = try session_types.parseEvent(allocator, parsed_event.value),
     });
 
-    const session = Session{ .client = &client, .id = "session-1" };
+    const session = try client.sessionForId("session-1");
     var event = try session.nextEvent();
     defer event.deinit(allocator);
     try std.testing.expectEqualStrings("permission-1", event.permission_requested.request_id);
@@ -9644,7 +9707,7 @@ test "approveAll leaves managed permission events observable" {
         .event = try session_types.parseEvent(allocator, managed_request_event.value),
     });
 
-    const managed_session = Session{ .client = &client, .id = "managed-session" };
+    const managed_session = try client.sessionForId("managed-session");
     var first = try managed_session.nextEvent();
     defer first.deinit(allocator);
     try std.testing.expectEqualStrings("permission-1", first.permission_requested.request_id);
@@ -9656,7 +9719,7 @@ test "approveAll leaves managed permission events observable" {
         else => return error.TestExpectedHandlerFailure,
     }
 
-    const managed_request = Session{ .client = &client, .id = "managed-request" };
+    const managed_request = try client.sessionForId("managed-request");
     var second = try managed_request.nextEvent();
     defer second.deinit(allocator);
     try std.testing.expectEqualStrings("permission-2", second.permission_requested.request_id);
@@ -9747,7 +9810,7 @@ fn runAutomaticPermissionRpc(
         .event = try session_types.parseEvent(allocator, parsed_event.value),
     });
 
-    const session = Session{ .client = &client, .id = "session-1" };
+    const session = try client.sessionForId("session-1");
     var event = try session.nextEvent();
     defer event.deinit(allocator);
 
@@ -9868,7 +9931,7 @@ test "permission response delivery failures are explicit" {
         .event = try session_types.parseEvent(allocator, parsed_event.value),
     });
 
-    const session = Session{ .client = &client, .id = "session-1" };
+    const session = try client.sessionForId("session-1");
     var event = try session.nextEvent();
     defer event.deinit(allocator);
     try std.testing.expectEqualStrings("permission-1", event.permission_requested.request_id);
@@ -9940,7 +10003,7 @@ fn runSendRpc(
         .id = try allocator.dupe(u8, "session-1"),
     });
 
-    const message_id = try (Session{ .client = &client, .id = "session-1" }).send(options);
+    const message_id = try (try client.sessionForId("session-1")).send(options);
     errdefer allocator.free(message_id);
     const request_frame = try tmp.dir.readFileAlloc(
         std.testing.io,
@@ -10307,10 +10370,7 @@ test "session.sendAndWait cleans its message id and returns an owned assistant m
     const attachments = [_]session_types.Attachment{
         .{ .file = .{ .path = "/tmp/a.zig" } },
     };
-    const message = (try (Session{
-        .client = &client,
-        .id = "session-1",
-    }).sendAndWait(.{
+    const message = (try (try client.sessionForId("session-1")).sendAndWait(.{
         .prompt = "inspect",
         .attachments = &attachments,
     })).?;
@@ -11456,7 +11516,7 @@ test "capability updates are tri-state and canvas state is defensive" {
             .canvasId = "c1",
         }},
     }, &.{});
-    const session = Session{ .client = &client, .id = "s1" };
+    const session = try client.sessionForId("s1");
     try std.testing.expect(session.capabilities().supports(.canvases));
     try std.testing.expectEqual(ext.CapabilityState.unknown, session.capabilities().mcp_apps);
     try std.testing.expectError(error.UnsupportedCapability, session.experimental(.mcp_apps));
@@ -11851,11 +11911,14 @@ test "failed resident resume preserves committed runtime and session id" {
     var new_context: u8 = 2;
     const session_id = try allocator.dupe(u8, "s1");
     try client.sessions.append(allocator, .{ .id = session_id });
+    const old_session = try client.sessionForId("s1");
     try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
         .extensions = .{ .common = .{ .hooks = .{
             .context = &old_context,
         } } },
     }, &.{});
+    try client.beginSessionRecord(try allocator.dupe(u8, "s1"), old_session.record_index);
+    try client.prepareSessionCommit("s1", "/replacement");
     try client.commitExtensionRuntime("s1", .{}, &.{});
     try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
         .extensions = .{ .common = .{ .hooks = .{
@@ -11875,13 +11938,16 @@ test "failed resident resume preserves committed runtime and session id" {
         client.commitExtensionRuntime("s1", response.value, &.{"TOKEN"}),
     );
     client.rollbackExtensionRuntime();
+    client.rollbackSessionRecord();
     try std.testing.expectEqual(@as(usize, 1), client.extension_runtimes.items.len);
     try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
     try std.testing.expectEqual(
         @as(?*anyopaque, &old_context),
         client.findExtensionRuntime("s1").?.hooks.context,
     );
-    try std.testing.expect(client.findSession("s1").?.id.ptr == session_id.ptr);
+    try std.testing.expect(client.findSession("s1").?.id.?.ptr == session_id.ptr);
+    try std.testing.expectEqual(old_session.generation, client.findSession("s1").?.generation);
+    try std.testing.expect((try old_session.workspacePath()) == null);
 }
 
 test "failed frame writes wipe the transport buffer" {
@@ -12090,7 +12156,7 @@ test "disconnect releases OAuth interest before detaching" {
     const session_id = try allocator.dupe(u8, "s1");
     try client.sessions.append(allocator, .{ .id = session_id });
 
-    try (Session{ .client = &client, .id = session_id }).disconnect();
+    try (try client.sessionForId(session_id)).disconnect();
     try std.testing.expect(client.findExtensionRuntime("s1") == null);
     try std.testing.expect(client.findSession("s1") == null);
 
@@ -12351,7 +12417,7 @@ test "zero OAuth token lifetime cancels the pending request" {
     }, &.{});
     try client.commitExtensionRuntime("s1", .{}, &.{});
 
-    const session = Session{ .client = &client, .id = "s1" };
+    const session = try client.sessionForId("s1");
     try std.testing.expectError(
         error.InvalidMcpAuthTokenExpiration,
         session.nextEvent(),
@@ -12399,7 +12465,7 @@ test "review regressions preserve protocol semantics" {
     );
     defer response.deinit();
     try client.commitExtensionRuntime("s1", response.value, &.{"TOKEN"});
-    const session = Session{ .client = &client, .id = "s1" };
+    const session = try client.sessionForId("s1");
     var grants = try session.snapshotEnvironmentGrants(allocator);
     defer grants.deinit();
     try std.testing.expectEqualStrings("secret", grants.get("TOKEN").?);
@@ -13867,7 +13933,7 @@ test "disconnect removes provider token registrations" {
         }},
     );
 
-    try (Session{ .client = &client, .id = "disconnect-session" }).disconnect();
+    try (try client.sessionForId("disconnect-session")).disconnect();
     try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
     try std.testing.expect(!client.sessions.items[0].active);
     try std.testing.expectEqual(@as(usize, 0), client.provider_tokens.items.len);

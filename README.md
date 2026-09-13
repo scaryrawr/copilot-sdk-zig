@@ -128,7 +128,11 @@ data until `send` or `sendAndWait` returns. These inputs require no `deinit`.
 `Session` borrows its `Client`. Keep the client alive while a session handle is
 in use. `SessionEvent` values and the message ID from `send` own memory from the
 client allocator. `Session.disconnect` releases the client-side session
-resources while preserving the session state so it can be resumed later.
+resources while preserving the remote session state so it can be resumed later.
+The session ID and other borrowed session data remain valid only until
+disconnect, client deinitialization, or a successful resident resume. Handles
+are generation checked, so a disconnected or replaced handle remains inactive
+even when its internal record slot or session ID is reused.
 
 ## Configure the runtime
 

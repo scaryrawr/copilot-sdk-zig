@@ -837,11 +837,15 @@ export function zigEnumValues(
     ",",
     `Zig ${name}`,
   ).segments;
-  return values.map((value) => {
+  const result = [];
+  for (const value of values) {
     const normalized = value.trim();
-    assert(/^\w+$/.test(normalized), `Zig ${name} declaration changed`);
-    return normalized;
-  });
+    if (/^pub\s+fn\b/.test(normalized)) break;
+    const identifier = /^(?:@"([^"]+)"|(\w+))$/.exec(normalized);
+    assert(identifier, `Zig ${name} declaration changed`);
+    result.push(identifier[1] ?? identifier[2]);
+  }
+  return result;
 }
 
 export function sourceSection(source, startMarker, endMarker, owner) {
