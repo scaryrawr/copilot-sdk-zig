@@ -4,13 +4,9 @@ import {
   exportedStringUnionValues,
   inheritedInterfacePropertySignatures,
   interfacePropertySignatures,
-  interfaceMemberSignatures,
   interfaceBase,
   omitIntersectionAlias,
-  plainOmitAlias,
-  requireExactInterfaceSignatures,
   requireExactPropertySignatures,
-  requireExactTypeImportBinding,
   requireSourceFragments,
   sourceSection,
   zigEnumValues,
@@ -114,22 +110,6 @@ export interface Example extends Base {
   );
 });
 
-test("interface member parsing rejects inherited methods", () => {
-  const source = `
-export interface Base {
-  inherited(): void;
-}
-export interface Example extends Base {
-  direct(): boolean;
-}
-`;
-
-  assert.throws(
-    () => interfaceMemberSignatures(source, "Example"),
-    /upstream Example must not use inheritance/,
-  );
-});
-
 test("interface parsing rejects declaration merging", () => {
   const source = `
 export interface Example {
@@ -142,7 +122,6 @@ export declare interface Example {
 
   for (const parse of [
     interfacePropertySignatures,
-    interfaceMemberSignatures,
     interfaceBase,
   ]) {
     assert.throws(
@@ -317,146 +296,6 @@ test("named interfaces reject unsupported direct members", () => {
         "Example",
       ),
       /unsupported property declaration/,
-    );
-  }
-});
-
-test("interface members retain complete method and property signatures", () => {
-  const source = `
-export interface SessionFsProvider {
-  readFile(path: string): Promise<string>;
-  writeFile(
-    path: string,
-    content: string,
-    mode?: number
-  ): Promise<void>;
-  transaction?(
-    statements: Array<{ query: string; params?: Record<string, number> }>
-  ): Promise<{ rows: string[] }[]>;
-  exists(): Promise<boolean>;
-  sqlite?: SessionFsSqliteProvider;
-}
-`;
-
-  assert.deepEqual(interfaceMemberSignatures(source, "SessionFsProvider"), {
-    methods: {
-      readFile: "required:(path:string)=>Promise<string>",
-      writeFile:
-        "required:(path:string,content:string,mode?:number)=>Promise<void>",
-      transaction:
-        "optional:(statements:Array<{query:string;params?:Record<string,number>}>)=>Promise<{rows:string[]}[]>",
-      exists: "required:()=>Promise<boolean>",
-    },
-    properties: {
-      sqlite: "optional:SessionFsSqliteProvider",
-    },
-  });
-});
-
-test("interface methods accept function-typed parameters", () => {
-  const source = `
-export interface Example {
-  run(callback: (value: string) => void): Promise<void>;
-}
-`;
-
-  assert.deepEqual(interfaceMemberSignatures(source, "Example"), {
-    methods: {
-      run: "required:(callback:(value:string)=>void)=>Promise<void>",
-    },
-    properties: {},
-  });
-});
-
-test("exact interface contracts reject every signature drift category", () => {
-  const expected = {
-    methods: {
-      writeFile:
-        "required:(path:string,content:string,mode?:number)=>Promise<void>",
-    },
-    properties: {
-      sqlite: "optional:SessionFsSqliteProvider",
-    },
-  };
-  const declarations = {
-    valid: `
-export interface SessionFsProvider {
-  writeFile(path: string, content: string, mode?: number): Promise<void>;
-  sqlite?: SessionFsSqliteProvider;
-}
-`,
-    add: `
-export interface SessionFsProvider {
-  writeFile(path: string, content: string, mode?: number): Promise<void>;
-  exists(path: string): Promise<boolean>;
-  sqlite?: SessionFsSqliteProvider;
-}
-`,
-    remove: `
-export interface SessionFsProvider {
-  sqlite?: SessionFsSqliteProvider;
-}
-`,
-    rename: `
-export interface SessionFsProvider {
-  writeFile(path: string, data: string, mode?: number): Promise<void>;
-  sqlite?: SessionFsSqliteProvider;
-}
-`,
-    type: `
-export interface SessionFsProvider {
-  writeFile(path: string, content: Uint8Array, mode?: number): Promise<boolean>;
-  sqlite?: SessionFsSqliteProvider;
-}
-`,
-    optionality: `
-export interface SessionFsProvider {
-  writeFile?(path: string, content: string, mode?: number): Promise<void>;
-  sqlite?: SessionFsSqliteProvider;
-}
-`,
-    parameterOptionality: `
-export interface SessionFsProvider {
-  writeFile(path: string, content: string, mode: number): Promise<void>;
-  sqlite?: SessionFsSqliteProvider;
-}
-`,
-    propertyOptionality: `
-export interface SessionFsProvider {
-  writeFile(path: string, content: string, mode?: number): Promise<void>;
-  sqlite: SessionFsSqliteProvider;
-}
-`,
-  };
-
-  assert.equal(
-    requireExactInterfaceSignatures(
-      interfaceMemberSignatures(declarations.valid, "SessionFsProvider"),
-      expected,
-      "SessionFsProvider",
-    ),
-    undefined,
-  );
-  for (const category of [
-    "add",
-    "remove",
-    "rename",
-    "type",
-    "optionality",
-    "parameterOptionality",
-    "propertyOptionality",
-  ]) {
-    assert.throws(
-      () => requireExactInterfaceSignatures(
-        interfaceMemberSignatures(
-          declarations[category],
-          "SessionFsProvider",
-        ),
-        expected,
-        "SessionFsProvider",
-      ),
-      /SessionFsProvider/,
-      category,
     );
   }
 });
@@ -730,141 +569,6 @@ export type JoinSessionConfig = Omit<Base, "field"> & {
       "JoinSessionConfig",
     ),
     /duplicate property field/,
-  );
-});
-
-test("plain Omit aliases retain one exact base and exclusion set", () => {
-  const source = `
-// export type SessionFsFileInfo = Omit<Wrong, "comment">;
-const quoted = 'export type SessionFsFileInfo = Omit<Wrong, "string">;';
-export type SessionFsFileInfo = Omit<
-  SessionFsStatResult,
-  "error"
->;
-`;
-
-  assert.deepEqual(
-    plainOmitAlias(source, "SessionFsFileInfo"),
-    {
-      base: "SessionFsStatResult",
-      excluded: ["error"],
-    },
-  );
-});
-
-test("plain Omit alias lookup ignores regex literals", () => {
-  const source = String.raw`
-const ratio = total / count;
-if (enabled) /export type SessionFsFileInfo = Omit<Wrong, "regex">[;]\/escaped/.test(source);
-export type SessionFsFileInfo = Omit<
-  SessionFsStatResult,
-  "error"
->;
-`;
-
-  assert.deepEqual(
-    plainOmitAlias(source, "SessionFsFileInfo"),
-    {
-      base: "SessionFsStatResult",
-      excluded: ["error"],
-    },
-  );
-});
-
-test("plain Omit aliases reject intersections and trailing syntax", () => {
-  assert.throws(
-    () => plainOmitAlias(
-      'export type SessionFsFileInfo = Omit<SessionFsStatResult, "error"> & {};',
-      "SessionFsFileInfo",
-    ),
-    /trailing syntax/,
-  );
-  assert.throws(
-    () => plainOmitAlias(
-      'export type SessionFsFileInfo = Omit<SessionFsStatResult, "error"> extra;',
-      "SessionFsFileInfo",
-    ),
-    /trailing syntax/,
-  );
-});
-
-test("type import provenance rejects duplicate matching bindings", () => {
-  const binding = `
-import type {
-  SessionFsSqliteQueryResult as GeneratedSqliteQueryResult,
-} from "./generated/rpc.js";
-`;
-
-  assert.throws(
-    () => requireExactTypeImportBinding(
-      `${binding}\n${binding}`,
-      {
-        imported: "SessionFsSqliteQueryResult",
-        local: "GeneratedSqliteQueryResult",
-        module: "./generated/rpc.js",
-      },
-      "SQLite result import",
-    ),
-    /exactly one relevant type import binding/,
-  );
-});
-
-test("type import provenance rejects unsupported relevant import syntax", () => {
-  const expected = {
-    imported: "SessionFsSqliteQueryResult",
-    local: "GeneratedSqliteQueryResult",
-    module: "./generated/rpc.js",
-  };
-  for (const source of [
-    `import {
-      type SessionFsSqliteQueryResult as GeneratedSqliteQueryResult,
-    } from "./generated/rpc.js";`,
-    `import {
-      SessionFsSqliteQueryResult as GeneratedSqliteQueryResult,
-    } from "./generated/rpc.js";`,
-    `import type GeneratedSqliteQueryResult from "./generated/rpc.js";`,
-    `import type * as GeneratedSqliteQueryResult from "./generated/rpc.js";`,
-    `import type {
-      SessionFsSqliteQueryResult as GeneratedSqliteQueryResult,
-    } from "./generated/rpc.js" with { type: "json" };`,
-    `import type {
-      , SessionFsSqliteQueryResult as GeneratedSqliteQueryResult
-    } from "./generated/rpc.js";`,
-    `import type {
-      SessionFsSqliteQueryResult as GeneratedSqliteQueryResult,,
-    } from "./generated/rpc.js";`,
-  ]) {
-    assert.throws(
-      () => requireExactTypeImportBinding(
-        source,
-        expected,
-        "SQLite result import",
-      ),
-      /unsupported import syntax/,
-    );
-  }
-});
-
-test("type import provenance ignores lexical decoys and unrelated import syntax", () => {
-  const source = `
-const pattern = /import type { SessionFsSqliteQueryResult as GeneratedSqliteQueryResult } from ".\\/wrong.js"/;
-import type { "external" as External } from "./other.js";
-import type {
-  SessionFsSqliteQueryResult as GeneratedSqliteQueryResult,
-} from "./generated/rpc.js";
-`;
-
-  assert.equal(
-    requireExactTypeImportBinding(
-      source,
-      {
-        imported: "SessionFsSqliteQueryResult",
-        local: "GeneratedSqliteQueryResult",
-        module: "./generated/rpc.js",
-      },
-      "SQLite result import",
-    ),
-    undefined,
   );
 });
 
