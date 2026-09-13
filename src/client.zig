@@ -1276,6 +1276,16 @@ const EventQueueFailure = enum {
     rejection_failed,
 };
 
+const BufferedResponse = struct {
+    id: u64,
+    body: []u8,
+
+    fn deinit(self: *BufferedResponse, allocator: std.mem.Allocator) void {
+        wipeSecret(self.body);
+        allocator.free(self.body);
+    }
+};
+
 const AutomaticEventTarget = union(enum) {
     queued: u64,
     transient: *session_types.SessionEvent,
@@ -2978,6 +2988,9 @@ pub const Client = struct {
     pending_provider_tokens: ?RegisteredProviderTokens = null,
     rpc_handlers: std.ArrayList(RegisteredRpcHandler) = .empty,
     dispatching_rpc_handler: bool = false,
+    direct_request_ids: [8]u64 = undefined,
+    direct_request_count: usize = 0,
+    buffered_responses: std.ArrayList(BufferedResponse) = .empty,
     rpc_ready: bool = false,
 
     pub fn init(
@@ -3229,6 +3242,8 @@ pub const Client = struct {
         self.provider_tokens.deinit(self.allocator);
         for (self.rpc_handlers.items) |handler| handler.deinit(self.allocator);
         self.rpc_handlers.deinit(self.allocator);
+        for (self.buffered_responses.items) |*response| response.deinit(self.allocator);
+        self.buffered_responses.deinit(self.allocator);
         if (self.pending_session) |*pending| pending.deinit(self.allocator);
         for (self.sessions.items) |*session| session.deinit(self.allocator);
         self.sessions.deinit(self.allocator);
@@ -5161,6 +5176,21 @@ pub const Client = struct {
             );
         }
         defer self.endDirectRpcCall();
+        if (self.direct_request_count == self.direct_request_ids.len)
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                error.ReentrantRpcCall,
+                recordReentrant,
+                .{ self.allocator, method },
+            ) };
+        self.direct_request_ids[self.direct_request_count] = id;
+        self.direct_request_count += 1;
+        defer {
+            std.debug.assert(self.direct_request_count != 0);
+            std.debug.assert(self.direct_request_ids[self.direct_request_count - 1] == id);
+            self.direct_request_count -= 1;
+            self.discardBufferedResponse(id);
+        }
         if (dispatched) |value| value.* = true;
         writeFrameAndWipe(
             self.transportWriter(),
@@ -5174,10 +5204,11 @@ pub const Client = struct {
         ) };
 
         while (true) {
-            const body = switch (try self.readTransportFrame(failure_policy)) {
-                .success => |value| value,
-                .failure => |failure| return .{ .failure = failure },
-            };
+            const body = self.takeBufferedResponse(id) orelse
+                switch (try self.readTransportFrame(failure_policy)) {
+                    .success => |value| value,
+                    .failure => |failure| return .{ .failure = failure },
+                };
             var body_owned = true;
             defer if (body_owned) {
                 wipeSecret(body);
@@ -5247,13 +5278,24 @@ pub const Client = struct {
                     continue;
                 },
                 .response => |response| {
-                    if (response.id != id)
+                    if (response.id != id) {
+                        if (self.isDirectRequestActive(response.id) and
+                            !self.hasBufferedResponse(response.id))
+                        {
+                            try self.buffered_responses.append(self.allocator, .{
+                                .id = response.id,
+                                .body = body,
+                            });
+                            body_owned = false;
+                            continue;
+                        }
                         return .{ .failure = try policyFailure(
                             failure_policy,
                             error.UnexpectedResponse,
                             recordUnexpectedResponse,
                             .{ self.allocator, id, response.id_value },
                         ) };
+                    }
                     if (response.rpc_error) |rpc_error| {
                         const rpc_failure = switch (validateRpcFailure(
                             method,
@@ -5926,6 +5968,33 @@ pub const Client = struct {
             return self.send_operations.orderedRemove(index);
         }
         return null;
+    }
+
+    fn isDirectRequestActive(self: *const Client, id: u64) bool {
+        for (self.direct_request_ids[0..self.direct_request_count]) |active_id| {
+            if (active_id == id) return true;
+        }
+        return false;
+    }
+
+    fn hasBufferedResponse(self: *const Client, id: u64) bool {
+        for (self.buffered_responses.items) |response| {
+            if (response.id == id) return true;
+        }
+        return false;
+    }
+
+    fn takeBufferedResponse(self: *Client, id: u64) ?[]u8 {
+        for (self.buffered_responses.items, 0..) |response, index| {
+            if (response.id == id) return self.buffered_responses.orderedRemove(index).body;
+        }
+        return null;
+    }
+
+    fn discardBufferedResponse(self: *Client, id: u64) void {
+        const body = self.takeBufferedResponse(id) orelse return;
+        wipeSecret(body);
+        self.allocator.free(body);
     }
 
     fn detachSendOperation(self: *Client, operation: *SendOperation) void {
@@ -10002,7 +10071,7 @@ pub const Session = struct {
                         recordSessionTimeout,
                         .{
                             self.client.allocator,
-                            resolved.id,
+                            session_log.session_id,
                             wait_options.timeout_ns.?,
                         },
                     ) };
@@ -10157,7 +10226,7 @@ pub const Session = struct {
                                 recordSessionTimeout,
                                 .{
                                     self.client.allocator,
-                                    resolved.id,
+                                    session_log.session_id,
                                     wait_options.timeout_ns.?,
                                 },
                             ) };
@@ -10211,7 +10280,7 @@ pub const Session = struct {
                 null,
                 null,
             );
-            return switch (try self.processRetainedEvent(.legacy, resolved.id, event)) {
+            return switch (try self.processRetainedEvent(.legacy, lease.log.session_id, event)) {
                 .success => |delivery_value| {
                     var delivery = delivery_value;
                     return delivery.intoEvent(self.client.allocator);
@@ -10241,12 +10310,23 @@ pub const Session = struct {
                 .failure => |failure| failure.native_error,
             };
         }
-        return self.client.nextSubscriberEvent(
+        const event = try self.client.nextSubscriberEvent(
             lease.log,
             lease.log.compatibilityToken(),
             null,
             null,
         );
+        return switch (try self.processRetainedEvent(
+            .legacy,
+            lease.log.session_id,
+            event,
+        )) {
+            .success => |delivery_value| {
+                var delivery = delivery_value;
+                return delivery.intoEvent(self.client.allocator);
+            },
+            .failure => |failure| failure.native_error,
+        };
     }
 
     pub fn nextEventDetailed(
@@ -10318,13 +10398,17 @@ pub const Session = struct {
             if (event == .session_error) {
                 const failure = try sessionFailureFromEvent(
                     self.client.allocator,
-                    resolved.id,
+                    lease.log.session_id,
                     event.session_error,
                 );
                 event.deinit(self.client.allocator);
                 return .{ .failure = failure };
             }
-            return switch (try self.processRetainedEvent(.detailed, resolved.id, event)) {
+            return switch (try self.processRetainedEvent(
+                .detailed,
+                lease.log.session_id,
+                event,
+            )) {
                 .success => |delivery_value| {
                     var delivery = delivery_value;
                     return .{ .success = delivery.intoEvent(self.client.allocator) };
@@ -10394,13 +10478,23 @@ pub const Session = struct {
         if (event == .session_error) {
             const failure = try sessionFailureFromEvent(
                 self.client.allocator,
-                resolved.id,
+                lease.log.session_id,
                 event.session_error,
             );
             event.deinit(self.client.allocator);
             return .{ .failure = failure };
         }
-        return .{ .success = event };
+        return switch (try self.processRetainedEvent(
+            .detailed,
+            lease.log.session_id,
+            event,
+        )) {
+            .success => |delivery_value| {
+                var delivery = delivery_value;
+                return .{ .success = delivery.intoEvent(self.client.allocator) };
+            },
+            .failure => |failure| .{ .failure = failure },
+        };
     }
 
     fn nextEventDeliveryImpl(
@@ -18748,6 +18842,8 @@ fn deinitTestMessaging(client: *Client) void {
         client.allocator.free(response.body);
     }
     client.retained_responses.deinit(client.allocator);
+    for (client.buffered_responses.items) |*response| response.deinit(client.allocator);
+    client.buffered_responses.deinit(client.allocator);
     client.pending_calls.deinit(client.allocator);
     client.send_operations.deinit(client.allocator);
     client.event_queue.deinit(client.allocator);
@@ -18756,6 +18852,67 @@ fn deinitTestMessaging(client: *Client) void {
 
 fn captureNextRequestId(client: *Client, result: *u64) void {
     result.* = client.nextRequestId();
+}
+
+test "nested direct calls retain outer responses by request ID" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const outer_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"outer":true}}
+    ;
+    const nested_response =
+        \\{"jsonrpc":"2.0","id":2,"result":null}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            outer_response.len,
+            outer_response,
+            nested_response.len,
+            nested_response,
+        },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = responses });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+        .next_request_id = 2,
+    };
+    defer deinitTestMessaging(&client);
+
+    try std.testing.expect(!client.beginRpcCall());
+    defer client.endDirectRpcCall();
+    client.direct_request_ids[0] = 1;
+    client.direct_request_count = 1;
+    defer client.direct_request_count = 0;
+
+    const nested = try client.call(std.json.Value, "test.nested", .{});
+    defer nested.deinit();
+    try std.testing.expect(nested.value == .null);
+
+    const buffered = client.takeBufferedResponse(1) orelse
+        return error.TestExpectedBufferedResponse;
+    defer {
+        wipeSecret(buffered);
+        allocator.free(buffered);
+    }
+    try std.testing.expectEqualStrings(outer_response, buffered);
 }
 
 test "request IDs remain unique across concurrent callers" {

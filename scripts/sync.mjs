@@ -855,6 +855,43 @@ function verifyExtensibilitySourceContract(
   verifyHookContract(contract, typesSource);
 }
 
+function verifyOutboundMessageEnumContract(typesSource, zigSessionSource) {
+  const messageOptions = interfacePropertySignatures(typesSource, "MessageOptions");
+  const zigMessageOptions = zigStructFields(zigSessionSource, "MessageOptions");
+  const contracts = [
+    {
+      field: "mode",
+      signature: 'optional:"enqueue"|"immediate"',
+      zigField: "mode",
+      zig: "MessageDeliveryMode",
+      values: ["enqueue", "immediate"],
+    },
+    {
+      field: "agentMode",
+      signature: 'optional:"interactive"|"plan"|"autopilot"|"shell"',
+      zigField: "agent_mode",
+      zig: "AgentMode",
+      values: ["interactive", "plan", "autopilot", "shell"],
+    },
+  ];
+  for (const contract of contracts) {
+    assert(
+      messageOptions[contract.field] === contract.signature,
+      `MessageOptions.${contract.field} changed`,
+    );
+    assert(
+      zigMessageOptions[contract.zigField]?.type === `?${contract.zig}` &&
+        zigMessageOptions[contract.zigField]?.default === "null",
+      `Zig MessageOptions.${contract.zigField} changed`,
+    );
+    requireExactStrings(
+      zigEnumValues(zigSessionSource, contract.zig),
+      contract.values,
+      `Zig ${contract.zig} values`,
+    );
+  }
+}
+
 function verifyPinnedSourceContracts(
   upstreamCommit,
   clientSource,
@@ -867,6 +904,7 @@ function verifyPinnedSourceContracts(
     extensionSource,
     zigSessionSource,
   );
+  verifyOutboundMessageEnumContract(typesSource, zigSessionSource);
   verifyStableSessionRuntimeSourceContract(clientSource, typesSource);
   verifyExtensibilitySourceContract(
     expectedExtensibilityContract(upstreamCommit),
