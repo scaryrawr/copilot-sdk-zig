@@ -16,6 +16,7 @@ pub const Evidence = enum {
     shutdown_behavior,
     shutdown_dropped_behavior,
     connect_rejection_dispatch,
+    client_operation_rejection,
     protocol_version_dispatch,
     root_export_compile,
 };
@@ -53,6 +54,7 @@ pub const registry = [_]Spec{
     .{ .id = .shutdown_behavior, .source_file = "src/client.zig", .test_filter = "stopDetailed retains detach RPC failure details and completes cleanup", .kind = .detailed_behavior },
     .{ .id = .shutdown_dropped_behavior, .source_file = "src/client.zig", .test_filter = "stopDetailed reports allocation-free dropped diagnostics", .kind = .detailed_behavior },
     .{ .id = .connect_rejection_dispatch, .source_file = "src/client.zig", .test_filter = "connect rejection preserves legacy and detailed classification", .kind = .detailed_behavior },
+    .{ .id = .client_operation_rejection, .source_file = "src/client.zig", .test_filter = "session operation rejection is owned and legacy methods collapse it", .kind = .detailed_behavior },
     .{ .id = .protocol_version_dispatch, .source_file = "src/client.zig", .test_filter = "connect validates the protocol version", .kind = .detailed_behavior },
     .{ .id = .root_export_compile, .source_file = "testdata/root_export_consumer.zig", .test_filter = "external consumer imports root SdkError export", .kind = .compile, .package_root = "src/root.zig" },
 };

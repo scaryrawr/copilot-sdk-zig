@@ -5,13 +5,13 @@ status=0
 executed=0
 seen_ids=$'\n'
 seen_commands=$'\n'
-expected_required_rows=55
-expected_unique_evidence_commands=19
-expected_case_id_checksum=9aea595abb39b20dc3f484101f7313c4ab4e62a11b369093134b39a487969436
-expected_mapping_checksum=890943290da3792c36ceb7a057749fe1ffcf466165581fe4802a3ae93470dad7
-expected_taxonomy_emitted=71
+expected_required_rows=56
+expected_unique_evidence_commands=20
+expected_case_id_checksum=34c86b9aaf4188369160d5d9f1e9dc2a280affd673af3633f13b26d893a1c9d3
+expected_mapping_checksum=ba1c666964c718e1a7164cde81378f7614e10f70e02e3cb348cee5132ab6a093
+expected_taxonomy_emitted=72
 expected_taxonomy_declared_not_emitted=7
-expected_taxonomy_triples=145
+expected_taxonomy_triples=148
 
 if command -v shasum >/dev/null 2>&1; then
   sha256_tool=shasum
