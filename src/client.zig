@@ -60,6 +60,26 @@ pub const ClientInfo = struct {
     integration_version: ?[]const u8 = null,
 };
 
+fn isValidElicitationContent(value: std.json.Value) bool {
+    const object = switch (value) {
+        .object => |object| object,
+        else => return false,
+    };
+    var fields = object.iterator();
+    while (fields.next()) |field| {
+        switch (field.value_ptr.*) {
+            .string, .integer, .float, .number_string, .bool => {},
+            .array => |items| {
+                for (items.items) |item| {
+                    if (item != .string) return false;
+                }
+            },
+            else => return false,
+        }
+    }
+    return true;
+}
+
 const QueuedEvent = struct {
     id: u64 = 0,
     session_id: []u8,
@@ -2955,7 +2975,7 @@ pub const Client = struct {
             null;
         defer if (content) |value| value.deinit();
         if (content) |value| {
-            if (value.value != .object) {
+            if (!isValidElicitationContent(value.value)) {
                 self.setElicitationAutomaticHandling(target, .invalid_result);
                 return;
             }
@@ -4369,7 +4389,8 @@ pub const SessionUi = struct {
             action_string,
         ) orelse return error.InvalidElicitationResult;
         const content = if (object.get("content")) |content| blk: {
-            if (content != .object) return error.InvalidElicitationResult;
+            if (!isValidElicitationContent(content))
+                return error.InvalidElicitationResult;
             break :blk content;
         } else null;
         return .{
@@ -7032,13 +7053,21 @@ test "session UI rejects invalid defaults before RPC and invalid returned values
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const response =
+    const invalid_email_response =
         \\{"jsonrpc":"2.0","id":1,"result":{"action":"accept","content":{"value":"not-an-email"}}}
+    ;
+    const invalid_content_response =
+        \\{"jsonrpc":"2.0","id":2,"result":{"action":"accept","content":{"value":{"nested":true}}}}
     ;
     const responses = try std.fmt.allocPrint(
         allocator,
-        "Content-Length: {d}\r\n\r\n{s}",
-        .{ response.len, response },
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            invalid_email_response.len,
+            invalid_email_response,
+            invalid_content_response.len,
+            invalid_content_response,
+        },
     );
     defer allocator.free(responses);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = responses });
@@ -7084,6 +7113,15 @@ test "session UI rejects invalid defaults before RPC and invalid returned values
         error.InvalidElicitationResult,
         ui.input("Email", .{ .format = .email }),
     );
+    try std.testing.expectError(
+        error.InvalidElicitationResult,
+        ui.elicitation(.{
+            .message = "Nested",
+            .requested_schema_json =
+            \\{"type":"object","properties":{"value":{"type":"string"}}}
+            ,
+        }),
+    );
 
     try writer.interface.flush();
     const requests = try tmp.dir.readFileAlloc(
@@ -7096,9 +7134,14 @@ test "session UI rejects invalid defaults before RPC and invalid returned values
     var request_reader = std.Io.Reader.fixed(requests);
     const body = try json_rpc.readFrame(allocator, &request_reader);
     defer allocator.free(body);
+    const nested_body = try json_rpc.readFrame(allocator, &request_reader);
+    defer allocator.free(nested_body);
     try std.testing.expectEqualStrings(
         \\{"jsonrpc":"2.0","id":1,"method":"session.ui.elicitation","params":{"sessionId":"ui-session","message":"Email","requestedSchema":{"type":"object","properties":{"value":{"type":"string","format":"email"}},"required":["value"]}}}
     , body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":2,"method":"session.ui.elicitation","params":{"sessionId":"ui-session","message":"Nested","requestedSchema":{"type":"object","properties":{"value":{"type":"string"}}}}}
+    , nested_body);
 }
 
 test "command and elicitation events resolve on receipt without nextEvent" {
@@ -7513,7 +7556,13 @@ test "elicitation handler failures remain typed and never become cancellation" {
             if (std.mem.eql(u8, request.message, "fail")) return error.HandlerFailed;
             return .{
                 .action = .accept,
-                .content_json = try std.testing.allocator.dupe(u8, "[]"),
+                .content_json = try std.testing.allocator.dupe(
+                    u8,
+                    if (std.mem.eql(u8, request.message, "nested"))
+                        "{\"answer\":{\"nested\":true}}"
+                    else
+                        "[]",
+                ),
             };
         }
     }.handle;
@@ -7551,6 +7600,19 @@ test "elicitation handler failures remain typed and never become cancellation" {
         client.events.items[1].event.elicitation_requested.automatic_handling ==
             .invalid_result,
     );
+    const nested = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"events","event":{"type":"elicitation.requested","data":{"requestId":"nested","message":"nested"}}}
+    ,
+        .{},
+    );
+    defer nested.deinit();
+    try client.queueSessionEvent(nested.value);
+    try std.testing.expect(
+        client.events.items[2].event.elicitation_requested.automatic_handling ==
+            .invalid_result,
+    );
     try writer.interface.flush();
     const requests = try tmp.dir.readFileAlloc(
         std.testing.io,
@@ -7560,6 +7622,34 @@ test "elicitation handler failures remain typed and never become cancellation" {
     );
     defer allocator.free(requests);
     try std.testing.expectEqual(@as(usize, 0), requests.len);
+}
+
+test "elicitation content accepts only protocol field values" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        json: []const u8,
+        valid: bool,
+    }{
+        .{ .json = "{}", .valid = true },
+        .{ .json = "{\"string\":\"value\",\"integer\":1,\"number\":1.5,\"boolean\":true,\"choices\":[\"one\",\"two\"]}", .valid = true },
+        .{ .json = "{\"value\":null}", .valid = false },
+        .{ .json = "{\"value\":{\"nested\":true}}", .valid = false },
+        .{ .json = "{\"value\":[\"one\",2]}", .valid = false },
+        .{ .json = "[]", .valid = false },
+    };
+    for (cases) |case| {
+        const parsed = try std.json.parseFromSlice(
+            std.json.Value,
+            allocator,
+            case.json,
+            .{},
+        );
+        defer parsed.deinit();
+        try std.testing.expectEqual(
+            case.valid,
+            isValidElicitationContent(parsed.value),
+        );
+    }
 }
 
 test "exit plan and auto mode callbacks validate and lower exact responses" {
