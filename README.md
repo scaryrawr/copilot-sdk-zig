@@ -694,8 +694,13 @@ if either inventory is stale or unclassified. The checks also regenerate the
 event registry in memory and reject drift in the union, parser, or cleanup
 mapping.
 
-The client stores at most 1,024 queued session events. An RPC call or event read
-returns `error.EventQueueFull` when callers leave other sessions undrained.
+The client stores at most 1,024 queued events per session. One session cannot
+evict another session's events. If a session exceeds its limit, the client keeps
+the admitted events, rejects new permission and external tool requests through
+their protocol response methods, and continues to run automatic callbacks
+exactly once. After the admitted events drain, `nextEvent` reports the session's
+sticky delivery failure as `error.EventQueueFull`,
+`error.EventQueueAllocationFailed`, or `error.EventQueueRejectionFailed`.
 
 ## Develop
 

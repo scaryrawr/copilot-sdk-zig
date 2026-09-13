@@ -7,9 +7,16 @@ const session_types = @import("session.zig");
 const ext = @import("extensibility.zig");
 
 const max_queued_events: usize = 1024;
+const event_queue_capacity_message = "SDK event queue capacity exceeded";
 
 fn wipeSecret(value: []const u8) void {
-    @memset(@constCast(value), 0);
+    std.crypto.secureZero(u8, @constCast(@volatileCast(value)));
+}
+
+fn wipeAndFreeSecret(allocator: std.mem.Allocator, value: []u8) void {
+    if (value.len == 0) return;
+    wipeSecret(value);
+    allocator.rawFree(value, .of(u8), @returnAddress());
 }
 
 fn wipeJsonStrings(value: std.json.Value) void {
@@ -66,6 +73,19 @@ const QueuedEvent = struct {
     }
 };
 
+const EventDeliveryClass = enum {
+    observation,
+    automatic,
+    permission_request,
+    external_tool_request,
+};
+
+const EventQueueFailure = enum {
+    capacity_exceeded,
+    allocation_failed,
+    rejection_failed,
+};
+
 const BufferedResponse = struct {
     id: u64,
     body: []u8,
@@ -76,7 +96,10 @@ const BufferedResponse = struct {
     }
 };
 
-const AutomaticEventTarget = u64;
+const AutomaticEventTarget = union(enum) {
+    queued: u64,
+    transient: *session_types.SessionEvent,
+};
 
 const RegisteredTool = struct {
     session_id: []const u8,
@@ -193,6 +216,7 @@ const SessionExtensionRuntime = struct {
     open_canvases: std.ArrayList(ext.OpenCanvas) = .empty,
     capabilities: ext.CapabilitySet = .{},
     mcp_apps_requested: bool,
+    event_queue_failure: ?EventQueueFailure = null,
     tools: []RuntimeTool,
     commands: []RuntimeCommand,
     permission_handler: ?session_types.PermissionHandler,
@@ -1303,6 +1327,7 @@ pub const Client = struct {
                         .none => {},
                     }
                 }
+                runtime.event_queue_failure = existing.event_queue_failure;
                 const replacement = self.pending_extension_runtime.?;
                 self.pending_extension_runtime = null;
                 existing.deinit(self.allocator);
@@ -1620,12 +1645,9 @@ pub const Client = struct {
                     continue;
                 }
                 if (std.mem.eql(u8, name, "session.event")) {
-                    self.queueSessionEvent(
+                    try self.queueSessionEvent(
                         object.get("params") orelse return error.InvalidJsonRpc,
-                    ) catch |err| switch (err) {
-                        error.EventQueueFull => {},
-                        else => return err,
-                    };
+                    );
                 }
                 continue;
             }
@@ -2281,10 +2303,10 @@ pub const Client = struct {
         }, token_provider.context) catch |err| {
             return self.writeServerRequestError(writer, id, -32000, @errorName(err));
         };
-        defer self.allocator.free(token);
+        defer wipeAndFreeSecret(self.allocator, token);
 
         const response = try json_rpc.encodeSuccessResponse(self.allocator, id, .{ .token = token });
-        defer self.allocator.free(response);
+        defer wipeAndFreeSecret(self.allocator, response);
         try self.writeServerFrame(writer, response);
     }
 
@@ -2547,48 +2569,155 @@ pub const Client = struct {
         };
         if (self.findExtensionRuntime(session_id) == null) return;
         const event_value = params.get("event") orelse return error.InvalidSessionEvent;
+        const owned_session_id = try self.allocator.dupe(u8, session_id);
+        var session_id_owned = true;
+        errdefer if (session_id_owned) self.allocator.free(owned_session_id);
+        const event = try session_types.parseEvent(
+            self.allocator,
+            event_value,
+        );
+        session_id_owned = false;
         var queued = QueuedEvent{
             .id = self.next_queued_event_id,
-            .session_id = try self.allocator.dupe(u8, session_id),
-            .event = undefined,
+            .session_id = owned_session_id,
+            .event = event,
         };
         self.next_queued_event_id +%= 1;
         if (self.next_queued_event_id == 0) self.next_queued_event_id = 1;
         var queued_owned = true;
-        errdefer if (queued_owned) self.allocator.free(queued.session_id);
-        queued.event = try session_types.parseEvent(
-            self.allocator,
-            event_value,
-        );
-        errdefer if (queued_owned) queued.event.deinit(self.allocator);
+        defer if (queued_owned) queued.deinit(self.allocator);
         try self.applyExtensionEvent(session_id, &queued.event);
-        const automatically_handled = switch (queued.event) {
-            .command_execute, .elicitation_requested => true,
+        const delivery_class: EventDeliveryClass = switch (queued.event) {
+            .command_execute, .elicitation_requested => .automatic,
             .mcp_oauth_required => if (self.findExtensionRuntime(session_id)) |runtime|
-                !runtime.credentials_quarantined and runtime.mcp_auth_handler != null
+                if (!runtime.credentials_quarantined and runtime.mcp_auth_handler != null)
+                    .automatic
+                else
+                    .observation
             else
-                false,
-            else => false,
+                .observation,
+            .permission_requested => .permission_request,
+            .external_tool_requested => .external_tool_request,
+            else => .observation,
         };
-        var queue_overflowed = false;
-        if (self.events.items.len >= max_queued_events) {
-            if (!automatically_handled) return error.EventQueueFull;
-            const removable_index = for (self.events.items, 0..) |existing, index| {
-                if (!existing.automatic_handling_in_progress) break index;
-            } else return error.EventQueueFull;
-            var removed = self.events.orderedRemove(removable_index);
-            removed.deinit(self.allocator);
-            queue_overflowed = true;
+        const failed = self.sessionEventQueueFailure(session_id) != null;
+        if (failed or self.queuedEventCount(session_id) >= max_queued_events) {
+            self.handleUnretainedEvent(
+                session_id,
+                &queued.event,
+                delivery_class,
+                .capacity_exceeded,
+            );
+            return;
         }
-        queued.automatic_handling_in_progress = automatically_handled;
-        try self.events.append(self.allocator, queued);
+        queued.automatic_handling_in_progress = delivery_class == .automatic;
+        self.events.append(self.allocator, queued) catch {
+            self.handleUnretainedEvent(
+                session_id,
+                &queued.event,
+                delivery_class,
+                .allocation_failed,
+            );
+            return;
+        };
         queued_owned = false;
-        if (automatically_handled) {
+        if (delivery_class == .automatic) {
             const event_id = queued.id;
-            defer self.finishAutomaticEvent(event_id);
-            self.handleAutomaticSessionEvent(session_id, event_id);
+            const target = AutomaticEventTarget{ .queued = event_id };
+            defer self.finishAutomaticEvent(target);
+            self.handleAutomaticSessionEvent(session_id, target);
         }
-        if (queue_overflowed) return error.EventQueueFull;
+    }
+
+    fn queuedEventCount(self: *const Client, session_id: []const u8) usize {
+        var count: usize = 0;
+        for (self.events.items) |queued| {
+            if (std.mem.eql(u8, queued.session_id, session_id)) count += 1;
+        }
+        return count;
+    }
+
+    fn sessionEventQueueFailure(
+        self: *Client,
+        session_id: []const u8,
+    ) ?EventQueueFailure {
+        var failure: ?EventQueueFailure = null;
+        if (self.pending_extension_runtime) |*runtime| {
+            if (runtime.session_id) |runtime_session_id| {
+                if (std.mem.eql(u8, runtime_session_id, session_id)) {
+                    failure = runtime.event_queue_failure;
+                }
+            }
+        }
+        for (self.extension_runtimes.items) |*runtime| {
+            const runtime_session_id = runtime.session_id orelse continue;
+            if (!std.mem.eql(u8, runtime_session_id, session_id)) continue;
+            if (runtime.event_queue_failure == .rejection_failed)
+                return .rejection_failed;
+            if (failure == null) failure = runtime.event_queue_failure;
+        }
+        return failure;
+    }
+
+    fn recordEventQueueFailure(
+        self: *Client,
+        session_id: []const u8,
+        failure: EventQueueFailure,
+    ) void {
+        if (self.pending_extension_runtime) |*runtime| {
+            if (runtime.session_id) |runtime_session_id| {
+                if (std.mem.eql(u8, runtime_session_id, session_id) and
+                    (runtime.event_queue_failure == null or failure == .rejection_failed))
+                {
+                    runtime.event_queue_failure = failure;
+                }
+            }
+        }
+        for (self.extension_runtimes.items) |*runtime| {
+            const runtime_session_id = runtime.session_id orelse continue;
+            if (std.mem.eql(u8, runtime_session_id, session_id) and
+                (runtime.event_queue_failure == null or failure == .rejection_failed))
+            {
+                runtime.event_queue_failure = failure;
+            }
+        }
+    }
+
+    fn handleUnretainedEvent(
+        self: *Client,
+        session_id: []const u8,
+        event: *session_types.SessionEvent,
+        delivery_class: EventDeliveryClass,
+        failure: EventQueueFailure,
+    ) void {
+        self.recordEventQueueFailure(session_id, failure);
+        switch (delivery_class) {
+            .observation => {},
+            .automatic => self.handleAutomaticSessionEvent(
+                session_id,
+                .{ .transient = event },
+            ),
+            .permission_request => {
+                const request_id = event.permission_requested.request_id;
+                (Session{ .client = self, .id = session_id }).rejectPermission(
+                    request_id,
+                    event_queue_capacity_message,
+                ) catch self.recordEventQueueFailure(
+                    session_id,
+                    .rejection_failed,
+                );
+            },
+            .external_tool_request => {
+                const request_id = event.external_tool_requested.request_id;
+                (Session{ .client = self, .id = session_id }).respondToToolError(
+                    request_id,
+                    event_queue_capacity_message,
+                ) catch self.recordEventQueueFailure(
+                    session_id,
+                    .rejection_failed,
+                );
+            },
+        }
     }
 
     fn handleAutomaticSessionEvent(
@@ -2618,8 +2747,13 @@ pub const Client = struct {
         self: *Client,
         target: AutomaticEventTarget,
     ) ?*session_types.SessionEvent {
-        const queued = self.queuedEvent(target) orelse return null;
-        return &queued.event;
+        return switch (target) {
+            .queued => |id| blk: {
+                const queued = self.queuedEvent(id) orelse break :blk null;
+                break :blk &queued.event;
+            },
+            .transient => |event| event,
+        };
     }
 
     fn queuedEvent(self: *Client, id: u64) ?*QueuedEvent {
@@ -2629,7 +2763,11 @@ pub const Client = struct {
         return null;
     }
 
-    fn finishAutomaticEvent(self: *Client, id: u64) void {
+    fn finishAutomaticEvent(self: *Client, target: AutomaticEventTarget) void {
+        const id = switch (target) {
+            .queued => |id| id,
+            .transient => return,
+        };
         for (self.events.items, 0..) |*queued, index| {
             if (queued.id != id) continue;
             if (queued.remove_after_automatic_handling) {
@@ -3437,6 +3575,13 @@ pub const Client = struct {
                     self.allocator.free(result.session_id);
                     return result.event;
                 }
+            }
+            if (self.sessionEventQueueFailure(session_id)) |failure| {
+                return switch (failure) {
+                    .capacity_exceeded => error.EventQueueFull,
+                    .allocation_failed => error.EventQueueAllocationFailed,
+                    .rejection_failed => error.EventQueueRejectionFailed,
+                };
             }
 
             const body = try json_rpc.readFrame(self.allocator, &self.reader.interface);
@@ -12729,7 +12874,39 @@ test "disconnect removes session-owned allocations" {
     try std.testing.expectEqual(@as(usize, 0), client.events.items.len);
 }
 
-test "a full event queue resolves interaction without aborting the active call" {
+fn fillRequiredEventQueue(
+    client: *Client,
+    allocator: std.mem.Allocator,
+    session_id: []const u8,
+) !void {
+    const permission_json = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"permission.requested","data":{"requestId":"permission-queued","permissionRequest":{"kind":"shell","fullCommandText":"pwd","intention":"show directory","commands":[],"possiblePaths":[],"possibleUrls":[],"hasWriteFileRedirection":false,"canOfferSessionApproval":false}}}
+    ,
+        .{},
+    );
+    defer permission_json.deinit();
+    const tool_json = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"external_tool.requested","data":{"requestId":"tool-queued","sessionId":"s1","toolCallId":"call-1","toolName":"lookup"}}
+    ,
+        .{},
+    );
+    defer tool_json.deinit();
+    for (0..max_queued_events) |index| {
+        try client.events.append(allocator, .{
+            .session_id = try allocator.dupe(u8, session_id),
+            .event = try session_types.parseEvent(
+                allocator,
+                if (index % 2 == 0) permission_json.value else tool_json.value,
+            ),
+        });
+    }
+}
+
+test "a full interaction queue does not evict another session" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -12803,23 +12980,38 @@ test "a full event queue resolves interaction without aborting the active call" 
             &.{},
         ),
     );
+    try client.extension_runtimes.append(
+        allocator,
+        try SessionExtensionRuntime.init(
+            allocator,
+            "s2",
+            session_types.CreateSessionConfig{},
+            &.{},
+        ),
+    );
 
     try client.events.ensureTotalCapacity(allocator, max_queued_events);
-    for (0..max_queued_events) |_| {
-        try client.events.append(allocator, .{
-            .session_id = try allocator.dupe(u8, "s1"),
-            .event = .{ .session_idle = .{} },
-        });
-    }
+    try client.events.append(allocator, .{
+        .session_id = try allocator.dupe(u8, "s2"),
+        .event = .{ .session_idle = .{} },
+    });
+    try fillRequiredEventQueue(&client, allocator, "s1");
 
     const outer = try client.callRpc(struct { value: []const u8 }, "test.outer", .{});
     defer outer.deinit();
     try std.testing.expectEqualStrings("done", outer.value.value);
     try std.testing.expect(command_called);
-    try std.testing.expectEqual(@as(usize, max_queued_events), client.events.items.len);
-    try std.testing.expect(
-        client.events.items[max_queued_events - 1].event.command_execute.automatic_handling ==
-            .handled,
+    try std.testing.expectEqual(@as(usize, max_queued_events + 1), client.events.items.len);
+    var preserved = try (Session{ .client = &client, .id = "s2" }).nextEvent();
+    defer preserved.deinit(allocator);
+    try std.testing.expect(preserved == .session_idle);
+    for (0..max_queued_events) |_| {
+        var retained = try (Session{ .client = &client, .id = "s1" }).nextEvent();
+        retained.deinit(allocator);
+    }
+    try std.testing.expectError(
+        error.EventQueueFull,
+        (Session{ .client = &client, .id = "s1" }).nextEvent(),
     );
     try writer.interface.flush();
     const requests = try tmp.dir.readFileAlloc(
@@ -12840,6 +13032,176 @@ test "a full event queue resolves interaction without aborting the active call" 
     try std.testing.expectEqualStrings(
         \\{"jsonrpc":"2.0","id":2,"method":"session.commands.handlePendingCommand","params":{"sessionId":"s1","requestId":"command-1"}}
     , command_body);
+}
+
+test "a full session queue rejects unretained permission and tool requests" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        event_json: []const u8,
+        expected_request: []const u8,
+    }{
+        .{
+            .event_json =
+            \\{"sessionId":"s1","event":{"type":"permission.requested","data":{"requestId":"overflow","permissionRequest":{"kind":"shell","fullCommandText":"pwd","intention":"show directory","commands":[],"possiblePaths":[],"possibleUrls":[],"hasWriteFileRedirection":false,"canOfferSessionApproval":false}}}}
+            ,
+            .expected_request =
+            \\{"jsonrpc":"2.0","id":1,"method":"session.permissions.handlePendingPermissionRequest","params":{"sessionId":"s1","requestId":"overflow","result":{"kind":"reject","feedback":"SDK event queue capacity exceeded"}}}
+            ,
+        },
+        .{
+            .event_json =
+            \\{"sessionId":"s1","event":{"type":"external_tool.requested","data":{"requestId":"overflow","sessionId":"s1","toolCallId":"call-overflow","toolName":"lookup"}}}
+            ,
+            .expected_request =
+            \\{"jsonrpc":"2.0","id":1,"method":"session.tools.handlePendingToolCall","params":{"sessionId":"s1","requestId":"overflow","error":"SDK event queue capacity exceeded"}}
+            ,
+        },
+    };
+
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const response =
+            \\{"jsonrpc":"2.0","id":1,"result":{"success":true}}
+        ;
+        const framed = try std.fmt.allocPrint(
+            allocator,
+            "Content-Length: {d}\r\n\r\n{s}",
+            .{ response.len, response },
+        );
+        defer allocator.free(framed);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = framed });
+        const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{ .mode = .read_only });
+        defer response_file.close(std.testing.io);
+        var reader_buffer: [512]u8 = undefined;
+        var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+        const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+        defer request_file.close(std.testing.io);
+        var writer_buffer: [512]u8 = undefined;
+        var writer = request_file.writer(std.testing.io, &writer_buffer);
+        var client = Client{
+            .allocator = allocator,
+            .io = std.testing.io,
+            .child = null,
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        };
+        defer {
+            for (client.events.items) |*event| event.deinit(allocator);
+            client.events.deinit(allocator);
+            for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+            client.extension_runtimes.deinit(allocator);
+        }
+        try client.extension_runtimes.append(
+            allocator,
+            try SessionExtensionRuntime.init(
+                allocator,
+                "s1",
+                session_types.CreateSessionConfig{},
+                &.{},
+            ),
+        );
+        try fillRequiredEventQueue(&client, allocator, "s1");
+        const parsed = try std.json.parseFromSlice(
+            std.json.Value,
+            allocator,
+            case.event_json,
+            .{},
+        );
+        defer parsed.deinit();
+
+        try client.queueSessionEvent(parsed.value);
+        try std.testing.expectEqual(@as(usize, max_queued_events), client.events.items.len);
+        try writer.interface.flush();
+        const requests = try tmp.dir.readFileAlloc(
+            std.testing.io,
+            "requests",
+            allocator,
+            .limited(4096),
+        );
+        defer allocator.free(requests);
+        var request_reader = std.Io.Reader.fixed(requests);
+        const request = try json_rpc.readFrame(allocator, &request_reader);
+        defer allocator.free(request);
+        try std.testing.expectEqualStrings(case.expected_request, request);
+        for (0..max_queued_events) |_| {
+            var retained = try (Session{ .client = &client, .id = "s1" }).nextEvent();
+            retained.deinit(allocator);
+        }
+        try std.testing.expectError(
+            error.EventQueueFull,
+            (Session{ .client = &client, .id = "s1" }).nextEvent(),
+        );
+    }
+}
+
+test "failed overflow rejection is observable after retained work drains" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"success":false}}
+    ;
+    const framed = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ response.len, response },
+    );
+    defer allocator.free(framed);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = framed });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{ .mode = .read_only });
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [512]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [512]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.events.items) |*event| event.deinit(allocator);
+        client.events.deinit(allocator);
+        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
+        client.extension_runtimes.deinit(allocator);
+    }
+    try client.extension_runtimes.append(
+        allocator,
+        try SessionExtensionRuntime.init(
+            allocator,
+            "s1",
+            session_types.CreateSessionConfig{},
+            &.{},
+        ),
+    );
+    try fillRequiredEventQueue(&client, allocator, "s1");
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"s1","event":{"type":"permission.requested","data":{"requestId":"overflow","permissionRequest":{"kind":"shell","fullCommandText":"pwd","intention":"show directory","commands":[],"possiblePaths":[],"possibleUrls":[],"hasWriteFileRedirection":false,"canOfferSessionApproval":false}}}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+
+    try client.queueSessionEvent(parsed.value);
+    for (0..max_queued_events) |_| {
+        var retained = try (Session{ .client = &client, .id = "s1" }).nextEvent();
+        retained.deinit(allocator);
+    }
+    try std.testing.expectError(
+        error.EventQueueRejectionFailed,
+        (Session{ .client = &client, .id = "s1" }).nextEvent(),
+    );
 }
 
 test "create resume and parent join lower custom agents to literal lifecycle JSON" {
@@ -13885,6 +14247,161 @@ test "provider token dispatch routes by session and provider and rejects invalid
         ),
     );
     try std.testing.expectEqual(@as(usize, 2), client.session_ids.items.len);
+}
+
+test "provider token dispatch wipes callback and response allocations" {
+    const secret = "provider-secret-token";
+    const TrackingAllocator = struct {
+        backing: std.mem.Allocator,
+        token_ptr: ?[*]u8 = null,
+        response_len: usize,
+        token_wiped: bool = false,
+        response_wiped: bool = false,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            } };
+        }
+
+        fn alloc(
+            context: *anyopaque,
+            len: usize,
+            alignment: std.mem.Alignment,
+            return_address: usize,
+        ) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.backing.rawAlloc(len, alignment, return_address);
+        }
+
+        fn resize(
+            context: *anyopaque,
+            memory: []u8,
+            alignment: std.mem.Alignment,
+            new_len: usize,
+            return_address: usize,
+        ) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.backing.rawResize(memory, alignment, new_len, return_address);
+        }
+
+        fn remap(
+            context: *anyopaque,
+            memory: []u8,
+            alignment: std.mem.Alignment,
+            new_len: usize,
+            return_address: usize,
+        ) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.backing.rawRemap(memory, alignment, new_len, return_address);
+        }
+
+        fn free(
+            context: *anyopaque,
+            memory: []u8,
+            alignment: std.mem.Alignment,
+            return_address: usize,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const wiped = for (memory) |byte| {
+                if (byte != 0) break false;
+            } else true;
+            if (self.token_ptr) |token_ptr| {
+                if (memory.ptr == token_ptr) self.token_wiped = wiped;
+            }
+            if (memory.len == self.response_len and
+                (self.token_ptr == null or memory.ptr != self.token_ptr.?))
+            {
+                self.response_wiped = self.response_wiped or wiped;
+            }
+            self.backing.rawFree(memory, alignment, return_address);
+        }
+    };
+    const CallbackContext = struct {
+        tracker: *TrackingAllocator,
+    };
+    const callback = struct {
+        fn getToken(
+            allocator: std.mem.Allocator,
+            _: provider.ProviderTokenRequest,
+            context: ?*anyopaque,
+        ) ![]u8 {
+            const state: *CallbackContext = @ptrCast(@alignCast(context.?));
+            const token = try allocator.dupe(u8, secret);
+            state.tracker.token_ptr = token.ptr;
+            return token;
+        }
+    }.getToken;
+    const expected_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"token":"provider-secret-token"}}
+    ;
+
+    for ([_]bool{ false, true }) |fail_write| {
+        var tracker = TrackingAllocator{
+            .backing = std.testing.allocator,
+            .response_len = expected_response.len,
+        };
+        const allocator = tracker.allocator();
+        var callback_context = CallbackContext{ .tracker = &tracker };
+        var client: Client = undefined;
+        client.allocator = allocator;
+        client.writer_buffer = &.{};
+        client.pending_extension_runtime = null;
+        client.extension_runtimes = .empty;
+        client.provider_tokens = .empty;
+        defer {
+            for (client.provider_tokens.items) |registered| registered.deinit(allocator);
+            client.provider_tokens.deinit(allocator);
+        }
+        try client.registerProviderTokens("s1", &.{.{
+            .provider_name = "provider",
+            .token_provider = .{
+                .callback = callback,
+                .context = &callback_context,
+            },
+        }});
+        const params = try std.json.parseFromSlice(
+            std.json.Value,
+            allocator,
+            \\{"sessionId":"s1","providerName":"provider"}
+        ,
+            .{},
+        );
+        defer params.deinit();
+        var output_bytes: [512]u8 = undefined;
+        var output = if (fail_write)
+            std.Io.Writer{
+                .vtable = &.{ .drain = std.Io.Writer.failingDrain },
+                .buffer = output_bytes[0..1],
+            }
+        else
+            std.Io.Writer.fixed(&output_bytes);
+
+        if (fail_write) {
+            try std.testing.expectError(
+                error.WriteFailed,
+                client.dispatchProviderTokenRequest(
+                    &output,
+                    .{ .integer = 1 },
+                    params.value,
+                ),
+            );
+        } else {
+            try client.dispatchProviderTokenRequest(
+                &output,
+                .{ .integer = 1 },
+                params.value,
+            );
+            try std.testing.expect(
+                std.mem.indexOf(u8, output.buffered(), secret) != null,
+            );
+        }
+        try std.testing.expect(tracker.token_wiped);
+        try std.testing.expect(tracker.response_wiped);
+    }
 }
 
 test "failed create and resume roll back provider token routes" {
