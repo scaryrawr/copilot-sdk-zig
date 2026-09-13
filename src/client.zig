@@ -1788,34 +1788,25 @@ pub const Client = struct {
         method: []const u8,
         params: ?std.json.Value,
     ) !void {
-        if (std.mem.eql(u8, method, "hooks.invoke")) {
-            return self.dispatchHookRequest(writer, id, params);
+        const typed_request = typedServerRequest(method);
+        if (typed_request) |request| {
+            if (self.hasApplicableTypedRegistration(request, method, params))
+                return self.dispatchTypedServerRequest(request, writer, id, method, params);
         }
-        if (std.mem.eql(u8, method, "canvas.open") or
-            std.mem.eql(u8, method, "canvas.close") or
-            std.mem.eql(u8, method, "canvas.action.invoke"))
-        {
-            return self.dispatchCanvasRequest(writer, id, method, params);
-        }
-        if (std.mem.eql(u8, method, "providerToken.getToken")) {
-            return self.dispatchProviderTokenRequest(writer, id, params);
-        }
-        if (std.mem.eql(u8, method, "gitHubToken.getToken")) {
-            return self.dispatchGitHubTokenRequest(writer, id, params);
-        }
-        if (std.mem.eql(u8, method, "userInput.request")) {
-            return self.dispatchUserInputRequest(writer, id, params);
-        }
-        if (std.mem.eql(u8, method, "exitPlanMode.request")) {
-            return self.dispatchExitPlanModeRequest(writer, id, params);
-        }
-        if (std.mem.eql(u8, method, "autoModeSwitch.request")) {
-            return self.dispatchAutoModeSwitchRequest(writer, id, params);
-        }
-        const registered = self.findRpcHandler(method) orelse {
-            try self.rejectServerRequest(writer, id);
-            return;
-        };
+        if (self.findRpcHandler(method)) |registered|
+            return self.dispatchRegisteredRpcHandler(writer, id, params, registered);
+        if (typed_request) |request|
+            return self.dispatchTypedServerRequest(request, writer, id, method, params);
+        try self.rejectServerRequest(writer, id);
+    }
+
+    fn dispatchRegisteredRpcHandler(
+        self: *Client,
+        writer: *std.Io.Writer,
+        id: std.json.Value,
+        params: ?std.json.Value,
+        registered: RegisteredRpcHandler,
+    ) !void {
         const params_json = try stringifyRpcParams(self.allocator, params);
         defer if (params_json) |json| self.allocator.free(json);
 
@@ -1858,6 +1849,151 @@ pub const Client = struct {
         const response = try json_rpc.encodeSuccessResponse(self.allocator, id, result.value);
         defer self.allocator.free(response);
         try json_rpc.writeFrame(writer, response);
+    }
+
+    const TypedServerRequest = enum {
+        hook,
+        canvas,
+        provider_token,
+        github_token,
+        user_input,
+        exit_plan_mode,
+        auto_mode_switch,
+    };
+
+    fn typedServerRequest(method: []const u8) ?TypedServerRequest {
+        if (std.mem.eql(u8, method, "hooks.invoke")) return .hook;
+        if (std.mem.eql(u8, method, "canvas.open") or
+            std.mem.eql(u8, method, "canvas.close") or
+            std.mem.eql(u8, method, "canvas.action.invoke"))
+        {
+            return .canvas;
+        }
+        if (std.mem.eql(u8, method, "providerToken.getToken")) return .provider_token;
+        if (std.mem.eql(u8, method, "gitHubToken.getToken")) return .github_token;
+        if (std.mem.eql(u8, method, "userInput.request")) return .user_input;
+        if (std.mem.eql(u8, method, "exitPlanMode.request")) return .exit_plan_mode;
+        if (std.mem.eql(u8, method, "autoModeSwitch.request")) return .auto_mode_switch;
+        return null;
+    }
+
+    fn dispatchTypedServerRequest(
+        self: *Client,
+        request: TypedServerRequest,
+        writer: *std.Io.Writer,
+        id: std.json.Value,
+        method: []const u8,
+        params: ?std.json.Value,
+    ) !void {
+        return switch (request) {
+            .hook => self.dispatchHookRequest(writer, id, params),
+            .canvas => self.dispatchCanvasRequest(writer, id, method, params),
+            .provider_token => self.dispatchProviderTokenRequest(writer, id, params),
+            .github_token => self.dispatchGitHubTokenRequest(writer, id, params),
+            .user_input => self.dispatchUserInputRequest(writer, id, params),
+            .exit_plan_mode => self.dispatchExitPlanModeRequest(writer, id, params),
+            .auto_mode_switch => self.dispatchAutoModeSwitchRequest(writer, id, params),
+        };
+    }
+
+    fn hasApplicableTypedRegistration(
+        self: *Client,
+        request: TypedServerRequest,
+        method: []const u8,
+        params: ?std.json.Value,
+    ) bool {
+        const object = switch (params orelse return false) {
+            .object => |value| value,
+            else => return false,
+        };
+        return switch (request) {
+            .hook => self.hasApplicableHookRegistration(object),
+            .exit_plan_mode => blk: {
+                const session_id = jsonString(object, "sessionId") orelse break :blk false;
+                const runtime = self.findExtensionRuntime(session_id) orelse break :blk false;
+                break :blk runtime.exit_plan_mode_handler != null;
+            },
+            .auto_mode_switch => blk: {
+                const session_id = jsonString(object, "sessionId") orelse break :blk false;
+                const runtime = self.findExtensionRuntime(session_id) orelse break :blk false;
+                break :blk runtime.auto_mode_switch_handler != null;
+            },
+            .canvas => self.hasApplicableCanvasRegistration(method, object),
+            .provider_token => self.findProviderTokenFromParams(params) != null,
+            .github_token => self.hasApplicableGitHubTokenRegistration(object),
+            .user_input => self.findUserInputHandlerFromParams(params) != null,
+        };
+    }
+
+    fn hasApplicableHookRegistration(
+        self: *Client,
+        object: std.json.ObjectMap,
+    ) bool {
+        const session_id = jsonString(object, "sessionId") orelse return false;
+        const hook_type = jsonString(object, "hookType") orelse return false;
+        const runtime = self.findExtensionRuntime(session_id) orelse return false;
+        if (std.mem.eql(u8, hook_type, "preToolUse"))
+            return runtime.hooks.on_pre_tool_use != null;
+        if (std.mem.eql(u8, hook_type, "preMcpToolCall"))
+            return runtime.hooks.on_pre_mcp_tool_call != null;
+        if (std.mem.eql(u8, hook_type, "postToolUse"))
+            return runtime.hooks.on_post_tool_use != null;
+        if (std.mem.eql(u8, hook_type, "postToolUseFailure"))
+            return runtime.hooks.on_post_tool_use_failure != null;
+        if (std.mem.eql(u8, hook_type, "userPromptSubmitted"))
+            return runtime.hooks.on_user_prompt_submitted != null;
+        if (std.mem.eql(u8, hook_type, "userPromptTransformed"))
+            return runtime.hooks.on_user_prompt_transformed != null;
+        if (std.mem.eql(u8, hook_type, "sessionStart"))
+            return runtime.hooks.on_session_start != null;
+        if (std.mem.eql(u8, hook_type, "sessionEnd"))
+            return runtime.hooks.on_session_end != null;
+        if (std.mem.eql(u8, hook_type, "errorOccurred"))
+            return runtime.hooks.on_error_occurred != null;
+        if (std.mem.eql(u8, hook_type, "agentStop"))
+            return runtime.hooks.on_agent_stop != null;
+        return false;
+    }
+
+    fn hasApplicableCanvasRegistration(
+        self: *Client,
+        method: []const u8,
+        object: std.json.ObjectMap,
+    ) bool {
+        const session_id = jsonString(object, "sessionId") orelse return false;
+        const canvas_id = jsonString(object, "canvasId") orelse return false;
+        const runtime = self.findExtensionRuntime(session_id) orelse return false;
+        for (runtime.canvases) |canvas| {
+            if (!std.mem.eql(u8, canvas.id, canvas_id)) continue;
+            if (!std.mem.eql(u8, method, "canvas.action.invoke")) return true;
+            const action_name = jsonString(object, "actionName") orelse return false;
+            for (canvas.actions) |action| {
+                if (std.mem.eql(u8, action.name, action_name)) return true;
+            }
+            return false;
+        }
+        return false;
+    }
+
+    fn hasApplicableGitHubTokenRegistration(
+        self: *Client,
+        object: std.json.ObjectMap,
+    ) bool {
+        const registration_id = jsonString(object, "registrationId") orelse return false;
+        const runtime = self.findGitHubTokenRuntime(registration_id) orelse return false;
+        if (runtime.git_hub_token_provider == null) return false;
+        if (runtime.session_id) |registered_session_id| {
+            const requested_session_id = jsonString(object, "sessionId") orelse return false;
+            return std.mem.eql(u8, registered_session_id, requested_session_id);
+        }
+        return object.get("sessionId") == null;
+    }
+
+    fn jsonString(object: std.json.ObjectMap, name: []const u8) ?[]const u8 {
+        return switch (object.get(name) orelse return null) {
+            .string => |value| value,
+            else => null,
+        };
     }
 
     fn writeTypedSuccess(
@@ -6408,6 +6544,320 @@ test "inbound RPC dispatch writes success and error frames" {
         @as(i64, -32603),
         invalid.value.object.get("error").?.object.get("code").?.integer,
     );
+}
+
+test "reserved inbound methods prefer exact typed registrations and otherwise fall back" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer deinitTestClientRegistries(&client);
+
+    var generic_calls: usize = 0;
+    const generic_handler = struct {
+        fn handle(
+            inner_allocator: std.mem.Allocator,
+            _: ?[]const u8,
+            context: ?*anyopaque,
+        ) ![]u8 {
+            const calls: *usize = @ptrCast(@alignCast(context.?));
+            calls.* += 1;
+            return inner_allocator.dupe(u8, "{\"generic\":true}");
+        }
+    }.handle;
+    const hook_handler = struct {
+        fn handle(
+            _: std.mem.Allocator,
+            _: ext.PreToolUseInput,
+            _: ext.HookInvocation,
+            _: ?*anyopaque,
+        ) !ext.PreToolUseOutput {
+            return .{};
+        }
+    }.handle;
+    const canvas_open_handler = struct {
+        fn handle(
+            _: std.mem.Allocator,
+            _: ext.CanvasOpenRequest,
+            _: ?*anyopaque,
+        ) !ext.CanvasOpenResult {
+            return .{};
+        }
+    }.handle;
+    const canvas_action_handler = struct {
+        fn handle(
+            inner_allocator: std.mem.Allocator,
+            _: ext.CanvasActionRequest,
+            _: ?*anyopaque,
+        ) ![]u8 {
+            return inner_allocator.dupe(u8, "{\"typed\":true}");
+        }
+    }.handle;
+    const invalid_canvas_action_handler = struct {
+        fn handle(
+            inner_allocator: std.mem.Allocator,
+            _: ext.CanvasActionRequest,
+            _: ?*anyopaque,
+        ) ![]u8 {
+            return inner_allocator.dupe(u8, "not json");
+        }
+    }.handle;
+    const github_handler = struct {
+        fn handle(
+            _: std.mem.Allocator,
+            _: session_types.GitHubTokenRequest,
+            _: ?*anyopaque,
+        ) !session_types.GitHubTokenResult {
+            return .cancelled;
+        }
+    }.handle;
+    const user_input_handler = struct {
+        fn handle(
+            inner_allocator: std.mem.Allocator,
+            _: session_types.UserInputRequest,
+            _: ?*anyopaque,
+        ) !session_types.UserInputResponse {
+            return .{
+                .answer = try inner_allocator.dupe(u8, "typed"),
+                .was_freeform = false,
+            };
+        }
+    }.handle;
+    const exit_handler = struct {
+        fn handle(
+            _: session_types.ExitPlanModeRequest,
+            _: ?*anyopaque,
+        ) !session_types.ExitPlanModeResult {
+            return .{ .approved = true, .selected_action = .interactive };
+        }
+    }.handle;
+    const auto_handler = struct {
+        fn handle(
+            _: session_types.AutoModeSwitchRequest,
+            _: ?*anyopaque,
+        ) !session_types.AutoModeSwitchResponse {
+            return .yes;
+        }
+    }.handle;
+    var provider_context = ProviderTokenTestContext{
+        .token = "typed-token",
+        .expected_session_id = "typed",
+        .expected_provider_name = "typed-provider",
+    };
+    try client.beginExtensionRuntime("typed", session_types.CreateSessionConfig{
+        .on_user_input_request = user_input_handler,
+        .on_exit_plan_mode_request = exit_handler,
+        .on_auto_mode_switch_request = auto_handler,
+        .git_hub_token_provider = .{ .callback = github_handler },
+        .extensions = .{ .common = .{
+            .hooks = .{ .on_pre_tool_use = hook_handler },
+            .canvases = &.{.{
+                .declaration = .{
+                    .id = "typed-canvas",
+                    .display_name = "Typed",
+                    .description = "Typed canvas",
+                },
+                .on_open = canvas_open_handler,
+                .actions = &.{ .{
+                    .name = "typed-action",
+                    .handler = canvas_action_handler,
+                }, .{
+                    .name = "invalid-action",
+                    .handler = invalid_canvas_action_handler,
+                } },
+            }},
+        } },
+    }, &.{});
+    try client.installRuntimeProviderTokens(&.{.{
+        .provider_name = "typed-provider",
+        .token_provider = .{
+            .callback = providerTokenTestCallback,
+            .context = &provider_context,
+        },
+    }});
+    client.pending_extension_runtime.?.git_hub_token_registration_id =
+        try allocator.dupe(u8, "typed-registration");
+    try client.commitPreparedExtensionRuntime("typed");
+
+    const cases = [_]struct {
+        method: []const u8,
+        typed_params: []const u8,
+        typed_result: []const u8,
+        fallback_params: []const u8,
+        missing_error: []const u8,
+    }{
+        .{
+            .method = "hooks.invoke",
+            .typed_params = "{\"sessionId\":\"typed\",\"hookType\":\"preToolUse\",\"input\":{\"sessionId\":\"typed\",\"timestamp\":1,\"cwd\":\"/repo\",\"toolName\":\"read\",\"toolArgs\":{}}}",
+            .typed_result = "{\"output\":{}}",
+            .fallback_params = "{\"sessionId\":\"other\",\"hookType\":\"preToolUse\",\"input\":{\"sessionId\":\"other\",\"timestamp\":1,\"cwd\":\"/repo\",\"toolName\":\"read\",\"toolArgs\":{}}}",
+            .missing_error = "{\"code\":-32000,\"message\":\"session not registered\"}",
+        },
+        .{
+            .method = "canvas.open",
+            .typed_params = "{\"sessionId\":\"typed\",\"extensionId\":\"ext\",\"canvasId\":\"typed-canvas\",\"instanceId\":\"instance\"}",
+            .typed_result = "{}",
+            .fallback_params = "{\"sessionId\":\"typed\",\"extensionId\":\"ext\",\"canvasId\":\"other-canvas\",\"instanceId\":\"instance\"}",
+            .missing_error = "{\"code\":-32000,\"message\":\"canvas not registered\"}",
+        },
+        .{
+            .method = "canvas.close",
+            .typed_params = "{\"sessionId\":\"typed\",\"extensionId\":\"ext\",\"canvasId\":\"typed-canvas\",\"instanceId\":\"instance\"}",
+            .typed_result = "null",
+            .fallback_params = "{\"sessionId\":\"typed\",\"extensionId\":\"ext\",\"canvasId\":\"other-canvas\",\"instanceId\":\"instance\"}",
+            .missing_error = "{\"code\":-32000,\"message\":\"canvas not registered\"}",
+        },
+        .{
+            .method = "canvas.action.invoke",
+            .typed_params = "{\"sessionId\":\"typed\",\"extensionId\":\"ext\",\"canvasId\":\"typed-canvas\",\"instanceId\":\"instance\",\"actionName\":\"typed-action\"}",
+            .typed_result = "{\"typed\":true}",
+            .fallback_params = "{\"sessionId\":\"typed\",\"extensionId\":\"ext\",\"canvasId\":\"typed-canvas\",\"instanceId\":\"instance\",\"actionName\":\"other-action\"}",
+            .missing_error = "{\"code\":-32000,\"message\":\"canvas action not registered\"}",
+        },
+        .{
+            .method = "providerToken.getToken",
+            .typed_params = "{\"sessionId\":\"typed\",\"providerName\":\"typed-provider\"}",
+            .typed_result = "{\"token\":\"typed-token\"}",
+            .fallback_params = "{\"sessionId\":\"typed\",\"providerName\":\"other-provider\"}",
+            .missing_error = "{\"code\":-32000,\"message\":\"bearer token provider not registered\"}",
+        },
+        .{
+            .method = "gitHubToken.getToken",
+            .typed_params = "{\"registrationId\":\"typed-registration\",\"host\":\"github.com\",\"sessionId\":\"typed\",\"reason\":\"initial\"}",
+            .typed_result = "{\"kind\":\"cancelled\"}",
+            .fallback_params = "{\"registrationId\":\"other-registration\",\"host\":\"github.com\",\"sessionId\":\"typed\",\"reason\":\"initial\"}",
+            .missing_error = "{\"code\":-32602,\"message\":\"unknown GitHub token registration\"}",
+        },
+        .{
+            .method = "userInput.request",
+            .typed_params = "{\"sessionId\":\"typed\",\"question\":\"Continue?\",\"choices\":[\"Yes\",\"No\"],\"allowFreeform\":false}",
+            .typed_result = "{\"answer\":\"typed\",\"wasFreeform\":false}",
+            .fallback_params = "{\"sessionId\":\"other\",\"question\":\"Continue?\",\"choices\":[\"Yes\",\"No\"],\"allowFreeform\":false}",
+            .missing_error = "{\"code\":-32000,\"message\":\"user input handler not registered\"}",
+        },
+        .{
+            .method = "exitPlanMode.request",
+            .typed_params = "{\"sessionId\":\"typed\",\"summary\":\"Plan\",\"actions\":[\"interactive\"],\"recommendedAction\":\"interactive\"}",
+            .typed_result = "{\"approved\":true,\"selectedAction\":\"interactive\"}",
+            .fallback_params = "{\"sessionId\":\"other\",\"summary\":\"Plan\",\"actions\":[\"interactive\"],\"recommendedAction\":\"interactive\"}",
+            .missing_error = "{\"code\":-32602,\"message\":\"unknown exit plan mode session\"}",
+        },
+        .{
+            .method = "autoModeSwitch.request",
+            .typed_params = "{\"sessionId\":\"typed\"}",
+            .typed_result = "{\"response\":\"yes\"}",
+            .fallback_params = "{\"sessionId\":\"other\"}",
+            .missing_error = "{\"code\":-32602,\"message\":\"unknown auto mode switch session\"}",
+        },
+    };
+    for (cases) |case| {
+        try client.registerRpcHandler(case.method, generic_handler, &generic_calls);
+    }
+
+    const dispatch = struct {
+        fn call(
+            dispatch_client: *Client,
+            inner_allocator: std.mem.Allocator,
+            id: i64,
+            method: []const u8,
+            params_json: []const u8,
+        ) ![]u8 {
+            const params = try std.json.parseFromSlice(
+                std.json.Value,
+                inner_allocator,
+                params_json,
+                .{},
+            );
+            defer params.deinit();
+            var output: std.Io.Writer.Allocating = .init(inner_allocator);
+            defer output.deinit();
+            try dispatch_client.dispatchServerRequest(
+                &output.writer,
+                .{ .integer = id },
+                method,
+                params.value,
+            );
+            return framedBody(inner_allocator, output.written());
+        }
+    }.call;
+
+    for (cases, 0..) |case, index| {
+        const id: i64 = @intCast(index + 1);
+        const body = try dispatch(&client, allocator, id, case.method, case.typed_params);
+        defer allocator.free(body);
+        const expected = try std.fmt.allocPrint(
+            allocator,
+            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{s}}}",
+            .{ id, case.typed_result },
+        );
+        defer allocator.free(expected);
+        try std.testing.expectEqualStrings(expected, body);
+    }
+    try std.testing.expectEqual(@as(usize, 0), generic_calls);
+    try std.testing.expectEqual(@as(usize, 1), provider_context.calls);
+    try std.testing.expect(provider_context.matched);
+
+    for (cases, 0..) |case, index| {
+        const id: i64 = @intCast(index + 101);
+        const body = try dispatch(&client, allocator, id, case.method, case.fallback_params);
+        defer allocator.free(body);
+        const expected = try std.fmt.allocPrint(
+            allocator,
+            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"generic\":true}}}}",
+            .{id},
+        );
+        defer allocator.free(expected);
+        try std.testing.expectEqualStrings(expected, body);
+    }
+    try std.testing.expectEqual(cases.len, generic_calls);
+
+    const selected_error_cases = [_]struct {
+        id: i64,
+        method: []const u8,
+        params: []const u8,
+        expected: []const u8,
+    }{
+        .{
+            .id = 191,
+            .method = "hooks.invoke",
+            .params = "{\"sessionId\":\"typed\",\"hookType\":\"preToolUse\",\"input\":{\"sessionId\":\"typed\",\"timestamp\":1,\"cwd\":\"/repo\",\"toolArgs\":{}}}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":191,\"error\":{\"code\":-32602,\"message\":\"invalid hook input\"}}",
+        },
+        .{
+            .id = 192,
+            .method = "canvas.action.invoke",
+            .params = "{\"sessionId\":\"typed\",\"extensionId\":\"ext\",\"canvasId\":\"typed-canvas\",\"instanceId\":\"instance\",\"actionName\":\"invalid-action\"}",
+            .expected = "{\"jsonrpc\":\"2.0\",\"id\":192,\"error\":{\"code\":-32603,\"message\":\"invalid canvas action result\"}}",
+        },
+    };
+    for (selected_error_cases) |case| {
+        const body = try dispatch(&client, allocator, case.id, case.method, case.params);
+        defer allocator.free(body);
+        try std.testing.expectEqualStrings(case.expected, body);
+    }
+    try std.testing.expectEqual(cases.len, generic_calls);
+
+    for (cases) |case| {
+        try std.testing.expect(client.unregisterRpcHandler(case.method));
+    }
+    for (cases, 0..) |case, index| {
+        const id: i64 = @intCast(index + 201);
+        const body = try dispatch(&client, allocator, id, case.method, case.fallback_params);
+        defer allocator.free(body);
+        const expected = try std.fmt.allocPrint(
+            allocator,
+            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"error\":{s}}}",
+            .{ id, case.missing_error },
+        );
+        defer allocator.free(expected);
+        try std.testing.expectEqualStrings(expected, body);
+    }
 }
 
 test "user input handler receives requests and returns responses" {
