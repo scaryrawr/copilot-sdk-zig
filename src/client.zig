@@ -900,7 +900,7 @@ fn needsGeneratedConnectionToken(connection: ResolvedConnection) bool {
     };
 }
 
-fn validateClientOptions(options: ClientOptions, connection: ResolvedConnection) !void {
+fn validateClientOptions(options: ClientOptions) !void {
     if (options.connection != null and
         (!std.mem.eql(u8, options.cli_path, "copilot") or
             options.cli_args.len != 0 or
@@ -913,7 +913,8 @@ fn validateClientOptions(options: ClientOptions, connection: ResolvedConnection)
             return error.ConflictingEnvironmentOptions,
         .tcp => |value| if (value.env != null and options.env != null)
             return error.ConflictingEnvironmentOptions,
-        .uri => {},
+        .uri => if (options.github_token != null or options.use_logged_in_user != null)
+            return error.UnsupportedUriAuthenticationOptions,
     };
 
     if (options.builtin_plugin_directories.len > 64)
@@ -933,7 +934,9 @@ fn validateClientOptions(options: ClientOptions, connection: ResolvedConnection)
         if (filesystem.session_state_path.len == 0)
             return error.InvalidSessionFilesystemStatePath;
     }
+}
 
+fn validateResolvedConnection(options: ClientOptions, connection: ResolvedConnection) !void {
     switch (connection) {
         .uri => |value| {
             if (value.token) |token| {
@@ -1502,8 +1505,9 @@ pub const Client = struct {
             else
                 null,
         );
+        try validateClientOptions(options);
         const connection = try resolveConnection(options, default_connection);
-        try validateClientOptions(options, connection);
+        try validateResolvedConnection(options, connection);
         var generated_token: ?[]u8 = null;
         defer if (generated_token) |token| {
             wipeSecret(token);
@@ -6670,6 +6674,19 @@ test "runtime authentication defaults match upstream" {
     }
 }
 
+const invalid_uri_authentication_cases = [_]struct {
+    github_token: ?[]const u8 = null,
+    use_logged_in_user: ?bool = null,
+}{
+    .{ .github_token = "github-token" },
+    .{ .use_logged_in_user = true },
+    .{ .use_logged_in_user = false },
+    .{
+        .github_token = "github-token",
+        .use_logged_in_user = true,
+    },
+};
+
 test "runtime configuration rejects invalid state before spawning" {
     const invalid_executable = "/definitely/not/a/copilot/runtime";
 
@@ -6735,8 +6752,9 @@ test "connection types contain transport data and client policy resolves conflic
         .working_directory = "/workspace",
         .connection = .{ .tcp = .{} },
     };
+    try validateClientOptions(explicit_working_directory);
     const resolved = try resolveConnection(explicit_working_directory, .stdio);
-    try validateClientOptions(explicit_working_directory, resolved);
+    try validateResolvedConnection(explicit_working_directory, resolved);
     try std.testing.expectEqualStrings(
         "/workspace",
         resolved.tcp.child.working_directory.?,
@@ -6748,32 +6766,31 @@ test "connection types contain transport data and client policy resolves conflic
             .env = &.{.{ .name = "CHILD_ENV", .value = "child" }},
         } },
     };
-    const conflict = try resolveConnection(conflicting_environment, .stdio);
     try std.testing.expectError(
         error.ConflictingEnvironmentOptions,
-        validateClientOptions(conflicting_environment, conflict),
+        validateClientOptions(conflicting_environment),
     );
 
-    const external_auth = ClientOptions{
-        .github_token = "token",
-        .connection = .{ .uri = .{ .url = "localhost:4321" } },
-    };
-    const external_auth_connection = try resolveConnection(external_auth, .stdio);
-    try validateClientOptions(external_auth, external_auth_connection);
-    const external_login = ClientOptions{
-        .use_logged_in_user = false,
-        .connection = .{ .uri = .{ .url = "localhost:4321" } },
-    };
-    const external_login_connection = try resolveConnection(external_login, .stdio);
-    try validateClientOptions(external_login, external_login_connection);
+    for (invalid_uri_authentication_cases) |case| {
+        const options = ClientOptions{
+            .github_token = case.github_token,
+            .use_logged_in_user = case.use_logged_in_user,
+            .connection = .{ .uri = .{ .url = "not-a-runtime-uri" } },
+        };
+        try std.testing.expectError(
+            error.UnsupportedUriAuthenticationOptions,
+            validateClientOptions(options),
+        );
+    }
 
     const ignored_uri_policy = ClientOptions{
         .base_directory = "",
         .env = &.{.{ .name = "COPILOT_HOME", .value = "ignored" }},
         .connection = .{ .uri = .{ .url = "localhost:4321" } },
     };
+    try validateClientOptions(ignored_uri_policy);
     const ignored_uri_connection = try resolveConnection(ignored_uri_policy, .stdio);
-    try validateClientOptions(ignored_uri_policy, ignored_uri_connection);
+    try validateResolvedConnection(ignored_uri_policy, ignored_uri_connection);
 }
 
 test "runtime environment distinguishes inheritance from explicit empty" {
@@ -7085,6 +7102,57 @@ fn unusedTcpPort(io: std.Io) !u16 {
     var server = try address.listen(io, .{});
     defer server.deinit(io);
     return server.socket.address.getPort();
+}
+
+fn observeUriConnection(server: *std.Io.net.Server, io: std.Io) !void {
+    const stream = try server.accept(io);
+    stream.close(io);
+}
+
+test "URI authentication options fail before transport opening" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    var server = try address.listen(io, .{});
+    defer server.deinit(io);
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "127.0.0.1:{d}",
+        .{server.socket.address.getPort()},
+    );
+    defer allocator.free(uri);
+
+    for (invalid_uri_authentication_cases) |case| {
+        const AcceptResult = union(enum) {
+            accepted: anyerror!void,
+        };
+        var result_buffer: [1]AcceptResult = undefined;
+        var select = std.Io.Select(AcceptResult).init(io, &result_buffer);
+        defer select.cancelDiscard();
+        select.async(.accepted, observeUriConnection, .{ &server, io });
+
+        try std.testing.expectError(
+            error.UnsupportedUriAuthenticationOptions,
+            Client.init(allocator, io, .{
+                .github_token = case.github_token,
+                .use_logged_in_user = case.use_logged_in_user,
+                .connection = .{ .uri = .{
+                    .url = uri,
+                    .token = "uri-token",
+                } },
+            }),
+        );
+
+        while (select.cancel()) |result| switch (result) {
+            .accepted => |accepted| {
+                accepted catch |err| switch (err) {
+                    error.Canceled => continue,
+                    else => return err,
+                };
+                return error.TestUnexpectedUriConnection;
+            },
+        };
+    }
 }
 
 test "TCP startup consumes delayed announcements and validates fixed ports" {

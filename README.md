@@ -180,8 +180,9 @@ A URI connection has no child-process fields. Deinitializing its client closes
 only the client-owned socket after bounded session detach attempts. It never
 shuts down the external runtime. URI connection setup has a ten-second
 deadline. The client keeps `.mode` active for URI session defaults. It ignores
-the other process policy, including authentication settings, because the
-external runtime owns that policy. Stdio and TCP clients request
+process-owned runtime settings because the external runtime owns that policy.
+It rejects `.github_token` and `.use_logged_in_user` because the external
+runtime also owns GitHub authentication. Stdio and TCP clients request
 `runtime.shutdown` for at most ten seconds, close the transport, then
 unconditionally terminate and reap their child.
 
@@ -194,7 +195,8 @@ stdio connection. This SDK returns `error.UnsupportedInProcessConnection` for
 Set `.github_token` and `.use_logged_in_user` on `ClientOptions`. If
 `.github_token` is set and `.use_logged_in_user` is omitted, the child uses only
 the token. If no token is set and `.use_logged_in_user` is omitted, the child
-uses the current Copilot login.
+uses the current Copilot login. These options apply only to SDK-owned stdio and
+TCP runtimes.
 
 Tokens are passed through a managed environment variable rather than argv.
 Raw `.env` entries cannot override SDK-owned connection,
