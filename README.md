@@ -103,6 +103,27 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
 }
 ```
 
+Attach files or other typed context to a message:
+
+```zig
+const attachments = [_]copilot.Attachment{
+    .{ .file = .{
+        .path = "/workspace/src/main.zig",
+        .display_name = "main.zig",
+        .line_range = .{ .start = 12, .end = 28 },
+    } },
+};
+
+const message_id = try session.send(.{
+    .prompt = "Explain this file.",
+    .attachments = &attachments,
+});
+defer allocator.free(message_id);
+```
+
+`MessageOptions` borrows the prompt, the attachment slice, and all attachment
+data until `send` or `sendAndWait` returns. These inputs require no `deinit`.
+
 `Session` borrows its `Client`. Keep the client alive while a session handle is
 in use. `SessionEvent` values and the message ID from `send` own memory from the
 client allocator. `Session.disconnect` releases the client-side session

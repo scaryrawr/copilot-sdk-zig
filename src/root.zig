@@ -65,6 +65,7 @@ pub const EnvironmentGrant = extensibility.EnvironmentGrant;
 pub const EnvironmentGrants = extensibility.EnvironmentGrants;
 pub const ProviderConfig = provider.ProviderConfig;
 pub const MessageOptions = session.MessageOptions;
+pub const Attachment = session.Attachment;
 pub const SessionEvent = session.SessionEvent;
 pub const AssistantMessage = session.AssistantMessage;
 pub const AssistantMessageDelta = session.AssistantMessageDelta;
@@ -123,4 +124,5 @@ test {
     _ = DefaultAgentConfig;
     _ = InitialAgent;
     _ = ReasoningEffort;
+    _ = Attachment;
 }
