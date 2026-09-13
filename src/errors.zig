@@ -498,7 +498,11 @@ fn deinitDetail(allocator: std.mem.Allocator, detail: *FailureDetail) void {
                 allocator.free(item.message);
                 deinitCause(allocator, item.cause);
             },
-            .invalid_envelope => |item| freeOptional(allocator, item.message_json),
+            .invalid_envelope => |item| {
+                if (item.message_json) |message_json| {
+                    freeRpcData(allocator, message_json);
+                }
+            },
             .unexpected_response => |item| freeOptional(allocator, item.actual_id_json),
             .mismatch => |item| switch (item) {
                 .invalid_server_version => |version| allocator.free(version.server_json),
