@@ -67,6 +67,208 @@ const WireModelsListRequest = struct {
     gitHubToken: ?[]const u8 = null,
 };
 
+const WireSendRequest = struct {
+    sessionId: []const u8,
+    prompt: []const u8,
+    attachments: ?WireAttachments = null,
+};
+
+const WireAttachments = struct {
+    values: []const session_types.Attachment,
+
+    pub fn jsonStringify(self: WireAttachments, writer: anytype) !void {
+        try writer.beginArray();
+        for (self.values) |value| {
+            try writer.write(WireAttachment{ .value = value });
+        }
+        try writer.endArray();
+    }
+};
+
+const WireAttachment = struct {
+    value: session_types.Attachment,
+
+    pub fn jsonStringify(self: WireAttachment, writer: anytype) !void {
+        switch (self.value) {
+            .file => |value| try writer.write(.{
+                .type = "file",
+                .path = value.path,
+                .displayName = attachmentDisplayName(value.display_name, value.path),
+                .lineRange = value.line_range,
+            }),
+            .directory => |value| try writer.write(.{
+                .type = "directory",
+                .path = value.path,
+                .displayName = attachmentDisplayName(value.display_name, value.path),
+            }),
+            .selection => |value| try writer.write(.{
+                .type = "selection",
+                .filePath = value.file_path,
+                .text = value.text,
+                .displayName = attachmentDisplayName(value.display_name, value.file_path),
+                .selection = value.selection,
+            }),
+            .blob => |value| try writer.write(.{
+                .type = "blob",
+                .data = value.data,
+                .mimeType = value.mime_type,
+                .displayName = nonEmptyDisplayName(value.display_name) orelse "attachment",
+            }),
+            .github_reference => |value| try writer.write(.{
+                .type = "github_reference",
+                .number = value.number,
+                .title = value.title,
+                .referenceType = value.reference_type,
+                .state = value.state,
+                .url = value.url,
+            }),
+            .github_commit => |value| try writer.write(.{
+                .type = "github_commit",
+                .message = value.message,
+                .oid = value.oid,
+                .repo = wireRepo(value.repo),
+                .url = value.url,
+            }),
+            .github_release => |value| try writer.write(.{
+                .type = "github_release",
+                .name = value.name,
+                .repo = wireRepo(value.repo),
+                .tagName = value.tag_name,
+                .url = value.url,
+            }),
+            .github_actions_job => |value| try writer.write(.{
+                .type = "github_actions_job",
+                .conclusion = value.conclusion,
+                .jobId = value.job_id,
+                .jobName = value.job_name,
+                .repo = wireRepo(value.repo),
+                .url = value.url,
+                .workflowName = value.workflow_name,
+            }),
+            .github_repository => |value| try writer.write(.{
+                .type = "github_repository",
+                .description = value.description,
+                .ref = value.git_ref,
+                .repo = wireRepo(value.repo),
+                .url = value.url,
+            }),
+            .github_file_diff => |value| switch (value.sides) {
+                .added => |head| try writer.write(.{
+                    .type = "github_file_diff",
+                    .head = wireFileDiffSide(head),
+                    .url = value.url,
+                }),
+                .deleted => |base| try writer.write(.{
+                    .type = "github_file_diff",
+                    .base = wireFileDiffSide(base),
+                    .url = value.url,
+                }),
+                .modified => |sides| try writer.write(.{
+                    .type = "github_file_diff",
+                    .base = wireFileDiffSide(sides.base),
+                    .head = wireFileDiffSide(sides.head),
+                    .url = value.url,
+                }),
+            },
+            .github_tree_comparison => |value| try writer.write(.{
+                .type = "github_tree_comparison",
+                .base = wireTreeComparisonSide(value.base),
+                .head = wireTreeComparisonSide(value.head),
+                .url = value.url,
+            }),
+            .github_url => |value| try writer.write(.{
+                .type = "github_url",
+                .url = value.url,
+            }),
+            .github_file => |value| try writer.write(.{
+                .type = "github_file",
+                .path = value.path,
+                .ref = value.git_ref,
+                .repo = wireRepo(value.repo),
+                .url = value.url,
+            }),
+            .github_snippet => |value| try writer.write(.{
+                .type = "github_snippet",
+                .lineRange = value.line_range,
+                .path = value.path,
+                .ref = value.git_ref,
+                .repo = wireRepo(value.repo),
+                .url = value.url,
+            }),
+        }
+    }
+};
+
+fn nonEmptyDisplayName(display_name: ?[]const u8) ?[]const u8 {
+    const value = display_name orelse return null;
+    return if (std.mem.trim(u8, value, " \t\r\n").len == 0) null else value;
+}
+
+fn attachmentDisplayName(display_name: ?[]const u8, path: []const u8) []const u8 {
+    if (nonEmptyDisplayName(display_name)) |value| return value;
+    const base_name = std.fs.path.basename(path);
+    if (base_name.len != 0) return base_name;
+    return if (path.len != 0) path else "attachment";
+}
+
+const WireGitHubRepoPointer = struct {
+    id: ?i64 = null,
+    name: []const u8,
+    owner: []const u8,
+};
+
+const WireGitHubFileDiffSide = struct {
+    path: []const u8,
+    ref: []const u8,
+    repo: WireGitHubRepoPointer,
+};
+
+const WireGitHubTreeComparisonSide = struct {
+    repo: WireGitHubRepoPointer,
+    revision: []const u8,
+};
+
+fn wireRepo(value: session_types.Attachment.GitHubRepoPointer) WireGitHubRepoPointer {
+    return .{
+        .id = value.id,
+        .name = value.name,
+        .owner = value.owner,
+    };
+}
+
+fn wireFileDiffSide(
+    value: session_types.Attachment.GitHubFileDiffSide,
+) WireGitHubFileDiffSide {
+    return .{
+        .path = value.path,
+        .ref = value.git_ref,
+        .repo = wireRepo(value.repo),
+    };
+}
+
+fn wireTreeComparisonSide(
+    value: session_types.Attachment.GitHubTreeComparisonSide,
+) WireGitHubTreeComparisonSide {
+    return .{
+        .repo = wireRepo(value.repo),
+        .revision = value.revision,
+    };
+}
+
+fn lowerMessage(
+    session_id: []const u8,
+    options: session_types.MessageOptions,
+) WireSendRequest {
+    return .{
+        .sessionId = session_id,
+        .prompt = options.prompt,
+        .attachments = if (options.attachments) |values|
+            .{ .values = values }
+        else
+            null,
+    };
+}
+
 const RegisteredRpcHandler = struct {
     method: []u8,
     handler: RpcHandler,
@@ -759,10 +961,11 @@ pub const Session = struct {
     id: []const u8,
 
     pub fn send(self: Session, options: session_types.MessageOptions) ![]u8 {
-        const parsed = try self.client.call(struct { messageId: []const u8 }, "session.send", .{
-            .sessionId = self.id,
-            .prompt = options.prompt,
-        });
+        const parsed = try self.client.call(
+            struct { messageId: []const u8 },
+            "session.send",
+            lowerMessage(self.id, options),
+        );
         defer parsed.deinit();
         return self.client.allocator.dupe(u8, parsed.value.messageId);
     }
@@ -2093,6 +2296,445 @@ test "permission response delivery failures are explicit" {
 fn framedBody(allocator: std.mem.Allocator, framed: []const u8) ![]u8 {
     var reader = std.Io.Reader.fixed(framed);
     return json_rpc.readFrame(allocator, &reader);
+}
+
+fn runSendRpc(
+    allocator: std.mem.Allocator,
+    options: session_types.MessageOptions,
+) !struct {
+    message_id: []u8,
+    request_body: []u8,
+} {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const response_body =
+        \\{"jsonrpc":"2.0","id":1,"result":{"messageId":"message-1"}}
+    ;
+    const response_frame = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ response_body.len, response_body },
+    );
+    defer allocator.free(response_frame);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "response",
+        .data = response_frame,
+    });
+
+    const response_file = try tmp.dir.openFile(
+        std.testing.io,
+        "response",
+        .{ .mode = .read_only },
+    );
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [8192]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        client.events.deinit(allocator);
+        client.session_ids.deinit(allocator);
+    }
+
+    const message_id = try (Session{ .client = &client, .id = "session-1" }).send(options);
+    errdefer allocator.free(message_id);
+    const request_frame = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "request",
+        allocator,
+        .limited(64 * 1024),
+    );
+    defer allocator.free(request_frame);
+
+    return .{
+        .message_id = message_id,
+        .request_body = try framedBody(allocator, request_frame),
+    };
+}
+
+test "session.send keeps prompt-only wire output unchanged" {
+    const result = try runSendRpc(std.testing.allocator, .{ .prompt = "hello" });
+    defer std.testing.allocator.free(result.message_id);
+    defer std.testing.allocator.free(result.request_body);
+
+    try std.testing.expectEqualStrings("message-1", result.message_id);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"hello"}}
+    , result.request_body);
+}
+
+test "session.send serializes every attachment variant" {
+    const repo = session_types.Attachment.GitHubRepoPointer{
+        .id = 7,
+        .name = "repo",
+        .owner = "owner",
+    };
+    const diff_side = session_types.Attachment.GitHubFileDiffSide{
+        .path = "src/a.zig",
+        .git_ref = "main",
+        .repo = repo,
+    };
+    const attachments = [_]session_types.Attachment{
+        .{ .file = .{
+            .path = "/tmp/a.zig",
+            .display_name = "a.zig",
+            .line_range = .{ .start = 2, .end = 4 },
+        } },
+        .{ .directory = .{
+            .path = "/tmp/src",
+            .display_name = "src",
+        } },
+        .{ .selection = .{
+            .file_path = "/tmp/a.zig",
+            .text = "const a = 1;",
+            .display_name = "a",
+            .selection = .{
+                .start = .{ .line = 1, .character = 2 },
+                .end = .{ .line = 1, .character = 14 },
+            },
+        } },
+        .{ .blob = .{
+            .data = "aGVsbG8=",
+            .mime_type = "text/plain",
+            .display_name = "hello.txt",
+        } },
+        .{ .github_reference = .{
+            .number = 42,
+            .title = "Issue",
+            .reference_type = .issue,
+            .state = "open",
+            .url = "https://github.com/owner/repo/issues/42",
+        } },
+        .{ .github_commit = .{
+            .message = "Commit",
+            .oid = "abc123",
+            .repo = repo,
+            .url = "https://github.com/owner/repo/commit/abc123",
+        } },
+        .{ .github_release = .{
+            .name = "Release",
+            .repo = repo,
+            .tag_name = "v1.0.0",
+            .url = "https://github.com/owner/repo/releases/tag/v1.0.0",
+        } },
+        .{ .github_actions_job = .{
+            .conclusion = "success",
+            .job_id = 99,
+            .job_name = "test",
+            .repo = repo,
+            .url = "https://github.com/owner/repo/actions/runs/1/job/99",
+            .workflow_name = "CI",
+        } },
+        .{ .github_repository = .{
+            .description = "A repo",
+            .git_ref = "main",
+            .repo = repo,
+            .url = "https://github.com/owner/repo",
+        } },
+        .{ .github_file_diff = .{
+            .sides = .{ .modified = .{
+                .base = diff_side,
+                .head = .{
+                    .path = "src/a.zig",
+                    .git_ref = "feature",
+                    .repo = repo,
+                },
+            } },
+            .url = "https://github.com/owner/repo/compare/main...feature",
+        } },
+        .{ .github_tree_comparison = .{
+            .base = .{ .repo = repo, .revision = "main" },
+            .head = .{ .repo = repo, .revision = "feature" },
+            .url = "https://github.com/owner/repo/compare/main...feature",
+        } },
+        .{ .github_url = .{
+            .url = "https://github.com/owner/repo",
+        } },
+        .{ .github_file = .{
+            .path = "src/a.zig",
+            .git_ref = "main",
+            .repo = repo,
+            .url = "https://github.com/owner/repo/blob/main/src/a.zig",
+        } },
+        .{ .github_snippet = .{
+            .line_range = .{ .start = 10, .end = 12 },
+            .path = "src/a.zig",
+            .git_ref = "main",
+            .repo = repo,
+            .url = "https://github.com/owner/repo/blob/main/src/a.zig#L10-L12",
+        } },
+    };
+
+    const result = try runSendRpc(std.testing.allocator, .{
+        .prompt = "inspect",
+        .attachments = &attachments,
+    });
+    defer std.testing.allocator.free(result.message_id);
+    defer std.testing.allocator.free(result.request_body);
+
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"inspect","attachments":[{"type":"file","path":"/tmp/a.zig","displayName":"a.zig","lineRange":{"start":2,"end":4}},{"type":"directory","path":"/tmp/src","displayName":"src"},{"type":"selection","filePath":"/tmp/a.zig","text":"const a = 1;","displayName":"a","selection":{"start":{"line":1,"character":2},"end":{"line":1,"character":14}}},{"type":"blob","data":"aGVsbG8=","mimeType":"text/plain","displayName":"hello.txt"},{"type":"github_reference","number":42,"title":"Issue","referenceType":"issue","state":"open","url":"https://github.com/owner/repo/issues/42"},{"type":"github_commit","message":"Commit","oid":"abc123","repo":{"id":7,"name":"repo","owner":"owner"},"url":"https://github.com/owner/repo/commit/abc123"},{"type":"github_release","name":"Release","repo":{"id":7,"name":"repo","owner":"owner"},"tagName":"v1.0.0","url":"https://github.com/owner/repo/releases/tag/v1.0.0"},{"type":"github_actions_job","conclusion":"success","jobId":99,"jobName":"test","repo":{"id":7,"name":"repo","owner":"owner"},"url":"https://github.com/owner/repo/actions/runs/1/job/99","workflowName":"CI"},{"type":"github_repository","description":"A repo","ref":"main","repo":{"id":7,"name":"repo","owner":"owner"},"url":"https://github.com/owner/repo"},{"type":"github_file_diff","base":{"path":"src/a.zig","ref":"main","repo":{"id":7,"name":"repo","owner":"owner"}},"head":{"path":"src/a.zig","ref":"feature","repo":{"id":7,"name":"repo","owner":"owner"}},"url":"https://github.com/owner/repo/compare/main...feature"},{"type":"github_tree_comparison","base":{"repo":{"id":7,"name":"repo","owner":"owner"},"revision":"main"},"head":{"repo":{"id":7,"name":"repo","owner":"owner"},"revision":"feature"},"url":"https://github.com/owner/repo/compare/main...feature"},{"type":"github_url","url":"https://github.com/owner/repo"},{"type":"github_file","path":"src/a.zig","ref":"main","repo":{"id":7,"name":"repo","owner":"owner"},"url":"https://github.com/owner/repo/blob/main/src/a.zig"},{"type":"github_snippet","lineRange":{"start":10,"end":12},"path":"src/a.zig","ref":"main","repo":{"id":7,"name":"repo","owner":"owner"},"url":"https://github.com/owner/repo/blob/main/src/a.zig#L10-L12"}]}}
+    , result.request_body);
+}
+
+test "session.send normalizes display names and omits absent optional fields" {
+    const repo = session_types.Attachment.GitHubRepoPointer{
+        .name = "repo",
+        .owner = "owner",
+    };
+    const attachments = [_]session_types.Attachment{
+        .{ .file = .{ .path = "/tmp/a.zig" } },
+        .{ .directory = .{ .path = "/tmp", .display_name = "" } },
+        .{ .selection = .{
+            .file_path = "/tmp/a.zig",
+            .text = "a",
+            .display_name = " \t",
+            .selection = .{
+                .start = .{ .line = 0, .character = 0 },
+                .end = .{ .line = 0, .character = 1 },
+            },
+        } },
+        .{ .blob = .{ .data = "YQ==", .mime_type = "text/plain" } },
+        .{ .github_actions_job = .{
+            .job_id = 1,
+            .job_name = "test",
+            .repo = repo,
+            .url = "https://github.com/owner/repo/actions",
+            .workflow_name = "CI",
+        } },
+        .{ .github_repository = .{
+            .repo = repo,
+            .url = "https://github.com/owner/repo",
+        } },
+    };
+
+    const result = try runSendRpc(std.testing.allocator, .{
+        .prompt = "inspect",
+        .attachments = &attachments,
+    });
+    defer std.testing.allocator.free(result.message_id);
+    defer std.testing.allocator.free(result.request_body);
+
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"inspect","attachments":[{"type":"file","path":"/tmp/a.zig","displayName":"a.zig"},{"type":"directory","path":"/tmp","displayName":"tmp"},{"type":"selection","filePath":"/tmp/a.zig","text":"a","displayName":"a.zig","selection":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}}},{"type":"blob","data":"YQ==","mimeType":"text/plain","displayName":"attachment"},{"type":"github_actions_job","jobId":1,"jobName":"test","repo":{"name":"repo","owner":"owner"},"url":"https://github.com/owner/repo/actions","workflowName":"CI"},{"type":"github_repository","repo":{"name":"repo","owner":"owner"},"url":"https://github.com/owner/repo"}]}}
+    , result.request_body);
+}
+
+test "session.send distinguishes omitted and empty attachments" {
+    const omitted = try runSendRpc(std.testing.allocator, .{
+        .prompt = "omitted",
+        .attachments = null,
+    });
+    defer std.testing.allocator.free(omitted.message_id);
+    defer std.testing.allocator.free(omitted.request_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"omitted"}}
+    , omitted.request_body);
+
+    const empty = try runSendRpc(std.testing.allocator, .{
+        .prompt = "empty",
+        .attachments = &.{},
+    });
+    defer std.testing.allocator.free(empty.message_id);
+    defer std.testing.allocator.free(empty.request_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"empty","attachments":[]}}
+    , empty.request_body);
+}
+
+test "session.send serializes every GitHub reference type" {
+    const attachments = [_]session_types.Attachment{
+        .{ .github_reference = .{
+            .number = 1,
+            .title = "Issue",
+            .reference_type = .issue,
+            .state = "open",
+            .url = "issue",
+        } },
+        .{ .github_reference = .{
+            .number = 2,
+            .title = "PR",
+            .reference_type = .pr,
+            .state = "merged",
+            .url = "pr",
+        } },
+        .{ .github_reference = .{
+            .number = 3,
+            .title = "Discussion",
+            .reference_type = .discussion,
+            .state = "open",
+            .url = "discussion",
+        } },
+    };
+    const result = try runSendRpc(std.testing.allocator, .{
+        .prompt = "references",
+        .attachments = &attachments,
+    });
+    defer std.testing.allocator.free(result.message_id);
+    defer std.testing.allocator.free(result.request_body);
+
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"references","attachments":[{"type":"github_reference","number":1,"title":"Issue","referenceType":"issue","state":"open","url":"issue"},{"type":"github_reference","number":2,"title":"PR","referenceType":"pr","state":"merged","url":"pr"},{"type":"github_reference","number":3,"title":"Discussion","referenceType":"discussion","state":"open","url":"discussion"}]}}
+    , result.request_body);
+}
+
+test "session.send serializes every GitHub file diff shape" {
+    const repo = session_types.Attachment.GitHubRepoPointer{
+        .name = "repo",
+        .owner = "owner",
+    };
+    const base = session_types.Attachment.GitHubFileDiffSide{
+        .path = "old.zig",
+        .git_ref = "main",
+        .repo = repo,
+    };
+    const head = session_types.Attachment.GitHubFileDiffSide{
+        .path = "new.zig",
+        .git_ref = "feature",
+        .repo = repo,
+    };
+    const attachments = [_]session_types.Attachment{
+        .{ .github_file_diff = .{
+            .sides = .{ .added = head },
+            .url = "added",
+        } },
+        .{ .github_file_diff = .{
+            .sides = .{ .deleted = base },
+            .url = "deleted",
+        } },
+        .{ .github_file_diff = .{
+            .sides = .{ .modified = .{ .base = base, .head = head } },
+            .url = "modified",
+        } },
+    };
+    const result = try runSendRpc(std.testing.allocator, .{
+        .prompt = "diffs",
+        .attachments = &attachments,
+    });
+    defer std.testing.allocator.free(result.message_id);
+    defer std.testing.allocator.free(result.request_body);
+
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"diffs","attachments":[{"type":"github_file_diff","head":{"path":"new.zig","ref":"feature","repo":{"name":"repo","owner":"owner"}},"url":"added"},{"type":"github_file_diff","base":{"path":"old.zig","ref":"main","repo":{"name":"repo","owner":"owner"}},"url":"deleted"},{"type":"github_file_diff","base":{"path":"old.zig","ref":"main","repo":{"name":"repo","owner":"owner"}},"head":{"path":"new.zig","ref":"feature","repo":{"name":"repo","owner":"owner"}},"url":"modified"}]}}
+    , result.request_body);
+}
+
+test "session.send preserves attachment order" {
+    const attachments = [_]session_types.Attachment{
+        .{ .github_url = .{ .url = "first" } },
+        .{ .directory = .{ .path = "second" } },
+        .{ .blob = .{ .data = "dGhpcmQ=", .mime_type = "text/plain" } },
+    };
+    const result = try runSendRpc(std.testing.allocator, .{
+        .prompt = "order",
+        .attachments = &attachments,
+    });
+    defer std.testing.allocator.free(result.message_id);
+    defer std.testing.allocator.free(result.request_body);
+
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"order","attachments":[{"type":"github_url","url":"first"},{"type":"directory","path":"second","displayName":"second"},{"type":"blob","data":"dGhpcmQ=","mimeType":"text/plain","displayName":"attachment"}]}}
+    , result.request_body);
+}
+
+test "session.sendAndWait cleans its message id and returns an owned assistant message" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const response_body =
+        \\{"jsonrpc":"2.0","id":1,"result":{"messageId":"temporary-id"}}
+    ;
+    const response_frame = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ response_body.len, response_body },
+    );
+    defer allocator.free(response_frame);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "response",
+        .data = response_frame,
+    });
+    const response_file = try tmp.dir.openFile(
+        std.testing.io,
+        "response",
+        .{ .mode = .read_only },
+    );
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.events.items) |*event| event.deinit(allocator);
+        client.events.deinit(allocator);
+        client.session_ids.deinit(allocator);
+    }
+    try client.events.append(allocator, .{
+        .session_id = try allocator.dupe(u8, "session-1"),
+        .event = .{ .assistant_message = .{
+            .content = try allocator.dupe(u8, "answer"),
+            .message_id = try allocator.dupe(u8, "assistant-id"),
+        } },
+    });
+    try client.events.append(allocator, .{
+        .session_id = try allocator.dupe(u8, "session-1"),
+        .event = .{ .session_idle = .{} },
+    });
+
+    const attachments = [_]session_types.Attachment{
+        .{ .file = .{ .path = "/tmp/a.zig" } },
+    };
+    const message = (try (Session{
+        .client = &client,
+        .id = "session-1",
+    }).sendAndWait(.{
+        .prompt = "inspect",
+        .attachments = &attachments,
+    })).?;
+    defer message.deinit(allocator);
+
+    try std.testing.expectEqualStrings("answer", message.content);
+    try std.testing.expectEqualStrings("assistant-id", message.message_id.?);
+    const request_frame = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "request",
+        allocator,
+        .limited(4096),
+    );
+    defer allocator.free(request_frame);
+    const request_body = try framedBody(allocator, request_frame);
+    defer allocator.free(request_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"inspect","attachments":[{"type":"file","path":"/tmp/a.zig","displayName":"a.zig"}]}}
+    , request_body);
 }
 
 test "client info maps to connect wire fields" {
