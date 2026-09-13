@@ -914,7 +914,7 @@ fn ownRpcFailure(
         try std.json.Stringify.valueAlloc(allocator, value, .{})
     else
         null;
-    errdefer if (data_json) |value| allocator.free(value);
+    errdefer if (data_json) |value| errors.freeRpcData(allocator, value);
     const context = try ownRpcOperationContext(allocator, view.context);
     return .{
         .method = owned_method,
@@ -1494,15 +1494,19 @@ const ShutdownOps = struct {
     terminate_child_once: *const fn (?*anyopaque, *Client) anyerror!void,
 };
 
-const ShutdownObserver = struct {
-    context: *anyopaque,
-    record: *const fn (*anyopaque, ?[]const u8, anyerror) void,
+const DetailedShutdownOps = struct {
+    context: ?*anyopaque,
+    disconnect_session_once: *const fn (
+        ?*anyopaque,
+        *Client,
+        []const u8,
+    ) errors.DetailedError!errors.DetailedResult(void),
+    terminate_child_once: *const fn (?*anyopaque, *Client) anyerror!void,
 };
 
-fn runShutdown(
+fn runLegacyShutdown(
     client: *Client,
     ops: ShutdownOps,
-    observer: ?ShutdownObserver,
 ) ?anyerror {
     var first_error: ?anyerror = null;
     var index = client.session_ids.items.len;
@@ -1511,12 +1515,10 @@ fn runShutdown(
         const session_id = client.session_ids.items[index];
         ops.disconnect_session_once(ops.context, client, session_id) catch |err| {
             if (first_error == null) first_error = err;
-            if (observer) |sink| sink.record(sink.context, session_id, err);
         };
     }
     ops.terminate_child_once(ops.context, client) catch |err| {
         if (first_error == null) first_error = err;
-        if (observer) |sink| sink.record(sink.context, null, err);
     };
     return first_error;
 }
@@ -1526,6 +1528,14 @@ fn disconnectForShutdown(_: ?*anyopaque, client: *Client, session_id: []const u8
         void,
         (Session{ .client = client, .id = session_id }).disconnectImpl(.legacy),
     );
+}
+
+fn disconnectDetailedForShutdown(
+    _: ?*anyopaque,
+    client: *Client,
+    session_id: []const u8,
+) errors.DetailedError!errors.DetailedResult(void) {
+    return (Session{ .client = client, .id = session_id }).disconnectImpl(.detailed);
 }
 
 fn terminateForShutdown(_: ?*anyopaque, client: *Client) !void {
@@ -1538,49 +1548,81 @@ const real_shutdown_ops = ShutdownOps{
     .terminate_child_once = terminateForShutdown,
 };
 
+const real_detailed_shutdown_ops = DetailedShutdownOps{
+    .context = null,
+    .disconnect_session_once = disconnectDetailedForShutdown,
+    .terminate_child_once = terminateForShutdown,
+};
+
 const ShutdownCollector = struct {
     allocator: std.mem.Allocator,
     storage: []errors.Failure,
     count: usize = 0,
     dropped: usize = 0,
 
-    fn record(context: *anyopaque, session_id: ?[]const u8, native_error: anyerror) void {
-        const self: *ShutdownCollector = @ptrCast(@alignCast(context));
+    fn recordOwned(self: *ShutdownCollector, failure: errors.Failure) void {
+        if (self.count == self.storage.len) {
+            var dropped_failure = failure;
+            dropped_failure.deinit();
+            self.dropped += 1;
+            return;
+        }
+        self.storage[self.count] = failure;
+        self.count += 1;
+    }
+
+    fn recordNative(self: *ShutdownCollector, native_error: anyerror) void {
         if (self.count == self.storage.len) {
             self.dropped += 1;
             return;
         }
-        const detail: errors.FailureDetail = if (session_id) |id| blk: {
-            const owned_id = self.allocator.dupe(u8, id) catch |err| switch (err) {
-                error.OutOfMemory => {
-                    self.dropped += 1;
-                    return;
-                },
-            };
-            break :blk .{ .session = .{ .detach_failed = .{
-                .session_id = owned_id,
-                .attempts = 1,
-                .rpc = null,
-                .message = null,
-            } } };
-        } else {
-            self.storage[self.count] = recordProcessTerminate(
-                self.allocator,
-                null,
-                native_error,
-            ) catch |err| switch (err) {
-                error.OutOfMemory => {
-                    self.dropped += 1;
-                    return;
-                },
-            };
-            self.count += 1;
-            return;
+        const failure = recordProcessTerminate(
+            self.allocator,
+            null,
+            native_error,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => {
+                self.dropped += 1;
+                return;
+            },
         };
-        self.storage[self.count] = recordFailure(self.allocator, native_error, detail);
-        self.count += 1;
+        self.recordOwned(failure);
     }
 };
+
+fn runDetailedShutdown(
+    client: *Client,
+    ops: DetailedShutdownOps,
+    collector: *ShutdownCollector,
+) ?anyerror {
+    var first_error: ?anyerror = null;
+    var index = client.session_ids.items.len;
+    while (index > 0) {
+        index -= 1;
+        const session_id = client.session_ids.items[index];
+        const result = ops.disconnect_session_once(
+            ops.context,
+            client,
+            session_id,
+        ) catch |err| {
+            if (first_error == null) first_error = err;
+            collector.dropped += 1;
+            continue;
+        };
+        switch (result) {
+            .success => {},
+            .failure => |failure| {
+                if (first_error == null) first_error = failure.native_error;
+                collector.recordOwned(failure);
+            },
+        }
+    }
+    ops.terminate_child_once(ops.context, client) catch |err| {
+        if (first_error == null) first_error = err;
+        collector.recordNative(err);
+    };
+    return first_error;
+}
 
 pub const Client = struct {
     allocator: std.mem.Allocator,
@@ -1791,16 +1833,16 @@ pub const Client = struct {
     }
 
     pub fn stop(self: *Client) !void {
-        if (runShutdown(self, real_shutdown_ops, null)) |err| return err;
+        if (runLegacyShutdown(self, real_shutdown_ops)) |err| return err;
     }
 
     pub fn stopDetailed(self: *Client) errors.DetailedResult(void) {
-        return stopDetailedWithOps(self, real_shutdown_ops, self.child != null);
+        return stopDetailedWithOps(self, real_detailed_shutdown_ops, self.child != null);
     }
 
     fn stopDetailedWithOps(
         self: *Client,
-        ops: ShutdownOps,
+        ops: DetailedShutdownOps,
         child_attempted: bool,
     ) errors.DetailedResult(void) {
         const session_count = self.session_ids.items.len;
@@ -1812,10 +1854,7 @@ pub const Client = struct {
             .allocator = self.allocator,
             .storage = storage,
         };
-        const native_error = runShutdown(self, ops, .{
-            .context = &collector,
-            .record = ShutdownCollector.record,
-        }) orelse {
+        const native_error = runDetailedShutdown(self, ops, &collector) orelse {
             if (collector.storage.len != 0) self.allocator.free(collector.storage);
             return .{ .success = {} };
         };
@@ -6660,14 +6699,93 @@ const ShutdownProbe = struct {
     }
 };
 
-const ShutdownRecordProbe = struct {
-    calls: usize = 0,
-    drop_all: bool,
+const DetailedShutdownProbe = struct {
+    attempted: [3][]const u8 = undefined,
+    attempt_count: usize = 0,
+    terminate_count: usize = 0,
+    disconnect_errors: [3]?anyerror,
+    terminate_error: ?anyerror,
+    failure_allocator: std.mem.Allocator,
 
-    fn record(context: *anyopaque, _: ?[]const u8, _: anyerror) void {
-        const self: *ShutdownRecordProbe = @ptrCast(@alignCast(context));
-        self.calls += 1;
-        if (self.drop_all) return;
+    fn disconnect(
+        context: ?*anyopaque,
+        _: *Client,
+        session_id: []const u8,
+    ) errors.DetailedError!errors.DetailedResult(void) {
+        const self: *DetailedShutdownProbe = @ptrCast(@alignCast(context.?));
+        const attempt = self.attempt_count;
+        self.attempted[attempt] = session_id;
+        self.attempt_count += 1;
+        const native_error = self.disconnect_errors[attempt] orelse
+            return .{ .success = {} };
+        const owned_session_id = try self.failure_allocator.dupe(u8, session_id);
+        errdefer self.failure_allocator.free(owned_session_id);
+        const message = try self.failure_allocator.dupe(u8, @errorName(native_error));
+        return .{ .failure = recordFailure(
+            self.failure_allocator,
+            native_error,
+            .{ .session = .{ .detach_failed = .{
+                .session_id = owned_session_id,
+                .attempts = 1,
+                .rpc = null,
+                .message = message,
+            } } },
+        ) };
+    }
+
+    fn terminate(context: ?*anyopaque, _: *Client) !void {
+        const self: *DetailedShutdownProbe = @ptrCast(@alignCast(context.?));
+        self.terminate_count += 1;
+        if (self.terminate_error) |err| return err;
+    }
+};
+
+const DetailedRpcShutdownProbe = struct {
+    attempted: [3][]const u8 = undefined,
+    attempt_count: usize = 0,
+    terminate_count: usize = 0,
+    failure_allocator: std.mem.Allocator,
+
+    fn disconnect(
+        context: ?*anyopaque,
+        _: *Client,
+        session_id: []const u8,
+    ) errors.DetailedError!errors.DetailedResult(void) {
+        const self: *DetailedRpcShutdownProbe = @ptrCast(@alignCast(context.?));
+        const attempt = self.attempt_count;
+        self.attempted[attempt] = session_id;
+        self.attempt_count += 1;
+        if (attempt != 0) return .{ .success = {} };
+
+        const remote_error =
+            \\{"code":-32077,"message":"detach denied","data":{"code":"detach_denied","token":"literal-secret"}}
+        ;
+        const parsed = std.json.parseFromSlice(
+            std.json.Value,
+            self.failure_allocator,
+            remote_error,
+            .{},
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable,
+        };
+        defer parsed.deinit();
+        const view = switch (validateRpcFailure(
+            "session.detach",
+            41,
+            .{ .session = .{ .session_id = session_id } },
+            parsed.value,
+        )) {
+            .valid => |view| view,
+            .invalid => return error.OutOfMemory,
+        };
+        return .{ .failure = try recordRpcFailure(self.failure_allocator, view) };
+    }
+
+    fn terminate(context: ?*anyopaque, _: *Client) !void {
+        const self: *DetailedRpcShutdownProbe = @ptrCast(@alignCast(context.?));
+        self.terminate_count += 1;
+        return error.AccessDenied;
     }
 };
 
@@ -6690,51 +6808,24 @@ test "shutdown attempts every initial session and child after all injected failu
         try client.session_ids.append(allocator, try allocator.dupe(u8, id));
     }
 
-    const cases = [_]struct {
-        disconnect_errors: [3]?anyerror,
-        terminate_error: ?anyerror,
-        drop_all_diagnostics: bool,
-        expected_first: anyerror,
-    }{
-        .{
-            .disconnect_errors = .{ error.BrokenPipe, error.OutOfMemory, error.EndOfStream },
-            .terminate_error = error.AccessDenied,
-            .drop_all_diagnostics = false,
-            .expected_first = error.BrokenPipe,
-        },
-        .{
-            .disconnect_errors = .{ error.BrokenPipe, error.OutOfMemory, error.EndOfStream },
-            .terminate_error = error.AccessDenied,
-            .drop_all_diagnostics = true,
-            .expected_first = error.BrokenPipe,
-        },
+    var operations = ShutdownProbe{
+        .disconnect_errors = .{ error.BrokenPipe, error.OutOfMemory, error.EndOfStream },
+        .terminate_error = error.AccessDenied,
     };
-
-    for (cases) |case| {
-        var operations = ShutdownProbe{
-            .disconnect_errors = case.disconnect_errors,
-            .terminate_error = case.terminate_error,
-        };
-        var records = ShutdownRecordProbe{ .drop_all = case.drop_all_diagnostics };
-        const result = runShutdown(&client, .{
-            .context = &operations,
-            .disconnect_session_once = ShutdownProbe.disconnect,
-            .terminate_child_once = ShutdownProbe.terminate,
-        }, .{
-            .context = &records,
-            .record = ShutdownRecordProbe.record,
-        });
-        try std.testing.expectEqual(case.expected_first, result.?);
-        try std.testing.expectEqual(@as(usize, 3), operations.attempt_count);
-        try std.testing.expectEqualStrings("s3", operations.attempted[0]);
-        try std.testing.expectEqualStrings("s2", operations.attempted[1]);
-        try std.testing.expectEqualStrings("s1", operations.attempted[2]);
-        try std.testing.expectEqual(@as(usize, 1), operations.terminate_count);
-        try std.testing.expectEqual(@as(usize, 4), records.calls);
-    }
+    const result = runLegacyShutdown(&client, .{
+        .context = &operations,
+        .disconnect_session_once = ShutdownProbe.disconnect,
+        .terminate_child_once = ShutdownProbe.terminate,
+    });
+    try std.testing.expectEqual(error.BrokenPipe, result.?);
+    try std.testing.expectEqual(@as(usize, 3), operations.attempt_count);
+    try std.testing.expectEqualStrings("s3", operations.attempted[0]);
+    try std.testing.expectEqualStrings("s2", operations.attempted[1]);
+    try std.testing.expectEqualStrings("s1", operations.attempted[2]);
+    try std.testing.expectEqual(@as(usize, 1), operations.terminate_count);
 }
 
-test "stopDetailed aggregates owned failures and attempt counts" {
+test "stopDetailed retains detach RPC failure details and completes cleanup" {
     std.debug.print("\nCENSUS_PROBE shutdown_behavior\n", .{});
     const allocator = std.testing.allocator;
     var client = Client{
@@ -6754,14 +6845,78 @@ test "stopDetailed aggregates owned failures and attempt counts" {
         try client.session_ids.append(allocator, try allocator.dupe(u8, id));
     }
 
-    var operations = ShutdownProbe{
+    var operations = DetailedRpcShutdownProbe{ .failure_allocator = allocator };
+    var failure = switch (client.stopDetailedWithOps(.{
+        .context = &operations,
+        .disconnect_session_once = DetailedRpcShutdownProbe.disconnect,
+        .terminate_child_once = DetailedRpcShutdownProbe.terminate,
+    }, true)) {
+        .success => return error.TestExpectedShutdownFailure,
+        .failure => |failure| failure,
+    };
+    defer failure.deinit();
+
+    try std.testing.expectEqual(error.JsonRpcError, failure.native_error);
+    const shutdown = switch (failure.detail) {
+        .shutdown => |shutdown| shutdown,
+        else => return error.TestExpectedShutdownFailure,
+    };
+    try std.testing.expectEqual(@as(usize, 3), operations.attempt_count);
+    try std.testing.expectEqualStrings("s3", operations.attempted[0]);
+    try std.testing.expectEqualStrings("s2", operations.attempted[1]);
+    try std.testing.expectEqualStrings("s1", operations.attempted[2]);
+    try std.testing.expectEqual(@as(usize, 1), operations.terminate_count);
+    try std.testing.expectEqual(@as(usize, 3), shutdown.sessions_attempted);
+    try std.testing.expect(shutdown.child_termination_attempted);
+    try std.testing.expectEqual(@as(usize, 2), shutdown.failure_count);
+    try std.testing.expectEqual(@as(usize, 0), shutdown.diagnostics_dropped);
+    const rpc = switch (shutdown.failures()[0].detail) {
+        .rpc => |rpc| rpc,
+        else => return error.TestExpectedRpcFailure,
+    };
+    try std.testing.expectEqualStrings("session.detach", rpc.method);
+    try std.testing.expectEqual(@as(u64, 41), rpc.request_id);
+    try std.testing.expectEqual(@as(i64, -32077), rpc.code);
+    try std.testing.expectEqualStrings("detach_denied", rpc.machine_code.?);
+    try std.testing.expectEqualStrings("detach denied", rpc.message);
+    try std.testing.expectEqualStrings(
+        "{\"code\":\"detach_denied\",\"token\":\"literal-secret\"}",
+        rpc.data_json.?,
+    );
+    switch (rpc.context) {
+        .session => |context| try std.testing.expectEqualStrings("s3", context.session_id),
+        else => return error.TestExpectedSessionContext,
+    }
+}
+
+test "stopDetailed aggregates owned failures and attempt counts" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = undefined,
+        .child = null,
+        .reader = undefined,
+        .writer = undefined,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        for (client.session_ids.items) |id| allocator.free(id);
+        client.session_ids.deinit(allocator);
+    }
+    for ([_][]const u8{ "s1", "s2", "s3" }) |id| {
+        try client.session_ids.append(allocator, try allocator.dupe(u8, id));
+    }
+
+    var operations = DetailedShutdownProbe{
         .disconnect_errors = .{ error.BrokenPipe, error.OutOfMemory, error.EndOfStream },
         .terminate_error = error.AccessDenied,
+        .failure_allocator = allocator,
     };
     var failure = switch (client.stopDetailedWithOps(.{
         .context = &operations,
-        .disconnect_session_once = ShutdownProbe.disconnect,
-        .terminate_child_once = ShutdownProbe.terminate,
+        .disconnect_session_once = DetailedShutdownProbe.disconnect,
+        .terminate_child_once = DetailedShutdownProbe.terminate,
     }, true)) {
         .success => return error.TestExpectedShutdownFailure,
         .failure => |failure| failure,
@@ -6821,14 +6976,15 @@ test "stopDetailed reports allocation-free dropped diagnostics" {
         try client.session_ids.append(allocator, try allocator.dupe(u8, id));
     }
 
-    var operations = ShutdownProbe{
+    var operations = DetailedShutdownProbe{
         .disconnect_errors = .{ error.BrokenPipe, error.EndOfStream, error.ConnectionResetByPeer },
         .terminate_error = error.AccessDenied,
+        .failure_allocator = allocator,
     };
     var failure = switch (client.stopDetailedWithOps(.{
         .context = &operations,
-        .disconnect_session_once = ShutdownProbe.disconnect,
-        .terminate_child_once = ShutdownProbe.terminate,
+        .disconnect_session_once = DetailedShutdownProbe.disconnect,
+        .terminate_child_once = DetailedShutdownProbe.terminate,
     }, true)) {
         .success => return error.TestExpectedShutdownFailure,
         .failure => |failure| failure,
@@ -10764,6 +10920,92 @@ test "failure constructors roll back every allocation failure" {
         exerciseFailureConstructors,
         .{},
     );
+}
+
+const RpcDataWipeProbe = struct {
+    var calls: usize = 0;
+    var saw_nonzero: bool = false;
+
+    fn reset() void {
+        calls = 0;
+        saw_nonzero = false;
+    }
+
+    fn observe(data: []const u8) void {
+        calls += 1;
+        for (data) |byte| {
+            if (byte != 0) saw_nonzero = true;
+        }
+    }
+};
+
+test "nested RPC failure deinit wipes canonical data before free" {
+    const allocator = std.testing.allocator;
+    const remote_error =
+        \\{"code":-32077,"message":"denied","data":{"token":"literal-secret"}}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, remote_error, .{});
+    defer parsed.deinit();
+    const view = switch (validateRpcFailure(
+        "permission.respond",
+        7,
+        .{ .permission = .{ .session_id = "s1", .request_id = "p1" } },
+        parsed.value,
+    )) {
+        .valid => |view| view,
+        .invalid => return error.TestExpectedRpcFailure,
+    };
+    var failure = try recordRpcFailure(allocator, view);
+    RpcDataWipeProbe.reset();
+    errors.setRpcDataWipeObserverForTest(RpcDataWipeProbe.observe);
+    defer errors.setRpcDataWipeObserverForTest(null);
+    failure.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), RpcDataWipeProbe.calls);
+    try std.testing.expect(!RpcDataWipeProbe.saw_nonzero);
+}
+
+test "RPC ownership rollback wipes canonical data when context allocation fails" {
+    const allocator = std.testing.allocator;
+    const remote_error =
+        \\{"code":-32077,"message":"denied","data":{"token":"literal-secret"}}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, remote_error, .{});
+    defer parsed.deinit();
+    const validated = switch (validateRpcFailure(
+        "session.detach",
+        9,
+        .generic,
+        parsed.value,
+    )) {
+        .valid => |view| view,
+        .invalid => return error.TestExpectedRpcFailure,
+    };
+
+    var counting = std.testing.FailingAllocator.init(allocator, .{});
+    const counted = try ownRpcFailure(counting.allocator(), validated);
+    var counted_failure = recordFailure(
+        counting.allocator(),
+        error.JsonRpcError,
+        .{ .rpc = counted },
+    );
+    counted_failure.deinit();
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = counting.alloc_index,
+    });
+    var context_view = validated;
+    context_view.context = .{ .session = .{ .session_id = "sensitive-session" } };
+    RpcDataWipeProbe.reset();
+    errors.setRpcDataWipeObserverForTest(RpcDataWipeProbe.observe);
+    defer errors.setRpcDataWipeObserverForTest(null);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        ownRpcFailure(failing.allocator(), context_view),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), RpcDataWipeProbe.calls);
+    try std.testing.expect(!RpcDataWipeProbe.saw_nonzero);
 }
 
 fn exerciseSessionFailureFromFrame(allocator: std.mem.Allocator) !void {
