@@ -181,23 +181,32 @@ pub const TurnTracker = struct {
                 const turn_id = payload.data.turn_id orelse return;
                 if (self.findByMessage(message_id)) |receipt| {
                     try self.bindTurn(receipt, turn_id);
+                    self.clearOrphansIfNoUnboundReceipt();
                 } else if (self.hasUnboundReceipt()) {
                     try self.storeUserTurn(message_id, turn_id);
                 }
             },
             .assistant_message => |message| {
                 const turn_id = message.turn_id orelse return;
-                if (self.findByTurn(turn_id)) |receipt| {
+                for (self.receipts) |*receipt| {
+                    if (!receipt.active) continue;
+                    const candidate = receipt.turn_id orelse continue;
+                    if (!std.mem.eql(u8, candidate, turn_id)) continue;
                     try self.replaceAssistant(receipt, event);
-                } else if (self.hasUnboundReceipt()) {
+                }
+                if (self.hasUnboundReceipt()) {
                     try self.storeAssistant(turn_id, event);
                 }
             },
             .assistant_turn_end => |payload| {
                 const turn_id = payload.data.turn_id;
-                if (self.findByTurn(turn_id)) |receipt| {
+                for (self.receipts) |*receipt| {
+                    if (!receipt.active) continue;
+                    const candidate = receipt.turn_id orelse continue;
+                    if (!std.mem.eql(u8, candidate, turn_id)) continue;
                     self.completeReceipt(receipt);
-                } else if (self.hasUnboundReceipt()) {
+                }
+                if (self.hasUnboundReceipt()) {
                     try self.storeTurnEnd(turn_id);
                 }
             },
@@ -239,13 +248,10 @@ pub const TurnTracker = struct {
             return;
         }
         receipt.turn_id = try self.allocator.dupe(u8, turn_id);
-        if (self.takeTurnFacts(turn_id)) |facts_value| {
-            var facts = facts_value;
-            defer self.deinitTurnFacts(&facts);
+        if (self.findOrphanTurn(turn_id)) |facts| {
             if (facts.latest_assistant) |message| {
-                if (receipt.latest_assistant) |previous| previous.deinit(self.allocator);
-                receipt.latest_assistant = message;
-                facts.latest_assistant = null;
+                const event = session.SessionEvent{ .assistant_message = message };
+                try self.replaceAssistant(receipt, event);
             }
             if (facts.completed) self.completeReceipt(receipt);
         }
@@ -341,7 +347,7 @@ pub const TurnTracker = struct {
 
     fn hasUnboundReceipt(self: *TurnTracker) bool {
         for (self.receipts) |receipt| {
-            if (receipt.active and receipt.message_id == null) return true;
+            if (receipt.active and receipt.turn_id == null) return true;
         }
         return false;
     }
@@ -357,15 +363,6 @@ pub const TurnTracker = struct {
         self.orphan_turns.clearRetainingCapacity();
     }
 
-    fn findByTurn(self: *TurnTracker, turn_id: []const u8) ?*Receipt {
-        for (self.receipts) |*receipt| {
-            if (!receipt.active) continue;
-            const candidate = receipt.turn_id orelse continue;
-            if (std.mem.eql(u8, candidate, turn_id)) return receipt;
-        }
-        return null;
-    }
-
     fn findOrphanTurn(self: *TurnTracker, turn_id: []const u8) ?*TurnFacts {
         for (self.orphan_turns.items) |*facts| {
             if (std.mem.eql(u8, facts.turn_id, turn_id)) return facts;
@@ -377,14 +374,6 @@ pub const TurnTracker = struct {
         for (self.orphan_users.items, 0..) |item, index| {
             if (std.mem.eql(u8, item.message_id, message_id))
                 return self.orphan_users.orderedRemove(index);
-        }
-        return null;
-    }
-
-    fn takeTurnFacts(self: *TurnTracker, turn_id: []const u8) ?TurnFacts {
-        for (self.orphan_turns.items, 0..) |item, index| {
-            if (std.mem.eql(u8, item.turn_id, turn_id))
-                return self.orphan_turns.orderedRemove(index);
         }
         return null;
     }
@@ -497,6 +486,90 @@ test "a prior raw send cannot satisfy a later waiter" {
     var message = result.completed.?;
     defer message.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("waited", message.content);
+}
+
+test "shared turn facts fan out to every matching receipt" {
+    var tracker = try TurnTracker.init(std.testing.allocator, std.testing.io, 4, 8);
+    defer tracker.deinit();
+
+    const first = try tracker.reserve(.waited);
+    try tracker.bindMessageId(first, "message-first");
+    const second = try tracker.reserve(.waited);
+    try tracker.bindMessageId(second, "message-second");
+
+    var assistant = try parseEvent(std.testing.allocator,
+        \\{"type":"assistant.message","data":{"content":"shared","messageId":"assistant","turnId":"turn-shared"}}
+    );
+    defer assistant.deinit(std.testing.allocator);
+    try tracker.observe(assistant);
+    var turn_end = try parseEvent(std.testing.allocator,
+        \\{"type":"assistant.turn_end","data":{"turnId":"turn-shared"}}
+    );
+    defer turn_end.deinit(std.testing.allocator);
+    try tracker.observe(turn_end);
+
+    var first_user = try parseEvent(std.testing.allocator,
+        \\{"type":"user.message","data":{"content":"p","messageId":"message-first","turnId":"turn-shared"}}
+    );
+    defer first_user.deinit(std.testing.allocator);
+    try tracker.observe(first_user);
+    var second_user = try parseEvent(std.testing.allocator,
+        \\{"type":"user.message","data":{"content":"p","messageId":"message-second","turnId":"turn-shared"}}
+    );
+    defer second_user.deinit(std.testing.allocator);
+    try tracker.observe(second_user);
+
+    const first_result = try tracker.inspect(first);
+    var first_message = first_result.completed.?;
+    defer first_message.deinit(std.testing.allocator);
+    const second_result = try tracker.inspect(second);
+    var second_message = second_result.completed.?;
+    defer second_message.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("shared", first_message.content);
+    try std.testing.expectEqualStrings("shared", second_message.content);
+    try std.testing.expect(first_message.content.ptr != second_message.content.ptr);
+}
+
+test "shared turn facts remain available for a later correlation" {
+    var tracker = try TurnTracker.init(std.testing.allocator, std.testing.io, 4, 8);
+    defer tracker.deinit();
+
+    const first = try tracker.reserve(.waited);
+    try tracker.bindMessageId(first, "message-first");
+    const second = try tracker.reserve(.waited);
+    try tracker.bindMessageId(second, "message-second");
+
+    var first_user = try parseEvent(std.testing.allocator,
+        \\{"type":"user.message","data":{"content":"p","messageId":"message-first","turnId":"turn-shared"}}
+    );
+    defer first_user.deinit(std.testing.allocator);
+    try tracker.observe(first_user);
+    var assistant = try parseEvent(std.testing.allocator,
+        \\{"type":"assistant.message","data":{"content":"shared","messageId":"assistant","turnId":"turn-shared"}}
+    );
+    defer assistant.deinit(std.testing.allocator);
+    try tracker.observe(assistant);
+    var turn_end = try parseEvent(std.testing.allocator,
+        \\{"type":"assistant.turn_end","data":{"turnId":"turn-shared"}}
+    );
+    defer turn_end.deinit(std.testing.allocator);
+    try tracker.observe(turn_end);
+
+    var second_user = try parseEvent(std.testing.allocator,
+        \\{"type":"user.message","data":{"content":"p","messageId":"message-second","turnId":"turn-shared"}}
+    );
+    defer second_user.deinit(std.testing.allocator);
+    try tracker.observe(second_user);
+
+    const first_result = try tracker.inspect(first);
+    var first_message = first_result.completed.?;
+    defer first_message.deinit(std.testing.allocator);
+    const second_result = try tracker.inspect(second);
+    var second_message = second_result.completed.?;
+    defer second_message.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("shared", first_message.content);
+    try std.testing.expectEqualStrings("shared", second_message.content);
+    try std.testing.expect(first_message.content.ptr != second_message.content.ptr);
 }
 
 test "unrelated completed turns are bounded and do not fail active waits" {

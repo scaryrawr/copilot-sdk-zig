@@ -149,6 +149,7 @@ const attachments = [_]copilot.MessageAttachment{
             .start = .{ .line = 12, .character = 0 },
             .end = .{ .line = 28, .character = 0 },
         },
+        .text = "const result = try run();",
     } },
 };
 const headers = [_]copilot.RequestHeader{
@@ -169,8 +170,12 @@ defer allocator.free(message_id);
 
 `MessageOptions` borrows the prompt, the attachment slice, and all attachment
 data until `send` or `sendAndWait` returns. These inputs require no `deinit`.
-File, directory, and blob display names are optional. A selection requires a
-display name. Its range and text are independent optional fields.
+The stable public types match the Node SDK: file, directory, and blob display
+names are optional, and a selection requires only a display name while its range
+and text are independently optional. The currently pinned CLI wire schema is
+stricter: file and directory attachments require `display_name`, and selections
+require both `selection` and `text`. Zig rejects incomplete values locally before
+sending an RPC rather than inventing attachment data.
 
 `sendAndWait` waits for up to 60 seconds. Use `sendAndWaitWithOptions` to set a
 different timeout or stop only the local wait:

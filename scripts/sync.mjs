@@ -856,34 +856,325 @@ function verifyExtensibilitySourceContract(
 }
 
 function verifyOutboundMessageEnumContract(typesSource, zigSessionSource) {
-  const messageOptions = interfacePropertySignatures(typesSource, "MessageOptions");
-  const zigMessageOptions = zigStructFields(zigSessionSource, "MessageOptions");
-  const contracts = [
+  requireExactPropertySignatures(
+    interfacePropertySignatures(typesSource, "MessageOptions"),
     {
-      field: "mode",
-      signature: 'optional:"enqueue"|"immediate"',
-      zigField: "mode",
+      prompt: "required:string",
+      source: "optional:MessageSource",
+      attachments:
+        'optional:Array<|{type:"file";path:string;displayName?:string;}|{type:"directory";path:string;displayName?:string;}|{type:"selection";filePath:string;displayName:string;selection?:{start:{line:number;character:number};end:{line:number;character:number};};text?:string;}|{type:"blob";data:string;mimeType:string;displayName?:string;}>',
+      mode: 'optional:"enqueue"|"immediate"',
+      agentMode: 'optional:"interactive"|"plan"|"autopilot"|"shell"',
+      requestHeaders: "optional:Record<string,string>",
+      displayPrompt: "optional:string",
+    },
+    "MessageOptions",
+  );
+
+  const messageSource = findTypeAlias(
+    typesSource,
+    "MessageSource",
+    "MessageSource",
+  );
+  const messageSourceType = messageSource.node.type;
+
+  assert(
+    ts.isUnionTypeNode(messageSourceType) &&
+      messageSourceType.types.length === 3,
+    "upstream MessageSource union changed",
+  );
+
+  const [userSource, systemSource, agentSource] = messageSourceType.types;
+
+  assert(
+    ts.isLiteralTypeNode(userSource) &&
+      ts.isStringLiteralLike(userSource.literal) &&
+      userSource.literal.text === "user",
+    "upstream MessageSource.user changed",
+  );
+  assert(
+    ts.isLiteralTypeNode(systemSource) &&
+      ts.isStringLiteralLike(systemSource.literal) &&
+      systemSource.literal.text === "system",
+    "upstream MessageSource.system changed",
+  );
+  assert(
+    ts.isTemplateLiteralTypeNode(agentSource) &&
+      agentSource.head.text === "agent-" &&
+      agentSource.templateSpans.length === 1 &&
+      agentSource.templateSpans[0].type.kind === ts.SyntaxKind.StringKeyword &&
+      ts.isTemplateTail(agentSource.templateSpans[0].literal) &&
+      agentSource.templateSpans[0].literal.text === "",
+    "upstream MessageSource agent template changed",
+  );
+
+  requireExactPropertySignatures(
+    zigStructFields(zigSessionSource, "MessageOptions"),
+    {
+      prompt: {
+        type: "[]const u8",
+        default: null,
+      },
+      source: {
+        type: "?MessageSource",
+        default: "null",
+      },
+      attachments: {
+        type: "?[]const MessageAttachment",
+        default: "null",
+      },
+      mode: {
+        type: "?MessageDeliveryMode",
+        default: "null",
+      },
+      agent_mode: {
+        type: "?AgentMode",
+        default: "null",
+      },
+      request_headers: {
+        type: "?[]const RequestHeader",
+        default: "null",
+      },
+      display_prompt: {
+        type: "?[]const u8",
+        default: "null",
+      },
+    },
+    "Zig MessageOptions",
+  );
+
+  requireExactPropertySignatures(
+    zigStructFields(zigSessionSource, "RequestHeader"),
+    {
+      name: {
+        type: "[]const u8",
+        default: null,
+      },
+      value: {
+        type: "[]const u8",
+        default: null,
+      },
+    },
+    "Zig RequestHeader",
+  );
+
+  const zigMessageSourceSection = sourceSection(
+    zigSessionSource,
+    "pub const MessageSource = union(enum) {",
+    "pub const MessageDeliveryMode = enum {",
+    "Zig MessageSource",
+  );
+  const zigMessageSourceAsStruct = zigMessageSourceSection
+    .replace("union(enum)", "struct")
+    .replace(/\buser\s*,/, "user: void,")
+    .replace(/\bsystem\s*,/, "system: void,");
+
+  requireExactPropertySignatures(
+    zigStructFields(zigMessageSourceAsStruct, "MessageSource"),
+    {
+      user: {
+        type: "void",
+        default: null,
+      },
+      system: {
+        type: "void",
+        default: null,
+      },
+      agent: {
+        type: "[]const u8",
+        default: null,
+      },
+    },
+    "Zig MessageSource",
+  );
+
+  const zigMessageAttachmentSection = sourceSection(
+    zigSessionSource,
+    "pub const MessageAttachment = union(enum) {",
+    "pub const Attachment = union(enum) {",
+    "Zig MessageAttachment",
+  );
+
+  const zigMessageAttachmentVariants = sourceSection(
+    zigMessageAttachmentSection,
+    "pub const MessageAttachment = union(enum) {",
+    "    pub const SelectionPosition = struct {",
+    "Zig MessageAttachment variants",
+  )
+    .replace("union(enum)", "struct")
+    .concat("};");
+
+  requireExactPropertySignatures(
+    zigStructFields(zigMessageAttachmentVariants, "MessageAttachment"),
+    {
+      file: {
+        type: "File",
+        default: null,
+      },
+      directory: {
+        type: "Directory",
+        default: null,
+      },
+      selection: {
+        type: "Selection",
+        default: null,
+      },
+      blob: {
+        type: "Blob",
+        default: null,
+      },
+    },
+    "Zig MessageAttachment variants",
+  );
+
+  const selectionPositionSource = sourceSection(
+    zigMessageAttachmentSection,
+    "    pub const SelectionPosition = struct {",
+    "    pub const SelectionRange = struct {",
+    "Zig MessageAttachment.SelectionPosition",
+  );
+  requireExactPropertySignatures(
+    zigStructFields(selectionPositionSource, "SelectionPosition"),
+    {
+      line: {
+        type: "u32",
+        default: null,
+      },
+      character: {
+        type: "u32",
+        default: null,
+      },
+    },
+    "Zig MessageAttachment.SelectionPosition",
+  );
+
+  const selectionRangeSource = sourceSection(
+    zigMessageAttachmentSection,
+    "    pub const SelectionRange = struct {",
+    "    pub const File = struct {",
+    "Zig MessageAttachment.SelectionRange",
+  );
+  requireExactPropertySignatures(
+    zigStructFields(selectionRangeSource, "SelectionRange"),
+    {
+      start: {
+        type: "SelectionPosition",
+        default: null,
+      },
+      end: {
+        type: "SelectionPosition",
+        default: null,
+      },
+    },
+    "Zig MessageAttachment.SelectionRange",
+  );
+
+  const fileAttachmentSource = sourceSection(
+    zigMessageAttachmentSection,
+    "    pub const File = struct {",
+    "    pub const Directory = struct {",
+    "Zig MessageAttachment.File",
+  );
+  requireExactPropertySignatures(
+    zigStructFields(fileAttachmentSource, "File"),
+    {
+      path: {
+        type: "[]const u8",
+        default: null,
+      },
+      display_name: {
+        type: "?[]const u8",
+        default: "null",
+      },
+    },
+    "Zig MessageAttachment.File",
+  );
+
+  const directoryAttachmentSource = sourceSection(
+    zigMessageAttachmentSection,
+    "    pub const Directory = struct {",
+    "    pub const Selection = struct {",
+    "Zig MessageAttachment.Directory",
+  );
+  requireExactPropertySignatures(
+    zigStructFields(directoryAttachmentSource, "Directory"),
+    {
+      path: {
+        type: "[]const u8",
+        default: null,
+      },
+      display_name: {
+        type: "?[]const u8",
+        default: "null",
+      },
+    },
+    "Zig MessageAttachment.Directory",
+  );
+
+  const selectionAttachmentSource = sourceSection(
+    zigMessageAttachmentSection,
+    "    pub const Selection = struct {",
+    "    pub const Blob = struct {",
+    "Zig MessageAttachment.Selection",
+  );
+  requireExactPropertySignatures(
+    zigStructFields(selectionAttachmentSource, "Selection"),
+    {
+      file_path: {
+        type: "[]const u8",
+        default: null,
+      },
+      display_name: {
+        type: "[]const u8",
+        default: null,
+      },
+      selection: {
+        type: "?SelectionRange",
+        default: "null",
+      },
+      text: {
+        type: "?[]const u8",
+        default: "null",
+      },
+    },
+    "Zig MessageAttachment.Selection",
+  );
+
+  const blobAttachmentSource = sourceSection(
+    zigMessageAttachmentSection,
+    "    pub const Blob = struct {",
+    "\n};\n\n",
+    "Zig MessageAttachment.Blob",
+  );
+  requireExactPropertySignatures(
+    zigStructFields(blobAttachmentSource, "Blob"),
+    {
+      data: {
+        type: "[]const u8",
+        default: null,
+      },
+      mime_type: {
+        type: "[]const u8",
+        default: null,
+      },
+      display_name: {
+        type: "?[]const u8",
+        default: "null",
+      },
+    },
+    "Zig MessageAttachment.Blob",
+  );
+
+  for (const contract of [
+    {
       zig: "MessageDeliveryMode",
       values: ["enqueue", "immediate"],
     },
     {
-      field: "agentMode",
-      signature: 'optional:"interactive"|"plan"|"autopilot"|"shell"',
-      zigField: "agent_mode",
       zig: "AgentMode",
       values: ["interactive", "plan", "autopilot", "shell"],
     },
-  ];
-  for (const contract of contracts) {
-    assert(
-      messageOptions[contract.field] === contract.signature,
-      `MessageOptions.${contract.field} changed`,
-    );
-    assert(
-      zigMessageOptions[contract.zigField]?.type === `?${contract.zig}` &&
-        zigMessageOptions[contract.zigField]?.default === "null",
-      `Zig MessageOptions.${contract.zigField} changed`,
-    );
+  ]) {
     requireExactStrings(
       zigEnumValues(zigSessionSource, contract.zig),
       contract.values,

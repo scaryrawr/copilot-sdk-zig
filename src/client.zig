@@ -1707,6 +1707,20 @@ fn validateMessageOptions(options: session_types.MessageOptions) !void {
         .agent => |name| if (name.len == 0) return error.InvalidMessageSource,
         else => {},
     };
+    if (options.attachments) |attachments| {
+        for (attachments) |attachment| switch (attachment) {
+            .file => |file| if (file.display_name == null)
+                return error.MissingAttachmentDisplayName,
+            .directory => |directory| if (directory.display_name == null)
+                return error.MissingAttachmentDisplayName,
+            .selection => |selection| if (selection.selection == null or
+                selection.text == null)
+            {
+                return error.IncompleteSelectionAttachment;
+            },
+            .blob => {},
+        };
+    }
     if (options.request_headers) |headers| {
         for (headers, 0..) |header, index| {
             if (!isValidHeaderName(header.name)) return error.InvalidRequestHeaderName;
@@ -1716,6 +1730,47 @@ fn validateMessageOptions(options: session_types.MessageOptions) !void {
             }
         }
     }
+}
+
+fn messageValidationField(
+    options: session_types.MessageOptions,
+    err: anyerror,
+    buffer: []u8,
+) []const u8 {
+    if (options.attachments) |attachments| {
+        for (attachments, 0..) |attachment, index| switch (attachment) {
+            .file => |file| if (file.display_name == null and
+                err == error.MissingAttachmentDisplayName)
+            {
+                return std.fmt.bufPrint(
+                    buffer,
+                    "attachments[{d}].file.display_name",
+                    .{index},
+                ) catch "attachments";
+            },
+            .directory => |directory| if (directory.display_name == null and
+                err == error.MissingAttachmentDisplayName)
+            {
+                return std.fmt.bufPrint(
+                    buffer,
+                    "attachments[{d}].directory.display_name",
+                    .{index},
+                ) catch "attachments";
+            },
+            .selection => |selection| if ((selection.selection == null or
+                selection.text == null) and
+                err == error.IncompleteSelectionAttachment)
+            {
+                return std.fmt.bufPrint(
+                    buffer,
+                    "attachments[{d}].selection",
+                    .{index},
+                ) catch "attachments";
+            },
+            .blob => {},
+        };
+    }
+    return "message";
 }
 
 fn isValidHeaderName(name: []const u8) bool {
@@ -2987,7 +3042,8 @@ pub const Client = struct {
     provider_tokens: std.ArrayList(RegisteredProviderTokens) = .empty,
     pending_provider_tokens: ?RegisteredProviderTokens = null,
     rpc_handlers: std.ArrayList(RegisteredRpcHandler) = .empty,
-    dispatching_rpc_handler: bool = false,
+    rpc_handler_owner: ?std.Thread.Id = null,
+    rpc_handler_depth: usize = 0,
     direct_request_ids: [8]u64 = undefined,
     direct_request_count: usize = 0,
     buffered_responses: std.ArrayList(BufferedResponse) = .empty,
@@ -5140,7 +5196,7 @@ pub const Client = struct {
         context: OperationContext,
         dispatched: ?*bool,
     ) errors.DetailedError!PolicyResult(failure_policy, std.json.Parsed(Result)) {
-        if (self.dispatching_rpc_handler)
+        if (self.isRpcHandlerThread())
             return .{ .failure = try policyFailure(
                 failure_policy,
                 error.ReentrantRpcCall,
@@ -5589,6 +5645,33 @@ pub const Client = struct {
             self.pending_mutex.unlock(self.io);
             return;
         }
+    }
+
+    fn isRpcHandlerThread(self: *Client) bool {
+        self.pending_mutex.lockUncancelable(self.io);
+        defer self.pending_mutex.unlock(self.io);
+        return self.rpc_handler_depth != 0 and
+            self.rpc_handler_owner == std.Thread.getCurrentId();
+    }
+
+    fn beginRpcHandler(self: *Client) void {
+        const current_thread = std.Thread.getCurrentId();
+        self.pending_mutex.lockUncancelable(self.io);
+        defer self.pending_mutex.unlock(self.io);
+        std.debug.assert(
+            self.rpc_handler_owner == null or self.rpc_handler_owner == current_thread,
+        );
+        self.rpc_handler_owner = current_thread;
+        self.rpc_handler_depth += 1;
+    }
+
+    fn endRpcHandler(self: *Client) void {
+        self.pending_mutex.lockUncancelable(self.io);
+        defer self.pending_mutex.unlock(self.io);
+        std.debug.assert(self.rpc_handler_owner == std.Thread.getCurrentId());
+        std.debug.assert(self.rpc_handler_depth != 0);
+        self.rpc_handler_depth -= 1;
+        if (self.rpc_handler_depth == 0) self.rpc_handler_owner = null;
     }
 
     fn beginRpcCall(self: *Client) bool {
@@ -6118,8 +6201,8 @@ pub const Client = struct {
             self.allocator.free(json);
         };
 
-        self.dispatching_rpc_handler = true;
-        defer self.dispatching_rpc_handler = false;
+        self.beginRpcHandler();
+        defer self.endRpcHandler();
         const result_json = registered.handler(
             self.allocator,
             params_json,
@@ -6211,8 +6294,8 @@ pub const Client = struct {
             return;
         };
 
-        self.dispatching_rpc_handler = true;
-        defer self.dispatching_rpc_handler = false;
+        self.beginRpcHandler();
+        defer self.endRpcHandler();
 
         if (std.mem.eql(u8, method, "sessionFs.readFile")) {
             validateObjectFields(object, &.{ "sessionId", "path" }) catch {
@@ -6825,8 +6908,8 @@ pub const Client = struct {
         if (!std.mem.eql(u8, session_id, base.runtime_session_id))
             return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
         const invocation = ext.HookInvocation{ .session_id = session_id };
-        self.dispatching_rpc_handler = true;
-        defer self.dispatching_rpc_handler = false;
+        self.beginRpcHandler();
+        defer self.endRpcHandler();
 
         if (std.mem.eql(u8, hook_type, "preToolUse")) {
             const handler = runtime.hooks.on_pre_tool_use orelse
@@ -7149,8 +7232,8 @@ pub const Client = struct {
         else
             null;
         defer if (session_json) |value| self.allocator.free(value);
-        self.dispatching_rpc_handler = true;
-        defer self.dispatching_rpc_handler = false;
+        self.beginRpcHandler();
+        defer self.endRpcHandler();
 
         if (std.mem.eql(u8, method, "canvas.open")) {
             const input_json = if (object.get("input")) |value|
@@ -7261,8 +7344,8 @@ pub const Client = struct {
             "bearer token provider not registered",
         );
 
-        self.dispatching_rpc_handler = true;
-        defer self.dispatching_rpc_handler = false;
+        self.beginRpcHandler();
+        defer self.endRpcHandler();
         const token = token_provider.callback(self.allocator, .{
             .session_id = parsed.value.sessionId,
             .provider_name = parsed.value.providerName,
@@ -7333,8 +7416,8 @@ pub const Client = struct {
         const provider_config = runtime.git_hub_token_provider orelse
             return self.writeServerRequestError(writer, id, -32602, "unknown GitHub token registration");
 
-        self.dispatching_rpc_handler = true;
-        defer self.dispatching_rpc_handler = false;
+        self.beginRpcHandler();
+        defer self.endRpcHandler();
         var result = provider_config.callback(self.allocator, .{
             .host = parsed.value.host,
             .session_id = parsed.value.sessionId orelse runtime.session_id,
@@ -7385,8 +7468,8 @@ pub const Client = struct {
             return self.writeServerRequestError(writer, id, -32602, "unknown exit plan mode session");
         const handler = runtime.exit_plan_mode_handler orelse
             return self.writeTypedSuccess(writer, id, .{ .approved = true });
-        self.dispatching_rpc_handler = true;
-        defer self.dispatching_rpc_handler = false;
+        self.beginRpcHandler();
+        defer self.endRpcHandler();
         const result = handler(.{
             .session_id = parsed.value.sessionId,
             .summary = parsed.value.summary,
@@ -7438,8 +7521,8 @@ pub const Client = struct {
         const handler = runtime.auto_mode_switch_handler orelse
             return self.writeTypedSuccess(writer, id, .{ .response = session_types.AutoModeSwitchResponse.no });
 
-        self.dispatching_rpc_handler = true;
-        defer self.dispatching_rpc_handler = false;
+        self.beginRpcHandler();
+        defer self.endRpcHandler();
         const response = handler(.{
             .session_id = parsed.value.sessionId,
             .error_code = parsed.value.errorCode,
@@ -7487,8 +7570,8 @@ pub const Client = struct {
                 );
             };
 
-        self.dispatching_rpc_handler = true;
-        defer self.dispatching_rpc_handler = false;
+        self.beginRpcHandler();
+        defer self.endRpcHandler();
         const response = registered.handler(self.allocator, .{
             .session_id = parsed.value.sessionId,
             .question = parsed.value.question,
@@ -9726,12 +9809,17 @@ pub const Session = struct {
         comptime failure_policy: FailurePolicy,
         options: session_types.MessageOptions,
     ) errors.DetailedError!PolicyResult(failure_policy, []u8) {
+        var validation_field_buffer: [96]u8 = undefined;
         validateMessageOptions(options) catch |err|
             return .{ .failure = try policyFailure(
                 failure_policy,
                 err,
                 recordInvalidConfig,
-                .{ self.client.allocator, "message", err },
+                .{
+                    self.client.allocator,
+                    messageValidationField(options, err, &validation_field_buffer),
+                    err,
+                },
             ) };
         const resolved = switch (try self.resolveForPolicy(failure_policy)) {
             .success => |value| value,
@@ -9919,12 +10007,17 @@ pub const Session = struct {
         options: session_types.MessageOptions,
         wait_options: session_types.WaitOptions,
     ) errors.DetailedError!PolicyResult(failure_policy, ?session_types.AssistantMessage) {
+        var validation_field_buffer: [96]u8 = undefined;
         validateMessageOptions(options) catch |err|
             return .{ .failure = try policyFailure(
                 failure_policy,
                 err,
                 recordInvalidConfig,
-                .{ self.client.allocator, "message", err },
+                .{
+                    self.client.allocator,
+                    messageValidationField(options, err, &validation_field_buffer),
+                    err,
+                },
             ) };
         const resolved = switch (try self.resolveForPolicy(failure_policy)) {
             .success => |value| value,
@@ -18854,6 +18947,28 @@ fn captureNextRequestId(client: *Client, result: *u64) void {
     result.* = client.nextRequestId();
 }
 
+fn captureRpcHandlerState(client: *Client, result: *bool) void {
+    result.* = client.isRpcHandlerThread();
+}
+
+test "RPC handler reentrancy is scoped to the callback thread" {
+    var client = Client{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+    };
+    client.beginRpcHandler();
+    defer client.endRpcHandler();
+    try std.testing.expect(client.isRpcHandlerThread());
+
+    var other_thread_is_handler = true;
+    var future = try std.testing.io.concurrent(
+        captureRpcHandlerState,
+        .{ &client, &other_thread_is_handler },
+    );
+    future.await(std.testing.io);
+    try std.testing.expect(!other_thread_is_handler);
+}
+
 test "nested direct calls retain outer responses by request ID" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -19229,40 +19344,81 @@ test "session.send preserves omitted and empty collections" {
     , empty.request_body);
 }
 
-test "session.send preserves selection optionality" {
-    const attachments = [_]session_types.MessageAttachment{
-        .{ .selection = .{ .file_path = "a", .display_name = "neither" } },
-        .{ .selection = .{
-            .file_path = "b",
-            .display_name = "range",
-            .selection = .{
-                .start = .{ .line = 1, .character = 2 },
-                .end = .{ .line = 3, .character = 4 },
-            },
-        } },
-        .{ .selection = .{ .file_path = "c", .display_name = "text", .text = "" } },
-        .{ .selection = .{
-            .file_path = "d",
-            .display_name = "both",
-            .selection = .{
-                .start = .{ .line = 5, .character = 6 },
-                .end = .{ .line = 7, .character = 8 },
-            },
-            .text = "selected",
-        } },
+test "optional public attachments fail closed at the pinned wire boundary" {
+    const cases = [_]struct {
+        attachment: session_types.MessageAttachment,
+        expected_error: anyerror,
+        expected_field: []const u8,
+    }{
+        .{
+            .attachment = .{ .file = .{ .path = "a" } },
+            .expected_error = error.MissingAttachmentDisplayName,
+            .expected_field = "attachments[0].file.display_name",
+        },
+        .{
+            .attachment = .{ .directory = .{ .path = "dir" } },
+            .expected_error = error.MissingAttachmentDisplayName,
+            .expected_field = "attachments[0].directory.display_name",
+        },
+        .{
+            .attachment = .{ .selection = .{
+                .file_path = "a",
+                .display_name = "neither",
+            } },
+            .expected_error = error.IncompleteSelectionAttachment,
+            .expected_field = "attachments[0].selection",
+        },
+        .{
+            .attachment = .{ .selection = .{
+                .file_path = "b",
+                .display_name = "range",
+                .selection = .{
+                    .start = .{ .line = 1, .character = 2 },
+                    .end = .{ .line = 3, .character = 4 },
+                },
+            } },
+            .expected_error = error.IncompleteSelectionAttachment,
+            .expected_field = "attachments[0].selection",
+        },
+        .{
+            .attachment = .{ .selection = .{
+                .file_path = "c",
+                .display_name = "text",
+                .text = "",
+            } },
+            .expected_error = error.IncompleteSelectionAttachment,
+            .expected_field = "attachments[0].selection",
+        },
     };
-    const result = try runSendRpc(std.testing.allocator, .{
-        .prompt = "selections",
-        .source = .system,
-        .attachments = &attachments,
-        .mode = .enqueue,
-        .agent_mode = .shell,
-    });
-    defer std.testing.allocator.free(result.message_id);
-    defer std.testing.allocator.free(result.request_body);
-    try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"selections","source":"system","attachments":[{"type":"selection","filePath":"a","displayName":"neither"},{"type":"selection","filePath":"b","displayName":"range","selection":{"start":{"line":1,"character":2},"end":{"line":3,"character":4}}},{"type":"selection","filePath":"c","displayName":"text","text":""},{"type":"selection","filePath":"d","displayName":"both","selection":{"start":{"line":5,"character":6},"end":{"line":7,"character":8}},"text":"selected"}],"mode":"enqueue","agentMode":"shell"}}
-    , result.request_body);
+    for (cases) |case| {
+        var client = Client{
+            .allocator = std.testing.allocator,
+            .io = std.testing.io,
+        };
+        const attachments = [_]session_types.MessageAttachment{case.attachment};
+        const result = try (Session{
+            .client = &client,
+            .id = "inactive",
+        }).sendDetailed(.{
+            .prompt = "invalid",
+            .attachments = &attachments,
+        });
+        var failure = switch (result) {
+            .failure => |value| value,
+            .success => return error.TestExpectedFailure,
+        };
+        defer failure.deinit();
+        try std.testing.expectEqual(case.expected_error, failure.native_error);
+        switch (failure.detail) {
+            .client => |client_failure| switch (client_failure) {
+                .invalid_config => |detail| {
+                    try std.testing.expectEqualStrings(case.expected_field, detail.field.?);
+                },
+                else => return error.TestExpectedInvalidConfig,
+            },
+            else => return error.TestExpectedClientFailure,
+        }
+    }
 }
 
 test "sendAndWait default is sixty seconds" {
@@ -26295,8 +26451,8 @@ test "resident resume preparation failure preserves committed credential routes"
     try std.testing.expect(client.findGitHubTokenRuntime("old-registration") == runtime);
     try std.testing.expect(client.findProviderToken("resident", "old") != null);
 
-    client.dispatching_rpc_handler = true;
-    defer client.dispatching_rpc_handler = false;
+    client.beginRpcHandler();
+    defer client.endRpcHandler();
     try std.testing.expectError(
         error.ReentrantRpcCall,
         client.resumeSession("resident", .{}),
