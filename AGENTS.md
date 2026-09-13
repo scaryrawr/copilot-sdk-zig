@@ -8,6 +8,8 @@
   `scripts/sync.mjs`; do not edit them by hand.
 - Generate and verify compatibility ledgers from the same canonical expected
   structure; checking only their upstream commit allows manual drift to pass.
+  Run declaration/source assertions from both generation and `--check` paths so
+  CI verifies the evidence behind a checked-in ledger, not only its JSON shape.
 - When Zig manually mirrors an enum from the pinned schemas, verify the exact
   upstream value set in `npm test`; pinning the schema does not update the Zig
   type when upstream adds a variant.
@@ -41,9 +43,11 @@ after SDK or synchronization changes. Build affected examples with
 - During lifecycle RPCs, resolve an exact pending session runtime first, then
   committed runtimes, and use an ID-less create runtime only as a final fallback
   so unrelated interleaved callbacks cannot mutate the new session.
-- Release remote event-interest handles before deinitializing event queues,
-  tools, callback registries, or extension runtimes because the release RPC can
-  dispatch interleaved notifications and server requests.
+- Release remote event-interest handles before detaching the owning session or
+  deinitializing event queues, tools, callback registries, or extension
+  runtimes because the release RPC can dispatch interleaved notifications and
+  server requests. If pre-detach release fails, retain local session state; if
+  detach later fails, best-effort restore the released interest.
 - Treat OAuth tokens and granted environment variables as secrets in every
   representation. Wipe encoded requests, raw responses, intermediate JSON,
   owned copies, partial-construction cleanup paths, and both streaming transport
