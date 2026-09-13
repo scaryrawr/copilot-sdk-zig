@@ -26,6 +26,7 @@ const schemaDirectory = join(vendorDirectory, "schemas");
 const metadataPath = join(vendorDirectory, "upstream.json");
 const generatedPath = join(root, "src", "protocol_version.zig");
 const zigSessionSource = readFileSync(join(root, "src", "session.zig"), "utf8");
+const zigRuntimeSource = readFileSync(join(root, "src", "runtime.zig"), "utf8");
 const compatibilityPath = join(root, "sync", "compatibility.json");
 const publicRpcSurfacePath = join(root, "sync", "public-rpc-surface.json");
 const extensibilityContractPath = join(root, "sync", "extensibility-contract.json");
@@ -304,13 +305,12 @@ function stringUnionValues(source, name) {
 }
 
 function zigEnumValues(source, name) {
-  const declaration = sourceSection(
-    source,
-    `pub const ${name} = enum {`,
-    "};",
-    `Zig ${name}`,
+  const match = source.match(
+    new RegExp(`(?:pub\\s+)?const ${name} = enum \\{([\\s\\S]*?)\\n\\};`),
   );
-  return [...declaration.matchAll(/^\s*(\w+),\s*$/gm)].map((match) => match[1]);
+  assert(match, `Zig ${name} declaration is missing`);
+  return [...match[1].matchAll(/^\s*(?:@"([^"]+)"|(\w+)),\s*$/gm)]
+    .map((match) => match[1] ?? match[2]);
 }
 
 function verifyCustomAgentSourceContract(
@@ -353,7 +353,6 @@ function verifyCustomAgentSourceContract(
     expected.reasoningEffort,
     "Zig ReasoningEffort values",
   );
-
   const base = sourceSection(
     typesSource,
     "export interface SessionConfigBase {",
@@ -763,6 +762,65 @@ function verifyCompatibility(apiSchema, eventSchema) {
   const autoTiers = ["balance", "efficiency", "fast", "intelligence"];
   requireExactStrings(stringEnum(apiSchema, "AutoTier"), autoTiers, "API AutoTier enum");
   requireExactStrings(stringEnum(eventSchema, "AutoTier"), autoTiers, "event AutoTier enum");
+  for (const contract of [
+    {
+      schema: "SessionFsSetProviderConventions",
+      zig: "SessionFilesystemConventions",
+      tags: ["posix", "windows"],
+    },
+    {
+      schema: "SessionFsReaddirWithTypesEntryType",
+      zig: "SessionFilesystemEntryType",
+      tags: ["file", "directory"],
+    },
+    {
+      schema: "SessionFsSqliteQueryType",
+      zig: "SessionFilesystemSqliteQueryType",
+      tags: ["exec", "query", "run"],
+    },
+  ]) {
+    requireExactStrings(
+      stringEnum(apiSchema, contract.schema),
+      contract.tags,
+      `${contract.schema} values`,
+    );
+    requireExactStrings(
+      zigEnumValues(zigRuntimeSource, contract.zig),
+      contract.tags,
+      `Zig ${contract.zig} values`,
+    );
+  }
+  const remoteSessionModes = ["off", "export", "on"];
+  requireExactStrings(
+    stringEnum(apiSchema, "RemoteSessionMode"),
+    remoteSessionModes,
+    "RemoteSessionMode values",
+  );
+  requireExactStrings(
+    zigEnumValues(zigSessionSource, "RemoteSessionMode"),
+    remoteSessionModes,
+    "Zig RemoteSessionMode values",
+  );
+  requireExactStrings(
+    stringEnum(apiSchema, "SessionFsSqliteTransactionErrorClass"),
+    ["busyOrLocked", "fatal", "postCommitAmbiguous"],
+    "SessionFsSqliteTransactionErrorClass values",
+  );
+  requireExactStrings(
+    zigEnumValues(zigRuntimeSource, "SessionFilesystemSqliteTransactionErrorClass"),
+    ["busyOrLocked", "fatal", "postCommitAmbiguous"],
+    "Zig SessionFilesystemSqliteTransactionErrorClass values",
+  );
+  requireExactStrings(
+    stringEnum(apiSchema, "SessionFsErrorCode"),
+    ["ENOENT", "UNKNOWN"],
+    "SessionFsErrorCode values",
+  );
+  requireExactStrings(
+    zigEnumValues(clientSource, "SessionFilesystemErrorCode"),
+    ["ENOENT", "UNKNOWN"],
+    "Zig SessionFilesystemErrorCode values",
+  );
   const modelDiscountPercent =
     apiSchema.definitions?.ModelBilling?.properties?.discountPercent;
   assert(
