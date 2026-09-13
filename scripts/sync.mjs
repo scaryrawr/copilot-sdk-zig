@@ -1188,6 +1188,7 @@ function verifyPinnedSourceContracts(
   clientSource,
   typesSource,
   extensionSource,
+  publicTypesSource,
 ) {
   verifyCustomAgentSourceContract(
     clientSource,
@@ -1195,7 +1196,7 @@ function verifyPinnedSourceContracts(
     extensionSource,
     zigSessionSource,
   );
-  verifyOutboundMessageEnumContract(typesSource, zigSessionSource);
+  verifyOutboundMessageEnumContract(publicTypesSource, zigSessionSource);
   verifyStableSessionRuntimeSourceContract(clientSource, typesSource);
   verifyExtensibilitySourceContract(
     expectedExtensibilityContract(upstreamCommit),
@@ -2302,7 +2303,13 @@ async function synchronize(explicitCommit, ifPublished = false) {
     /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(cliPackageVersion),
     "upstream package manifest has no exact Copilot CLI version",
   );
-  verifyPinnedSourceContracts(commit, nodeClient, nodeTypes, nodeExtension);
+  verifyPinnedSourceContracts(
+    commit,
+    nodeClient,
+    nodeTypes,
+    nodeExtension,
+    publicTypes,
+  );
   verifyStableParitySourceContract(
     { name: "protocol commit", commit },
     nodeClient,
@@ -2386,6 +2393,7 @@ if (args.includes("--check")) {
     nodeClient,
     nodeTypes,
     nodeExtension,
+    publicTypes,
   );
   verifyStableParitySourceContract(
     { name: "protocol commit", commit: metadata.upstreamCommit },
