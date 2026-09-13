@@ -1008,7 +1008,11 @@ pub const Client = struct {
         if (std.mem.eql(u8, hook_type, "preToolUse")) {
             const handler = runtime.hooks.on_pre_tool_use orelse
                 return self.writeTypedSuccess(writer, id, .{});
-            const args = try stringifyJsonValue(self.allocator, input.get("toolArgs") orelse .null);
+            const args = try stringifyJsonValue(
+                self.allocator,
+                jsonRequiredValue(input, "toolArgs") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+            );
             defer self.allocator.free(args);
             const output = handler(self.allocator, .{
                 .base = base,
@@ -1038,7 +1042,11 @@ pub const Client = struct {
         if (std.mem.eql(u8, hook_type, "preMcpToolCall")) {
             const handler = runtime.hooks.on_pre_mcp_tool_call orelse
                 return self.writeTypedSuccess(writer, id, .{});
-            const arguments = try stringifyJsonValue(self.allocator, input.get("arguments") orelse .null);
+            const arguments = try stringifyJsonValue(
+                self.allocator,
+                jsonRequiredValue(input, "arguments") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+            );
             defer self.allocator.free(arguments);
             const meta = if (input.get("_meta")) |value|
                 try stringifyJsonValue(self.allocator, value)
@@ -1079,9 +1087,17 @@ pub const Client = struct {
         if (std.mem.eql(u8, hook_type, "postToolUse")) {
             const handler = runtime.hooks.on_post_tool_use orelse
                 return self.writeTypedSuccess(writer, id, .{});
-            const args = try stringifyJsonValue(self.allocator, input.get("toolArgs") orelse .null);
+            const args = try stringifyJsonValue(
+                self.allocator,
+                jsonRequiredValue(input, "toolArgs") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+            );
             defer self.allocator.free(args);
-            const tool_result = try stringifyJsonValue(self.allocator, input.get("toolResult") orelse .null);
+            const tool_result = try stringifyJsonValue(
+                self.allocator,
+                jsonRequiredValue(input, "toolResult") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+            );
             defer self.allocator.free(tool_result);
             const output = handler(self.allocator, .{
                 .base = base,
@@ -1110,7 +1126,11 @@ pub const Client = struct {
         if (std.mem.eql(u8, hook_type, "postToolUseFailure")) {
             const handler = runtime.hooks.on_post_tool_use_failure orelse
                 return self.writeTypedSuccess(writer, id, .{});
-            const args = try stringifyJsonValue(self.allocator, input.get("toolArgs") orelse .null);
+            const args = try stringifyJsonValue(
+                self.allocator,
+                jsonRequiredValue(input, "toolArgs") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+            );
             defer self.allocator.free(args);
             const output = handler(self.allocator, .{
                 .base = base,
@@ -2505,6 +2525,10 @@ fn jsonRequiredString(object: std.json.ObjectMap, name: []const u8) ![]const u8 
         .string => |value| value,
         else => error.InvalidField,
     };
+}
+
+fn jsonRequiredValue(object: std.json.ObjectMap, name: []const u8) !std.json.Value {
+    return object.get(name) orelse error.MissingField;
 }
 
 fn jsonOptionalString(object: std.json.ObjectMap, name: []const u8) !?[]const u8 {
@@ -5313,6 +5337,15 @@ test "invalid required hook fields receive an invalid-params response" {
     };
     defer client.rollbackExtensionRuntime();
     const handlers = struct {
+        fn preTool(
+            _: std.mem.Allocator,
+            input: ext.PreToolUseInput,
+            _: ext.HookInvocation,
+            _: ?*anyopaque,
+        ) !ext.PreToolUseOutput {
+            try std.testing.expectEqualStrings("null", input.tool_args_json);
+            return .{};
+        }
         fn postTool(
             _: std.mem.Allocator,
             _: ext.PostToolUseInput,
@@ -5329,55 +5362,75 @@ test "invalid required hook fields receive an invalid-params response" {
         ) !ext.PreMcpToolCallOutput {
             return error.TestUnexpectedHookInvocation;
         }
+        fn postToolFailure(
+            _: std.mem.Allocator,
+            _: ext.PostToolUseFailureInput,
+            _: ext.HookInvocation,
+            _: ?*anyopaque,
+        ) !ext.PostToolUseFailureOutput {
+            return error.TestUnexpectedHookInvocation;
+        }
     };
     try client.beginExtensionRuntime(null, session_types.CreateSessionConfig{
         .extensions = .{ .common = .{ .hooks = .{
+            .on_pre_tool_use = handlers.preTool,
             .on_post_tool_use = handlers.postTool,
+            .on_post_tool_use_failure = handlers.postToolFailure,
             .on_pre_mcp_tool_call = handlers.preMcp,
         } } },
     }, &.{});
-    const params = try std.json.parseFromSlice(
-        std.json.Value,
-        allocator,
-        \\{"sessionId":"s1","hookType":"postToolUse","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","toolArgs":{},"toolResult":{}}}
-    ,
-        .{},
-    );
-    defer params.deinit();
-    var output: std.Io.Writer.Allocating = .init(allocator);
-    defer output.deinit();
-
-    try client.dispatchServerRequest(
-        &output.writer,
-        .{ .integer = 9 },
-        "hooks.invoke",
-        params.value,
-    );
-
-    const body = try framedBody(allocator, output.written());
-    defer allocator.free(body);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"code\":-32602") != null);
-
-    const optional_params = try std.json.parseFromSlice(
-        std.json.Value,
-        allocator,
+    const invalid_requests = [_][]const u8{
+        \\{"sessionId":"s1","hookType":"preToolUse","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","toolName":"tool"}}
+        ,
+        \\{"sessionId":"s1","hookType":"preMcpToolCall","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","serverName":"server","toolName":"tool"}}
+        ,
+        \\{"sessionId":"s1","hookType":"postToolUse","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","toolName":"tool","toolResult":{}}}
+        ,
+        \\{"sessionId":"s1","hookType":"postToolUse","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","toolName":"tool","toolArgs":{}}}
+        ,
+        \\{"sessionId":"s1","hookType":"postToolUseFailure","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","toolName":"tool","error":"failed"}}
+        ,
         \\{"sessionId":"s1","hookType":"preMcpToolCall","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","toolCallId":42,"serverName":"server","toolName":"tool","arguments":{}}}
+        ,
+    };
+    for (invalid_requests, 0..) |request, index| {
+        const params = try std.json.parseFromSlice(std.json.Value, allocator, request, .{});
+        defer params.deinit();
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        defer output.deinit();
+        try client.dispatchServerRequest(
+            &output.writer,
+            .{ .integer = @intCast(9 + index) },
+            "hooks.invoke",
+            params.value,
+        );
+        const body = try framedBody(allocator, output.written());
+        defer allocator.free(body);
+        try std.testing.expect(
+            std.mem.indexOf(u8, body, "\"code\":-32602") != null,
+        );
+    }
+
+    const null_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"s1","hookType":"preToolUse","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","toolName":"tool","toolArgs":null}}
     ,
         .{},
     );
-    defer optional_params.deinit();
-    var optional_output: std.Io.Writer.Allocating = .init(allocator);
-    defer optional_output.deinit();
+    defer null_params.deinit();
+    var null_output: std.Io.Writer.Allocating = .init(allocator);
+    defer null_output.deinit();
     try client.dispatchServerRequest(
-        &optional_output.writer,
-        .{ .integer = 10 },
+        &null_output.writer,
+        .{ .integer = 15 },
         "hooks.invoke",
-        optional_params.value,
+        null_params.value,
     );
-    const optional_body = try framedBody(allocator, optional_output.written());
-    defer allocator.free(optional_body);
+    const null_body = try framedBody(allocator, null_output.written());
+    defer allocator.free(null_body);
     try std.testing.expect(
-        std.mem.indexOf(u8, optional_body, "\"code\":-32602") != null,
+        std.mem.indexOf(u8, null_body, "\"result\":") != null,
     );
 }
 
