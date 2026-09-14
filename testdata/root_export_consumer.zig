@@ -45,4 +45,15 @@ test "external consumer imports root SdkError export" {
     _ = copilot_sdk.Client.nextLifecycleEventDetailed;
     _ = copilot_sdk.Session.getEvents;
     _ = copilot_sdk.Session.getEventsDetailed;
+
+    const attachments = [_]copilot_sdk.Attachment{
+        .{ .github_url = .{
+            .url = "https://github.com/scaryrawr/copilot-sdk-zig",
+        } },
+    };
+    const options = copilot_sdk.MessageOptions{
+        .prompt = "inspect",
+        .attachments = &attachments,
+    };
+    try std.testing.expectEqualStrings("inspect", options.prompt);
 }

@@ -20597,7 +20597,7 @@ test "session.send serializes stable attachments and message options" {
     const result = try runSendRpc(std.testing.allocator, .{
         .prompt = "inspect",
         .source = .{ .agent = "reviewer" },
-        .attachments = &attachments,
+        .message_attachments = &attachments,
         .mode = .immediate,
         .agent_mode = .interactive,
         .request_headers = &headers,
@@ -20620,7 +20620,7 @@ test "session.send preserves omitted and empty collections" {
 
     const empty = try runSendRpc(std.testing.allocator, .{
         .prompt = "empty",
-        .attachments = &.{},
+        .message_attachments = &.{},
         .request_headers = &.{},
     });
     defer std.testing.allocator.free(empty.message_id);
@@ -20687,7 +20687,7 @@ test "optional public attachments fail closed at the pinned wire boundary" {
             .id = "inactive",
         }).sendDetailed(.{
             .prompt = "invalid",
-            .attachments = &attachments,
+            .message_attachments = &attachments,
         });
         var failure = switch (result) {
             .failure => |value| value,
@@ -20699,6 +20699,105 @@ test "optional public attachments fail closed at the pinned wire boundary" {
             .client => |client_failure| switch (client_failure) {
                 .invalid_config => |detail| {
                     try std.testing.expectEqualStrings(case.expected_field, detail.field.?);
+                },
+                else => return error.TestExpectedInvalidConfig,
+            },
+            else => return error.TestExpectedClientFailure,
+        }
+    }
+}
+
+test "session.send preserves legacy shared and GitHub attachments" {
+    const repo = session_types.Attachment.GitHubRepoPointer{
+        .id = 7,
+        .name = "repo",
+        .owner = "owner",
+    };
+    const attachments = [_]session_types.Attachment{
+        .{ .file = .{
+            .path = "/tmp/a.zig",
+            .line_range = .{ .start = 2, .end = 4 },
+        } },
+        .{ .selection = .{
+            .file_path = "/tmp/a.zig",
+            .text = "const a = 1;",
+            .selection = .{
+                .start = .{ .line = 1, .character = 2 },
+                .end = .{ .line = 1, .character = 14 },
+            },
+        } },
+        .{ .github_reference = .{
+            .number = 42,
+            .title = "Issue",
+            .reference_type = .issue,
+            .state = "open",
+            .url = "https://github.com/owner/repo/issues/42",
+        } },
+        .{ .github_file_diff = .{
+            .sides = .{ .modified = .{
+                .base = .{ .path = "a.zig", .git_ref = "main", .repo = repo },
+                .head = .{ .path = "a.zig", .git_ref = "feature", .repo = repo },
+            } },
+            .url = "https://github.com/owner/repo/compare/main...feature",
+        } },
+        .{ .github_url = .{ .url = "https://github.com/owner/repo" } },
+    };
+    const result = try runSendRpc(std.testing.allocator, .{
+        .prompt = "legacy",
+        .attachments = &attachments,
+    });
+    defer std.testing.allocator.free(result.message_id);
+    defer std.testing.allocator.free(result.request_body);
+
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"legacy","attachments":[{"type":"file","path":"/tmp/a.zig","displayName":"a.zig","lineRange":{"start":2,"end":4}},{"type":"selection","filePath":"/tmp/a.zig","text":"const a = 1;","displayName":"a.zig","selection":{"start":{"line":1,"character":2},"end":{"line":1,"character":14}}},{"type":"github_reference","number":42,"title":"Issue","referenceType":"issue","state":"open","url":"https://github.com/owner/repo/issues/42"},{"type":"github_file_diff","base":{"path":"a.zig","ref":"main","repo":{"id":7,"name":"repo","owner":"owner"}},"head":{"path":"a.zig","ref":"feature","repo":{"id":7,"name":"repo","owner":"owner"}},"url":"https://github.com/owner/repo/compare/main...feature"},{"type":"github_url","url":"https://github.com/owner/repo"}]}}
+    , result.request_body);
+}
+
+test "session.send rejects conflicting attachment inputs" {
+    const legacy = [_]session_types.Attachment{
+        .{ .github_url = .{ .url = "legacy" } },
+    };
+    const stable = [_]session_types.MessageAttachment{
+        .{ .blob = .{ .data = "YQ==", .mime_type = "text/plain" } },
+    };
+    const cases = [_]session_types.MessageOptions{
+        .{
+            .prompt = "values",
+            .attachments = &legacy,
+            .message_attachments = &stable,
+        },
+        .{
+            .prompt = "empty",
+            .attachments = &.{},
+            .message_attachments = &.{},
+        },
+    };
+    for (cases) |options| {
+        var client = Client{
+            .allocator = std.testing.allocator,
+            .io = std.testing.io,
+        };
+        const result = try (Session{
+            .client = &client,
+            .id = "inactive",
+        }).sendDetailed(options);
+        var failure = switch (result) {
+            .failure => |value| value,
+            .success => return error.TestExpectedFailure,
+        };
+        defer failure.deinit();
+        try std.testing.expectEqual(
+            error.ConflictingAttachmentInputs,
+            failure.native_error,
+        );
+        switch (failure.detail) {
+            .client => |client_failure| switch (client_failure) {
+                .invalid_config => |detail| {
+                    try std.testing.expectEqualStrings(
+                        "attachments",
+                        detail.field.?,
+                    );
                 },
                 else => return error.TestExpectedInvalidConfig,
             },
