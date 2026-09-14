@@ -1173,6 +1173,7 @@ fn isValidElicitationContent(value: std.json.Value) bool {
 const EventDelivery = struct {
     id: u64 = 0,
     session_id: []u8,
+    generation: u64 = 0,
     event: session_types.SessionEvent,
     diagnostic_frame: ?[]u8 = null,
     automatic_handling_in_progress: bool = false,
@@ -1294,6 +1295,12 @@ const EventLogLease = struct {
         self.log.releaseOperation();
         self.client.reclaimClosedEventLogs();
     }
+};
+
+const EventIngressAdmission = union(enum) {
+    unknown,
+    unavailable,
+    active: EventLogLease,
 };
 
 const SendOperation = struct {
@@ -2831,12 +2838,16 @@ const SessionRecord = struct {
     id: ?[]u8 = null,
     generation: u64 = 1,
     workspace_path: ?[]u8 = null,
-    removal_pending: bool = false,
+    removal: enum {
+        none,
+        draining,
+        deferred,
+    } = .none,
     replacement_pending: bool = false,
 
     fn isActive(self: SessionRecord) bool {
         return self.id != null and
-            !self.removal_pending and
+            self.removal == .none and
             !self.replacement_pending;
     }
 
@@ -2846,7 +2857,7 @@ const SessionRecord = struct {
         if (self.workspace_path) |path| allocator.free(path);
         self.id = null;
         self.workspace_path = null;
-        self.removal_pending = false;
+        self.removal = .none;
         self.replacement_pending = false;
     }
 
@@ -2873,6 +2884,13 @@ const SessionRecordCommit = struct {
     pending: PendingSessionRecord,
     prior_log: ?*event_log.EventLog,
     replacing: bool,
+};
+
+const SessionRemoval = struct {
+    record_index: usize,
+    session_id: []u8,
+    generation: u64,
+    log: ?*event_log.EventLog,
 };
 
 fn nextSessionGeneration(generation: u64) !u64 {
@@ -4962,23 +4980,32 @@ pub const Client = struct {
         session_id: []const u8,
         config: session_types.JoinSessionConfig,
     ) !JoinedSession {
+        const owned_session_id = try self.allocator.dupe(u8, session_id);
+        defer self.allocator.free(owned_session_id);
         const resume_config = resumeConfigFromJoin(config);
         const session = try legacyResult(
             Session,
             self.resumeSessionWithEnvironment(
                 .legacy,
-                session_id,
+                owned_session_id,
                 resume_config,
                 config.extensions.requested_environment_variables,
             ),
         );
         const grants = session.snapshotEnvironmentGrants(self.allocator) catch |err| {
             session.disconnect() catch |cleanup_err| {
-                if (self.findExtensionRuntime(session.id)) |runtime| {
+                if (self.findExtensionRuntime(owned_session_id)) |runtime| {
                     self.releaseMcpOAuthInterest(runtime) catch |release_err|
                         std.log.warn("failed to release MCP OAuth interest after join cleanup: {s}", .{@errorName(release_err)});
                 }
-                self.removeSession(session.id);
+                self.removeSessionExpected(
+                    session.record_index,
+                    owned_session_id,
+                    session.generation,
+                ) catch |remove_err| switch (remove_err) {
+                    error.SessionNotActive => {},
+                    else => return remove_err,
+                };
                 return cleanup_err;
             };
             return err;
@@ -5338,7 +5365,14 @@ pub const Client = struct {
         );
         return switch (deletion) {
             .success => {
-                self.removeSession(session_id);
+                self.removeSession(session_id) catch |err| return .{
+                    .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordClientIo,
+                        .{ self.allocator, .callback, err },
+                    ),
+                };
                 return .{ .success = {} };
             },
             .failure => |failure| .{ .failure = failure },
@@ -6532,8 +6566,12 @@ pub const Client = struct {
             else => return .unscoped,
         };
         const session_id = jsonString(object, "sessionId") orelse return .unscoped;
-        if (try self.acquireActiveEventIngress(session_id, true)) |lease|
-            return .{ .active = lease };
+        const admission = try self.acquireActiveEventIngress(session_id, true);
+        switch (admission) {
+            .active => |lease| return .{ .active = lease },
+            .unavailable => return .inactive,
+            .unknown => {},
+        }
         self.extension_runtimes_mutex.lockUncancelable(self.io);
         if (self.pending_extension_runtime) |*pending| {
             if (pending.session_id == null or
@@ -8046,27 +8084,20 @@ pub const Client = struct {
             break :event parsed_event;
         };
         defer if (!transferred) event.deinit(self.allocator);
-        const requires_session_lifetime = switch (event) {
-            .capabilities_changed,
-            .session_canvas_closed,
-            .session_canvas_opened,
-            .command_execute,
-            .elicitation_requested,
-            .mcp_oauth_required,
-            .permission_requested,
-            .external_tool_requested,
-            => true,
-            else => false,
-        };
-        var active_lease = self.acquireActiveEventIngress(
+        const admission = self.acquireActiveEventIngress(
             owned_session_id,
-            requires_session_lifetime,
+            true,
         ) catch |err| return .{ .failure = try policyFailure(
             failure_policy,
             err,
             recordClientIo,
             .{ self.allocator, .read, err },
         ) };
+        var active_lease: ?EventLogLease = switch (admission) {
+            .unknown => null,
+            .unavailable => return .{ .success = false },
+            .active => |lease| lease,
+        };
         defer if (active_lease) |*lease| lease.deinit();
         const ingress_admitted = active_lease != null;
         var ingress_transferred = false;
@@ -8090,6 +8121,7 @@ pub const Client = struct {
             else => .observation,
         };
         const active_log = if (active_lease) |lease| lease.log else null;
+        const generation = if (active_log) |log| log.generation else 0;
         const worker_async = pump_running and
             (active_log != null or
                 (delivery_class == .automatic and ingress_admitted));
@@ -8106,6 +8138,7 @@ pub const Client = struct {
             self.cloneEventDelivery(
                 event_id,
                 owned_session_id,
+                generation,
                 event,
                 diagnostic_frame,
                 delivery_class == .automatic,
@@ -8125,7 +8158,7 @@ pub const Client = struct {
             null;
         self.events_mutex.lockUncancelable(self.io);
         if (prior_queue_failure != null or
-            self.queuedEventCount(owned_session_id) >= max_queued_events)
+            self.queuedEventCount(owned_session_id, generation) >= max_queued_events)
         {
             self.events_mutex.unlock(self.io);
             if (ingress_admitted) {
@@ -8141,6 +8174,7 @@ pub const Client = struct {
         self.events.append(self.allocator, .{
             .id = event_id,
             .session_id = owned_session_id,
+            .generation = generation,
             .event = event,
             .diagnostic_frame = diagnostic_frame,
             .automatic_handling_in_progress = worker_async,
@@ -8256,6 +8290,7 @@ pub const Client = struct {
         self: *Client,
         id: u64,
         session_id: []const u8,
+        generation: u64,
         event: session_types.SessionEvent,
         diagnostic_frame: ?[]const u8,
         automatic_handling_in_progress: bool,
@@ -8271,6 +8306,7 @@ pub const Client = struct {
         return .{
             .id = id,
             .session_id = owned_session_id,
+            .generation = generation,
             .event = owned_event,
             .diagnostic_frame = owned_frame,
             .automatic_handling_in_progress = automatic_handling_in_progress,
@@ -8444,9 +8480,9 @@ pub const Client = struct {
             log.generation,
         ) orelse return;
         const record = &self.sessions.items[record_index];
-        if (!record.removal_pending) return;
+        if (record.removal != .deferred) return;
         log.drainAndClose();
-        self.removeSessionState(log.session_id);
+        self.removeSessionState(log.session_id, log.generation);
         record.deactivate(self.allocator);
     }
 
@@ -8650,10 +8686,18 @@ pub const Client = struct {
         }
     }
 
-    fn queuedEventCount(self: *const Client, session_id: []const u8) usize {
+    fn queuedEventCount(
+        self: *const Client,
+        session_id: []const u8,
+        generation: u64,
+    ) usize {
         var count: usize = 0;
         for (self.events.items) |queued| {
-            if (std.mem.eql(u8, queued.session_id, session_id)) count += 1;
+            if (queued.generation == generation and
+                std.mem.eql(u8, queued.session_id, session_id))
+            {
+                count += 1;
+            }
         }
         return count;
     }
@@ -9496,6 +9540,7 @@ pub const Client = struct {
         if (commit.replacing) {
             const existing = &self.sessions.items[commit.pending.record_index];
             if (!existing.replacement_pending) return error.SessionNotActive;
+            self.removeQueuedSessionEvents(existing.id.?, existing.generation);
         }
         if (self.pending_extension_runtime != null) {
             self.extension_runtimes_mutex.lockUncancelable(self.io);
@@ -9568,10 +9613,18 @@ pub const Client = struct {
         self: *Client,
         session_id: []const u8,
         create_if_missing: bool,
-    ) error{ OutOfMemory, TooManyRetainedSessionLogs, Canceled }!?EventLogLease {
+    ) error{ OutOfMemory, TooManyRetainedSessionLogs, Canceled }!EventIngressAdmission {
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
-        const record = self.findSession(session_id) orelse return null;
+        const record = record: {
+            for (self.sessions.items) |*candidate| {
+                const id = candidate.id orelse continue;
+                if (!std.mem.eql(u8, id, session_id)) continue;
+                if (!candidate.isActive()) return .unavailable;
+                break :record candidate;
+            }
+            return .unknown;
+        };
         var lease = if (create_if_missing)
             try self.ensureEventLogLease(session_id, record.generation)
         else
@@ -9579,14 +9632,14 @@ pub const Client = struct {
                 session_id,
                 record.generation,
             ) catch |err| switch (err) {
-                error.SessionDisconnected => return null,
+                error.SessionDisconnected => return .unavailable,
             };
         errdefer lease.deinit();
         lease.log.beginIngress() catch |err| switch (err) {
-            error.SessionDisconnected => return null,
+            error.SessionDisconnected => return .unavailable,
             error.Canceled => return error.Canceled,
         };
-        return lease;
+        return .{ .active = lease };
     }
 
     fn acquireSessionHandleIngress(
@@ -9645,7 +9698,11 @@ pub const Client = struct {
         return record;
     }
 
-    fn removeSessionState(self: *Client, session_id: []const u8) void {
+    fn removeSessionState(
+        self: *Client,
+        session_id: []const u8,
+        generation: u64,
+    ) void {
         self.extension_runtimes_mutex.lockUncancelable(self.io);
         for (self.extension_runtimes.items, 0..) |runtime, runtime_index| {
             if (runtime.session_id != null and
@@ -9657,22 +9714,7 @@ pub const Client = struct {
             }
         }
         self.extension_runtimes_mutex.unlock(self.io);
-        var index: usize = 0;
-        self.events_mutex.lockUncancelable(self.io);
-        while (index < self.events.items.len) {
-            if (std.mem.eql(u8, self.events.items[index].session_id, session_id)) {
-                if (self.events.items[index].automatic_handling_in_progress) {
-                    self.events.items[index].remove_after_automatic_handling = true;
-                    index += 1;
-                    continue;
-                }
-                var event = self.events.orderedRemove(index);
-                event.deinit(self.allocator);
-            } else {
-                index += 1;
-            }
-        }
-        self.events_mutex.unlock(self.io);
+        self.removeQueuedSessionEvents(session_id, generation);
 
         var tool_index: usize = 0;
         while (tool_index < self.tools.items.len) {
@@ -9719,27 +9761,119 @@ pub const Client = struct {
         }
     }
 
-    fn removeSessionAt(self: *Client, record_index: usize) void {
+    fn removeQueuedSessionEvents(
+        self: *Client,
+        session_id: []const u8,
+        generation: u64,
+    ) void {
+        var index: usize = 0;
+        self.events_mutex.lockUncancelable(self.io);
+        defer self.events_mutex.unlock(self.io);
+        while (index < self.events.items.len) {
+            if (self.events.items[index].generation == generation and
+                std.mem.eql(u8, self.events.items[index].session_id, session_id))
+            {
+                if (self.events.items[index].automatic_handling_in_progress) {
+                    self.events.items[index].remove_after_automatic_handling = true;
+                    index += 1;
+                    continue;
+                }
+                var event = self.events.orderedRemove(index);
+                event.deinit(self.allocator);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn beginSessionRemoval(
+        self: *Client,
+        record_index: usize,
+        expected_session_id: []const u8,
+        expected_generation: u64,
+    ) !?SessionRemoval {
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
-        if (record_index >= self.sessions.items.len) return;
+        if (record_index >= self.sessions.items.len)
+            return error.SessionNotActive;
         const record = &self.sessions.items[record_index];
-        const id = record.id orelse return;
-        if (!record.isActive()) return;
-        if (self.beginCloseEventLog(id, record.generation)) |log| {
-            if (isCurrentSessionIngress(log)) {
-                record.removal_pending = true;
-                return;
-            }
-            log.drainAndClose();
+        const id = record.id orelse return error.SessionNotActive;
+        if (!record.isActive() or
+            record.generation != expected_generation or
+            !std.mem.eql(u8, id, expected_session_id))
+        {
+            return error.SessionNotActive;
         }
-        self.removeSessionState(id);
+        const owned_session_id = try self.allocator.dupe(u8, id);
+        errdefer self.allocator.free(owned_session_id);
+        const log = self.beginCloseEventLog(id, record.generation);
+        if (log) |active_log| {
+            if (isCurrentSessionIngress(active_log)) {
+                record.removal = .deferred;
+                self.allocator.free(owned_session_id);
+                return null;
+            }
+        }
+        record.removal = .draining;
+        return .{
+            .record_index = record_index,
+            .session_id = owned_session_id,
+            .generation = expected_generation,
+            .log = log,
+        };
+    }
+
+    fn finishSessionRemoval(self: *Client, removal: SessionRemoval) !void {
+        defer self.allocator.free(removal.session_id);
+        if (removal.log) |log| log.drainAndClose();
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
+        if (removal.record_index >= self.sessions.items.len)
+            return error.SessionNotActive;
+        const record = &self.sessions.items[removal.record_index];
+        const id = record.id orelse return error.SessionNotActive;
+        if (record.removal != .draining or
+            record.generation != removal.generation or
+            !std.mem.eql(u8, id, removal.session_id))
+        {
+            return error.SessionNotActive;
+        }
+        self.removeSessionState(removal.session_id, removal.generation);
         record.deactivate(self.allocator);
     }
 
-    fn removeSession(self: *Client, session_id: []const u8) void {
-        const record_index = self.findSessionIndex(session_id) orelse return;
-        self.removeSessionAt(record_index);
+    fn removeSessionExpected(
+        self: *Client,
+        record_index: usize,
+        expected_session_id: []const u8,
+        expected_generation: u64,
+    ) !void {
+        const removal = try self.beginSessionRemoval(
+            record_index,
+            expected_session_id,
+            expected_generation,
+        ) orelse return;
+        try self.finishSessionRemoval(removal);
+    }
+
+    fn removeSession(self: *Client, session_id: []const u8) !void {
+        self.sessions_mutex.lockUncancelable(self.io);
+        const record_index = self.findSessionIndex(session_id) orelse {
+            self.sessions_mutex.unlock(self.io);
+            return;
+        };
+        const generation = self.sessions.items[record_index].generation;
+        const owned_session_id = self.allocator.dupe(u8, session_id) catch |err| {
+            self.sessions_mutex.unlock(self.io);
+            return err;
+        };
+        self.sessions_mutex.unlock(self.io);
+        defer self.allocator.free(owned_session_id);
+        try self.removeSessionExpected(
+            record_index,
+            owned_session_id,
+            generation,
+        );
     }
 
     fn registerOwnedSession(
@@ -9755,9 +9889,20 @@ pub const Client = struct {
 
         try self.beginSessionRecord(owned_session_id, null);
         const record_index = try self.commitSessionRecord();
-        errdefer self.removeSessionAt(record_index);
-
         const session_id = self.sessions.items[record_index].id.?;
+        const generation = self.sessions.items[record_index].generation;
+        self.registerSessionBindings(session_id, config, token_bindings) catch |err| {
+            try self.removeSessionExpected(record_index, session_id, generation);
+            return err;
+        };
+    }
+
+    fn registerSessionBindings(
+        self: *Client,
+        session_id: []const u8,
+        config: session_types.SessionConfig,
+        token_bindings: []const provider.TokenBinding,
+    ) !void {
         try self.registerToolHandlers(session_id, config.tools);
         try self.registerPermissionHandler(session_id, config);
         try self.registerUserInputHandler(
@@ -10199,12 +10344,15 @@ pub const Client = struct {
         self: *Client,
         comptime failure_policy: FailurePolicy,
         session_id: []const u8,
+        generation: u64,
     ) errors.DetailedError!PolicyResult(failure_policy, EventDelivery) {
         while (true) {
             self.events_mutex.lockUncancelable(self.io);
             var queued_delivery: ?EventDelivery = null;
             for (self.events.items, 0..) |queued, index| {
-                if (std.mem.eql(u8, queued.session_id, session_id)) {
+                if (queued.generation == generation and
+                    std.mem.eql(u8, queued.session_id, session_id))
+                {
                     if (queued.automatic_handling_in_progress) {
                         self.events.items[index].remove_after_automatic_handling = true;
                         continue;
@@ -10213,7 +10361,7 @@ pub const Client = struct {
                     break;
                 }
             }
-            const queued_count = self.queuedEventCount(session_id);
+            const queued_count = self.queuedEventCount(session_id, generation);
             self.events_mutex.unlock(self.io);
             if (queued_delivery) |delivery| return .{ .success = delivery };
             if (self.sessionEventQueueFailure(session_id)) |failure| {
@@ -10316,11 +10464,16 @@ pub const Client = struct {
         }
     }
 
-    fn hasQueuedSessionEvent(self: *Client, session_id: []const u8) bool {
+    fn hasQueuedSessionEvent(
+        self: *Client,
+        session_id: []const u8,
+        generation: u64,
+    ) bool {
         self.events_mutex.lockUncancelable(self.io);
         defer self.events_mutex.unlock(self.io);
         for (self.events.items) |queued| {
-            if (std.mem.eql(u8, queued.session_id, session_id) and
+            if (queued.generation == generation and
+                std.mem.eql(u8, queued.session_id, session_id) and
                 !queued.automatic_handling_in_progress) return true;
         }
         return false;
@@ -11074,7 +11227,7 @@ pub const Session = struct {
         var lease = try self.eventLog();
         defer lease.deinit();
         const session_id = lease.log.session_id;
-        if (self.client.hasQueuedSessionEvent(session_id)) {
+        if (self.client.hasQueuedSessionEvent(session_id, self.generation)) {
             return switch (try self.nextEventDeliveryImpl(.legacy)) {
                 .success => |delivery_value| {
                     var delivery = delivery_value;
@@ -11084,7 +11237,7 @@ pub const Session = struct {
             };
         }
         try self.client.ensurePump();
-        if (self.client.hasQueuedSessionEvent(session_id)) {
+        if (self.client.hasQueuedSessionEvent(session_id, self.generation)) {
             return switch (try self.nextEventDeliveryImpl(.legacy)) {
                 .success => |delivery_value| {
                     var delivery = delivery_value;
@@ -11125,7 +11278,7 @@ pub const Session = struct {
         };
         defer lease.deinit();
         const session_id = lease.log.session_id;
-        if (self.client.hasQueuedSessionEvent(session_id)) {
+        if (self.client.hasQueuedSessionEvent(session_id, self.generation)) {
             return switch (try self.nextEventDeliveryImpl(.detailed)) {
                 .success => |delivery_value| {
                     var delivery = delivery_value;
@@ -11148,7 +11301,7 @@ pub const Session = struct {
                 .read,
                 err,
             ) };
-        if (self.client.hasQueuedSessionEvent(session_id)) {
+        if (self.client.hasQueuedSessionEvent(session_id, self.generation)) {
             return switch (try self.nextEventDeliveryImpl(.detailed)) {
                 .success => |delivery_value| {
                     var delivery = delivery_value;
@@ -11209,7 +11362,11 @@ pub const Session = struct {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
         };
-        const delivery = switch (try self.client.nextEventImpl(failure_policy, initial.id)) {
+        const delivery = switch (try self.client.nextEventImpl(
+            failure_policy,
+            initial.id,
+            self.generation,
+        )) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
         };
@@ -11762,23 +11919,16 @@ pub const Session = struct {
             };
             defer parsed.deinit();
             if (parsed.value.success) {
-                if (resolved.record_index >= self.client.sessions.items.len or
-                    !self.client.sessions.items[resolved.record_index].isActive() or
-                    self.client.sessions.items[resolved.record_index].generation != self.generation or
-                    !std.mem.eql(
-                        u8,
-                        self.client.sessions.items[resolved.record_index].id.?,
-                        owned_session_id,
-                    ))
-                {
-                    return .{ .failure = try policyFailure(
-                        failure_policy,
-                        error.SessionNotActive,
-                        recordInvalidConfig,
-                        .{ self.client.allocator, "session_id", error.SessionNotActive },
-                    ) };
-                }
-                self.client.removeSessionAt(resolved.record_index);
+                self.client.removeSessionExpected(
+                    resolved.record_index,
+                    owned_session_id,
+                    self.generation,
+                ) catch |err| return .{ .failure = try policyFailure(
+                    failure_policy,
+                    err,
+                    recordInvalidConfig,
+                    .{ self.client.allocator, "session_id", err },
+                ) };
                 return .{ .success = {} };
             }
         }
@@ -15728,7 +15878,7 @@ test "inactive session record slots are reused without stale id access" {
     try client.prepareSessionCommit("first", "/first");
     const first = client.sessionHandle(try client.commitSessionRecord());
     const first_mcp_apps = McpApps{ .session = first };
-    client.removeSessionAt(first.record_index);
+    try client.removeSessionExpected(first.record_index, first.id, first.generation);
 
     try client.beginSessionRecord(try allocator.dupe(u8, "second"), null);
     try client.prepareSessionCommit("second", "/second");
@@ -15752,13 +15902,13 @@ test "inactive session record slots are reused without stale id access" {
     );
     try std.testing.expectEqualStrings("/second", (try second.workspacePath()).?);
 
-    client.removeSessionAt(second.record_index);
+    try client.removeSessionExpected(second.record_index, second.id, second.generation);
     for (0..8) |index| {
         const id = try std.fmt.allocPrint(allocator, "reuse-{d}", .{index});
         try client.beginSessionRecord(id, null);
         const current = client.sessionHandle(try client.commitSessionRecord());
         try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
-        client.removeSessionAt(current.record_index);
+        try client.removeSessionExpected(current.record_index, current.id, current.generation);
     }
 }
 
@@ -19108,7 +19258,7 @@ test "permission handler receives events and can leave requests pending" {
     };
     try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "session-1") });
     defer {
-        client.removeSession("session-1");
+        removeTestSession(&client, "session-1");
         deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
@@ -19150,6 +19300,7 @@ test "permission handler receives events and can leave requests pending" {
     defer parsed_event.deinit();
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "session-1"),
+        .generation = 1,
         .event = try deliveryEventForTest(
             allocator,
             try session_types.parseEvent(allocator, parsed_event.value),
@@ -19181,7 +19332,7 @@ test "permission handler receives injected managed settings metadata" {
     };
     try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "session-1") });
     defer {
-        client.removeSession("session-1");
+        removeTestSession(&client, "session-1");
         deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
@@ -19219,6 +19370,7 @@ test "permission handler receives injected managed settings metadata" {
     defer parsed_event.deinit();
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "session-1"),
+        .generation = 1,
         .event = try deliveryEventForTest(
             allocator,
             try session_types.parseEvent(allocator, parsed_event.value),
@@ -19242,7 +19394,7 @@ test "permission handler failures leave requests available for manual handling" 
     };
     try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "session-1") });
     defer {
-        client.removeSession("session-1");
+        removeTestSession(&client, "session-1");
         deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
@@ -19273,6 +19425,7 @@ test "permission handler failures leave requests available for manual handling" 
     defer parsed_event.deinit();
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "session-1"),
+        .generation = 1,
         .event = try deliveryEventForTest(
             allocator,
             try session_types.parseEvent(allocator, parsed_event.value),
@@ -19298,8 +19451,8 @@ test "approveAll leaves managed permission events observable" {
     try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "managed-session") });
     try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "managed-request") });
     defer {
-        client.removeSession("managed-session");
-        client.removeSession("managed-request");
+        removeTestSession(&client, "managed-session");
+        removeTestSession(&client, "managed-request");
         deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
@@ -19324,6 +19477,7 @@ test "approveAll leaves managed permission events observable" {
     defer managed_session_event.deinit();
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "managed-session"),
+        .generation = 1,
         .event = try deliveryEventForTest(
             allocator,
             try session_types.parseEvent(allocator, managed_session_event.value),
@@ -19340,6 +19494,7 @@ test "approveAll leaves managed permission events observable" {
     defer managed_request_event.deinit();
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "managed-request"),
+        .generation = 1,
         .event = try deliveryEventForTest(
             allocator,
             try session_types.parseEvent(allocator, managed_request_event.value),
@@ -19413,7 +19568,7 @@ fn runAutomaticPermissionRpc(
     };
     try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "session-1") });
     defer {
-        client.removeSession("session-1");
+        removeTestSession(&client, "session-1");
         deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
@@ -19444,6 +19599,7 @@ fn runAutomaticPermissionRpc(
     defer parsed_event.deinit();
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "session-1"),
+        .generation = 1,
         .event = try deliveryEventForTest(
             allocator,
             try session_types.parseEvent(allocator, parsed_event.value),
@@ -19547,7 +19703,7 @@ test "permission response delivery failures are explicit" {
     };
     try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "session-1") });
     defer {
-        client.removeSession("session-1");
+        removeTestSession(&client, "session-1");
         deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
@@ -19578,6 +19734,7 @@ test "permission response delivery failures are explicit" {
     defer parsed_event.deinit();
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "session-1"),
+        .generation = 1,
         .event = try deliveryEventForTest(
             allocator,
             try session_types.parseEvent(allocator, parsed_event.value),
@@ -19679,15 +19836,6 @@ fn queueEventForProbe(
             client.allocator.free(frame);
         },
     }
-}
-
-fn removeSessionForProbe(
-    client: *Client,
-    record_index: usize,
-    completed: *std.Io.Event,
-) void {
-    client.removeSessionAt(record_index);
-    completed.set(std.testing.io);
 }
 
 fn stopPumpForProbe(
@@ -20561,7 +20709,7 @@ test "direct-reader handoff does not duplicate compatibility delivery" {
         .failure => unreachable,
     }
 
-    var compatibility = switch (try client.nextEventImpl(.legacy, "session-1")) {
+    var compatibility = switch (try client.nextEventImpl(.legacy, "session-1", 1)) {
         .success => |delivery| delivery,
         .failure => return error.TestUnexpectedResult,
     };
@@ -23723,10 +23871,11 @@ test "disconnect removes session-owned allocations" {
     try client.sessions.append(allocator, .{ .id = session_id });
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "s1"),
+        .generation = 1,
         .event = .{ .session_idle = .{} },
     });
 
-    client.removeSession("s1");
+    try client.removeSession("s1");
 
     try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
     try std.testing.expect(!client.sessions.items[0].isActive());
@@ -24151,6 +24300,65 @@ fn addTestSession(client: *Client, session_id: []const u8) !Session {
     return client.sessionForId(session_id);
 }
 
+fn removeTestSession(client: *Client, session_id: []const u8) void {
+    client.removeSession(session_id) catch |err|
+        std.debug.panic("test session cleanup failed: {s}", .{@errorName(err)});
+}
+
+const GatedSessionRemoval = struct {
+    client: *Client,
+    ready: *std.Io.Event,
+    started: *std.Io.Event,
+    record_index: usize,
+    session_id: []const u8,
+    generation: u64,
+    result: ?anyerror = null,
+
+    fn run(context: *@This()) void {
+        context.ready.wait(context.client.io) catch |err| {
+            context.result = err;
+            context.started.set(context.client.io);
+            return;
+        };
+        context.client.removeSessionExpected(
+            context.record_index,
+            context.session_id,
+            context.generation,
+        ) catch |err| {
+            context.result = err;
+        };
+        context.started.set(context.client.io);
+    }
+};
+
+const DrainingSessionRemoval = struct {
+    client: *Client,
+    started: *std.Io.Event,
+    record_index: usize,
+    session_id: []const u8,
+    generation: u64,
+    result: ?anyerror = null,
+
+    fn run(context: *@This()) void {
+        const removal = context.client.beginSessionRemoval(
+            context.record_index,
+            context.session_id,
+            context.generation,
+        ) catch |err| {
+            context.result = err;
+            context.started.set(context.client.io);
+            return;
+        } orelse {
+            context.started.set(context.client.io);
+            return;
+        };
+        context.started.set(context.client.io);
+        context.client.finishSessionRemoval(removal) catch |err| {
+            context.result = err;
+        };
+    }
+};
+
 test "session event log lease owns its session id through removal" {
     const allocator = std.testing.allocator;
     var client = Client{
@@ -24165,10 +24373,205 @@ test "session event log lease owns its session id through removal" {
     var lease = try active.eventLog();
     defer lease.deinit();
 
-    client.removeSessionAt(0);
+    try client.removeSessionExpected(0, "session-1", 1);
 
     try std.testing.expectEqualStrings("session-1", lease.log.session_id);
     try std.testing.expectError(error.SessionNotActive, active.eventLog());
+}
+
+test "ordinary events without a prior log stay within their session generation" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+    _ = try addTestSession(&client, "target");
+
+    const old_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"target","event":{"type":"assistant.message","data":{"content":"old","messageId":"old-message"}}}
+    ,
+        .{},
+    );
+    defer old_params.deinit();
+    const old_frame = try allocator.dupe(u8, "{}");
+    switch (try client.queueSessionEvent(.detailed, old_frame, old_params.value)) {
+        .success => |retained| if (!retained) allocator.free(old_frame),
+        .failure => |failure_value| {
+            allocator.free(old_frame);
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    }
+    try std.testing.expectEqual(@as(u64, 1), client.events.items[0].generation);
+
+    try client.beginSessionRecord(try allocator.dupe(u8, "target"), 0);
+    const replacement_index = try client.commitSessionRecord();
+    const replacement = client.sessionHandle(replacement_index);
+    try std.testing.expectEqual(@as(u64, 2), replacement.generation);
+    try std.testing.expectEqual(@as(usize, 0), client.events.items.len);
+
+    const new_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"target","event":{"type":"assistant.message","data":{"content":"new","messageId":"new-message"}}}
+    ,
+        .{},
+    );
+    defer new_params.deinit();
+    const new_frame = try allocator.dupe(u8, "{}");
+    switch (try client.queueSessionEvent(.detailed, new_frame, new_params.value)) {
+        .success => |retained| if (!retained) allocator.free(new_frame),
+        .failure => |failure_value| {
+            allocator.free(new_frame);
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    }
+    var event = try replacement.nextEvent();
+    defer event.deinit(allocator);
+    try std.testing.expectEqualStrings("new", event.assistant_message.content);
+}
+
+test "stale session removal cannot deactivate a replacement generation" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+    _ = try addTestSession(&client, "target");
+    const stale_id = try allocator.dupe(u8, "target");
+    defer allocator.free(stale_id);
+    var ready: std.Io.Event = .unset;
+    var completed: std.Io.Event = .unset;
+    var context = GatedSessionRemoval{
+        .client = &client,
+        .ready = &ready,
+        .started = &completed,
+        .record_index = 0,
+        .session_id = stale_id,
+        .generation = 1,
+    };
+    var future = try std.testing.io.concurrent(GatedSessionRemoval.run, .{&context});
+
+    try client.removeSessionExpected(0, "target", 1);
+    try client.beginSessionRecord(try allocator.dupe(u8, "target"), null);
+    const replacement_index = try client.commitSessionRecord();
+    const replacement = client.sessionHandle(replacement_index);
+    ready.set(client.io);
+    try completed.wait(client.io);
+    future.await(client.io);
+
+    try std.testing.expectEqual(error.SessionNotActive, context.result.?);
+    try std.testing.expectEqual(@as(u64, 2), replacement.generation);
+    var lease = try replacement.eventLog();
+    lease.deinit();
+}
+
+test "session removal drains ingress without holding the sessions mutex" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+    const session = try addTestSession(&client, "target");
+    const log = try client.ensureEventLog("target", 1);
+    try log.beginIngress();
+    var ingress_scope: SessionIngressScope = undefined;
+    beginSessionIngressScope(&ingress_scope, log);
+    var started: std.Io.Event = .unset;
+    var context = DrainingSessionRemoval{
+        .client = &client,
+        .started = &started,
+        .record_index = 0,
+        .session_id = "target",
+        .generation = 1,
+    };
+    var future = try std.testing.io.concurrent(DrainingSessionRemoval.run, .{&context});
+    try started.wait(client.io);
+
+    const late_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"target","event":{"type":"assistant.message","data":{"content":"late","messageId":"late-message"}}}
+    ,
+        .{},
+    );
+    defer late_params.deinit();
+    const late_frame = try allocator.dupe(u8, "{}");
+    switch (try client.queueSessionEvent(.detailed, late_frame, late_params.value)) {
+        .success => |retained| {
+            try std.testing.expect(!retained);
+            allocator.free(late_frame);
+        },
+        .failure => |failure_value| {
+            allocator.free(late_frame);
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    }
+    try std.testing.expectEqual(@as(usize, 0), client.events.items.len);
+    try std.testing.expectError(error.SessionNotActive, session.eventLog());
+    endSessionIngressScope(&ingress_scope);
+    client.finishSessionIngress(log);
+    future.await(client.io);
+
+    try std.testing.expect(context.result == null);
+    try std.testing.expect(!client.sessions.items[0].isActive());
+}
+
+test "closing session requests cannot bind a pending replacement runtime" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        client.rollbackExtensionRuntime();
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+    _ = try addTestSession(&client, "target");
+    client.sessions.items[0].removal = .draining;
+    try client.beginExtensionRuntime(
+        "target",
+        session_types.ResumeSessionConfig{},
+        &.{},
+    );
+    const params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"target"}
+    ,
+        .{},
+    );
+    defer params.deinit();
+
+    switch (try client.acquireServerRequestLifetime(params.value)) {
+        .inactive => {},
+        .active => |lease_value| {
+            var lease = lease_value;
+            lease.deinit();
+            return error.TestExpectedInactiveSession;
+        },
+        .unscoped, .pending => return error.TestExpectedInactiveSession,
+    }
 }
 
 test "session failure conversion rolls back every allocation failure" {
@@ -24382,11 +24785,17 @@ test "admitted session events block same-session removal before runtime access" 
         defer parsed.deinit();
         var event = try session_types.parseEventClassified(allocator, parsed.value.object.get("event").?);
         defer event.deinit(allocator);
-        var lease = (try client.acquireActiveEventIngress("target", true)).?;
+        var lease = switch (try client.acquireActiveEventIngress("target", true)) {
+            .active => |value| value,
+            .unknown, .unavailable => return error.TestExpectedActiveSession,
+        };
         var ingress_scope: SessionIngressScope = undefined;
         beginSessionIngressScope(&ingress_scope, lease.log);
-        client.removeSessionAt(0);
-        try std.testing.expect(client.sessions.items[0].removal_pending);
+        try client.removeSessionExpected(0, "target", 1);
+        try std.testing.expectEqual(
+            .deferred,
+            client.sessions.items[0].removal,
+        );
         try client.applyExtensionEvent("target", &event);
         endSessionIngressScope(&ingress_scope);
         client.finishSessionIngress(lease.log);
@@ -24426,7 +24835,10 @@ test "resumed session events admit only the active log generation" {
     defer parsed.deinit();
     var event = try session_types.parseEventClassified(allocator, parsed.value.object.get("event").?);
     defer event.deinit(allocator);
-    var lease = (try client.acquireActiveEventIngress("target", true)).?;
+    var lease = switch (try client.acquireActiveEventIngress("target", true)) {
+        .active => |value| value,
+        .unknown, .unavailable => return error.TestExpectedActiveSession,
+    };
     try std.testing.expect(lease.log == active_log);
     const stale_log = client.findEventLog("target", 1).?;
     stale_log.mutex.lockUncancelable(client.io);
@@ -24436,7 +24848,7 @@ test "resumed session events admit only the active log generation" {
 
     var ingress_scope: SessionIngressScope = undefined;
     beginSessionIngressScope(&ingress_scope, lease.log);
-    client.removeSessionAt(0);
+    try client.removeSessionExpected(0, "target", 2);
     try client.applyExtensionEvent("target", &event);
     endSessionIngressScope(&ingress_scope);
     client.finishSessionIngress(lease.log);
@@ -24635,7 +25047,7 @@ test "automatic callback removal completes after its own ingress returns" {
             raw_context: ?*anyopaque,
         ) !void {
             const context: *@This() = @ptrCast(@alignCast(raw_context.?));
-            context.client.removeSessionAt(0);
+            try context.client.removeSessionExpected(0, "target", 1);
             context.returned.* = true;
         }
     };
@@ -24716,7 +25128,10 @@ test "preceding session removal cannot redirect target extension events" {
     defer parsed.deinit();
     var event = try session_types.parseEventClassified(allocator, parsed.value.object.get("event").?);
     defer event.deinit(allocator);
-    var lease = (try client.acquireActiveEventIngress("target", true)).?;
+    var lease = switch (try client.acquireActiveEventIngress("target", true)) {
+        .active => |value| value,
+        .unknown, .unavailable => return error.TestExpectedActiveSession,
+    };
     var removed = client.extension_runtimes.orderedRemove(0);
     removed.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), client.extension_runtimes.items.len);
@@ -24755,6 +25170,7 @@ test "a full interaction queue does not evict another session" {
     for (0..max_queued_events) |_| {
         try client.events.append(allocator, .{
             .session_id = try allocator.dupe(u8, "s1"),
+            .generation = 1,
             .event = .{ .session_idle = .{} },
         });
     }
@@ -24805,6 +25221,7 @@ test "a full session queue records an observable failure without cross-session e
     for (0..max_queued_events) |_| {
         try client.events.append(allocator, .{
             .session_id = try allocator.dupe(u8, "session-1"),
+            .generation = 1,
             .event = .{ .session_idle = .{} },
         });
     }
@@ -24837,7 +25254,7 @@ test "a full session queue records an observable failure without cross-session e
     for (client.events.items) |*event| event.deinit(allocator);
     client.events.clearRetainingCapacity();
     client.transport_closed = true;
-    const failure = switch (try client.nextEventImpl(.legacy, "session-1")) {
+    const failure = switch (try client.nextEventImpl(.legacy, "session-1", 1)) {
         .success => return error.TestExpectedQueueFailure,
         .failure => |value| value,
     };
@@ -24914,6 +25331,7 @@ test "a full session queue rejects unretained permission and tool requests" {
         for (0..max_queued_events) |_| {
             try client.events.append(allocator, .{
                 .session_id = try allocator.dupe(u8, "s1"),
+                .generation = 1,
                 .event = .{ .session_idle = .{} },
             });
         }
@@ -24973,11 +25391,12 @@ test "session removal defers in-progress automatic event cleanup" {
     try client.events.append(allocator, .{
         .id = 42,
         .session_id = try allocator.dupe(u8, "s1"),
+        .generation = 1,
         .event = try session_types.parseEvent(allocator, parsed.value),
         .automatic_handling_in_progress = true,
     });
 
-    client.removeSessionState("s1");
+    client.removeSessionState("s1", 1);
     try std.testing.expectEqual(@as(usize, 1), client.events.items.len);
     try std.testing.expect(client.events.items[0].remove_after_automatic_handling);
     try std.testing.expectEqualStrings(
@@ -26191,7 +26610,7 @@ test "interleaved request response write failure is captured" {
         }
     }.handle, null);
 
-    var failure = switch (try client.nextEventImpl(.detailed, "session-1")) {
+    var failure = switch (try client.nextEventImpl(.detailed, "session-1", 1)) {
         .success => |delivery| {
             var owned = delivery;
             owned.deinit(allocator);
@@ -26393,8 +26812,6 @@ test "cross-session errors retain diagnostics without eager failure construction
     var idle = try session_one.nextEvent();
     defer idle.deinit(allocator);
     try std.testing.expect(idle == .session_idle);
-    client.stopEventWorker();
-    client.stopPump();
 
     var failure = switch (try session_two.nextEventDetailed()) {
         .success => |event_value| {
@@ -26812,6 +27229,7 @@ fn runAutomaticToolFailure(
     defer event_json.deinit();
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "session-1"),
+        .generation = 1,
         .event = try deliveryEventForTest(
             allocator,
             try session_types.parseEvent(allocator, event_json.value),
@@ -27187,7 +27605,7 @@ test "session.event invalid envelope violation matrix" {
         deinitTestEventLogs(&client);
         client.events.deinit(allocator);
     }
-    var delivery = switch (try client.nextEventImpl(.detailed, "s1")) {
+    var delivery = switch (try client.nextEventImpl(.detailed, "s1", 0)) {
         .success => |value| value,
         .failure => |failure| {
             var owned = failure;
@@ -27580,6 +27998,26 @@ test "custom agent validation precedes lifecycle state and RPC writes" {
     try std.testing.expectEqual(@as(u64, 1), client.next_request_id);
     try std.testing.expectEqual(@as(usize, 0), client.sessions.items.len);
     try std.testing.expectEqual(@as(usize, 0), client.extension_runtimes.items.len);
+    try std.testing.expect(client.pending_extension_runtime == null);
+}
+
+test "parent join id allocation failure precedes lifecycle mutation" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var client = Client{
+        .allocator = failing.allocator(),
+        .io = undefined,
+    };
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        client.joinParentSession("target", .{}),
+    );
+    try std.testing.expectEqual(@as(u64, 1), client.next_request_id);
+    try std.testing.expectEqual(@as(usize, 0), client.sessions.items.len);
+    try std.testing.expect(client.pending_session == null);
     try std.testing.expect(client.pending_extension_runtime == null);
 }
 
@@ -28803,6 +29241,7 @@ fn attachDeleteTestState(client: *Client, session_id: []const u8) !void {
     runtime.mcp_oauth_interest = try testMcpOAuthInterest(client.allocator, "interest-1");
     try client.events.append(client.allocator, .{
         .session_id = try client.allocator.dupe(u8, session_id),
+        .generation = 1,
         .event = .{ .session_idle = .{} },
     });
 }
