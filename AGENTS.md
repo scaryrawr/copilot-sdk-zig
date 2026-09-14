@@ -18,6 +18,10 @@
 - When Zig manually mirrors an enum from the pinned schemas, verify the exact
   upstream value set in `npm test`; pinning the schema does not update the Zig
   type when upstream adds a variant.
+- Treat optional inbound session-event fields as nullable at the decode
+  boundary. The CLI may emit explicit JSON `null` where the pinned schema only
+  documents omission; generated parsers must preserve required-field checks
+  while accepting both shapes for optional fields.
 - Scope upstream API checks to the TypeScript declaration that owns each field,
   including inherited lifecycle fields, `Omit` exclusions, intersection
   re-declarations, startup initialization, and response handling; searching
