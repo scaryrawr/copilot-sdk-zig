@@ -6749,43 +6749,43 @@ fn parseAgentInterruptedData(allocator: std.mem.Allocator, value: std.json.Value
     }
     const parsed_elapsed_ms = try parseNumber(object.get("elapsedMs") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_turn = try parseInteger(u64, object.get("turn") orelse return error.InvalidSessionEvent, 0, null, null);
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_api_endpoint = if (object.get("apiEndpoint")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_api_endpoint = if (object.get("apiEndpoint")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_api_endpoint = parsed_api_endpoint;
         if (cleanup_api_endpoint) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_transport = if (object.get("transport")) |field_value| try parseModelCallFailureTransport(allocator, field_value) else null;
+    const parsed_transport = if (object.get("transport")) |field_value| if ((field_value) == .null) null else try parseModelCallFailureTransport(allocator, field_value) else null;
     errdefer {
         var cleanup_transport = parsed_transport;
         if (cleanup_transport) |*present| {
             wipeModelCallFailureTransport(&present.*);
         }
     }
-    const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_reasoning_effort = parsed_reasoning_effort;
         if (cleanup_reasoning_effort) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_cancel_phase = if (object.get("cancelPhase")) |field_value| try parseAgentInterruptedCancelPhase(allocator, field_value) else null;
+    const parsed_cancel_phase = if (object.get("cancelPhase")) |field_value| if ((field_value) == .null) null else try parseAgentInterruptedCancelPhase(allocator, field_value) else null;
     errdefer {
         var cleanup_cancel_phase = parsed_cancel_phase;
         if (cleanup_cancel_phase) |*present| {
             wipeAgentInterruptedCancelPhase(&present.*);
         }
     }
-    const parsed_output_ttft_ms = if (object.get("outputTtftMs")) |field_value| try parseNumber(field_value, 0, null, null) else null;
-    const parsed_tool_names = if (object.get("toolNames")) |field_value| try parseAgentInterruptedDataToolNamesArray(allocator, field_value) else null;
+    const parsed_output_ttft_ms = if (object.get("outputTtftMs")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_tool_names = if (object.get("toolNames")) |field_value| if ((field_value) == .null) null else try parseAgentInterruptedDataToolNamesArray(allocator, field_value) else null;
     errdefer {
         var cleanup_tool_names = parsed_tool_names;
         if (cleanup_tool_names) |*present| {
@@ -6794,7 +6794,7 @@ fn parseAgentInterruptedData(allocator: std.mem.Allocator, value: std.json.Value
             }
         }
     }
-    const parsed_tool_call_ids = if (object.get("toolCallIds")) |field_value| try parseAgentInterruptedDataToolCallIdsArray(allocator, field_value) else null;
+    const parsed_tool_call_ids = if (object.get("toolCallIds")) |field_value| if ((field_value) == .null) null else try parseAgentInterruptedDataToolCallIdsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_tool_call_ids = parsed_tool_call_ids;
         if (cleanup_tool_call_ids) |*present| {
@@ -6803,7 +6803,7 @@ fn parseAgentInterruptedData(allocator: std.mem.Allocator, value: std.json.Value
             }
         }
     }
-    const parsed_safe_tool_names = if (object.get("safeToolNames")) |field_value| try parseAgentInterruptedDataSafeToolNamesArray(allocator, field_value) else null;
+    const parsed_safe_tool_names = if (object.get("safeToolNames")) |field_value| if ((field_value) == .null) null else try parseAgentInterruptedDataSafeToolNamesArray(allocator, field_value) else null;
     errdefer {
         var cleanup_safe_tool_names = parsed_safe_tool_names;
         if (cleanup_safe_tool_names) |*present| {
@@ -6812,7 +6812,7 @@ fn parseAgentInterruptedData(allocator: std.mem.Allocator, value: std.json.Value
             }
         }
     }
-    const parsed_interrupted_agent_count = if (object.get("interruptedAgentCount")) |field_value| try parseInteger(u64, field_value, 1, null, null) else null;
+    const parsed_interrupted_agent_count = if (object.get("interruptedAgentCount")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 1, null, null) else null;
     return .{
         .activity = parsed_activity,
         .elapsed_ms = parsed_elapsed_ms,
@@ -6902,8 +6902,8 @@ fn parseFusionPhaseActivityData(allocator: std.mem.Allocator, value: std.json.Va
         var cleanup_activity = parsed_activity;
         wipeFusionPhaseActivityKind(&cleanup_activity);
     }
-    const parsed_total_response_size_bytes = if (object.get("totalResponseSizeBytes")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_total_response_size_bytes = if (object.get("totalResponseSizeBytes")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -6937,7 +6937,7 @@ fn parseFusionPhaseUsage(_: std.mem.Allocator, value: std.json.Value) !FusionPha
     const parsed_input_tokens = try parseInteger(u64, object.get("inputTokens") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_output_tokens = try parseInteger(u64, object.get("outputTokens") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_cached_tokens = try parseInteger(u64, object.get("cachedTokens") orelse return error.InvalidSessionEvent, 0, null, null);
-    const parsed_cache_write_tokens = if (object.get("cacheWriteTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_cache_write_tokens = if (object.get("cacheWriteTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_total_nano_aiu = try parseNumber(object.get("totalNanoAiu") orelse return error.InvalidSessionEvent, 0, null, null);
     return .{
         .request_count = parsed_request_count,
@@ -7048,21 +7048,21 @@ fn parseFusionPhaseCompletedData(allocator: std.mem.Allocator, value: std.json.V
         var cleanup_usage = parsed_usage;
         wipeFusionPhaseUsage(&cleanup_usage);
     }
-    const parsed_projection_message = if (object.get("projectionMessage")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_projection_message = if (object.get("projectionMessage")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_projection_message = parsed_projection_message;
         if (cleanup_projection_message) |*present| {
             wipeJsonValue(&present.*);
         }
     }
-    const parsed_projection_mode = if (object.get("projectionMode")) |field_value| try parseFusionProjectionMode(allocator, field_value) else null;
+    const parsed_projection_mode = if (object.get("projectionMode")) |field_value| if ((field_value) == .null) null else try parseFusionProjectionMode(allocator, field_value) else null;
     errdefer {
         var cleanup_projection_mode = parsed_projection_mode;
         if (cleanup_projection_mode) |*present| {
             wipeFusionProjectionMode(&present.*);
         }
     }
-    const parsed_staged_terminal = if (object.get("stagedTerminal")) |field_value| try parseFusionStagedTerminal(allocator, field_value) else null;
+    const parsed_staged_terminal = if (object.get("stagedTerminal")) |field_value| if ((field_value) == .null) null else try parseFusionStagedTerminal(allocator, field_value) else null;
     errdefer {
         var cleanup_staged_terminal = parsed_staged_terminal;
         if (cleanup_staged_terminal) |*present| {
@@ -7135,14 +7135,14 @@ fn parseFusionPhaseFailedData(allocator: std.mem.Allocator, value: std.json.Valu
         var cleanup_usage = parsed_usage;
         wipeFusionPhaseUsage(&cleanup_usage);
     }
-    const parsed_error_message = if (object.get("errorMessage")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_error_message = if (object.get("errorMessage")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_error_message = parsed_error_message;
         if (cleanup_error_message) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_degraded_to_phase_id = if (object.get("degradedToPhaseId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_degraded_to_phase_id = if (object.get("degradedToPhaseId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_degraded_to_phase_id = parsed_degraded_to_phase_id;
         if (cleanup_degraded_to_phase_id) |*present| {
@@ -7215,7 +7215,7 @@ fn parseFusionPhaseStartedData(allocator: std.mem.Allocator, value: std.json.Val
 
 fn parseAssistantIdleData(_: std.mem.Allocator, value: std.json.Value) !AssistantIdleData {
     const object = try payloads.requiredObject(value);
-    const parsed_aborted = if (object.get("aborted")) |field_value| try parseBool(field_value) else null;
+    const parsed_aborted = if (object.get("aborted")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .aborted = parsed_aborted,
     };
@@ -7276,35 +7276,35 @@ fn parseAssistantMessageToolRequest(allocator: std.mem.Allocator, value: std.jso
         const cleanup_name = parsed_name;
         wipeString(cleanup_name);
     }
-    const parsed_arguments = if (object.get("arguments")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_arguments = if (object.get("arguments")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_arguments = parsed_arguments;
         if (cleanup_arguments) |*present| {
             wipeJsonValue(&present.*);
         }
     }
-    const parsed_type = if (object.get("type")) |field_value| try parseAssistantMessageToolRequestType(allocator, field_value) else null;
+    const parsed_type = if (object.get("type")) |field_value| if ((field_value) == .null) null else try parseAssistantMessageToolRequestType(allocator, field_value) else null;
     errdefer {
         var cleanup_type = parsed_type;
         if (cleanup_type) |*present| {
             wipeAssistantMessageToolRequestType(&present.*);
         }
     }
-    const parsed_tool_title = if (object.get("toolTitle")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_title = if (object.get("toolTitle")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_title = parsed_tool_title;
         if (cleanup_tool_title) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_mcp_server_name = if (object.get("mcpServerName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_mcp_server_name = if (object.get("mcpServerName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_mcp_server_name = parsed_mcp_server_name;
         if (cleanup_mcp_server_name) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_mcp_tool_name = if (object.get("mcpToolName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_mcp_tool_name = if (object.get("mcpToolName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_mcp_tool_name = parsed_mcp_tool_name;
         if (cleanup_mcp_tool_name) |*present| {
@@ -7318,7 +7318,7 @@ fn parseAssistantMessageToolRequest(allocator: std.mem.Allocator, value: std.jso
             wipeString(present.*);
         }
     }
-    const parsed_caller = if (object.get("caller")) |field_value| try parseAssistantMessageToolRequestCaller(allocator, field_value) else null;
+    const parsed_caller = if (object.get("caller")) |field_value| if ((field_value) == .null) null else try parseAssistantMessageToolRequestCaller(allocator, field_value) else null;
     errdefer {
         var cleanup_caller = parsed_caller;
         if (cleanup_caller) |*present| {
@@ -7345,7 +7345,7 @@ fn parseAssistantMessageServerTools(allocator: std.mem.Allocator, value: std.jso
         const cleanup_provider = parsed_provider;
         wipeString(cleanup_provider);
     }
-    const parsed_items = if (object.get("items")) |field_value| try parseAssistantMessageServerToolsItemsArray(allocator, field_value) else null;
+    const parsed_items = if (object.get("items")) |field_value| if ((field_value) == .null) null else try parseAssistantMessageServerToolsItemsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_items = parsed_items;
         if (cleanup_items) |*present| {
@@ -7354,7 +7354,7 @@ fn parseAssistantMessageServerTools(allocator: std.mem.Allocator, value: std.jso
             }
         }
     }
-    const parsed_function_call_namespaces = if (object.get("functionCallNamespaces")) |field_value| try parseAssistantMessageServerToolsFunctionCallNamespacesMap(allocator, field_value) else null;
+    const parsed_function_call_namespaces = if (object.get("functionCallNamespaces")) |field_value| if ((field_value) == .null) null else try parseAssistantMessageServerToolsFunctionCallNamespacesMap(allocator, field_value) else null;
     errdefer {
         var cleanup_function_call_namespaces = parsed_function_call_namespaces;
         if (cleanup_function_call_namespaces) |*present| {
@@ -7367,7 +7367,7 @@ fn parseAssistantMessageServerTools(allocator: std.mem.Allocator, value: std.jso
             }
         }
     }
-    const parsed_raw_content_blocks = if (object.get("rawContentBlocks")) |field_value| try parseAssistantMessageServerToolsRawContentBlocksArray(allocator, field_value) else null;
+    const parsed_raw_content_blocks = if (object.get("rawContentBlocks")) |field_value| if ((field_value) == .null) null else try parseAssistantMessageServerToolsRawContentBlocksArray(allocator, field_value) else null;
     errdefer {
         var cleanup_raw_content_blocks = parsed_raw_content_blocks;
         if (cleanup_raw_content_blocks) |*present| {
@@ -7376,7 +7376,7 @@ fn parseAssistantMessageServerTools(allocator: std.mem.Allocator, value: std.jso
             }
         }
     }
-    const parsed_advisor_model = if (object.get("advisorModel")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_advisor_model = if (object.get("advisorModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_advisor_model = parsed_advisor_model;
         if (cleanup_advisor_model) |*present| {
@@ -7399,7 +7399,7 @@ fn parseAssistantMessageReasoningBlocks(allocator: std.mem.Allocator, value: std
         const cleanup_provider = parsed_provider;
         wipeString(cleanup_provider);
     }
-    const parsed_blocks = if (object.get("blocks")) |field_value| try parseAssistantMessageReasoningBlocksBlocksArray(allocator, field_value) else null;
+    const parsed_blocks = if (object.get("blocks")) |field_value| if ((field_value) == .null) null else try parseAssistantMessageReasoningBlocksBlocksArray(allocator, field_value) else null;
     errdefer {
         var cleanup_blocks = parsed_blocks;
         if (cleanup_blocks) |*present| {
@@ -7434,21 +7434,21 @@ fn parseCitationSource(allocator: std.mem.Allocator, value: std.json.Value) !Cit
         var cleanup_provider = parsed_provider;
         wipeCitationProvider(&cleanup_provider);
     }
-    const parsed_title = if (object.get("title")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_title = if (object.get("title")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_title = parsed_title;
         if (cleanup_title) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_url = if (object.get("url")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_url = if (object.get("url")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_url = parsed_url;
         if (cleanup_url) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_path = if (object.get("path")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_path = if (object.get("path")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_path = parsed_path;
         if (cleanup_path) |*present| {
@@ -7528,21 +7528,21 @@ fn parseCitationReference(allocator: std.mem.Allocator, value: std.json.Value) !
         const cleanup_source_id = parsed_source_id;
         wipeString(cleanup_source_id);
     }
-    const parsed_cited_text = if (object.get("citedText")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_cited_text = if (object.get("citedText")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_cited_text = parsed_cited_text;
         if (cleanup_cited_text) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_location = if (object.get("location")) |field_value| try parseCitationLocation(allocator, field_value) else null;
+    const parsed_location = if (object.get("location")) |field_value| if ((field_value) == .null) null else try parseCitationLocation(allocator, field_value) else null;
     errdefer {
         var cleanup_location = parsed_location;
         if (cleanup_location) |*present| {
             wipeCitationLocation(&present.*);
         }
     }
-    const parsed_provider_metadata = if (object.get("providerMetadata")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_provider_metadata = if (object.get("providerMetadata")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_provider_metadata = parsed_provider_metadata;
         if (cleanup_provider_metadata) |*present| {
@@ -7604,7 +7604,7 @@ fn parseFusionAttribution(allocator: std.mem.Allocator, value: std.json.Value) !
         const cleanup_fusion_id = parsed_fusion_id;
         wipeString(cleanup_fusion_id);
     }
-    const parsed_commit_id = if (object.get("commitId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_commit_id = if (object.get("commitId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_commit_id = parsed_commit_id;
         if (cleanup_commit_id) |*present| {
@@ -7626,42 +7626,42 @@ fn parseFusionAttribution(allocator: std.mem.Allocator, value: std.json.Value) !
         const cleanup_pattern = parsed_pattern;
         wipeString(cleanup_pattern);
     }
-    const parsed_phase_id = if (object.get("phaseId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_phase_id = if (object.get("phaseId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_phase_id = parsed_phase_id;
         if (cleanup_phase_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_phase_kind = if (object.get("phaseKind")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_phase_kind = if (object.get("phaseKind")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_phase_kind = parsed_phase_kind;
         if (cleanup_phase_kind) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_role = if (object.get("role")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_role = if (object.get("role")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_role = parsed_role;
         if (cleanup_role) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_source_model = if (object.get("sourceModel")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_source_model = if (object.get("sourceModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_source_model = parsed_source_model;
         if (cleanup_source_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_conversation_scope = if (object.get("conversationScope")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_conversation_scope = if (object.get("conversationScope")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_conversation_scope = parsed_conversation_scope;
         if (cleanup_conversation_scope) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_source_phase_id = if (object.get("sourcePhaseId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_source_phase_id = if (object.get("sourcePhaseId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_source_phase_id = parsed_source_phase_id;
         if (cleanup_source_phase_id) |*present| {
@@ -7690,7 +7690,7 @@ fn parseAssistantMessageData(allocator: std.mem.Allocator, value: std.json.Value
         const cleanup_message_id = parsed_message_id;
         wipeString(cleanup_message_id);
     }
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
@@ -7702,7 +7702,7 @@ fn parseAssistantMessageData(allocator: std.mem.Allocator, value: std.json.Value
         const cleanup_content = parsed_content;
         wipeString(cleanup_content);
     }
-    const parsed_tool_requests = if (object.get("toolRequests")) |field_value| try parseAssistantMessageDataToolRequestsArray(allocator, field_value) else null;
+    const parsed_tool_requests = if (object.get("toolRequests")) |field_value| if ((field_value) == .null) null else try parseAssistantMessageDataToolRequestsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_tool_requests = parsed_tool_requests;
         if (cleanup_tool_requests) |*present| {
@@ -7711,116 +7711,116 @@ fn parseAssistantMessageData(allocator: std.mem.Allocator, value: std.json.Value
             }
         }
     }
-    const parsed_reasoning_opaque = if (object.get("reasoningOpaque")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_reasoning_opaque = if (object.get("reasoningOpaque")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_reasoning_opaque = parsed_reasoning_opaque;
         if (cleanup_reasoning_opaque) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_reasoning_text = if (object.get("reasoningText")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_reasoning_text = if (object.get("reasoningText")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_reasoning_text = parsed_reasoning_text;
         if (cleanup_reasoning_text) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_reasoning_wire_field = if (object.get("reasoningWireField")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_reasoning_wire_field = if (object.get("reasoningWireField")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_reasoning_wire_field = parsed_reasoning_wire_field;
         if (cleanup_reasoning_wire_field) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_encrypted_content = if (object.get("encryptedContent")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_encrypted_content = if (object.get("encryptedContent")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_encrypted_content = parsed_encrypted_content;
         if (cleanup_encrypted_content) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_phase = if (object.get("phase")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_phase = if (object.get("phase")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_phase = parsed_phase;
         if (cleanup_phase) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_chunk_index = if (object.get("chunkIndex")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_chunk_count = if (object.get("chunkCount")) |field_value| try parseInteger(u64, field_value, 1, null, null) else null;
-    const parsed_output_tokens = if (object.get("outputTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_interaction_id = if (object.get("interactionId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_chunk_index = if (object.get("chunkIndex")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_chunk_count = if (object.get("chunkCount")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 1, null, null) else null;
+    const parsed_output_tokens = if (object.get("outputTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_interaction_id = if (object.get("interactionId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_interaction_id = parsed_interaction_id;
         if (cleanup_interaction_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_request_id = if (object.get("requestId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_request_id = if (object.get("requestId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_request_id = parsed_request_id;
         if (cleanup_request_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_client_request_id = if (object.get("clientRequestId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_client_request_id = if (object.get("clientRequestId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_client_request_id = parsed_client_request_id;
         if (cleanup_client_request_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_service_request_id = if (object.get("serviceRequestId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_service_request_id = if (object.get("serviceRequestId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_service_request_id = parsed_service_request_id;
         if (cleanup_service_request_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_rte = if (object.get("rte")) |field_value| try parseBool(field_value) else null;
-    const parsed_api_call_id = if (object.get("apiCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_rte = if (object.get("rte")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_api_call_id = if (object.get("apiCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_api_call_id = parsed_api_call_id;
         if (cleanup_api_call_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_server_tools = if (object.get("serverTools")) |field_value| try parseAssistantMessageServerTools(allocator, field_value) else null;
+    const parsed_server_tools = if (object.get("serverTools")) |field_value| if ((field_value) == .null) null else try parseAssistantMessageServerTools(allocator, field_value) else null;
     errdefer {
         var cleanup_server_tools = parsed_server_tools;
         if (cleanup_server_tools) |*present| {
             wipeAssistantMessageServerTools(&present.*);
         }
     }
-    const parsed_reasoning_blocks = if (object.get("reasoningBlocks")) |field_value| try parseAssistantMessageReasoningBlocks(allocator, field_value) else null;
+    const parsed_reasoning_blocks = if (object.get("reasoningBlocks")) |field_value| if ((field_value) == .null) null else try parseAssistantMessageReasoningBlocks(allocator, field_value) else null;
     errdefer {
         var cleanup_reasoning_blocks = parsed_reasoning_blocks;
         if (cleanup_reasoning_blocks) |*present| {
             wipeAssistantMessageReasoningBlocks(&present.*);
         }
     }
-    const parsed_turn_id = if (object.get("turnId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_turn_id = if (object.get("turnId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_turn_id = parsed_turn_id;
         if (cleanup_turn_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_parent_tool_call_id = parsed_parent_tool_call_id;
         if (cleanup_parent_tool_call_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_citations = if (object.get("citations")) |field_value| try parseCitations(allocator, field_value) else null;
+    const parsed_citations = if (object.get("citations")) |field_value| if ((field_value) == .null) null else try parseCitations(allocator, field_value) else null;
     errdefer {
         var cleanup_citations = parsed_citations;
         if (cleanup_citations) |*present| {
             wipeCitations(&present.*);
         }
     }
-    const parsed_fusion = if (object.get("fusion")) |field_value| try parseFusionAttribution(allocator, field_value) else null;
+    const parsed_fusion = if (object.get("fusion")) |field_value| if ((field_value) == .null) null else try parseFusionAttribution(allocator, field_value) else null;
     errdefer {
         var cleanup_fusion = parsed_fusion;
         if (cleanup_fusion) |*present| {
@@ -7867,7 +7867,7 @@ fn parseAssistantMessageDeltaData(allocator: std.mem.Allocator, value: std.json.
         const cleanup_delta_content = parsed_delta_content;
         wipeString(cleanup_delta_content);
     }
-    const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_parent_tool_call_id = parsed_parent_tool_call_id;
         if (cleanup_parent_tool_call_id) |*present| {
@@ -7888,7 +7888,7 @@ fn parseAssistantMessageStartData(allocator: std.mem.Allocator, value: std.json.
         const cleanup_message_id = parsed_message_id;
         wipeString(cleanup_message_id);
     }
-    const parsed_phase = if (object.get("phase")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_phase = if (object.get("phase")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_phase = parsed_phase;
         if (cleanup_phase) |*present| {
@@ -7913,7 +7913,7 @@ fn parseAssistantReasoningData(allocator: std.mem.Allocator, value: std.json.Val
         const cleanup_content = parsed_content;
         wipeString(cleanup_content);
     }
-    const parsed_rte = if (object.get("rte")) |field_value| try parseBool(field_value) else null;
+    const parsed_rte = if (object.get("rte")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .reasoning_id = parsed_reasoning_id,
         .content = parsed_content,
@@ -7974,14 +7974,14 @@ fn parseAssistantToolCallDeltaData(allocator: std.mem.Allocator, value: std.json
         const cleanup_tool_call_id = parsed_tool_call_id;
         wipeString(cleanup_tool_call_id);
     }
-    const parsed_tool_name = if (object.get("toolName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_name = if (object.get("toolName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_name = parsed_tool_name;
         if (cleanup_tool_name) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_tool_type = if (object.get("toolType")) |field_value| try parseAssistantMessageToolRequestType(allocator, field_value) else null;
+    const parsed_tool_type = if (object.get("toolType")) |field_value| if ((field_value) == .null) null else try parseAssistantMessageToolRequestType(allocator, field_value) else null;
     errdefer {
         var cleanup_tool_type = parsed_tool_type;
         if (cleanup_tool_type) |*present| {
@@ -8008,7 +8008,7 @@ fn parseAssistantTurnEndData(allocator: std.mem.Allocator, value: std.json.Value
         const cleanup_turn_id = parsed_turn_id;
         wipeString(cleanup_turn_id);
     }
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
@@ -8028,14 +8028,14 @@ fn parseAssistantTurnRetryData(allocator: std.mem.Allocator, value: std.json.Val
         const cleanup_turn_id = parsed_turn_id;
         wipeString(cleanup_turn_id);
     }
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_reason = if (object.get("reason")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_reason = if (object.get("reason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_reason = parsed_reason;
         if (cleanup_reason) |*present| {
@@ -8056,14 +8056,14 @@ fn parseAssistantTurnStartData(allocator: std.mem.Allocator, value: std.json.Val
         const cleanup_turn_id = parsed_turn_id;
         wipeString(cleanup_turn_id);
     }
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_interaction_id = if (object.get("interactionId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_interaction_id = if (object.get("interactionId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_interaction_id = parsed_interaction_id;
         if (cleanup_interaction_id) |*present| {
@@ -8102,16 +8102,16 @@ fn parseAssistantUsageQuotaSnapshot(allocator: std.mem.Allocator, value: std.jso
     const parsed_overage = try parseNumber(object.get("overage") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_overage_allowed_with_exhausted_quota = try parseBool(object.get("overageAllowedWithExhaustedQuota") orelse return error.InvalidSessionEvent);
     const parsed_remaining_percentage = try parseNumber(object.get("remainingPercentage") orelse return error.InvalidSessionEvent, 0, null, 100);
-    const parsed_reset_date = if (object.get("resetDate")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_reset_date = if (object.get("resetDate")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_reset_date = parsed_reset_date;
         if (cleanup_reset_date) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_has_quota = if (object.get("hasQuota")) |field_value| try parseBool(field_value) else null;
-    const parsed_token_based_billing = if (object.get("tokenBasedBilling")) |field_value| try parseBool(field_value) else null;
-    const parsed_overage_entitlement = if (object.get("overageEntitlement")) |field_value| try parseNumber(field_value, 0, null, null) else null;
+    const parsed_has_quota = if (object.get("hasQuota")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_token_based_billing = if (object.get("tokenBasedBilling")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_overage_entitlement = if (object.get("overageEntitlement")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
     return .{
         .is_unlimited_entitlement = parsed_is_unlimited_entitlement,
         .entitlement_requests = parsed_entitlement_requests,
@@ -8131,7 +8131,7 @@ fn parseAssistantUsageCopilotUsageTokenDetail(allocator: std.mem.Allocator, valu
     const object = try payloads.requiredObject(value);
     const parsed_batch_size = try parseInteger(u64, object.get("batchSize") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_cost_per_batch = try parseInteger(u64, object.get("costPerBatch") orelse return error.InvalidSessionEvent, 0, null, null);
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
@@ -8155,14 +8155,14 @@ fn parseAssistantUsageCopilotUsageTokenDetail(allocator: std.mem.Allocator, valu
 
 fn parseAssistantUsageCopilotUsage(allocator: std.mem.Allocator, value: std.json.Value) !AssistantUsageCopilotUsage {
     const object = try payloads.requiredObject(value);
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_token_details = if (object.get("tokenDetails")) |field_value| try parseAssistantUsageCopilotUsageTokenDetailsArray(allocator, field_value) else null;
+    const parsed_token_details = if (object.get("tokenDetails")) |field_value| if ((field_value) == .null) null else try parseAssistantUsageCopilotUsageTokenDetailsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_token_details = parsed_token_details;
         if (cleanup_token_details) |*present| {
@@ -8194,87 +8194,87 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
         const cleanup_model = parsed_model;
         wipeString(cleanup_model);
     }
-    const parsed_input_tokens = if (object.get("inputTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_output_tokens = if (object.get("outputTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_cache_read_tokens = if (object.get("cacheReadTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_cache_write_tokens = if (object.get("cacheWriteTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_cache_expires_at = if (object.get("cacheExpiresAt")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_input_tokens = if (object.get("inputTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_output_tokens = if (object.get("outputTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_cache_read_tokens = if (object.get("cacheReadTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_cache_write_tokens = if (object.get("cacheWriteTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_cache_expires_at = if (object.get("cacheExpiresAt")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_cache_expires_at = parsed_cache_expires_at;
         if (cleanup_cache_expires_at) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_reasoning_tokens = if (object.get("reasoningTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_cost = if (object.get("cost")) |field_value| try parseNumber(field_value, null, null, null) else null;
-    const parsed_duration = if (object.get("duration")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_time_to_first_token_ms = if (object.get("timeToFirstTokenMs")) |field_value| try parseNumber(field_value, 0, null, null) else null;
-    const parsed_output_ttft_ms = if (object.get("outputTtftMs")) |field_value| try parseNumber(field_value, 0, null, null) else null;
-    const parsed_inter_token_latency_ms = if (object.get("interTokenLatencyMs")) |field_value| try parseNumber(field_value, 0, null, null) else null;
-    const parsed_initiator = if (object.get("initiator")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_reasoning_tokens = if (object.get("reasoningTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_cost = if (object.get("cost")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, null, null) else null;
+    const parsed_duration = if (object.get("duration")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_time_to_first_token_ms = if (object.get("timeToFirstTokenMs")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_output_ttft_ms = if (object.get("outputTtftMs")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_inter_token_latency_ms = if (object.get("interTokenLatencyMs")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_initiator = if (object.get("initiator")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_initiator = parsed_initiator;
         if (cleanup_initiator) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_interaction_type = if (object.get("interactionType")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_interaction_type = if (object.get("interactionType")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_interaction_type = parsed_interaction_type;
         if (cleanup_interaction_type) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_is_byok = if (object.get("isByok")) |field_value| try parseBool(field_value) else null;
-    const parsed_is_auto = if (object.get("isAuto")) |field_value| try parseBool(field_value) else null;
-    const parsed_max_prompt_tokens = if (object.get("maxPromptTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_max_output_tokens = if (object.get("maxOutputTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_accepted_prediction_tokens = if (object.get("acceptedPredictionTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_rejected_prediction_tokens = if (object.get("rejectedPredictionTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_transport = if (object.get("transport")) |field_value| try parseAssistantUsageTransport(allocator, field_value) else null;
+    const parsed_is_byok = if (object.get("isByok")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_is_auto = if (object.get("isAuto")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_max_prompt_tokens = if (object.get("maxPromptTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_max_output_tokens = if (object.get("maxOutputTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_accepted_prediction_tokens = if (object.get("acceptedPredictionTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_rejected_prediction_tokens = if (object.get("rejectedPredictionTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_transport = if (object.get("transport")) |field_value| if ((field_value) == .null) null else try parseAssistantUsageTransport(allocator, field_value) else null;
     errdefer {
         var cleanup_transport = parsed_transport;
         if (cleanup_transport) |*present| {
             wipeAssistantUsageTransport(&present.*);
         }
     }
-    const parsed_api_call_id = if (object.get("apiCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_api_call_id = if (object.get("apiCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_api_call_id = parsed_api_call_id;
         if (cleanup_api_call_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_provider_call_id = if (object.get("providerCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_provider_call_id = if (object.get("providerCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_provider_call_id = parsed_provider_call_id;
         if (cleanup_provider_call_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_service_request_id = if (object.get("serviceRequestId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_service_request_id = if (object.get("serviceRequestId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_service_request_id = parsed_service_request_id;
         if (cleanup_service_request_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_rte = if (object.get("rte")) |field_value| try parseBool(field_value) else null;
-    const parsed_api_endpoint = if (object.get("apiEndpoint")) |field_value| try parseAssistantUsageApiEndpoint(allocator, field_value) else null;
+    const parsed_rte = if (object.get("rte")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_api_endpoint = if (object.get("apiEndpoint")) |field_value| if ((field_value) == .null) null else try parseAssistantUsageApiEndpoint(allocator, field_value) else null;
     errdefer {
         var cleanup_api_endpoint = parsed_api_endpoint;
         if (cleanup_api_endpoint) |*present| {
             wipeAssistantUsageApiEndpoint(&present.*);
         }
     }
-    const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_parent_tool_call_id = parsed_parent_tool_call_id;
         if (cleanup_parent_tool_call_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_quota_snapshots = if (object.get("quotaSnapshots")) |field_value| try parseAssistantUsageDataQuotaSnapshotsMap(allocator, field_value) else null;
+    const parsed_quota_snapshots = if (object.get("quotaSnapshots")) |field_value| if ((field_value) == .null) null else try parseAssistantUsageDataQuotaSnapshotsMap(allocator, field_value) else null;
     errdefer {
         var cleanup_quota_snapshots = parsed_quota_snapshots;
         if (cleanup_quota_snapshots) |*present| {
@@ -8287,40 +8287,40 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
             }
         }
     }
-    const parsed_copilot_usage = if (object.get("copilotUsage")) |field_value| try parseAssistantUsageCopilotUsage(allocator, field_value) else null;
+    const parsed_copilot_usage = if (object.get("copilotUsage")) |field_value| if ((field_value) == .null) null else try parseAssistantUsageCopilotUsage(allocator, field_value) else null;
     errdefer {
         var cleanup_copilot_usage = parsed_copilot_usage;
         if (cleanup_copilot_usage) |*present| {
             wipeAssistantUsageCopilotUsage(&present.*);
         }
     }
-    const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_reasoning_effort = parsed_reasoning_effort;
         if (cleanup_reasoning_effort) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_reasoning_summary = if (object.get("reasoningSummary")) |field_value| try parseReasoningSummary(allocator, field_value) else null;
+    const parsed_reasoning_summary = if (object.get("reasoningSummary")) |field_value| if ((field_value) == .null) null else try parseReasoningSummary(allocator, field_value) else null;
     errdefer {
         var cleanup_reasoning_summary = parsed_reasoning_summary;
         if (cleanup_reasoning_summary) |*present| {
             wipeReasoningSummary(&present.*);
         }
     }
-    const parsed_available_tool_count = if (object.get("availableToolCount")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_tool_token_count = if (object.get("toolTokenCount")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_frontier_source = if (object.get("frontierSource")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_available_tool_count = if (object.get("availableToolCount")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_tool_token_count = if (object.get("toolTokenCount")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_frontier_source = if (object.get("frontierSource")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_frontier_source = parsed_frontier_source;
         if (cleanup_frontier_source) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_cache_ttl_seconds = if (object.get("cacheTtlSeconds")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_cache_details_reported = if (object.get("cacheDetailsReported")) |field_value| try parseBool(field_value) else null;
-    const parsed_num_tool_calls = if (object.get("numToolCalls")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_tool_counts = if (object.get("toolCounts")) |field_value| try parseAssistantUsageDataToolCountsMap(allocator, field_value) else null;
+    const parsed_cache_ttl_seconds = if (object.get("cacheTtlSeconds")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_cache_details_reported = if (object.get("cacheDetailsReported")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_num_tool_calls = if (object.get("numToolCalls")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_tool_counts = if (object.get("toolCounts")) |field_value| if ((field_value) == .null) null else try parseAssistantUsageDataToolCountsMap(allocator, field_value) else null;
     errdefer {
         var cleanup_tool_counts = parsed_tool_counts;
         if (cleanup_tool_counts) |*present| {
@@ -8332,15 +8332,15 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
             }
         }
     }
-    const parsed_finish_reason = if (object.get("finishReason")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_finish_reason = if (object.get("finishReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_finish_reason = parsed_finish_reason;
         if (cleanup_finish_reason) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_content_filter_triggered = if (object.get("contentFilterTriggered")) |field_value| try parseBool(field_value) else null;
-    const parsed_fusion = if (object.get("fusion")) |field_value| try parseFusionAttribution(allocator, field_value) else null;
+    const parsed_content_filter_triggered = if (object.get("contentFilterTriggered")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_fusion = if (object.get("fusion")) |field_value| if ((field_value) == .null) null else try parseFusionAttribution(allocator, field_value) else null;
     errdefer {
         var cleanup_fusion = parsed_fusion;
         if (cleanup_fusion) |*present| {
@@ -8425,14 +8425,14 @@ fn parseAutoModeSwitchRequestedData(allocator: std.mem.Allocator, value: std.jso
         const cleanup_request_id = parsed_request_id;
         wipeString(cleanup_request_id);
     }
-    const parsed_error_code = if (object.get("errorCode")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_error_code = if (object.get("errorCode")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_error_code = parsed_error_code;
         if (cleanup_error_code) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_retry_after_seconds = if (object.get("retryAfterSeconds")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_retry_after_seconds = if (object.get("retryAfterSeconds")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     return .{
         .request_id = parsed_request_id,
         .error_code = parsed_error_code,
@@ -8442,9 +8442,9 @@ fn parseAutoModeSwitchRequestedData(allocator: std.mem.Allocator, value: std.jso
 
 fn parseCapabilitiesChangedUI(_: std.mem.Allocator, value: std.json.Value) !CapabilitiesChangedUI {
     const object = try payloads.requiredObject(value);
-    const parsed_elicitation = if (object.get("elicitation")) |field_value| try parseBool(field_value) else null;
-    const parsed_mcp_apps = if (object.get("mcpApps")) |field_value| try parseBool(field_value) else null;
-    const parsed_canvases = if (object.get("canvases")) |field_value| try parseBool(field_value) else null;
+    const parsed_elicitation = if (object.get("elicitation")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_mcp_apps = if (object.get("mcpApps")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_canvases = if (object.get("canvases")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .elicitation = parsed_elicitation,
         .mcp_apps = parsed_mcp_apps,
@@ -8454,7 +8454,7 @@ fn parseCapabilitiesChangedUI(_: std.mem.Allocator, value: std.json.Value) !Capa
 
 fn parseCapabilitiesChangedData(allocator: std.mem.Allocator, value: std.json.Value) !CapabilitiesChangedData {
     const object = try payloads.requiredObject(value);
-    const parsed_ui = if (object.get("ui")) |field_value| try parseCapabilitiesChangedUI(allocator, field_value) else null;
+    const parsed_ui = if (object.get("ui")) |field_value| if ((field_value) == .null) null else try parseCapabilitiesChangedUI(allocator, field_value) else null;
     errdefer {
         var cleanup_ui = parsed_ui;
         if (cleanup_ui) |*present| {
@@ -8533,7 +8533,7 @@ fn parseCommandsChangedCommand(allocator: std.mem.Allocator, value: std.json.Val
         const cleanup_name = parsed_name;
         wipeString(cleanup_name);
     }
-    const parsed_description = if (object.get("description")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_description = if (object.get("description")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_description = parsed_description;
         if (cleanup_description) |*present| {
@@ -8579,14 +8579,14 @@ fn parseElicitationCompletedData(allocator: std.mem.Allocator, value: std.json.V
         const cleanup_request_id = parsed_request_id;
         wipeString(cleanup_request_id);
     }
-    const parsed_action = if (object.get("action")) |field_value| try parseElicitationCompletedAction(allocator, field_value) else null;
+    const parsed_action = if (object.get("action")) |field_value| if ((field_value) == .null) null else try parseElicitationCompletedAction(allocator, field_value) else null;
     errdefer {
         var cleanup_action = parsed_action;
         if (cleanup_action) |*present| {
             wipeElicitationCompletedAction(&present.*);
         }
     }
-    const parsed_content = if (object.get("content")) |field_value| try parseElicitationCompletedDataContentMap(allocator, field_value) else null;
+    const parsed_content = if (object.get("content")) |field_value| if ((field_value) == .null) null else try parseElicitationCompletedDataContentMap(allocator, field_value) else null;
     errdefer {
         var cleanup_content = parsed_content;
         if (cleanup_content) |*present| {
@@ -8631,7 +8631,7 @@ fn parseElicitationRequestedSchema(allocator: std.mem.Allocator, value: std.json
             }
         }
     }
-    const parsed_required = if (object.get("required")) |field_value| try parseElicitationRequestedSchemaRequiredArray(allocator, field_value) else null;
+    const parsed_required = if (object.get("required")) |field_value| if ((field_value) == .null) null else try parseElicitationRequestedSchemaRequiredArray(allocator, field_value) else null;
     errdefer {
         var cleanup_required = parsed_required;
         if (cleanup_required) |*present| {
@@ -8654,14 +8654,14 @@ fn parseElicitationRequestedData(allocator: std.mem.Allocator, value: std.json.V
         const cleanup_request_id = parsed_request_id;
         wipeString(cleanup_request_id);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_elicitation_source = if (object.get("elicitationSource")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_elicitation_source = if (object.get("elicitationSource")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_elicitation_source = parsed_elicitation_source;
         if (cleanup_elicitation_source) |*present| {
@@ -8673,21 +8673,21 @@ fn parseElicitationRequestedData(allocator: std.mem.Allocator, value: std.json.V
         const cleanup_message = parsed_message;
         wipeString(cleanup_message);
     }
-    const parsed_mode = if (object.get("mode")) |field_value| try parseElicitationRequestedMode(allocator, field_value) else null;
+    const parsed_mode = if (object.get("mode")) |field_value| if ((field_value) == .null) null else try parseElicitationRequestedMode(allocator, field_value) else null;
     errdefer {
         var cleanup_mode = parsed_mode;
         if (cleanup_mode) |*present| {
             wipeElicitationRequestedMode(&present.*);
         }
     }
-    const parsed_requested_schema = if (object.get("requestedSchema")) |field_value| try parseElicitationRequestedSchema(allocator, field_value) else null;
+    const parsed_requested_schema = if (object.get("requestedSchema")) |field_value| if ((field_value) == .null) null else try parseElicitationRequestedSchema(allocator, field_value) else null;
     errdefer {
         var cleanup_requested_schema = parsed_requested_schema;
         if (cleanup_requested_schema) |*present| {
             wipeElicitationRequestedSchema(&present.*);
         }
     }
-    const parsed_url = if (object.get("url")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_url = if (object.get("url")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_url = parsed_url;
         if (cleanup_url) |*present| {
@@ -8721,16 +8721,16 @@ fn parseExitPlanModeCompletedData(allocator: std.mem.Allocator, value: std.json.
         const cleanup_request_id = parsed_request_id;
         wipeString(cleanup_request_id);
     }
-    const parsed_approved = if (object.get("approved")) |field_value| try parseBool(field_value) else null;
-    const parsed_selected_action = if (object.get("selectedAction")) |field_value| try parseExitPlanModeAction(allocator, field_value) else null;
+    const parsed_approved = if (object.get("approved")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_selected_action = if (object.get("selectedAction")) |field_value| if ((field_value) == .null) null else try parseExitPlanModeAction(allocator, field_value) else null;
     errdefer {
         var cleanup_selected_action = parsed_selected_action;
         if (cleanup_selected_action) |*present| {
             wipeExitPlanModeAction(&present.*);
         }
     }
-    const parsed_auto_approve_edits = if (object.get("autoApproveEdits")) |field_value| try parseBool(field_value) else null;
-    const parsed_feedback = if (object.get("feedback")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_auto_approve_edits = if (object.get("autoApproveEdits")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_feedback = if (object.get("feedback")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_feedback = parsed_feedback;
         if (cleanup_feedback) |*present| {
@@ -8775,7 +8775,7 @@ fn parseExitPlanModeRequestedData(allocator: std.mem.Allocator, value: std.json.
         var cleanup_recommended_action = parsed_recommended_action;
         wipeExitPlanModeAction(&cleanup_recommended_action);
     }
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
@@ -8833,28 +8833,28 @@ fn parseExternalToolRequestedData(allocator: std.mem.Allocator, value: std.json.
             wipeString(present.*);
         }
     }
-    const parsed_arguments = if (object.get("arguments")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_arguments = if (object.get("arguments")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_arguments = parsed_arguments;
         if (cleanup_arguments) |*present| {
             wipeJsonValue(&present.*);
         }
     }
-    const parsed_working_directory = if (object.get("workingDirectory")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_working_directory = if (object.get("workingDirectory")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_working_directory = parsed_working_directory;
         if (cleanup_working_directory) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_traceparent = if (object.get("traceparent")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_traceparent = if (object.get("traceparent")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_traceparent = parsed_traceparent;
         if (cleanup_traceparent) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_tracestate = if (object.get("tracestate")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tracestate = if (object.get("tracestate")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tracestate = parsed_tracestate;
         if (cleanup_tracestate) |*present| {
@@ -8899,7 +8899,7 @@ fn parseFactoryRunSettledData(allocator: std.mem.Allocator, value: std.json.Valu
     const parsed_consumed_subagents = try parseInteger(u64, object.get("consumedSubagents") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_consumed_nano_aiu = try parseInteger(u64, object.get("consumedNanoAiu") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_elapsed_ms = try parseInteger(u64, object.get("elapsedMs") orelse return error.InvalidSessionEvent, 0, null, null);
-    const parsed_failure_type = if (object.get("failureType")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_failure_type = if (object.get("failureType")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_failure_type = parsed_failure_type;
         if (cleanup_failure_type) |*present| {
@@ -8957,14 +8957,14 @@ fn parseHookEndError(allocator: std.mem.Allocator, value: std.json.Value) !HookE
         const cleanup_message = parsed_message;
         wipeString(cleanup_message);
     }
-    const parsed_stack = if (object.get("stack")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_stack = if (object.get("stack")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_stack = parsed_stack;
         if (cleanup_stack) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_source = if (object.get("source")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_source = if (object.get("source")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_source = parsed_source;
         if (cleanup_source) |*present| {
@@ -8990,7 +8990,7 @@ fn parseHookEndData(allocator: std.mem.Allocator, value: std.json.Value) !HookEn
         const cleanup_hook_type = parsed_hook_type;
         wipeString(cleanup_hook_type);
     }
-    const parsed_output = if (object.get("output")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_output = if (object.get("output")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_output = parsed_output;
         if (cleanup_output) |*present| {
@@ -8998,14 +8998,14 @@ fn parseHookEndData(allocator: std.mem.Allocator, value: std.json.Value) !HookEn
         }
     }
     const parsed_success = try parseBool(object.get("success") orelse return error.InvalidSessionEvent);
-    const parsed_error_ = if (object.get("error")) |field_value| try parseHookEndError(allocator, field_value) else null;
+    const parsed_error_ = if (object.get("error")) |field_value| if ((field_value) == .null) null else try parseHookEndError(allocator, field_value) else null;
     errdefer {
         var cleanup_error_ = parsed_error_;
         if (cleanup_error_) |*present| {
             wipeHookEndError(&present.*);
         }
     }
-    const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_parent_tool_call_id = parsed_parent_tool_call_id;
         if (cleanup_parent_tool_call_id) |*present| {
@@ -9029,7 +9029,7 @@ fn parseHookProgressData(allocator: std.mem.Allocator, value: std.json.Value) !H
         const cleanup_message = parsed_message;
         wipeString(cleanup_message);
     }
-    const parsed_temporary = if (object.get("temporary")) |field_value| try parseBool(field_value) else null;
+    const parsed_temporary = if (object.get("temporary")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .message = parsed_message,
         .temporary = parsed_temporary,
@@ -9048,14 +9048,14 @@ fn parseHookStartData(allocator: std.mem.Allocator, value: std.json.Value) !Hook
         const cleanup_hook_type = parsed_hook_type;
         wipeString(cleanup_hook_type);
     }
-    const parsed_input = if (object.get("input")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_input = if (object.get("input")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_input = parsed_input;
         if (cleanup_input) |*present| {
             wipeJsonValue(&present.*);
         }
     }
-    const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_parent_tool_call_id = parsed_parent_tool_call_id;
         if (cleanup_parent_tool_call_id) |*present| {
@@ -9166,15 +9166,15 @@ fn parseMcpOauthRequiredStaticClientConfig(allocator: std.mem.Allocator, value: 
         const cleanup_client_id = parsed_client_id;
         wipeString(cleanup_client_id);
     }
-    const parsed_client_secret = if (object.get("clientSecret")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_client_secret = if (object.get("clientSecret")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_client_secret = parsed_client_secret;
         if (cleanup_client_secret) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_public_client = if (object.get("publicClient")) |field_value| try parseBool(field_value) else null;
-    const parsed_grant_type = if (object.get("grantType")) |field_value| try parseConstant(allocator, field_value, "client_credentials") else null;
+    const parsed_public_client = if (object.get("publicClient")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_grant_type = if (object.get("grantType")) |field_value| if ((field_value) == .null) null else try parseConstant(allocator, field_value, "client_credentials") else null;
     errdefer {
         var cleanup_grant_type = parsed_grant_type;
         if (cleanup_grant_type) |*present| {
@@ -9191,21 +9191,21 @@ fn parseMcpOauthRequiredStaticClientConfig(allocator: std.mem.Allocator, value: 
 
 fn parseMcpOauthWWWAuthenticateParams(allocator: std.mem.Allocator, value: std.json.Value) !McpOauthWWWAuthenticateParams {
     const object = try payloads.requiredObject(value);
-    const parsed_resource_metadata_url = if (object.get("resourceMetadataUrl")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_resource_metadata_url = if (object.get("resourceMetadataUrl")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_resource_metadata_url = parsed_resource_metadata_url;
         if (cleanup_resource_metadata_url) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_scope = if (object.get("scope")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_scope = if (object.get("scope")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_scope = parsed_scope;
         if (cleanup_scope) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_error_ = if (object.get("error")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_error_ = if (object.get("error")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_error_ = parsed_error_;
         if (cleanup_error_) |*present| {
@@ -9247,7 +9247,7 @@ fn parseMcpOauthHttpResponse(allocator: std.mem.Allocator, value: std.json.Value
             wipeHeaderEntry(&item.*);
         }
     }
-    const parsed_body = if (object.get("body")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_body = if (object.get("body")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_body = parsed_body;
         if (cleanup_body) |*present| {
@@ -9287,28 +9287,28 @@ fn parseMcpOauthRequiredData(allocator: std.mem.Allocator, value: std.json.Value
         const cleanup_server_url = parsed_server_url;
         wipeString(cleanup_server_url);
     }
-    const parsed_static_client_config = if (object.get("staticClientConfig")) |field_value| try parseMcpOauthRequiredStaticClientConfig(allocator, field_value) else null;
+    const parsed_static_client_config = if (object.get("staticClientConfig")) |field_value| if ((field_value) == .null) null else try parseMcpOauthRequiredStaticClientConfig(allocator, field_value) else null;
     errdefer {
         var cleanup_static_client_config = parsed_static_client_config;
         if (cleanup_static_client_config) |*present| {
             wipeMcpOauthRequiredStaticClientConfig(&present.*);
         }
     }
-    const parsed_www_authenticate_params = if (object.get("wwwAuthenticateParams")) |field_value| try parseMcpOauthWWWAuthenticateParams(allocator, field_value) else null;
+    const parsed_www_authenticate_params = if (object.get("wwwAuthenticateParams")) |field_value| if ((field_value) == .null) null else try parseMcpOauthWWWAuthenticateParams(allocator, field_value) else null;
     errdefer {
         var cleanup_www_authenticate_params = parsed_www_authenticate_params;
         if (cleanup_www_authenticate_params) |*present| {
             wipeMcpOauthWWWAuthenticateParams(&present.*);
         }
     }
-    const parsed_http_response = if (object.get("httpResponse")) |field_value| try parseMcpOauthHttpResponse(allocator, field_value) else null;
+    const parsed_http_response = if (object.get("httpResponse")) |field_value| if ((field_value) == .null) null else try parseMcpOauthHttpResponse(allocator, field_value) else null;
     errdefer {
         var cleanup_http_response = parsed_http_response;
         if (cleanup_http_response) |*present| {
             wipeMcpOauthHttpResponse(&present.*);
         }
     }
-    const parsed_resource_metadata = if (object.get("resourceMetadata")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_resource_metadata = if (object.get("resourceMetadata")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_resource_metadata = parsed_resource_metadata;
         if (cleanup_resource_metadata) |*present| {
@@ -9358,14 +9358,14 @@ fn parseMcpAppToolCallCompleteError(allocator: std.mem.Allocator, value: std.jso
 
 fn parseMcpAppToolCallCompleteToolMetaUI(allocator: std.mem.Allocator, value: std.json.Value) !McpAppToolCallCompleteToolMetaUI {
     const object = try payloads.requiredObject(value);
-    const parsed_resource_uri = if (object.get("resourceUri")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_resource_uri = if (object.get("resourceUri")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_resource_uri = parsed_resource_uri;
         if (cleanup_resource_uri) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_visibility = if (object.get("visibility")) |field_value| try parseMcpAppToolCallCompleteToolMetaUIVisibilityArray(allocator, field_value) else null;
+    const parsed_visibility = if (object.get("visibility")) |field_value| if ((field_value) == .null) null else try parseMcpAppToolCallCompleteToolMetaUIVisibilityArray(allocator, field_value) else null;
     errdefer {
         var cleanup_visibility = parsed_visibility;
         if (cleanup_visibility) |*present| {
@@ -9382,7 +9382,7 @@ fn parseMcpAppToolCallCompleteToolMetaUI(allocator: std.mem.Allocator, value: st
 
 fn parseMcpAppToolCallCompleteToolMeta(allocator: std.mem.Allocator, value: std.json.Value) !McpAppToolCallCompleteToolMeta {
     const object = try payloads.requiredObject(value);
-    const parsed_ui = if (object.get("ui")) |field_value| try parseMcpAppToolCallCompleteToolMetaUI(allocator, field_value) else null;
+    const parsed_ui = if (object.get("ui")) |field_value| if ((field_value) == .null) null else try parseMcpAppToolCallCompleteToolMetaUI(allocator, field_value) else null;
     errdefer {
         var cleanup_ui = parsed_ui;
         if (cleanup_ui) |*present| {
@@ -9406,7 +9406,7 @@ fn parseMcpAppToolCallCompleteData(allocator: std.mem.Allocator, value: std.json
         const cleanup_tool_name = parsed_tool_name;
         wipeString(cleanup_tool_name);
     }
-    const parsed_arguments = if (object.get("arguments")) |field_value| try parseMcpAppToolCallCompleteDataArgumentsMap(allocator, field_value) else null;
+    const parsed_arguments = if (object.get("arguments")) |field_value| if ((field_value) == .null) null else try parseMcpAppToolCallCompleteDataArgumentsMap(allocator, field_value) else null;
     errdefer {
         var cleanup_arguments = parsed_arguments;
         if (cleanup_arguments) |*present| {
@@ -9421,7 +9421,7 @@ fn parseMcpAppToolCallCompleteData(allocator: std.mem.Allocator, value: std.json
     }
     const parsed_success = try parseBool(object.get("success") orelse return error.InvalidSessionEvent);
     const parsed_duration_ms = try parseNumber(object.get("durationMs") orelse return error.InvalidSessionEvent, null, null, null);
-    const parsed_result = if (object.get("result")) |field_value| try parseMcpAppToolCallCompleteDataResultMap(allocator, field_value) else null;
+    const parsed_result = if (object.get("result")) |field_value| if ((field_value) == .null) null else try parseMcpAppToolCallCompleteDataResultMap(allocator, field_value) else null;
     errdefer {
         var cleanup_result = parsed_result;
         if (cleanup_result) |*present| {
@@ -9434,14 +9434,14 @@ fn parseMcpAppToolCallCompleteData(allocator: std.mem.Allocator, value: std.json
             }
         }
     }
-    const parsed_error_ = if (object.get("error")) |field_value| try parseMcpAppToolCallCompleteError(allocator, field_value) else null;
+    const parsed_error_ = if (object.get("error")) |field_value| if ((field_value) == .null) null else try parseMcpAppToolCallCompleteError(allocator, field_value) else null;
     errdefer {
         var cleanup_error_ = parsed_error_;
         if (cleanup_error_) |*present| {
             wipeMcpAppToolCallCompleteError(&present.*);
         }
     }
-    const parsed_tool_meta = if (object.get("toolMeta")) |field_value| try parseMcpAppToolCallCompleteToolMeta(allocator, field_value) else null;
+    const parsed_tool_meta = if (object.get("toolMeta")) |field_value| if ((field_value) == .null) null else try parseMcpAppToolCallCompleteToolMeta(allocator, field_value) else null;
     errdefer {
         var cleanup_tool_meta = parsed_tool_meta;
         if (cleanup_tool_meta) |*present| {
@@ -9490,7 +9490,7 @@ fn parseModelCallFailureRequestFingerprint(allocator: std.mem.Allocator, value: 
     const parsed_nameless_tool_call_count = try parseInteger(u64, object.get("namelessToolCallCount") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_image_part_count = try parseInteger(u64, object.get("imagePartCount") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_image_parts_missing_media_type = try parseInteger(u64, object.get("imagePartsMissingMediaType") orelse return error.InvalidSessionEvent, 0, null, null);
-    const parsed_last_message_role = if (object.get("lastMessageRole")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_last_message_role = if (object.get("lastMessageRole")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_last_message_role = parsed_last_message_role;
         if (cleanup_last_message_role) |*present| {
@@ -9510,77 +9510,77 @@ fn parseModelCallFailureRequestFingerprint(allocator: std.mem.Allocator, value: 
 
 fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value) !ModelCallFailureData {
     const object = try payloads.requiredObject(value);
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_initiator = if (object.get("initiator")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_initiator = if (object.get("initiator")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_initiator = parsed_initiator;
         if (cleanup_initiator) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_api_call_id = if (object.get("apiCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_api_call_id = if (object.get("apiCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_api_call_id = parsed_api_call_id;
         if (cleanup_api_call_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_provider_call_id = if (object.get("providerCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_provider_call_id = if (object.get("providerCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_provider_call_id = parsed_provider_call_id;
         if (cleanup_provider_call_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_service_request_id = if (object.get("serviceRequestId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_service_request_id = if (object.get("serviceRequestId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_service_request_id = parsed_service_request_id;
         if (cleanup_service_request_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_rte = if (object.get("rte")) |field_value| try parseBool(field_value) else null;
-    const parsed_status_code = if (object.get("statusCode")) |field_value| try parseInteger(u64, field_value, 0, null, 999) else null;
-    const parsed_duration_ms = if (object.get("durationMs")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_api_endpoint = if (object.get("apiEndpoint")) |field_value| try parseAssistantUsageApiEndpoint(allocator, field_value) else null;
+    const parsed_rte = if (object.get("rte")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_status_code = if (object.get("statusCode")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, 999) else null;
+    const parsed_duration_ms = if (object.get("durationMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_api_endpoint = if (object.get("apiEndpoint")) |field_value| if ((field_value) == .null) null else try parseAssistantUsageApiEndpoint(allocator, field_value) else null;
     errdefer {
         var cleanup_api_endpoint = parsed_api_endpoint;
         if (cleanup_api_endpoint) |*present| {
             wipeAssistantUsageApiEndpoint(&present.*);
         }
     }
-    const parsed_transport = if (object.get("transport")) |field_value| try parseModelCallFailureTransport(allocator, field_value) else null;
+    const parsed_transport = if (object.get("transport")) |field_value| if ((field_value) == .null) null else try parseModelCallFailureTransport(allocator, field_value) else null;
     errdefer {
         var cleanup_transport = parsed_transport;
         if (cleanup_transport) |*present| {
             wipeModelCallFailureTransport(&present.*);
         }
     }
-    const parsed_failure_kind = if (object.get("failureKind")) |field_value| try parseModelCallFailureKind(allocator, field_value) else null;
+    const parsed_failure_kind = if (object.get("failureKind")) |field_value| if ((field_value) == .null) null else try parseModelCallFailureKind(allocator, field_value) else null;
     errdefer {
         var cleanup_failure_kind = parsed_failure_kind;
         if (cleanup_failure_kind) |*present| {
             wipeModelCallFailureKind(&present.*);
         }
     }
-    const parsed_max_prompt_tokens = if (object.get("maxPromptTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_max_output_tokens = if (object.get("maxOutputTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_is_byok = if (object.get("isByok")) |field_value| try parseBool(field_value) else null;
-    const parsed_is_auto = if (object.get("isAuto")) |field_value| try parseBool(field_value) else null;
-    const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_max_prompt_tokens = if (object.get("maxPromptTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_max_output_tokens = if (object.get("maxOutputTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_is_byok = if (object.get("isByok")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_is_auto = if (object.get("isAuto")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_reasoning_effort = parsed_reasoning_effort;
         if (cleanup_reasoning_effort) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_interaction_type = if (object.get("interactionType")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_interaction_type = if (object.get("interactionType")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_interaction_type = parsed_interaction_type;
         if (cleanup_interaction_type) |*present| {
@@ -9592,35 +9592,35 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
         var cleanup_source = parsed_source;
         wipeModelCallFailureSource(&cleanup_source);
     }
-    const parsed_error_message = if (object.get("errorMessage")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_error_message = if (object.get("errorMessage")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_error_message = parsed_error_message;
         if (cleanup_error_message) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_bad_request_kind = if (object.get("badRequestKind")) |field_value| try parseModelCallFailureBadRequestKind(allocator, field_value) else null;
+    const parsed_bad_request_kind = if (object.get("badRequestKind")) |field_value| if ((field_value) == .null) null else try parseModelCallFailureBadRequestKind(allocator, field_value) else null;
     errdefer {
         var cleanup_bad_request_kind = parsed_bad_request_kind;
         if (cleanup_bad_request_kind) |*present| {
             wipeModelCallFailureBadRequestKind(&present.*);
         }
     }
-    const parsed_error_code = if (object.get("errorCode")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_error_code = if (object.get("errorCode")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_error_code = parsed_error_code;
         if (cleanup_error_code) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_error_type = if (object.get("errorType")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_error_type = if (object.get("errorType")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_error_type = parsed_error_type;
         if (cleanup_error_type) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_quota_snapshots = if (object.get("quotaSnapshots")) |field_value| try parseModelCallFailureDataQuotaSnapshotsMap(allocator, field_value) else null;
+    const parsed_quota_snapshots = if (object.get("quotaSnapshots")) |field_value| if ((field_value) == .null) null else try parseModelCallFailureDataQuotaSnapshotsMap(allocator, field_value) else null;
     errdefer {
         var cleanup_quota_snapshots = parsed_quota_snapshots;
         if (cleanup_quota_snapshots) |*present| {
@@ -9633,14 +9633,14 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
             }
         }
     }
-    const parsed_request_fingerprint = if (object.get("requestFingerprint")) |field_value| try parseModelCallFailureRequestFingerprint(allocator, field_value) else null;
+    const parsed_request_fingerprint = if (object.get("requestFingerprint")) |field_value| if ((field_value) == .null) null else try parseModelCallFailureRequestFingerprint(allocator, field_value) else null;
     errdefer {
         var cleanup_request_fingerprint = parsed_request_fingerprint;
         if (cleanup_request_fingerprint) |*present| {
             wipeModelCallFailureRequestFingerprint(&present.*);
         }
     }
-    const parsed_fusion = if (object.get("fusion")) |field_value| try parseFusionAttribution(allocator, field_value) else null;
+    const parsed_fusion = if (object.get("fusion")) |field_value| if ((field_value) == .null) null else try parseFusionAttribution(allocator, field_value) else null;
     errdefer {
         var cleanup_fusion = parsed_fusion;
         if (cleanup_fusion) |*present| {
@@ -9692,7 +9692,7 @@ fn parseModelCallFinishedData(allocator: std.mem.Allocator, value: std.json.Valu
         const cleanup_turn_id = parsed_turn_id;
         wipeString(cleanup_turn_id);
     }
-    const parsed_interaction_id = if (object.get("interactionId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_interaction_id = if (object.get("interactionId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_interaction_id = parsed_interaction_id;
         if (cleanup_interaction_id) |*present| {
@@ -9705,7 +9705,7 @@ fn parseModelCallFinishedData(allocator: std.mem.Allocator, value: std.json.Valu
         var cleanup_outcome = parsed_outcome;
         wipeModelCallFinishedOutcome(&cleanup_outcome);
     }
-    const parsed_contains_built_in_file_edit_request = if (object.get("containsBuiltInFileEditRequest")) |field_value| try parseBool(field_value) else null;
+    const parsed_contains_built_in_file_edit_request = if (object.get("containsBuiltInFileEditRequest")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_edit_classifier_version = try parseInteger(u64, object.get("editClassifierVersion") orelse return error.InvalidSessionEvent, 1, null, null);
     return .{
         .turn_id = parsed_turn_id,
@@ -9724,21 +9724,21 @@ fn parseModelCallStartData(allocator: std.mem.Allocator, value: std.json.Value) 
         const cleanup_turn_id = parsed_turn_id;
         wipeString(cleanup_turn_id);
     }
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_previous_response_id = if (object.get("previousResponseId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_previous_response_id = if (object.get("previousResponseId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_previous_response_id = parsed_previous_response_id;
         if (cleanup_previous_response_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_fusion = if (object.get("fusion")) |field_value| try parseFusionAttribution(allocator, field_value) else null;
+    const parsed_fusion = if (object.get("fusion")) |field_value| if ((field_value) == .null) null else try parseFusionAttribution(allocator, field_value) else null;
     errdefer {
         var cleanup_fusion = parsed_fusion;
         if (cleanup_fusion) |*present| {
@@ -9766,7 +9766,7 @@ fn parsePermissionApproved(allocator: std.mem.Allocator, value: std.json.Value) 
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_managed_approval_handled = if (object.get("managedApprovalHandled")) |field_value| try parseBool(field_value) else null;
+    const parsed_managed_approval_handled = if (object.get("managedApprovalHandled")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .kind = parsed_kind,
         .managed_approval_handled = parsed_managed_approval_handled,
@@ -9880,7 +9880,7 @@ fn parseUserToolSessionApprovalExtensionManagement(allocator: std.mem.Allocator,
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_operation = if (object.get("operation")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_operation = if (object.get("operation")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_operation = parsed_operation;
         if (cleanup_operation) |*present| {
@@ -9900,7 +9900,7 @@ fn parseUserToolSessionApprovalFactory(allocator: std.mem.Allocator, value: std.
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_approval_key = if (object.get("approvalKey")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_approval_key = if (object.get("approvalKey")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_approval_key = parsed_approval_key;
         if (cleanup_approval_key) |*present| {
@@ -9985,7 +9985,7 @@ fn parsePermissionApprovedForSession(allocator: std.mem.Allocator, value: std.js
         var cleanup_approval = parsed_approval;
         wipeUserToolSessionApproval(&cleanup_approval);
     }
-    const parsed_managed_approval_handled = if (object.get("managedApprovalHandled")) |field_value| try parseBool(field_value) else null;
+    const parsed_managed_approval_handled = if (object.get("managedApprovalHandled")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .kind = parsed_kind,
         .approval = parsed_approval,
@@ -10010,7 +10010,7 @@ fn parsePermissionApprovedForLocation(allocator: std.mem.Allocator, value: std.j
         const cleanup_location_key = parsed_location_key;
         wipeString(cleanup_location_key);
     }
-    const parsed_managed_approval_handled = if (object.get("managedApprovalHandled")) |field_value| try parseBool(field_value) else null;
+    const parsed_managed_approval_handled = if (object.get("managedApprovalHandled")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .kind = parsed_kind,
         .approval = parsed_approval,
@@ -10026,7 +10026,7 @@ fn parsePermissionCancelled(allocator: std.mem.Allocator, value: std.json.Value)
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_reason = if (object.get("reason")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_reason = if (object.get("reason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_reason = parsed_reason;
         if (cleanup_reason) |*present| {
@@ -10098,14 +10098,14 @@ fn parsePermissionDeniedInteractivelyByUser(allocator: std.mem.Allocator, value:
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_feedback = if (object.get("feedback")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_feedback = if (object.get("feedback")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_feedback = parsed_feedback;
         if (cleanup_feedback) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_force_reject = if (object.get("forceReject")) |field_value| try parseBool(field_value) else null;
+    const parsed_force_reject = if (object.get("forceReject")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .kind = parsed_kind,
         .feedback = parsed_feedback,
@@ -10144,14 +10144,14 @@ fn parsePermissionDeniedByPermissionRequestHook(allocator: std.mem.Allocator, va
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_message = if (object.get("message")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_message = if (object.get("message")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_message = parsed_message;
         if (cleanup_message) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_interrupt = if (object.get("interrupt")) |field_value| try parseBool(field_value) else null;
+    const parsed_interrupt = if (object.get("interrupt")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .kind = parsed_kind,
         .message = parsed_message,
@@ -10181,7 +10181,7 @@ fn parsePermissionCompletedData(allocator: std.mem.Allocator, value: std.json.Va
         const cleanup_request_id = parsed_request_id;
         wipeString(cleanup_request_id);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -10251,14 +10251,14 @@ fn parsePermissionRequestShell(allocator: std.mem.Allocator, value: std.json.Val
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_managed_approval_required = if (object.get("managedApprovalRequired")) |field_value| try parseBool(field_value) else null;
+    const parsed_managed_approval_required = if (object.get("managedApprovalRequired")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_full_command_text = try parseString(allocator, object.get("fullCommandText") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_full_command_text = parsed_full_command_text;
@@ -10276,7 +10276,7 @@ fn parsePermissionRequestShell(allocator: std.mem.Allocator, value: std.json.Val
             wipePermissionRequestShellCommand(&item.*);
         }
     }
-    const parsed_command_segments = if (object.get("commandSegments")) |field_value| try parsePermissionRequestShellCommandSegmentsArray(allocator, field_value) else null;
+    const parsed_command_segments = if (object.get("commandSegments")) |field_value| if ((field_value) == .null) null else try parsePermissionRequestShellCommandSegmentsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_command_segments = parsed_command_segments;
         if (cleanup_command_segments) |*present| {
@@ -10301,16 +10301,16 @@ fn parsePermissionRequestShell(allocator: std.mem.Allocator, value: std.json.Val
     }
     const parsed_has_write_file_redirection = try parseBool(object.get("hasWriteFileRedirection") orelse return error.InvalidSessionEvent);
     const parsed_can_offer_session_approval = try parseBool(object.get("canOfferSessionApproval") orelse return error.InvalidSessionEvent);
-    const parsed_warning = if (object.get("warning")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_warning = if (object.get("warning")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_warning = parsed_warning;
         if (cleanup_warning) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_request_sandbox_bypass = if (object.get("requestSandboxBypass")) |field_value| try parseBool(field_value) else null;
-    const parsed_request_sandbox_permissive = if (object.get("requestSandboxPermissive")) |field_value| try parseBool(field_value) else null;
-    const parsed_request_sandbox_bypass_reason = if (object.get("requestSandboxBypassReason")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_request_sandbox_bypass = if (object.get("requestSandboxBypass")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_request_sandbox_permissive = if (object.get("requestSandboxPermissive")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_request_sandbox_bypass_reason = if (object.get("requestSandboxBypassReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_request_sandbox_bypass_reason = parsed_request_sandbox_bypass_reason;
         if (cleanup_request_sandbox_bypass_reason) |*present| {
@@ -10343,14 +10343,14 @@ fn parsePermissionRequestWrite(allocator: std.mem.Allocator, value: std.json.Val
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_managed_approval_required = if (object.get("managedApprovalRequired")) |field_value| try parseBool(field_value) else null;
+    const parsed_managed_approval_required = if (object.get("managedApprovalRequired")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_intention = try parseString(allocator, object.get("intention") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_intention = parsed_intention;
@@ -10366,7 +10366,7 @@ fn parsePermissionRequestWrite(allocator: std.mem.Allocator, value: std.json.Val
         const cleanup_diff = parsed_diff;
         wipeString(cleanup_diff);
     }
-    const parsed_new_file_contents = if (object.get("newFileContents")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_new_file_contents = if (object.get("newFileContents")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_new_file_contents = parsed_new_file_contents;
         if (cleanup_new_file_contents) |*present| {
@@ -10374,8 +10374,8 @@ fn parsePermissionRequestWrite(allocator: std.mem.Allocator, value: std.json.Val
         }
     }
     const parsed_can_offer_session_approval = try parseBool(object.get("canOfferSessionApproval") orelse return error.InvalidSessionEvent);
-    const parsed_request_sandbox_bypass = if (object.get("requestSandboxBypass")) |field_value| try parseBool(field_value) else null;
-    const parsed_request_sandbox_bypass_reason = if (object.get("requestSandboxBypassReason")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_request_sandbox_bypass = if (object.get("requestSandboxBypass")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_request_sandbox_bypass_reason = if (object.get("requestSandboxBypassReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_request_sandbox_bypass_reason = parsed_request_sandbox_bypass_reason;
         if (cleanup_request_sandbox_bypass_reason) |*present| {
@@ -10403,14 +10403,14 @@ fn parsePermissionRequestRead(allocator: std.mem.Allocator, value: std.json.Valu
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_managed_approval_required = if (object.get("managedApprovalRequired")) |field_value| try parseBool(field_value) else null;
+    const parsed_managed_approval_required = if (object.get("managedApprovalRequired")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_intention = try parseString(allocator, object.get("intention") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_intention = parsed_intention;
@@ -10421,8 +10421,8 @@ fn parsePermissionRequestRead(allocator: std.mem.Allocator, value: std.json.Valu
         const cleanup_path = parsed_path;
         wipeString(cleanup_path);
     }
-    const parsed_request_sandbox_bypass = if (object.get("requestSandboxBypass")) |field_value| try parseBool(field_value) else null;
-    const parsed_request_sandbox_bypass_reason = if (object.get("requestSandboxBypassReason")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_request_sandbox_bypass = if (object.get("requestSandboxBypass")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_request_sandbox_bypass_reason = if (object.get("requestSandboxBypassReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_request_sandbox_bypass_reason = parsed_request_sandbox_bypass_reason;
         if (cleanup_request_sandbox_bypass_reason) |*present| {
@@ -10453,7 +10453,7 @@ fn parsePermissionRequestMcp(allocator: std.mem.Allocator, value: std.json.Value
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -10475,7 +10475,7 @@ fn parsePermissionRequestMcp(allocator: std.mem.Allocator, value: std.json.Value
         const cleanup_tool_title = parsed_tool_title;
         wipeString(cleanup_tool_title);
     }
-    const parsed_args = if (object.get("args")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_args = if (object.get("args")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_args = parsed_args;
         if (cleanup_args) |*present| {
@@ -10483,7 +10483,7 @@ fn parsePermissionRequestMcp(allocator: std.mem.Allocator, value: std.json.Value
         }
     }
     const parsed_read_only = try parseBool(object.get("readOnly") orelse return error.InvalidSessionEvent);
-    const parsed_permission_recommendation = if (object.get("permissionRecommendation")) |field_value| try parsePermissionRecommendation(allocator, field_value) else null;
+    const parsed_permission_recommendation = if (object.get("permissionRecommendation")) |field_value| if ((field_value) == .null) null else try parsePermissionRecommendation(allocator, field_value) else null;
     errdefer {
         var cleanup_permission_recommendation = parsed_permission_recommendation;
         if (cleanup_permission_recommendation) |*present| {
@@ -10509,14 +10509,14 @@ fn parsePermissionRequestUrl(allocator: std.mem.Allocator, value: std.json.Value
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_managed_approval_required = if (object.get("managedApprovalRequired")) |field_value| try parseBool(field_value) else null;
+    const parsed_managed_approval_required = if (object.get("managedApprovalRequired")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_intention = try parseString(allocator, object.get("intention") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_intention = parsed_intention;
@@ -10527,15 +10527,15 @@ fn parsePermissionRequestUrl(allocator: std.mem.Allocator, value: std.json.Value
         const cleanup_url = parsed_url;
         wipeString(cleanup_url);
     }
-    const parsed_redirected_from = if (object.get("redirectedFrom")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_redirected_from = if (object.get("redirectedFrom")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_redirected_from = parsed_redirected_from;
         if (cleanup_redirected_from) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_request_sandbox_bypass = if (object.get("requestSandboxBypass")) |field_value| try parseBool(field_value) else null;
-    const parsed_request_sandbox_bypass_reason = if (object.get("requestSandboxBypassReason")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_request_sandbox_bypass = if (object.get("requestSandboxBypass")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_request_sandbox_bypass_reason = if (object.get("requestSandboxBypassReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_request_sandbox_bypass_reason = parsed_request_sandbox_bypass_reason;
         if (cleanup_request_sandbox_bypass_reason) |*present| {
@@ -10601,21 +10601,21 @@ fn parsePermissionAssistedApproval(allocator: std.mem.Allocator, value: std.json
         var cleanup_recommendation = parsed_recommendation;
         wipeAssistedApprovalRecommendation(&cleanup_recommendation);
     }
-    const parsed_reason = if (object.get("reason")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_reason = if (object.get("reason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_reason = parsed_reason;
         if (cleanup_reason) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_failure_reason = if (object.get("failureReason")) |field_value| try parseAssistedApprovalJudgeFailureReason(allocator, field_value) else null;
+    const parsed_failure_reason = if (object.get("failureReason")) |field_value| if ((field_value) == .null) null else try parseAssistedApprovalJudgeFailureReason(allocator, field_value) else null;
     errdefer {
         var cleanup_failure_reason = parsed_failure_reason;
         if (cleanup_failure_reason) |*present| {
@@ -10637,21 +10637,21 @@ fn parsePermissionRequestMemory(allocator: std.mem.Allocator, value: std.json.Va
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_action = if (object.get("action")) |field_value| try parsePermissionRequestMemoryAction(allocator, field_value) else null;
+    const parsed_action = if (object.get("action")) |field_value| if ((field_value) == .null) null else try parsePermissionRequestMemoryAction(allocator, field_value) else null;
     errdefer {
         var cleanup_action = parsed_action;
         if (cleanup_action) |*present| {
             wipePermissionRequestMemoryAction(&present.*);
         }
     }
-    const parsed_subject = if (object.get("subject")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_subject = if (object.get("subject")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_subject = parsed_subject;
         if (cleanup_subject) |*present| {
@@ -10663,42 +10663,42 @@ fn parsePermissionRequestMemory(allocator: std.mem.Allocator, value: std.json.Va
         const cleanup_fact = parsed_fact;
         wipeString(cleanup_fact);
     }
-    const parsed_citations = if (object.get("citations")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_citations = if (object.get("citations")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_citations = parsed_citations;
         if (cleanup_citations) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_direction = if (object.get("direction")) |field_value| try parsePermissionRequestMemoryDirection(allocator, field_value) else null;
+    const parsed_direction = if (object.get("direction")) |field_value| if ((field_value) == .null) null else try parsePermissionRequestMemoryDirection(allocator, field_value) else null;
     errdefer {
         var cleanup_direction = parsed_direction;
         if (cleanup_direction) |*present| {
             wipePermissionRequestMemoryDirection(&present.*);
         }
     }
-    const parsed_reason = if (object.get("reason")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_reason = if (object.get("reason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_reason = parsed_reason;
         if (cleanup_reason) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_scope = if (object.get("scope")) |field_value| try parsePermissionRequestMemoryScope(allocator, field_value) else null;
+    const parsed_scope = if (object.get("scope")) |field_value| if ((field_value) == .null) null else try parsePermissionRequestMemoryScope(allocator, field_value) else null;
     errdefer {
         var cleanup_scope = parsed_scope;
         if (cleanup_scope) |*present| {
             wipePermissionRequestMemoryScope(&present.*);
         }
     }
-    const parsed_repo_nwo = if (object.get("repoNwo")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_repo_nwo = if (object.get("repoNwo")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_repo_nwo = parsed_repo_nwo;
         if (cleanup_repo_nwo) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| try parsePermissionAssistedApproval(allocator, field_value) else null;
+    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| if ((field_value) == .null) null else try parsePermissionAssistedApproval(allocator, field_value) else null;
     errdefer {
         var cleanup_assisted_approval = parsed_assisted_approval;
         if (cleanup_assisted_approval) |*present| {
@@ -10727,7 +10727,7 @@ fn parsePermissionRequestCustomTool(allocator: std.mem.Allocator, value: std.jso
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -10744,14 +10744,14 @@ fn parsePermissionRequestCustomTool(allocator: std.mem.Allocator, value: std.jso
         const cleanup_tool_description = parsed_tool_description;
         wipeString(cleanup_tool_description);
     }
-    const parsed_args = if (object.get("args")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_args = if (object.get("args")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_args = parsed_args;
         if (cleanup_args) |*present| {
             wipeJsonValue(&present.*);
         }
     }
-    const parsed_skip_permission = if (object.get("skipPermission")) |field_value| try parseBool(field_value) else null;
+    const parsed_skip_permission = if (object.get("skipPermission")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .kind = parsed_kind,
         .tool_call_id = parsed_tool_call_id,
@@ -10769,7 +10769,7 @@ fn parsePermissionRequestHook(allocator: std.mem.Allocator, value: std.json.Valu
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -10781,14 +10781,14 @@ fn parsePermissionRequestHook(allocator: std.mem.Allocator, value: std.json.Valu
         const cleanup_tool_name = parsed_tool_name;
         wipeString(cleanup_tool_name);
     }
-    const parsed_tool_args = if (object.get("toolArgs")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_tool_args = if (object.get("toolArgs")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_tool_args = parsed_tool_args;
         if (cleanup_tool_args) |*present| {
             wipeJsonValue(&present.*);
         }
     }
-    const parsed_hook_message = if (object.get("hookMessage")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_hook_message = if (object.get("hookMessage")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_hook_message = parsed_hook_message;
         if (cleanup_hook_message) |*present| {
@@ -10811,7 +10811,7 @@ fn parsePermissionRequestExtensionManagement(allocator: std.mem.Allocator, value
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -10823,7 +10823,7 @@ fn parsePermissionRequestExtensionManagement(allocator: std.mem.Allocator, value
         const cleanup_operation = parsed_operation;
         wipeString(cleanup_operation);
     }
-    const parsed_extension_name = if (object.get("extensionName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_extension_name = if (object.get("extensionName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_extension_name = parsed_extension_name;
         if (cleanup_extension_name) |*present| {
@@ -10852,7 +10852,7 @@ fn parseFactoryPermissionPhase(allocator: std.mem.Allocator, value: std.json.Val
         const cleanup_title = parsed_title;
         wipeString(cleanup_title);
     }
-    const parsed_detail = if (object.get("detail")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_detail = if (object.get("detail")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_detail = parsed_detail;
         if (cleanup_detail) |*present| {
@@ -10872,7 +10872,7 @@ fn parsePermissionRequestFactory(allocator: std.mem.Allocator, value: std.json.V
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -10901,14 +10901,14 @@ fn parsePermissionRequestFactory(allocator: std.mem.Allocator, value: std.json.V
             wipeFactoryPermissionPhase(&item.*);
         }
     }
-    const parsed_max_concurrent_subagents = if (object.get("maxConcurrentSubagents")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_max_total_subagents = if (object.get("maxTotalSubagents")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_timeout_seconds = if (object.get("timeoutSeconds")) |field_value| try parseNumber(field_value, null, null, null) else null;
-    const parsed_max_ai_credits = if (object.get("maxAiCredits")) |field_value| try parseNumber(field_value, null, null, null) else null;
-    const parsed_declared_max_concurrent_subagents = if (object.get("declaredMaxConcurrentSubagents")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_declared_max_total_subagents = if (object.get("declaredMaxTotalSubagents")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_declared_timeout_seconds = if (object.get("declaredTimeoutSeconds")) |field_value| try parseNumber(field_value, null, null, null) else null;
-    const parsed_declared_max_ai_credits = if (object.get("declaredMaxAiCredits")) |field_value| try parseNumber(field_value, null, null, null) else null;
+    const parsed_max_concurrent_subagents = if (object.get("maxConcurrentSubagents")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_max_total_subagents = if (object.get("maxTotalSubagents")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_timeout_seconds = if (object.get("timeoutSeconds")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, null, null) else null;
+    const parsed_max_ai_credits = if (object.get("maxAiCredits")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, null, null) else null;
+    const parsed_declared_max_concurrent_subagents = if (object.get("declaredMaxConcurrentSubagents")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_declared_max_total_subagents = if (object.get("declaredMaxTotalSubagents")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_declared_timeout_seconds = if (object.get("declaredTimeoutSeconds")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, null, null) else null;
+    const parsed_declared_max_ai_credits = if (object.get("declaredMaxAiCredits")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, null, null) else null;
     const parsed_approval_key = try parseString(allocator, object.get("approvalKey") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_approval_key = parsed_approval_key;
@@ -10942,7 +10942,7 @@ fn parsePermissionRequestExtensionPermissionAccess(allocator: std.mem.Allocator,
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -10976,7 +10976,7 @@ fn parsePermissionRequestExtensionEnvAccess(allocator: std.mem.Allocator, value:
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -11028,7 +11028,7 @@ fn parsePermissionPromptRequestCommands(allocator: std.mem.Allocator, value: std
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -11053,24 +11053,24 @@ fn parsePermissionPromptRequestCommands(allocator: std.mem.Allocator, value: std
         }
     }
     const parsed_can_offer_session_approval = try parseBool(object.get("canOfferSessionApproval") orelse return error.InvalidSessionEvent);
-    const parsed_warning = if (object.get("warning")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_warning = if (object.get("warning")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_warning = parsed_warning;
         if (cleanup_warning) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| try parsePermissionAssistedApproval(allocator, field_value) else null;
+    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| if ((field_value) == .null) null else try parsePermissionAssistedApproval(allocator, field_value) else null;
     errdefer {
         var cleanup_assisted_approval = parsed_assisted_approval;
         if (cleanup_assisted_approval) |*present| {
             wipePermissionAssistedApproval(&present.*);
         }
     }
-    const parsed_managed_approval_required = if (object.get("managedApprovalRequired")) |field_value| try parseBool(field_value) else null;
-    const parsed_request_sandbox_bypass = if (object.get("requestSandboxBypass")) |field_value| try parseBool(field_value) else null;
-    const parsed_request_sandbox_permissive = if (object.get("requestSandboxPermissive")) |field_value| try parseBool(field_value) else null;
-    const parsed_request_sandbox_bypass_reason = if (object.get("requestSandboxBypassReason")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_managed_approval_required = if (object.get("managedApprovalRequired")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_request_sandbox_bypass = if (object.get("requestSandboxBypass")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_request_sandbox_permissive = if (object.get("requestSandboxPermissive")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_request_sandbox_bypass_reason = if (object.get("requestSandboxBypassReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_request_sandbox_bypass_reason = parsed_request_sandbox_bypass_reason;
         if (cleanup_request_sandbox_bypass_reason) |*present| {
@@ -11100,7 +11100,7 @@ fn parsePermissionPromptRequestWrite(allocator: std.mem.Allocator, value: std.js
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -11122,7 +11122,7 @@ fn parsePermissionPromptRequestWrite(allocator: std.mem.Allocator, value: std.js
         const cleanup_diff = parsed_diff;
         wipeString(cleanup_diff);
     }
-    const parsed_new_file_contents = if (object.get("newFileContents")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_new_file_contents = if (object.get("newFileContents")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_new_file_contents = parsed_new_file_contents;
         if (cleanup_new_file_contents) |*present| {
@@ -11130,14 +11130,14 @@ fn parsePermissionPromptRequestWrite(allocator: std.mem.Allocator, value: std.js
         }
     }
     const parsed_can_offer_session_approval = try parseBool(object.get("canOfferSessionApproval") orelse return error.InvalidSessionEvent);
-    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| try parsePermissionAssistedApproval(allocator, field_value) else null;
+    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| if ((field_value) == .null) null else try parsePermissionAssistedApproval(allocator, field_value) else null;
     errdefer {
         var cleanup_assisted_approval = parsed_assisted_approval;
         if (cleanup_assisted_approval) |*present| {
             wipePermissionAssistedApproval(&present.*);
         }
     }
-    const parsed_managed_approval_required = if (object.get("managedApprovalRequired")) |field_value| try parseBool(field_value) else null;
+    const parsed_managed_approval_required = if (object.get("managedApprovalRequired")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .kind = parsed_kind,
         .tool_call_id = parsed_tool_call_id,
@@ -11158,7 +11158,7 @@ fn parsePermissionPromptRequestRead(allocator: std.mem.Allocator, value: std.jso
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -11175,14 +11175,14 @@ fn parsePermissionPromptRequestRead(allocator: std.mem.Allocator, value: std.jso
         const cleanup_path = parsed_path;
         wipeString(cleanup_path);
     }
-    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| try parsePermissionAssistedApproval(allocator, field_value) else null;
+    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| if ((field_value) == .null) null else try parsePermissionAssistedApproval(allocator, field_value) else null;
     errdefer {
         var cleanup_assisted_approval = parsed_assisted_approval;
         if (cleanup_assisted_approval) |*present| {
             wipePermissionAssistedApproval(&present.*);
         }
     }
-    const parsed_managed_approval_required = if (object.get("managedApprovalRequired")) |field_value| try parseBool(field_value) else null;
+    const parsed_managed_approval_required = if (object.get("managedApprovalRequired")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .kind = parsed_kind,
         .tool_call_id = parsed_tool_call_id,
@@ -11200,7 +11200,7 @@ fn parsePermissionPromptRequestMcp(allocator: std.mem.Allocator, value: std.json
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -11222,28 +11222,28 @@ fn parsePermissionPromptRequestMcp(allocator: std.mem.Allocator, value: std.json
         const cleanup_tool_title = parsed_tool_title;
         wipeString(cleanup_tool_title);
     }
-    const parsed_args = if (object.get("args")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_args = if (object.get("args")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_args = parsed_args;
         if (cleanup_args) |*present| {
             wipeJsonValue(&present.*);
         }
     }
-    const parsed_permission_recommendation = if (object.get("permissionRecommendation")) |field_value| try parsePermissionRecommendation(allocator, field_value) else null;
+    const parsed_permission_recommendation = if (object.get("permissionRecommendation")) |field_value| if ((field_value) == .null) null else try parsePermissionRecommendation(allocator, field_value) else null;
     errdefer {
         var cleanup_permission_recommendation = parsed_permission_recommendation;
         if (cleanup_permission_recommendation) |*present| {
             wipePermissionRecommendation(&present.*);
         }
     }
-    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| try parsePermissionAssistedApproval(allocator, field_value) else null;
+    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| if ((field_value) == .null) null else try parsePermissionAssistedApproval(allocator, field_value) else null;
     errdefer {
         var cleanup_assisted_approval = parsed_assisted_approval;
         if (cleanup_assisted_approval) |*present| {
             wipePermissionAssistedApproval(&present.*);
         }
     }
-    const parsed_can_offer_server_wide_approval = if (object.get("canOfferServerWideApproval")) |field_value| try parseBool(field_value) else null;
+    const parsed_can_offer_server_wide_approval = if (object.get("canOfferServerWideApproval")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .kind = parsed_kind,
         .tool_call_id = parsed_tool_call_id,
@@ -11264,7 +11264,7 @@ fn parsePermissionPromptRequestUrl(allocator: std.mem.Allocator, value: std.json
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -11281,29 +11281,29 @@ fn parsePermissionPromptRequestUrl(allocator: std.mem.Allocator, value: std.json
         const cleanup_url = parsed_url;
         wipeString(cleanup_url);
     }
-    const parsed_redirected_from = if (object.get("redirectedFrom")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_redirected_from = if (object.get("redirectedFrom")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_redirected_from = parsed_redirected_from;
         if (cleanup_redirected_from) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_request_sandbox_bypass = if (object.get("requestSandboxBypass")) |field_value| try parseBool(field_value) else null;
-    const parsed_request_sandbox_bypass_reason = if (object.get("requestSandboxBypassReason")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_request_sandbox_bypass = if (object.get("requestSandboxBypass")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_request_sandbox_bypass_reason = if (object.get("requestSandboxBypassReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_request_sandbox_bypass_reason = parsed_request_sandbox_bypass_reason;
         if (cleanup_request_sandbox_bypass_reason) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| try parsePermissionAssistedApproval(allocator, field_value) else null;
+    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| if ((field_value) == .null) null else try parsePermissionAssistedApproval(allocator, field_value) else null;
     errdefer {
         var cleanup_assisted_approval = parsed_assisted_approval;
         if (cleanup_assisted_approval) |*present| {
             wipePermissionAssistedApproval(&present.*);
         }
     }
-    const parsed_managed_approval_required = if (object.get("managedApprovalRequired")) |field_value| try parseBool(field_value) else null;
+    const parsed_managed_approval_required = if (object.get("managedApprovalRequired")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .kind = parsed_kind,
         .tool_call_id = parsed_tool_call_id,
@@ -11324,21 +11324,21 @@ fn parsePermissionPromptRequestMemory(allocator: std.mem.Allocator, value: std.j
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_action = if (object.get("action")) |field_value| try parsePermissionRequestMemoryAction(allocator, field_value) else null;
+    const parsed_action = if (object.get("action")) |field_value| if ((field_value) == .null) null else try parsePermissionRequestMemoryAction(allocator, field_value) else null;
     errdefer {
         var cleanup_action = parsed_action;
         if (cleanup_action) |*present| {
             wipePermissionRequestMemoryAction(&present.*);
         }
     }
-    const parsed_subject = if (object.get("subject")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_subject = if (object.get("subject")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_subject = parsed_subject;
         if (cleanup_subject) |*present| {
@@ -11350,28 +11350,28 @@ fn parsePermissionPromptRequestMemory(allocator: std.mem.Allocator, value: std.j
         const cleanup_fact = parsed_fact;
         wipeString(cleanup_fact);
     }
-    const parsed_citations = if (object.get("citations")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_citations = if (object.get("citations")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_citations = parsed_citations;
         if (cleanup_citations) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_direction = if (object.get("direction")) |field_value| try parsePermissionRequestMemoryDirection(allocator, field_value) else null;
+    const parsed_direction = if (object.get("direction")) |field_value| if ((field_value) == .null) null else try parsePermissionRequestMemoryDirection(allocator, field_value) else null;
     errdefer {
         var cleanup_direction = parsed_direction;
         if (cleanup_direction) |*present| {
             wipePermissionRequestMemoryDirection(&present.*);
         }
     }
-    const parsed_reason = if (object.get("reason")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_reason = if (object.get("reason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_reason = parsed_reason;
         if (cleanup_reason) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| try parsePermissionAssistedApproval(allocator, field_value) else null;
+    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| if ((field_value) == .null) null else try parsePermissionAssistedApproval(allocator, field_value) else null;
     errdefer {
         var cleanup_assisted_approval = parsed_assisted_approval;
         if (cleanup_assisted_approval) |*present| {
@@ -11398,7 +11398,7 @@ fn parsePermissionPromptRequestCustomTool(allocator: std.mem.Allocator, value: s
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -11415,14 +11415,14 @@ fn parsePermissionPromptRequestCustomTool(allocator: std.mem.Allocator, value: s
         const cleanup_tool_description = parsed_tool_description;
         wipeString(cleanup_tool_description);
     }
-    const parsed_args = if (object.get("args")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_args = if (object.get("args")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_args = parsed_args;
         if (cleanup_args) |*present| {
             wipeJsonValue(&present.*);
         }
     }
-    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| try parsePermissionAssistedApproval(allocator, field_value) else null;
+    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| if ((field_value) == .null) null else try parsePermissionAssistedApproval(allocator, field_value) else null;
     errdefer {
         var cleanup_assisted_approval = parsed_assisted_approval;
         if (cleanup_assisted_approval) |*present| {
@@ -11454,7 +11454,7 @@ fn parsePermissionPromptRequestPath(allocator: std.mem.Allocator, value: std.jso
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -11473,7 +11473,7 @@ fn parsePermissionPromptRequestPath(allocator: std.mem.Allocator, value: std.jso
             wipeString(item.*);
         }
     }
-    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| try parsePermissionAssistedApproval(allocator, field_value) else null;
+    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| if ((field_value) == .null) null else try parsePermissionAssistedApproval(allocator, field_value) else null;
     errdefer {
         var cleanup_assisted_approval = parsed_assisted_approval;
         if (cleanup_assisted_approval) |*present| {
@@ -11496,7 +11496,7 @@ fn parsePermissionPromptRequestHook(allocator: std.mem.Allocator, value: std.jso
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -11508,21 +11508,21 @@ fn parsePermissionPromptRequestHook(allocator: std.mem.Allocator, value: std.jso
         const cleanup_tool_name = parsed_tool_name;
         wipeString(cleanup_tool_name);
     }
-    const parsed_tool_args = if (object.get("toolArgs")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_tool_args = if (object.get("toolArgs")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_tool_args = parsed_tool_args;
         if (cleanup_tool_args) |*present| {
             wipeJsonValue(&present.*);
         }
     }
-    const parsed_hook_message = if (object.get("hookMessage")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_hook_message = if (object.get("hookMessage")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_hook_message = parsed_hook_message;
         if (cleanup_hook_message) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| try parsePermissionAssistedApproval(allocator, field_value) else null;
+    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| if ((field_value) == .null) null else try parsePermissionAssistedApproval(allocator, field_value) else null;
     errdefer {
         var cleanup_assisted_approval = parsed_assisted_approval;
         if (cleanup_assisted_approval) |*present| {
@@ -11546,7 +11546,7 @@ fn parsePermissionPromptRequestExtensionManagement(allocator: std.mem.Allocator,
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -11558,14 +11558,14 @@ fn parsePermissionPromptRequestExtensionManagement(allocator: std.mem.Allocator,
         const cleanup_operation = parsed_operation;
         wipeString(cleanup_operation);
     }
-    const parsed_extension_name = if (object.get("extensionName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_extension_name = if (object.get("extensionName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_extension_name = parsed_extension_name;
         if (cleanup_extension_name) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| try parsePermissionAssistedApproval(allocator, field_value) else null;
+    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| if ((field_value) == .null) null else try parsePermissionAssistedApproval(allocator, field_value) else null;
     errdefer {
         var cleanup_assisted_approval = parsed_assisted_approval;
         if (cleanup_assisted_approval) |*present| {
@@ -11588,7 +11588,7 @@ fn parsePermissionPromptRequestFactory(allocator: std.mem.Allocator, value: std.
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -11617,28 +11617,28 @@ fn parsePermissionPromptRequestFactory(allocator: std.mem.Allocator, value: std.
             wipeFactoryPermissionPhase(&item.*);
         }
     }
-    const parsed_max_concurrent_subagents = if (object.get("maxConcurrentSubagents")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_max_total_subagents = if (object.get("maxTotalSubagents")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_timeout_seconds = if (object.get("timeoutSeconds")) |field_value| try parseNumber(field_value, null, null, null) else null;
-    const parsed_max_ai_credits = if (object.get("maxAiCredits")) |field_value| try parseNumber(field_value, null, null, null) else null;
-    const parsed_declared_max_concurrent_subagents = if (object.get("declaredMaxConcurrentSubagents")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_declared_max_total_subagents = if (object.get("declaredMaxTotalSubagents")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_declared_timeout_seconds = if (object.get("declaredTimeoutSeconds")) |field_value| try parseNumber(field_value, null, null, null) else null;
-    const parsed_declared_max_ai_credits = if (object.get("declaredMaxAiCredits")) |field_value| try parseNumber(field_value, null, null, null) else null;
+    const parsed_max_concurrent_subagents = if (object.get("maxConcurrentSubagents")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_max_total_subagents = if (object.get("maxTotalSubagents")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_timeout_seconds = if (object.get("timeoutSeconds")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, null, null) else null;
+    const parsed_max_ai_credits = if (object.get("maxAiCredits")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, null, null) else null;
+    const parsed_declared_max_concurrent_subagents = if (object.get("declaredMaxConcurrentSubagents")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_declared_max_total_subagents = if (object.get("declaredMaxTotalSubagents")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_declared_timeout_seconds = if (object.get("declaredTimeoutSeconds")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, null, null) else null;
+    const parsed_declared_max_ai_credits = if (object.get("declaredMaxAiCredits")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, null, null) else null;
     const parsed_approval_key = try parseString(allocator, object.get("approvalKey") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_approval_key = parsed_approval_key;
         wipeString(cleanup_approval_key);
     }
     const parsed_can_persist_approval = try parseBool(object.get("canPersistApproval") orelse return error.InvalidSessionEvent);
-    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| try parsePermissionAssistedApproval(allocator, field_value) else null;
+    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| if ((field_value) == .null) null else try parsePermissionAssistedApproval(allocator, field_value) else null;
     errdefer {
         var cleanup_assisted_approval = parsed_assisted_approval;
         if (cleanup_assisted_approval) |*present| {
             wipePermissionAssistedApproval(&present.*);
         }
     }
-    const parsed_managed_approval_required = if (object.get("managedApprovalRequired")) |field_value| try parseBool(field_value) else null;
+    const parsed_managed_approval_required = if (object.get("managedApprovalRequired")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .kind = parsed_kind,
         .tool_call_id = parsed_tool_call_id,
@@ -11668,7 +11668,7 @@ fn parsePermissionPromptRequestExtensionPermissionAccess(allocator: std.mem.Allo
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -11687,7 +11687,7 @@ fn parsePermissionPromptRequestExtensionPermissionAccess(allocator: std.mem.Allo
             wipeString(item.*);
         }
     }
-    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| try parsePermissionAssistedApproval(allocator, field_value) else null;
+    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| if ((field_value) == .null) null else try parsePermissionAssistedApproval(allocator, field_value) else null;
     errdefer {
         var cleanup_assisted_approval = parsed_assisted_approval;
         if (cleanup_assisted_approval) |*present| {
@@ -11710,7 +11710,7 @@ fn parsePermissionPromptRequestExtensionEnvAccess(allocator: std.mem.Allocator, 
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
     }
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -11729,7 +11729,7 @@ fn parsePermissionPromptRequestExtensionEnvAccess(allocator: std.mem.Allocator, 
             wipeString(item.*);
         }
     }
-    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| try parsePermissionAssistedApproval(allocator, field_value) else null;
+    const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| if ((field_value) == .null) null else try parsePermissionAssistedApproval(allocator, field_value) else null;
     errdefer {
         var cleanup_assisted_approval = parsed_assisted_approval;
         if (cleanup_assisted_approval) |*present| {
@@ -11784,28 +11784,28 @@ fn parsePermissionRequestedData(allocator: std.mem.Allocator, value: std.json.Va
         var cleanup_permission_request = parsed_permission_request;
         wipePermissionRequest(&cleanup_permission_request);
     }
-    const parsed_prompt_request = if (object.get("promptRequest")) |field_value| try parsePermissionPromptRequest(allocator, field_value) else null;
+    const parsed_prompt_request = if (object.get("promptRequest")) |field_value| if ((field_value) == .null) null else try parsePermissionPromptRequest(allocator, field_value) else null;
     errdefer {
         var cleanup_prompt_request = parsed_prompt_request;
         if (cleanup_prompt_request) |*present| {
             wipePermissionPromptRequest(&present.*);
         }
     }
-    const parsed_agent_mode = if (object.get("agentMode")) |field_value| try parseSessionMode(allocator, field_value) else null;
+    const parsed_agent_mode = if (object.get("agentMode")) |field_value| if ((field_value) == .null) null else try parseSessionMode(allocator, field_value) else null;
     errdefer {
         var cleanup_agent_mode = parsed_agent_mode;
         if (cleanup_agent_mode) |*present| {
             wipeSessionMode(&present.*);
         }
     }
-    const parsed_risk_assessment = if (object.get("riskAssessment")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_risk_assessment = if (object.get("riskAssessment")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_risk_assessment = parsed_risk_assessment;
         if (cleanup_risk_assessment) |*present| {
             wipeJsonValue(&present.*);
         }
     }
-    const parsed_resolved_by_hook = if (object.get("resolvedByHook")) |field_value| try parseBool(field_value) else null;
+    const parsed_resolved_by_hook = if (object.get("resolvedByHook")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .request_id = parsed_request_id,
         .permission_request = parsed_permission_request,
@@ -11830,14 +11830,14 @@ fn parsePromptCacheBreakData(allocator: std.mem.Allocator, value: std.json.Value
             wipeString(item.*);
         }
     }
-    const parsed_before_request = if (object.get("beforeRequest")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_before_request = if (object.get("beforeRequest")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_before_request = parsed_before_request;
         if (cleanup_before_request) |*present| {
             wipeJsonValue(&present.*);
         }
     }
-    const parsed_after_request = if (object.get("afterRequest")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_after_request = if (object.get("afterRequest")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_after_request = parsed_after_request;
         if (cleanup_after_request) |*present| {
@@ -11848,21 +11848,21 @@ fn parsePromptCacheBreakData(allocator: std.mem.Allocator, value: std.json.Value
     const parsed_frontier_tokens = try parseInteger(u64, object.get("frontierTokens") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_shortfall_tokens = try parseInteger(u64, object.get("shortfallTokens") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_retention_ratio = try parseNumber(object.get("retentionRatio") orelse return error.InvalidSessionEvent, 0, null, 1);
-    const parsed_model_from = if (object.get("modelFrom")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model_from = if (object.get("modelFrom")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model_from = parsed_model_from;
         if (cleanup_model_from) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_model_to = if (object.get("modelTo")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model_to = if (object.get("modelTo")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model_to = parsed_model_to;
         if (cleanup_model_to) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_tools_added = if (object.get("toolsAdded")) |field_value| try parsePromptCacheBreakDataToolsAddedArray(allocator, field_value) else null;
+    const parsed_tools_added = if (object.get("toolsAdded")) |field_value| if ((field_value) == .null) null else try parsePromptCacheBreakDataToolsAddedArray(allocator, field_value) else null;
     errdefer {
         var cleanup_tools_added = parsed_tools_added;
         if (cleanup_tools_added) |*present| {
@@ -11871,7 +11871,7 @@ fn parsePromptCacheBreakData(allocator: std.mem.Allocator, value: std.json.Value
             }
         }
     }
-    const parsed_tools_removed = if (object.get("toolsRemoved")) |field_value| try parsePromptCacheBreakDataToolsRemovedArray(allocator, field_value) else null;
+    const parsed_tools_removed = if (object.get("toolsRemoved")) |field_value| if ((field_value) == .null) null else try parsePromptCacheBreakDataToolsRemovedArray(allocator, field_value) else null;
     errdefer {
         var cleanup_tools_removed = parsed_tools_removed;
         if (cleanup_tools_removed) |*present| {
@@ -11880,7 +11880,7 @@ fn parsePromptCacheBreakData(allocator: std.mem.Allocator, value: std.json.Value
             }
         }
     }
-    const parsed_tools_redefined = if (object.get("toolsRedefined")) |field_value| try parsePromptCacheBreakDataToolsRedefinedArray(allocator, field_value) else null;
+    const parsed_tools_redefined = if (object.get("toolsRedefined")) |field_value| if ((field_value) == .null) null else try parsePromptCacheBreakDataToolsRedefinedArray(allocator, field_value) else null;
     errdefer {
         var cleanup_tools_redefined = parsed_tools_redefined;
         if (cleanup_tools_redefined) |*present| {
@@ -11889,7 +11889,7 @@ fn parsePromptCacheBreakData(allocator: std.mem.Allocator, value: std.json.Value
             }
         }
     }
-    const parsed_tools_added_raw = if (object.get("toolsAddedRaw")) |field_value| try parsePromptCacheBreakDataToolsAddedRawArray(allocator, field_value) else null;
+    const parsed_tools_added_raw = if (object.get("toolsAddedRaw")) |field_value| if ((field_value) == .null) null else try parsePromptCacheBreakDataToolsAddedRawArray(allocator, field_value) else null;
     errdefer {
         var cleanup_tools_added_raw = parsed_tools_added_raw;
         if (cleanup_tools_added_raw) |*present| {
@@ -11898,7 +11898,7 @@ fn parsePromptCacheBreakData(allocator: std.mem.Allocator, value: std.json.Value
             }
         }
     }
-    const parsed_tools_removed_raw = if (object.get("toolsRemovedRaw")) |field_value| try parsePromptCacheBreakDataToolsRemovedRawArray(allocator, field_value) else null;
+    const parsed_tools_removed_raw = if (object.get("toolsRemovedRaw")) |field_value| if ((field_value) == .null) null else try parsePromptCacheBreakDataToolsRemovedRawArray(allocator, field_value) else null;
     errdefer {
         var cleanup_tools_removed_raw = parsed_tools_removed_raw;
         if (cleanup_tools_removed_raw) |*present| {
@@ -11907,7 +11907,7 @@ fn parsePromptCacheBreakData(allocator: std.mem.Allocator, value: std.json.Value
             }
         }
     }
-    const parsed_tools_redefined_raw = if (object.get("toolsRedefinedRaw")) |field_value| try parsePromptCacheBreakDataToolsRedefinedRawArray(allocator, field_value) else null;
+    const parsed_tools_redefined_raw = if (object.get("toolsRedefinedRaw")) |field_value| if ((field_value) == .null) null else try parsePromptCacheBreakDataToolsRedefinedRawArray(allocator, field_value) else null;
     errdefer {
         var cleanup_tools_redefined_raw = parsed_tools_redefined_raw;
         if (cleanup_tools_redefined_raw) |*present| {
@@ -11916,8 +11916,8 @@ fn parsePromptCacheBreakData(allocator: std.mem.Allocator, value: std.json.Value
             }
         }
     }
-    const parsed_tools_reordered = if (object.get("toolsReordered")) |field_value| try parseBool(field_value) else null;
-    const parsed_system_segments_changed = if (object.get("systemSegmentsChanged")) |field_value| try parsePromptCacheBreakDataSystemSegmentsChangedArray(allocator, field_value) else null;
+    const parsed_tools_reordered = if (object.get("toolsReordered")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_system_segments_changed = if (object.get("systemSegmentsChanged")) |field_value| if ((field_value) == .null) null else try parsePromptCacheBreakDataSystemSegmentsChangedArray(allocator, field_value) else null;
     errdefer {
         var cleanup_system_segments_changed = parsed_system_segments_changed;
         if (cleanup_system_segments_changed) |*present| {
@@ -11926,7 +11926,7 @@ fn parsePromptCacheBreakData(allocator: std.mem.Allocator, value: std.json.Value
             }
         }
     }
-    const parsed_cache_config_changed_fields = if (object.get("cacheConfigChangedFields")) |field_value| try parsePromptCacheBreakDataCacheConfigChangedFieldsArray(allocator, field_value) else null;
+    const parsed_cache_config_changed_fields = if (object.get("cacheConfigChangedFields")) |field_value| if ((field_value) == .null) null else try parsePromptCacheBreakDataCacheConfigChangedFieldsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_cache_config_changed_fields = parsed_cache_config_changed_fields;
         if (cleanup_cache_config_changed_fields) |*present| {
@@ -11935,15 +11935,15 @@ fn parsePromptCacheBreakData(allocator: std.mem.Allocator, value: std.json.Value
             }
         }
     }
-    const parsed_rewrite_message_index = if (object.get("rewriteMessageIndex")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_rewrite_shape = if (object.get("rewriteShape")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_rewrite_message_index = if (object.get("rewriteMessageIndex")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_rewrite_shape = if (object.get("rewriteShape")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_rewrite_shape = parsed_rewrite_shape;
         if (cleanup_rewrite_shape) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_rewrite_source = if (object.get("rewriteSource")) |field_value| try parsePromptCacheBreakDataRewriteSourceArray(allocator, field_value) else null;
+    const parsed_rewrite_source = if (object.get("rewriteSource")) |field_value| if ((field_value) == .null) null else try parsePromptCacheBreakDataRewriteSourceArray(allocator, field_value) else null;
     errdefer {
         var cleanup_rewrite_source = parsed_rewrite_source;
         if (cleanup_rewrite_source) |*present| {
@@ -11952,7 +11952,7 @@ fn parsePromptCacheBreakData(allocator: std.mem.Allocator, value: std.json.Value
             }
         }
     }
-    const parsed_agent_name = if (object.get("agentName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_agent_name = if (object.get("agentName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_agent_name = parsed_agent_name;
         if (cleanup_agent_name) |*present| {
@@ -12775,14 +12775,14 @@ fn parseAutoModeResolvedData(allocator: std.mem.Allocator, value: std.json.Value
         const cleanup_chosen_model = parsed_chosen_model;
         wipeString(cleanup_chosen_model);
     }
-    const parsed_reasoning_bucket = if (object.get("reasoningBucket")) |field_value| try parseAutoModeResolvedReasoningBucket(allocator, field_value) else null;
+    const parsed_reasoning_bucket = if (object.get("reasoningBucket")) |field_value| if ((field_value) == .null) null else try parseAutoModeResolvedReasoningBucket(allocator, field_value) else null;
     errdefer {
         var cleanup_reasoning_bucket = parsed_reasoning_bucket;
         if (cleanup_reasoning_bucket) |*present| {
             wipeAutoModeResolvedReasoningBucket(&present.*);
         }
     }
-    const parsed_category_scores = if (object.get("categoryScores")) |field_value| try parseAutoModeResolvedDataCategoryScoresMap(allocator, field_value) else null;
+    const parsed_category_scores = if (object.get("categoryScores")) |field_value| if ((field_value) == .null) null else try parseAutoModeResolvedDataCategoryScoresMap(allocator, field_value) else null;
     errdefer {
         var cleanup_category_scores = parsed_category_scores;
         if (cleanup_category_scores) |*present| {
@@ -12794,15 +12794,15 @@ fn parseAutoModeResolvedData(allocator: std.mem.Allocator, value: std.json.Value
             }
         }
     }
-    const parsed_predicted_label = if (object.get("predictedLabel")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_predicted_label = if (object.get("predictedLabel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_predicted_label = parsed_predicted_label;
         if (cleanup_predicted_label) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_confidence = if (object.get("confidence")) |field_value| try parseNumber(field_value, 0, null, 1) else null;
-    const parsed_candidate_models = if (object.get("candidateModels")) |field_value| try parseAutoModeResolvedDataCandidateModelsArray(allocator, field_value) else null;
+    const parsed_confidence = if (object.get("confidence")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, 1) else null;
+    const parsed_candidate_models = if (object.get("candidateModels")) |field_value| if ((field_value) == .null) null else try parseAutoModeResolvedDataCandidateModelsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_candidate_models = parsed_candidate_models;
         if (cleanup_candidate_models) |*present| {
@@ -12811,14 +12811,14 @@ fn parseAutoModeResolvedData(allocator: std.mem.Allocator, value: std.json.Value
             }
         }
     }
-    const parsed_routing_method = if (object.get("routingMethod")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_routing_method = if (object.get("routingMethod")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_routing_method = parsed_routing_method;
         if (cleanup_routing_method) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_available_models = if (object.get("availableModels")) |field_value| try parseAutoModeResolvedDataAvailableModelsArray(allocator, field_value) else null;
+    const parsed_available_models = if (object.get("availableModels")) |field_value| if ((field_value) == .null) null else try parseAutoModeResolvedDataAvailableModelsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_available_models = parsed_available_models;
         if (cleanup_available_models) |*present| {
@@ -12827,19 +12827,19 @@ fn parseAutoModeResolvedData(allocator: std.mem.Allocator, value: std.json.Value
             }
         }
     }
-    const parsed_fallback = if (object.get("fallback")) |field_value| try parseBool(field_value) else null;
-    const parsed_fallback_reason = if (object.get("fallbackReason")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_fallback = if (object.get("fallback")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_fallback_reason = if (object.get("fallbackReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_fallback_reason = parsed_fallback_reason;
         if (cleanup_fallback_reason) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_sticky_override = if (object.get("stickyOverride")) |field_value| try parseBool(field_value) else null;
-    const parsed_router_latency_ms = if (object.get("routerLatencyMs")) |field_value| try parseNumber(field_value, 0, null, null) else null;
-    const parsed_end_to_end_latency_ms = if (object.get("endToEndLatencyMs")) |field_value| try parseNumber(field_value, 0, null, null) else null;
-    const parsed_chosen_shortfall = if (object.get("chosenShortfall")) |field_value| try parseNumber(field_value, null, null, null) else null;
-    const parsed_has_image = if (object.get("hasImage")) |field_value| try parseBool(field_value) else null;
+    const parsed_sticky_override = if (object.get("stickyOverride")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_router_latency_ms = if (object.get("routerLatencyMs")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_end_to_end_latency_ms = if (object.get("endToEndLatencyMs")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_chosen_shortfall = if (object.get("chosenShortfall")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, null, null) else null;
+    const parsed_has_image = if (object.get("hasImage")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .chosen_model = parsed_chosen_model,
         .reasoning_bucket = parsed_reasoning_bucket,
@@ -12899,7 +12899,7 @@ fn parseAutoTierSwitchFailureReason(_: std.mem.Allocator, value: std.json.Value)
 
 fn parseAutoTierSwitchFailedData(allocator: std.mem.Allocator, value: std.json.Value) !AutoTierSwitchFailedData {
     const object = try payloads.requiredObject(value);
-    const parsed_effective_auto_tier = if (object.get("effectiveAutoTier")) |field_value| try parseAutoTier(allocator, field_value) else null;
+    const parsed_effective_auto_tier = if (object.get("effectiveAutoTier")) |field_value| if ((field_value) == .null) null else try parseAutoTier(allocator, field_value) else null;
     errdefer {
         var cleanup_effective_auto_tier = parsed_effective_auto_tier;
         if (cleanup_effective_auto_tier) |*present| {
@@ -12949,8 +12949,8 @@ fn parseAutopilotObjectiveChangedData(allocator: std.mem.Allocator, value: std.j
         var cleanup_operation = parsed_operation;
         wipeAutopilotObjectiveChangedOperation(&cleanup_operation);
     }
-    const parsed_id = if (object.get("id")) |field_value| try parseInteger(u64, field_value, null, 0, null) else null;
-    const parsed_status = if (object.get("status")) |field_value| try parseAutopilotObjectiveChangedStatus(allocator, field_value) else null;
+    const parsed_id = if (object.get("id")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, null, 0, null) else null;
+    const parsed_status = if (object.get("status")) |field_value| if ((field_value) == .null) null else try parseAutopilotObjectiveChangedStatus(allocator, field_value) else null;
     errdefer {
         var cleanup_status = parsed_status;
         if (cleanup_status) |*present| {
@@ -13000,14 +13000,14 @@ fn parseBinaryAssetData(allocator: std.mem.Allocator, value: std.json.Value) !Bi
         const cleanup_data = parsed_data;
         wipeString(cleanup_data);
     }
-    const parsed_description = if (object.get("description")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_description = if (object.get("description")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_description = parsed_description;
         if (cleanup_description) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_metadata = if (object.get("metadata")) |field_value| try parseBinaryAssetDataMetadataMap(allocator, field_value) else null;
+    const parsed_metadata = if (object.get("metadata")) |field_value| if ((field_value) == .null) null else try parseBinaryAssetDataMetadataMap(allocator, field_value) else null;
     errdefer {
         var cleanup_metadata = parsed_metadata;
         if (cleanup_metadata) |*present| {
@@ -13067,7 +13067,7 @@ fn parseCanvasOpenedData(allocator: std.mem.Allocator, value: std.json.Value) !C
         const cleanup_extension_id = parsed_extension_id;
         wipeString(cleanup_extension_id);
     }
-    const parsed_extension_name = if (object.get("extensionName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_extension_name = if (object.get("extensionName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_extension_name = parsed_extension_name;
         if (cleanup_extension_name) |*present| {
@@ -13079,35 +13079,35 @@ fn parseCanvasOpenedData(allocator: std.mem.Allocator, value: std.json.Value) !C
         const cleanup_canvas_id = parsed_canvas_id;
         wipeString(cleanup_canvas_id);
     }
-    const parsed_icon = if (object.get("icon")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_icon = if (object.get("icon")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_icon = parsed_icon;
         if (cleanup_icon) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_title = if (object.get("title")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_title = if (object.get("title")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_title = parsed_title;
         if (cleanup_title) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_status = if (object.get("status")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_status = if (object.get("status")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_status = parsed_status;
         if (cleanup_status) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_url = if (object.get("url")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_url = if (object.get("url")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_url = parsed_url;
         if (cleanup_url) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_input = if (object.get("input")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_input = if (object.get("input")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_input = parsed_input;
         if (cleanup_input) |*present| {
@@ -13144,14 +13144,14 @@ fn parseCanvasRecordedData(allocator: std.mem.Allocator, value: std.json.Value) 
         const cleanup_canvas_id = parsed_canvas_id;
         wipeString(cleanup_canvas_id);
     }
-    const parsed_title = if (object.get("title")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_title = if (object.get("title")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_title = parsed_title;
         if (cleanup_title) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_input = if (object.get("input")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_input = if (object.get("input")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_input = parsed_input;
         if (cleanup_input) |*present| {
@@ -13174,14 +13174,14 @@ fn parseCanvasRegistryChangedCanvasAction(allocator: std.mem.Allocator, value: s
         const cleanup_name = parsed_name;
         wipeString(cleanup_name);
     }
-    const parsed_description = if (object.get("description")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_description = if (object.get("description")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_description = parsed_description;
         if (cleanup_description) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_input_schema = if (object.get("inputSchema")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_input_schema = if (object.get("inputSchema")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_input_schema = parsed_input_schema;
         if (cleanup_input_schema) |*present| {
@@ -13202,7 +13202,7 @@ fn parseCanvasRegistryChangedCanvas(allocator: std.mem.Allocator, value: std.jso
         const cleanup_extension_id = parsed_extension_id;
         wipeString(cleanup_extension_id);
     }
-    const parsed_extension_name = if (object.get("extensionName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_extension_name = if (object.get("extensionName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_extension_name = parsed_extension_name;
         if (cleanup_extension_name) |*present| {
@@ -13224,21 +13224,21 @@ fn parseCanvasRegistryChangedCanvas(allocator: std.mem.Allocator, value: std.jso
         const cleanup_description = parsed_description;
         wipeString(cleanup_description);
     }
-    const parsed_icon = if (object.get("icon")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_icon = if (object.get("icon")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_icon = parsed_icon;
         if (cleanup_icon) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_input_schema = if (object.get("inputSchema")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_input_schema = if (object.get("inputSchema")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_input_schema = parsed_input_schema;
         if (cleanup_input_schema) |*present| {
             wipeJsonValue(&present.*);
         }
     }
-    const parsed_actions = if (object.get("actions")) |field_value| try parseCanvasRegistryChangedCanvasActionsArray(allocator, field_value) else null;
+    const parsed_actions = if (object.get("actions")) |field_value| if ((field_value) == .null) null else try parseCanvasRegistryChangedCanvasActionsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_actions = parsed_actions;
         if (cleanup_actions) |*present| {
@@ -13325,7 +13325,7 @@ fn parseCompactionCompleteCompactionTokensUsedCopilotUsageTokenDetail(allocator:
     const object = try payloads.requiredObject(value);
     const parsed_batch_size = try parseInteger(u64, object.get("batchSize") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_cost_per_batch = try parseInteger(u64, object.get("costPerBatch") orelse return error.InvalidSessionEvent, 0, null, null);
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
@@ -13349,14 +13349,14 @@ fn parseCompactionCompleteCompactionTokensUsedCopilotUsageTokenDetail(allocator:
 
 fn parseCompactionCompleteCompactionTokensUsedCopilotUsage(allocator: std.mem.Allocator, value: std.json.Value) !CompactionCompleteCompactionTokensUsedCopilotUsage {
     const object = try payloads.requiredObject(value);
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_token_details = if (object.get("tokenDetails")) |field_value| try parseCompactionCompleteCompactionTokensUsedCopilotUsageTokenDetailsArray(allocator, field_value) else null;
+    const parsed_token_details = if (object.get("tokenDetails")) |field_value| if ((field_value) == .null) null else try parseCompactionCompleteCompactionTokensUsedCopilotUsageTokenDetailsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_token_details = parsed_token_details;
         if (cleanup_token_details) |*present| {
@@ -13375,19 +13375,19 @@ fn parseCompactionCompleteCompactionTokensUsedCopilotUsage(allocator: std.mem.Al
 
 fn parseCompactionCompleteCompactionTokensUsed(allocator: std.mem.Allocator, value: std.json.Value) !CompactionCompleteCompactionTokensUsed {
     const object = try payloads.requiredObject(value);
-    const parsed_input_tokens = if (object.get("inputTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_output_tokens = if (object.get("outputTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_cache_read_tokens = if (object.get("cacheReadTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_cache_write_tokens = if (object.get("cacheWriteTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_copilot_usage = if (object.get("copilotUsage")) |field_value| try parseCompactionCompleteCompactionTokensUsedCopilotUsage(allocator, field_value) else null;
+    const parsed_input_tokens = if (object.get("inputTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_output_tokens = if (object.get("outputTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_cache_read_tokens = if (object.get("cacheReadTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_cache_write_tokens = if (object.get("cacheWriteTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_copilot_usage = if (object.get("copilotUsage")) |field_value| if ((field_value) == .null) null else try parseCompactionCompleteCompactionTokensUsedCopilotUsage(allocator, field_value) else null;
     errdefer {
         var cleanup_copilot_usage = parsed_copilot_usage;
         if (cleanup_copilot_usage) |*present| {
             wipeCompactionCompleteCompactionTokensUsedCopilotUsage(&present.*);
         }
     }
-    const parsed_duration = if (object.get("duration")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_duration = if (object.get("duration")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
@@ -13418,81 +13418,81 @@ fn parseCompactionTrigger(_: std.mem.Allocator, value: std.json.Value) !Compacti
 fn parseCompactionCompleteData(allocator: std.mem.Allocator, value: std.json.Value) !CompactionCompleteData {
     const object = try payloads.requiredObject(value);
     const parsed_success = try parseBool(object.get("success") orelse return error.InvalidSessionEvent);
-    const parsed_error_ = if (object.get("error")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_error_ = if (object.get("error")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_error_ = parsed_error_;
         if (cleanup_error_) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_pre_compaction_tokens = if (object.get("preCompactionTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_post_compaction_tokens = if (object.get("postCompactionTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_pre_compaction_messages_length = if (object.get("preCompactionMessagesLength")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_messages_removed = if (object.get("messagesRemoved")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_tokens_removed = if (object.get("tokensRemoved")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_custom_instructions = if (object.get("customInstructions")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_pre_compaction_tokens = if (object.get("preCompactionTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_post_compaction_tokens = if (object.get("postCompactionTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_pre_compaction_messages_length = if (object.get("preCompactionMessagesLength")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_messages_removed = if (object.get("messagesRemoved")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_tokens_removed = if (object.get("tokensRemoved")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_custom_instructions = if (object.get("customInstructions")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_custom_instructions = parsed_custom_instructions;
         if (cleanup_custom_instructions) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_summary_content = if (object.get("summaryContent")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_summary_content = if (object.get("summaryContent")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_summary_content = parsed_summary_content;
         if (cleanup_summary_content) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_active_factory_summary = if (object.get("activeFactorySummary")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_active_factory_summary = if (object.get("activeFactorySummary")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_active_factory_summary = parsed_active_factory_summary;
         if (cleanup_active_factory_summary) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_behavior_model_id = if (object.get("behaviorModelId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_behavior_model_id = if (object.get("behaviorModelId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_behavior_model_id = parsed_behavior_model_id;
         if (cleanup_behavior_model_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_checkpoint_number = if (object.get("checkpointNumber")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_checkpoint_path = if (object.get("checkpointPath")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_checkpoint_number = if (object.get("checkpointNumber")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_checkpoint_path = if (object.get("checkpointPath")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_checkpoint_path = parsed_checkpoint_path;
         if (cleanup_checkpoint_path) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_compaction_tokens_used = if (object.get("compactionTokensUsed")) |field_value| try parseCompactionCompleteCompactionTokensUsed(allocator, field_value) else null;
+    const parsed_compaction_tokens_used = if (object.get("compactionTokensUsed")) |field_value| if ((field_value) == .null) null else try parseCompactionCompleteCompactionTokensUsed(allocator, field_value) else null;
     errdefer {
         var cleanup_compaction_tokens_used = parsed_compaction_tokens_used;
         if (cleanup_compaction_tokens_used) |*present| {
             wipeCompactionCompleteCompactionTokensUsed(&present.*);
         }
     }
-    const parsed_request_id = if (object.get("requestId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_request_id = if (object.get("requestId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_request_id = parsed_request_id;
         if (cleanup_request_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_service_request_id = if (object.get("serviceRequestId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_service_request_id = if (object.get("serviceRequestId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_service_request_id = parsed_service_request_id;
         if (cleanup_service_request_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_system_tokens = if (object.get("systemTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_conversation_tokens = if (object.get("conversationTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_tool_definitions_tokens = if (object.get("toolDefinitionsTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_status_code = if (object.get("statusCode")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_token_limit = if (object.get("tokenLimit")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_trigger = if (object.get("trigger")) |field_value| try parseCompactionTrigger(allocator, field_value) else null;
+    const parsed_system_tokens = if (object.get("systemTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_conversation_tokens = if (object.get("conversationTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_tool_definitions_tokens = if (object.get("toolDefinitionsTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_status_code = if (object.get("statusCode")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_token_limit = if (object.get("tokenLimit")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_trigger = if (object.get("trigger")) |field_value| if ((field_value) == .null) null else try parseCompactionTrigger(allocator, field_value) else null;
     errdefer {
         var cleanup_trigger = parsed_trigger;
         if (cleanup_trigger) |*present| {
@@ -13527,19 +13527,19 @@ fn parseCompactionCompleteData(allocator: std.mem.Allocator, value: std.json.Val
 
 fn parseCompactionStartData(allocator: std.mem.Allocator, value: std.json.Value) !CompactionStartData {
     const object = try payloads.requiredObject(value);
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_system_tokens = if (object.get("systemTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_conversation_tokens = if (object.get("conversationTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_tool_definitions_tokens = if (object.get("toolDefinitionsTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_current_tokens = if (object.get("currentTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_token_limit = if (object.get("tokenLimit")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_trigger = if (object.get("trigger")) |field_value| try parseCompactionTrigger(allocator, field_value) else null;
+    const parsed_system_tokens = if (object.get("systemTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_conversation_tokens = if (object.get("conversationTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_tool_definitions_tokens = if (object.get("toolDefinitionsTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_current_tokens = if (object.get("currentTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_token_limit = if (object.get("tokenLimit")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_trigger = if (object.get("trigger")) |field_value| if ((field_value) == .null) null else try parseCompactionTrigger(allocator, field_value) else null;
     errdefer {
         var cleanup_trigger = parsed_trigger;
         if (cleanup_trigger) |*present| {
@@ -13600,7 +13600,7 @@ fn parseCompletionReceiptFinalTool(allocator: std.mem.Allocator, value: std.json
         const cleanup_tool_call_id = parsed_tool_call_id;
         wipeString(cleanup_tool_call_id);
     }
-    const parsed_tool_name = if (object.get("toolName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tool_name = if (object.get("toolName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_name = parsed_tool_name;
         if (cleanup_tool_name) |*present| {
@@ -13612,7 +13612,7 @@ fn parseCompletionReceiptFinalTool(allocator: std.mem.Allocator, value: std.json
         var cleanup_status = parsed_status;
         wipeCompletionReceiptToolStatus(&cleanup_status);
     }
-    const parsed_exit_code = if (object.get("exitCode")) |field_value| try parseInteger(i64, field_value, null, null, null) else null;
+    const parsed_exit_code = if (object.get("exitCode")) |field_value| if ((field_value) == .null) null else try parseInteger(i64, field_value, null, null, null) else null;
     return .{
         .tool_call_id = parsed_tool_call_id,
         .tool_name = parsed_tool_name,
@@ -13640,7 +13640,7 @@ fn parseCompletionReceiptData(allocator: std.mem.Allocator, value: std.json.Valu
         var cleanup_stop_reason = parsed_stop_reason;
         wipeCompletionReceiptStopReason(&cleanup_stop_reason);
     }
-    const parsed_final_tool = if (object.get("finalTool")) |field_value| try parseCompletionReceiptFinalTool(allocator, field_value) else null;
+    const parsed_final_tool = if (object.get("finalTool")) |field_value| if ((field_value) == .null) null else try parseCompletionReceiptFinalTool(allocator, field_value) else null;
     errdefer {
         var cleanup_final_tool = parsed_final_tool;
         if (cleanup_final_tool) |*present| {
@@ -13675,56 +13675,56 @@ fn parseWorkingDirectoryContext(allocator: std.mem.Allocator, value: std.json.Va
         const cleanup_cwd = parsed_cwd;
         wipeString(cleanup_cwd);
     }
-    const parsed_git_root = if (object.get("gitRoot")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_git_root = if (object.get("gitRoot")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_git_root = parsed_git_root;
         if (cleanup_git_root) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_repository = if (object.get("repository")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_repository = if (object.get("repository")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_repository = parsed_repository;
         if (cleanup_repository) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_host_type = if (object.get("hostType")) |field_value| try parseWorkingDirectoryContextHostType(allocator, field_value) else null;
+    const parsed_host_type = if (object.get("hostType")) |field_value| if ((field_value) == .null) null else try parseWorkingDirectoryContextHostType(allocator, field_value) else null;
     errdefer {
         var cleanup_host_type = parsed_host_type;
         if (cleanup_host_type) |*present| {
             wipeWorkingDirectoryContextHostType(&present.*);
         }
     }
-    const parsed_repository_host = if (object.get("repositoryHost")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_repository_host = if (object.get("repositoryHost")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_repository_host = parsed_repository_host;
         if (cleanup_repository_host) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_branch = if (object.get("branch")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_branch = if (object.get("branch")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_branch = parsed_branch;
         if (cleanup_branch) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_head_commit = if (object.get("headCommit")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_head_commit = if (object.get("headCommit")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_head_commit = parsed_head_commit;
         if (cleanup_head_commit) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_base_commit = if (object.get("baseCommit")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_base_commit = if (object.get("baseCommit")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_base_commit = parsed_base_commit;
         if (cleanup_base_commit) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_pending_git_context = if (object.get("pendingGitContext")) |field_value| try parseBool(field_value) else null;
+    const parsed_pending_git_context = if (object.get("pendingGitContext")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .cwd = parsed_cwd,
         .git_root = parsed_git_root,
@@ -13740,7 +13740,7 @@ fn parseWorkingDirectoryContext(allocator: std.mem.Allocator, value: std.json.Va
 
 fn parseContextClearedData(allocator: std.mem.Allocator, value: std.json.Value) !ContextClearedData {
     const object = try payloads.requiredObject(value);
-    const parsed_initial_message = if (object.get("initialMessage")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_initial_message = if (object.get("initialMessage")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_initial_message = parsed_initial_message;
         if (cleanup_initial_message) |*present| {
@@ -13798,15 +13798,15 @@ fn parseCustomAgentsUpdatedAgent(allocator: std.mem.Allocator, value: std.json.V
         }
     }
     const parsed_user_invocable = try parseBool(object.get("userInvocable") orelse return error.InvalidSessionEvent);
-    const parsed_disable_model_invocation = if (object.get("disableModelInvocation")) |field_value| try parseBool(field_value) else null;
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_disable_model_invocation = if (object.get("disableModelInvocation")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_models = if (object.get("models")) |field_value| try parseCustomAgentsUpdatedAgentModelsArray(allocator, field_value) else null;
+    const parsed_models = if (object.get("models")) |field_value| if ((field_value) == .null) null else try parseCustomAgentsUpdatedAgentModelsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_models = parsed_models;
         if (cleanup_models) |*present| {
@@ -13815,7 +13815,7 @@ fn parseCustomAgentsUpdatedAgent(allocator: std.mem.Allocator, value: std.json.V
             }
         }
     }
-    const parsed_model_policy = if (object.get("modelPolicy")) |field_value| try parseAgentModelPolicy(allocator, field_value) else null;
+    const parsed_model_policy = if (object.get("modelPolicy")) |field_value| if ((field_value) == .null) null else try parseAgentModelPolicy(allocator, field_value) else null;
     errdefer {
         var cleanup_model_policy = parsed_model_policy;
         if (cleanup_model_policy) |*present| {
@@ -13887,8 +13887,8 @@ fn parseCustomNotificationData(allocator: std.mem.Allocator, value: std.json.Val
         const cleanup_name = parsed_name;
         wipeString(cleanup_name);
     }
-    const parsed_version = if (object.get("version")) |field_value| try parseInteger(u64, field_value, null, 0, null) else null;
-    const parsed_subject = if (object.get("subject")) |field_value| try parseCustomNotificationSubject(allocator, field_value) else null;
+    const parsed_version = if (object.get("version")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, null, 0, null) else null;
+    const parsed_subject = if (object.get("subject")) |field_value| if ((field_value) == .null) null else try parseCustomNotificationSubject(allocator, field_value) else null;
     errdefer {
         var cleanup_subject = parsed_subject;
         if (cleanup_subject) |*present| {
@@ -13926,49 +13926,49 @@ fn parseErrorData(allocator: std.mem.Allocator, value: std.json.Value) !ErrorDat
         const cleanup_error_type = parsed_error_type;
         wipeString(cleanup_error_type);
     }
-    const parsed_error_code = if (object.get("errorCode")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_error_code = if (object.get("errorCode")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_error_code = parsed_error_code;
         if (cleanup_error_code) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_eligible_for_auto_switch = if (object.get("eligibleForAutoSwitch")) |field_value| try parseBool(field_value) else null;
+    const parsed_eligible_for_auto_switch = if (object.get("eligibleForAutoSwitch")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_message = try parseString(allocator, object.get("message") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_message = parsed_message;
         wipeString(cleanup_message);
     }
-    const parsed_remediation = if (object.get("remediation")) |field_value| try parseRemediationAction(allocator, field_value) else null;
+    const parsed_remediation = if (object.get("remediation")) |field_value| if ((field_value) == .null) null else try parseRemediationAction(allocator, field_value) else null;
     errdefer {
         var cleanup_remediation = parsed_remediation;
         if (cleanup_remediation) |*present| {
             wipeRemediationAction(&present.*);
         }
     }
-    const parsed_stack = if (object.get("stack")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_stack = if (object.get("stack")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_stack = parsed_stack;
         if (cleanup_stack) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_status_code = if (object.get("statusCode")) |field_value| try parseInteger(u64, field_value, 0, null, 999) else null;
-    const parsed_provider_call_id = if (object.get("providerCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_status_code = if (object.get("statusCode")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, 999) else null;
+    const parsed_provider_call_id = if (object.get("providerCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_provider_call_id = parsed_provider_call_id;
         if (cleanup_provider_call_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_service_request_id = if (object.get("serviceRequestId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_service_request_id = if (object.get("serviceRequestId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_service_request_id = parsed_service_request_id;
         if (cleanup_service_request_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_url = if (object.get("url")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_url = if (object.get("url")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_url = parsed_url;
         if (cleanup_url) |*present| {
@@ -14023,36 +14023,36 @@ fn parseAttachmentFile(allocator: std.mem.Allocator, value: std.json.Value) !Att
         const cleanup_display_name = parsed_display_name;
         wipeString(cleanup_display_name);
     }
-    const parsed_line_range = if (object.get("lineRange")) |field_value| try parseAttachmentFileLineRange(allocator, field_value) else null;
+    const parsed_line_range = if (object.get("lineRange")) |field_value| if ((field_value) == .null) null else try parseAttachmentFileLineRange(allocator, field_value) else null;
     errdefer {
         var cleanup_line_range = parsed_line_range;
         if (cleanup_line_range) |*present| {
             wipeAttachmentFileLineRange(&present.*);
         }
     }
-    const parsed_mime_type = if (object.get("mimeType")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_mime_type = if (object.get("mimeType")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_mime_type = parsed_mime_type;
         if (cleanup_mime_type) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_asset_id = if (object.get("assetId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_asset_id = if (object.get("assetId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_asset_id = parsed_asset_id;
         if (cleanup_asset_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_byte_length = if (object.get("byteLength")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_omitted_reason = if (object.get("omittedReason")) |field_value| try parseOmittedBinaryOmittedReason(allocator, field_value) else null;
+    const parsed_byte_length = if (object.get("byteLength")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_omitted_reason = if (object.get("omittedReason")) |field_value| if ((field_value) == .null) null else try parseOmittedBinaryOmittedReason(allocator, field_value) else null;
     errdefer {
         var cleanup_omitted_reason = parsed_omitted_reason;
         if (cleanup_omitted_reason) |*present| {
             wipeOmittedBinaryOmittedReason(&present.*);
         }
     }
-    const parsed_tagged_files_entry = if (object.get("taggedFilesEntry")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tagged_files_entry = if (object.get("taggedFilesEntry")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tagged_files_entry = parsed_tagged_files_entry;
         if (cleanup_tagged_files_entry) |*present| {
@@ -14089,7 +14089,7 @@ fn parseAttachmentDirectory(allocator: std.mem.Allocator, value: std.json.Value)
         const cleanup_display_name = parsed_display_name;
         wipeString(cleanup_display_name);
     }
-    const parsed_tagged_files_entry = if (object.get("taggedFilesEntry")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tagged_files_entry = if (object.get("taggedFilesEntry")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tagged_files_entry = parsed_tagged_files_entry;
         if (cleanup_tagged_files_entry) |*present| {
@@ -14226,7 +14226,7 @@ fn parseAttachmentGitHubReference(allocator: std.mem.Allocator, value: std.json.
 
 fn parseGitHubRepoRef(allocator: std.mem.Allocator, value: std.json.Value) !GitHubRepoRef {
     const object = try payloads.requiredObject(value);
-    const parsed_id = if (object.get("id")) |field_value| try parseInteger(u64, field_value, null, 0, null) else null;
+    const parsed_id = if (object.get("id")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, null, 0, null) else null;
     const parsed_name = try parseString(allocator, object.get("name") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_name = parsed_name;
@@ -14344,7 +14344,7 @@ fn parseAttachmentGitHubActionsJob(allocator: std.mem.Allocator, value: std.json
         const cleanup_url = parsed_url;
         wipeString(cleanup_url);
     }
-    const parsed_conclusion = if (object.get("conclusion")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_conclusion = if (object.get("conclusion")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_conclusion = parsed_conclusion;
         if (cleanup_conclusion) |*present| {
@@ -14379,14 +14379,14 @@ fn parseAttachmentGitHubRepository(allocator: std.mem.Allocator, value: std.json
         const cleanup_url = parsed_url;
         wipeString(cleanup_url);
     }
-    const parsed_description = if (object.get("description")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_description = if (object.get("description")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_description = parsed_description;
         if (cleanup_description) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_ref = if (object.get("ref")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_ref = if (object.get("ref")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_ref = parsed_ref;
         if (cleanup_ref) |*present| {
@@ -14438,14 +14438,14 @@ fn parseAttachmentGitHubFileDiff(allocator: std.mem.Allocator, value: std.json.V
         const cleanup_url = parsed_url;
         wipeString(cleanup_url);
     }
-    const parsed_head = if (object.get("head")) |field_value| try parseAttachmentGitHubFileDiffSide(allocator, field_value) else null;
+    const parsed_head = if (object.get("head")) |field_value| if ((field_value) == .null) null else try parseAttachmentGitHubFileDiffSide(allocator, field_value) else null;
     errdefer {
         var cleanup_head = parsed_head;
         if (cleanup_head) |*present| {
             wipeAttachmentGitHubFileDiffSide(&present.*);
         }
     }
-    const parsed_base = if (object.get("base")) |field_value| try parseAttachmentGitHubFileDiffSide(allocator, field_value) else null;
+    const parsed_base = if (object.get("base")) |field_value| if ((field_value) == .null) null else try parseAttachmentGitHubFileDiffSide(allocator, field_value) else null;
     errdefer {
         var cleanup_base = parsed_base;
         if (cleanup_base) |*present| {
@@ -14611,7 +14611,7 @@ fn parseAttachmentBlob(allocator: std.mem.Allocator, value: std.json.Value) !Att
         const cleanup_type = parsed_type;
         wipeString(cleanup_type);
     }
-    const parsed_data = if (object.get("data")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_data = if (object.get("data")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_data = parsed_data;
         if (cleanup_data) |*present| {
@@ -14623,22 +14623,22 @@ fn parseAttachmentBlob(allocator: std.mem.Allocator, value: std.json.Value) !Att
         const cleanup_mime_type = parsed_mime_type;
         wipeString(cleanup_mime_type);
     }
-    const parsed_display_name = if (object.get("displayName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_display_name = if (object.get("displayName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_display_name = parsed_display_name;
         if (cleanup_display_name) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_asset_id = if (object.get("assetId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_asset_id = if (object.get("assetId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_asset_id = parsed_asset_id;
         if (cleanup_asset_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_byte_length = if (object.get("byteLength")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_omitted_reason = if (object.get("omittedReason")) |field_value| try parseOmittedBinaryOmittedReason(allocator, field_value) else null;
+    const parsed_byte_length = if (object.get("byteLength")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_omitted_reason = if (object.get("omittedReason")) |field_value| if ((field_value) == .null) null else try parseOmittedBinaryOmittedReason(allocator, field_value) else null;
     errdefer {
         var cleanup_omitted_reason = parsed_omitted_reason;
         if (cleanup_omitted_reason) |*present| {
@@ -14668,14 +14668,14 @@ fn parseAttachmentExtensionContext(allocator: std.mem.Allocator, value: std.json
         const cleanup_extension_id = parsed_extension_id;
         wipeString(cleanup_extension_id);
     }
-    const parsed_canvas_id = if (object.get("canvasId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_canvas_id = if (object.get("canvasId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_canvas_id = parsed_canvas_id;
         if (cleanup_canvas_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_instance_id = if (object.get("instanceId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_instance_id = if (object.get("instanceId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_instance_id = parsed_instance_id;
         if (cleanup_instance_id) |*present| {
@@ -14687,7 +14687,7 @@ fn parseAttachmentExtensionContext(allocator: std.mem.Allocator, value: std.json
         const cleanup_title = parsed_title;
         wipeString(cleanup_title);
     }
-    const parsed_payload = if (object.get("payload")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_payload = if (object.get("payload")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_payload = parsed_payload;
         if (cleanup_payload) |*present| {
@@ -14921,7 +14921,7 @@ fn parseFusionCompletedData(allocator: std.mem.Allocator, value: std.json.Value)
     const parsed_input_tokens = try parseInteger(u64, object.get("inputTokens") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_output_tokens = try parseInteger(u64, object.get("outputTokens") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_cached_tokens = try parseInteger(u64, object.get("cachedTokens") orelse return error.InvalidSessionEvent, 0, null, null);
-    const parsed_cache_write_tokens = if (object.get("cacheWriteTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_cache_write_tokens = if (object.get("cacheWriteTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_total_nano_aiu = try parseNumber(object.get("totalNanoAiu") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_duration_ms = try parseNumber(object.get("durationMs") orelse return error.InvalidSessionEvent, 0, null, null);
     return .{
@@ -15070,50 +15070,50 @@ fn parseFusionResolvedData(allocator: std.mem.Allocator, value: std.json.Value) 
         const cleanup_policy = parsed_policy;
         wipeString(cleanup_policy);
     }
-    const parsed_route_source = if (object.get("routeSource")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_route_source = if (object.get("routeSource")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_route_source = parsed_route_source;
         if (cleanup_route_source) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_plan_version = if (object.get("planVersion")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_plan_version = if (object.get("planVersion")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_plan_version = parsed_plan_version;
         if (cleanup_plan_version) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_policy_version = if (object.get("policyVersion")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_policy_version = if (object.get("policyVersion")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_policy_version = parsed_policy_version;
         if (cleanup_policy_version) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_model_universe_version = if (object.get("modelUniverseVersion")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model_universe_version = if (object.get("modelUniverseVersion")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model_universe_version = parsed_model_universe_version;
         if (cleanup_model_universe_version) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_rule_id = if (object.get("ruleId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_rule_id = if (object.get("ruleId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_rule_id = parsed_rule_id;
         if (cleanup_rule_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_rule_index = if (object.get("ruleIndex")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_rule_name = if (object.get("ruleName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_rule_index = if (object.get("ruleIndex")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_rule_name = if (object.get("ruleName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_rule_name = parsed_rule_name;
         if (cleanup_rule_name) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_scores = if (object.get("scores")) |field_value| try parseFusionScores(allocator, field_value) else null;
+    const parsed_scores = if (object.get("scores")) |field_value| if ((field_value) == .null) null else try parseFusionScores(allocator, field_value) else null;
     errdefer {
         var cleanup_scores = parsed_scores;
         if (cleanup_scores) |*present| {
@@ -15125,7 +15125,7 @@ fn parseFusionResolvedData(allocator: std.mem.Allocator, value: std.json.Value) 
         var cleanup_pattern = parsed_pattern;
         wipeFusionPattern(&cleanup_pattern);
     }
-    const parsed_phase_plan = if (object.get("phasePlan")) |field_value| try parseFusionResolvedDataPhasePlanArray(allocator, field_value) else null;
+    const parsed_phase_plan = if (object.get("phasePlan")) |field_value| if ((field_value) == .null) null else try parseFusionResolvedDataPhasePlanArray(allocator, field_value) else null;
     errdefer {
         var cleanup_phase_plan = parsed_phase_plan;
         if (cleanup_phase_plan) |*present| {
@@ -15156,14 +15156,14 @@ fn parseFusionResolvedData(allocator: std.mem.Allocator, value: std.json.Value) 
         const cleanup_follow_up_model = parsed_follow_up_model;
         wipeString(cleanup_follow_up_model);
     }
-    const parsed_follow_up = if (object.get("followUp")) |field_value| try parseFusionFollowUpRecommendation(allocator, field_value) else null;
+    const parsed_follow_up = if (object.get("followUp")) |field_value| if ((field_value) == .null) null else try parseFusionFollowUpRecommendation(allocator, field_value) else null;
     errdefer {
         var cleanup_follow_up = parsed_follow_up;
         if (cleanup_follow_up) |*present| {
             wipeFusionFollowUpRecommendation(&present.*);
         }
     }
-    const parsed_routing_latency_ms = if (object.get("routingLatencyMs")) |field_value| try parseNumber(field_value, 0, null, null) else null;
+    const parsed_routing_latency_ms = if (object.get("routingLatencyMs")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
     return .{
         .fusion_id = parsed_fusion_id,
         .turn_id = parsed_turn_id,
@@ -15211,7 +15211,7 @@ fn parseFusionRouteFailedData(allocator: std.mem.Allocator, value: std.json.Valu
         const cleanup_reason = parsed_reason;
         wipeString(cleanup_reason);
     }
-    const parsed_error_message = if (object.get("errorMessage")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_error_message = if (object.get("errorMessage")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_error_message = parsed_error_message;
         if (cleanup_error_message) |*present| {
@@ -15223,7 +15223,7 @@ fn parseFusionRouteFailedData(allocator: std.mem.Allocator, value: std.json.Valu
         const cleanup_fallback_model = parsed_fallback_model;
         wipeString(cleanup_fallback_model);
     }
-    const parsed_routing_latency_ms = if (object.get("routingLatencyMs")) |field_value| try parseNumber(field_value, 0, null, null) else null;
+    const parsed_routing_latency_ms = if (object.get("routingLatencyMs")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
     return .{
         .attempt_id = parsed_attempt_id,
         .synthetic_model = parsed_synthetic_model,
@@ -15254,14 +15254,14 @@ fn parseFusionRouteStartedData(allocator: std.mem.Allocator, value: std.json.Val
         var cleanup_turn_kind = parsed_turn_kind;
         wipeFusionTurnKind(&cleanup_turn_kind);
     }
-    const parsed_synthetic_model = if (object.get("syntheticModel")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_synthetic_model = if (object.get("syntheticModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_synthetic_model = parsed_synthetic_model;
         if (cleanup_synthetic_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_policy = if (object.get("policy")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_policy = if (object.get("policy")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_policy = parsed_policy;
         if (cleanup_policy) |*present| {
@@ -15295,7 +15295,7 @@ fn parseHandoffRepository(allocator: std.mem.Allocator, value: std.json.Value) !
         const cleanup_name = parsed_name;
         wipeString(cleanup_name);
     }
-    const parsed_branch = if (object.get("branch")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_branch = if (object.get("branch")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_branch = parsed_branch;
         if (cleanup_branch) |*present| {
@@ -15321,35 +15321,35 @@ fn parseHandoffData(allocator: std.mem.Allocator, value: std.json.Value) !Handof
         var cleanup_source_type = parsed_source_type;
         wipeHandoffSourceType(&cleanup_source_type);
     }
-    const parsed_repository = if (object.get("repository")) |field_value| try parseHandoffRepository(allocator, field_value) else null;
+    const parsed_repository = if (object.get("repository")) |field_value| if ((field_value) == .null) null else try parseHandoffRepository(allocator, field_value) else null;
     errdefer {
         var cleanup_repository = parsed_repository;
         if (cleanup_repository) |*present| {
             wipeHandoffRepository(&present.*);
         }
     }
-    const parsed_context = if (object.get("context")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_context = if (object.get("context")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_context = parsed_context;
         if (cleanup_context) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_summary = if (object.get("summary")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_summary = if (object.get("summary")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_summary = parsed_summary;
         if (cleanup_summary) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_remote_session_id = if (object.get("remoteSessionId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_remote_session_id = if (object.get("remoteSessionId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_remote_session_id = parsed_remote_session_id;
         if (cleanup_remote_session_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_host = if (object.get("host")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_host = if (object.get("host")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_host = parsed_host;
         if (cleanup_host) |*present| {
@@ -15369,8 +15369,8 @@ fn parseHandoffData(allocator: std.mem.Allocator, value: std.json.Value) !Handof
 
 fn parseIdleData(allocator: std.mem.Allocator, value: std.json.Value) !IdleData {
     const object = try payloads.requiredObject(value);
-    const parsed_aborted = if (object.get("aborted")) |field_value| try parseBool(field_value) else null;
-    const parsed_mode = if (object.get("mode")) |field_value| try parseSessionMode(allocator, field_value) else null;
+    const parsed_aborted = if (object.get("aborted")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_mode = if (object.get("mode")) |field_value| if ((field_value) == .null) null else try parseSessionMode(allocator, field_value) else null;
     errdefer {
         var cleanup_mode = parsed_mode;
         if (cleanup_mode) |*present| {
@@ -15395,14 +15395,14 @@ fn parseInfoData(allocator: std.mem.Allocator, value: std.json.Value) !InfoData 
         const cleanup_message = parsed_message;
         wipeString(cleanup_message);
     }
-    const parsed_url = if (object.get("url")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_url = if (object.get("url")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_url = parsed_url;
         if (cleanup_url) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_tip = if (object.get("tip")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tip = if (object.get("tip")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tip = parsed_tip;
         if (cleanup_tip) |*present| {
@@ -15441,7 +15441,7 @@ fn parseManagedSettingsEnforcedData(allocator: std.mem.Allocator, value: std.jso
         var cleanup_action = parsed_action;
         wipeManagedSettingsEnforcedAction(&cleanup_action);
     }
-    const parsed_escalation = if (object.get("escalation")) |field_value| try parseManagedSettingsEnforcedEscalation(allocator, field_value) else null;
+    const parsed_escalation = if (object.get("escalation")) |field_value| if ((field_value) == .null) null else try parseManagedSettingsEnforcedEscalation(allocator, field_value) else null;
     errdefer {
         var cleanup_escalation = parsed_escalation;
         if (cleanup_escalation) |*present| {
@@ -15488,12 +15488,12 @@ fn parseManagedSettingsResolvedData(allocator: std.mem.Allocator, value: std.jso
     }
     const parsed_server_managed = try parseBool(object.get("serverManaged") orelse return error.InvalidSessionEvent);
     const parsed_device_managed = try parseBool(object.get("deviceManaged") orelse return error.InvalidSessionEvent);
-    const parsed_client_managed = if (object.get("clientManaged")) |field_value| try parseBool(field_value) else null;
-    const parsed_policy_helper_managed = if (object.get("policyHelperManaged")) |field_value| try parseBool(field_value) else null;
+    const parsed_client_managed = if (object.get("clientManaged")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_policy_helper_managed = if (object.get("policyHelperManaged")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_fail_closed = try parseBool(object.get("failClosed") orelse return error.InvalidSessionEvent);
-    const parsed_sandbox_enabled_by_undetermined_policy = if (object.get("sandboxEnabledByUndeterminedPolicy")) |field_value| try parseBool(field_value) else null;
+    const parsed_sandbox_enabled_by_undetermined_policy = if (object.get("sandboxEnabledByUndeterminedPolicy")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_bypass_permissions_disabled = try parseBool(object.get("bypassPermissionsDisabled") orelse return error.InvalidSessionEvent);
-    const parsed_permissions_allow_intersected = if (object.get("permissionsAllowIntersected")) |field_value| try parseBool(field_value) else null;
+    const parsed_permissions_allow_intersected = if (object.get("permissionsAllowIntersected")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_managed_keys = try parseManagedSettingsResolvedDataManagedKeysArray(allocator, object.get("managedKeys") orelse return error.InvalidSessionEvent);
     errdefer {
         const cleanup_managed_keys = parsed_managed_keys;
@@ -15501,7 +15501,7 @@ fn parseManagedSettingsResolvedData(allocator: std.mem.Allocator, value: std.jso
             wipeString(item.*);
         }
     }
-    const parsed_settings = if (object.get("settings")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_settings = if (object.get("settings")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_settings = parsed_settings;
         if (cleanup_settings) |*present| {
@@ -15571,7 +15571,7 @@ fn parseMcpServerStatusChangedData(allocator: std.mem.Allocator, value: std.json
         var cleanup_status = parsed_status;
         wipeMcpServerStatus(&cleanup_status);
     }
-    const parsed_error_ = if (object.get("error")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_error_ = if (object.get("error")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_error_ = parsed_error_;
         if (cleanup_error_) |*present| {
@@ -15629,42 +15629,42 @@ fn parseMcpServersLoadedServer(allocator: std.mem.Allocator, value: std.json.Val
         var cleanup_status = parsed_status;
         wipeMcpServerStatus(&cleanup_status);
     }
-    const parsed_source = if (object.get("source")) |field_value| try parseMcpServerSource(allocator, field_value) else null;
+    const parsed_source = if (object.get("source")) |field_value| if ((field_value) == .null) null else try parseMcpServerSource(allocator, field_value) else null;
     errdefer {
         var cleanup_source = parsed_source;
         if (cleanup_source) |*present| {
             wipeMcpServerSource(&present.*);
         }
     }
-    const parsed_error_ = if (object.get("error")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_error_ = if (object.get("error")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_error_ = parsed_error_;
         if (cleanup_error_) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_server_metadata = if (object.get("serverMetadata")) |field_value| try parseMcpServerMetadata(allocator, field_value) else null;
+    const parsed_server_metadata = if (object.get("serverMetadata")) |field_value| if ((field_value) == .null) null else try parseMcpServerMetadata(allocator, field_value) else null;
     errdefer {
         var cleanup_server_metadata = parsed_server_metadata;
         if (cleanup_server_metadata) |*present| {
             wipeMcpServerMetadata(&present.*);
         }
     }
-    const parsed_transport = if (object.get("transport")) |field_value| try parseMcpServerTransport(allocator, field_value) else null;
+    const parsed_transport = if (object.get("transport")) |field_value| if ((field_value) == .null) null else try parseMcpServerTransport(allocator, field_value) else null;
     errdefer {
         var cleanup_transport = parsed_transport;
         if (cleanup_transport) |*present| {
             wipeMcpServerTransport(&present.*);
         }
     }
-    const parsed_plugin_name = if (object.get("pluginName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_plugin_name = if (object.get("pluginName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_plugin_name = parsed_plugin_name;
         if (cleanup_plugin_name) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_plugin_version = if (object.get("pluginVersion")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_plugin_version = if (object.get("pluginVersion")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_plugin_version = parsed_plugin_version;
         if (cleanup_plugin_version) |*present| {
@@ -15728,7 +15728,7 @@ fn parseModeNoticeDeliveredData(allocator: std.mem.Allocator, value: std.json.Va
         var cleanup_mode = parsed_mode;
         wipeSessionMode(&cleanup_mode);
     }
-    const parsed_content = if (object.get("content")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_content = if (object.get("content")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_content = parsed_content;
         if (cleanup_content) |*present| {
@@ -15774,7 +15774,7 @@ fn parseModelChangeSource(_: std.mem.Allocator, value: std.json.Value) !ModelCha
 
 fn parseModelChangeData(allocator: std.mem.Allocator, value: std.json.Value) !ModelChangeData {
     const object = try payloads.requiredObject(value);
-    const parsed_previous_model = if (object.get("previousModel")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_previous_model = if (object.get("previousModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_previous_model = parsed_previous_model;
         if (cleanup_previous_model) |*present| {
@@ -15786,7 +15786,7 @@ fn parseModelChangeData(allocator: std.mem.Allocator, value: std.json.Value) !Mo
         const cleanup_new_model = parsed_new_model;
         wipeString(cleanup_new_model);
     }
-    const parsed_previous_reasoning_effort = if (object.get("previousReasoningEffort")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_previous_reasoning_effort = if (object.get("previousReasoningEffort")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_previous_reasoning_effort = parsed_previous_reasoning_effort;
         if (cleanup_previous_reasoning_effort) |*present| {
@@ -15800,28 +15800,28 @@ fn parseModelChangeData(allocator: std.mem.Allocator, value: std.json.Value) !Mo
             wipeString(present.*);
         }
     }
-    const parsed_previous_reasoning_summary = if (object.get("previousReasoningSummary")) |field_value| try parseReasoningSummary(allocator, field_value) else null;
+    const parsed_previous_reasoning_summary = if (object.get("previousReasoningSummary")) |field_value| if ((field_value) == .null) null else try parseReasoningSummary(allocator, field_value) else null;
     errdefer {
         var cleanup_previous_reasoning_summary = parsed_previous_reasoning_summary;
         if (cleanup_previous_reasoning_summary) |*present| {
             wipeReasoningSummary(&present.*);
         }
     }
-    const parsed_reasoning_summary = if (object.get("reasoningSummary")) |field_value| try parseReasoningSummary(allocator, field_value) else null;
+    const parsed_reasoning_summary = if (object.get("reasoningSummary")) |field_value| if ((field_value) == .null) null else try parseReasoningSummary(allocator, field_value) else null;
     errdefer {
         var cleanup_reasoning_summary = parsed_reasoning_summary;
         if (cleanup_reasoning_summary) |*present| {
             wipeReasoningSummary(&present.*);
         }
     }
-    const parsed_previous_verbosity = if (object.get("previousVerbosity")) |field_value| try parseVerbosity(allocator, field_value) else null;
+    const parsed_previous_verbosity = if (object.get("previousVerbosity")) |field_value| if ((field_value) == .null) null else try parseVerbosity(allocator, field_value) else null;
     errdefer {
         var cleanup_previous_verbosity = parsed_previous_verbosity;
         if (cleanup_previous_verbosity) |*present| {
             wipeVerbosity(&present.*);
         }
     }
-    const parsed_verbosity = if (object.get("verbosity")) |field_value| try parseVerbosity(allocator, field_value) else null;
+    const parsed_verbosity = if (object.get("verbosity")) |field_value| if ((field_value) == .null) null else try parseVerbosity(allocator, field_value) else null;
     errdefer {
         var cleanup_verbosity = parsed_verbosity;
         if (cleanup_verbosity) |*present| {
@@ -15835,21 +15835,21 @@ fn parseModelChangeData(allocator: std.mem.Allocator, value: std.json.Value) !Mo
             wipeContextTier(&present.*);
         }
     }
-    const parsed_cause = if (object.get("cause")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_cause = if (object.get("cause")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_cause = parsed_cause;
         if (cleanup_cause) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_source = if (object.get("source")) |field_value| try parseModelChangeSource(allocator, field_value) else null;
+    const parsed_source = if (object.get("source")) |field_value| if ((field_value) == .null) null else try parseModelChangeSource(allocator, field_value) else null;
     errdefer {
         var cleanup_source = parsed_source;
         if (cleanup_source) |*present| {
             wipeModelChangeSource(&present.*);
         }
     }
-    const parsed_previous_auto_tier = if (object.get("previousAutoTier")) |field_value| try parseAutoTier(allocator, field_value) else null;
+    const parsed_previous_auto_tier = if (object.get("previousAutoTier")) |field_value| if ((field_value) == .null) null else try parseAutoTier(allocator, field_value) else null;
     errdefer {
         var cleanup_previous_auto_tier = parsed_previous_auto_tier;
         if (cleanup_previous_auto_tier) |*present| {
@@ -15890,21 +15890,21 @@ fn parsePermissionMode(_: std.mem.Allocator, value: std.json.Value) !PermissionM
 
 fn parsePermissionsChangedData(allocator: std.mem.Allocator, value: std.json.Value) !PermissionsChangedData {
     const object = try payloads.requiredObject(value);
-    const parsed_previous_mode = if (object.get("previousMode")) |field_value| try parsePermissionMode(allocator, field_value) else null;
+    const parsed_previous_mode = if (object.get("previousMode")) |field_value| if ((field_value) == .null) null else try parsePermissionMode(allocator, field_value) else null;
     errdefer {
         var cleanup_previous_mode = parsed_previous_mode;
         if (cleanup_previous_mode) |*present| {
             wipePermissionMode(&present.*);
         }
     }
-    const parsed_mode = if (object.get("mode")) |field_value| try parsePermissionMode(allocator, field_value) else null;
+    const parsed_mode = if (object.get("mode")) |field_value| if ((field_value) == .null) null else try parsePermissionMode(allocator, field_value) else null;
     errdefer {
         var cleanup_mode = parsed_mode;
         if (cleanup_mode) |*present| {
             wipePermissionMode(&present.*);
         }
     }
-    const parsed_assisted_approval_model = if (object.get("assistedApprovalModel")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_assisted_approval_model = if (object.get("assistedApprovalModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_assisted_approval_model = parsed_assisted_approval_model;
         if (cleanup_assisted_approval_model) |*present| {
@@ -15948,7 +15948,7 @@ fn parseRemoteSteerableChangedData(_: std.mem.Allocator, value: std.json.Value) 
 
 fn parseSessionLimitsConfig(_: std.mem.Allocator, value: std.json.Value) !SessionLimitsConfig {
     const object = try payloads.requiredObject(value);
-    const parsed_max_ai_credits = if (object.get("maxAiCredits")) |field_value| try parseNumber(field_value, null, 0, null) else null;
+    const parsed_max_ai_credits = if (object.get("maxAiCredits")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, 0, null) else null;
     return .{
         .max_ai_credits = parsed_max_ai_credits,
     };
@@ -15962,29 +15962,29 @@ fn parseResumeData(allocator: std.mem.Allocator, value: std.json.Value) !ResumeD
         wipeString(cleanup_resume_time);
     }
     const parsed_event_count = try parseInteger(u64, object.get("eventCount") orelse return error.InvalidSessionEvent, 0, null, null);
-    const parsed_events_file_size_bytes = if (object.get("eventsFileSizeBytes")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_selected_model = if (object.get("selectedModel")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_events_file_size_bytes = if (object.get("eventsFileSizeBytes")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_selected_model = if (object.get("selectedModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_selected_model = parsed_selected_model;
         if (cleanup_selected_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_reasoning_effort = parsed_reasoning_effort;
         if (cleanup_reasoning_effort) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_reasoning_summary = if (object.get("reasoningSummary")) |field_value| try parseReasoningSummary(allocator, field_value) else null;
+    const parsed_reasoning_summary = if (object.get("reasoningSummary")) |field_value| if ((field_value) == .null) null else try parseReasoningSummary(allocator, field_value) else null;
     errdefer {
         var cleanup_reasoning_summary = parsed_reasoning_summary;
         if (cleanup_reasoning_summary) |*present| {
             wipeReasoningSummary(&present.*);
         }
     }
-    const parsed_verbosity = if (object.get("verbosity")) |field_value| try parseVerbosity(allocator, field_value) else null;
+    const parsed_verbosity = if (object.get("verbosity")) |field_value| if ((field_value) == .null) null else try parseVerbosity(allocator, field_value) else null;
     errdefer {
         var cleanup_verbosity = parsed_verbosity;
         if (cleanup_verbosity) |*present| {
@@ -15998,7 +15998,7 @@ fn parseResumeData(allocator: std.mem.Allocator, value: std.json.Value) !ResumeD
             wipeContextTier(&present.*);
         }
     }
-    const parsed_auto_tier = if (object.get("autoTier")) |field_value| try parseAutoTier(allocator, field_value) else null;
+    const parsed_auto_tier = if (object.get("autoTier")) |field_value| if ((field_value) == .null) null else try parseAutoTier(allocator, field_value) else null;
     errdefer {
         var cleanup_auto_tier = parsed_auto_tier;
         if (cleanup_auto_tier) |*present| {
@@ -16012,17 +16012,17 @@ fn parseResumeData(allocator: std.mem.Allocator, value: std.json.Value) !ResumeD
             wipeSessionLimitsConfig(&present.*);
         }
     }
-    const parsed_context = if (object.get("context")) |field_value| try parseWorkingDirectoryContext(allocator, field_value) else null;
+    const parsed_context = if (object.get("context")) |field_value| if ((field_value) == .null) null else try parseWorkingDirectoryContext(allocator, field_value) else null;
     errdefer {
         var cleanup_context = parsed_context;
         if (cleanup_context) |*present| {
             wipeWorkingDirectoryContext(&present.*);
         }
     }
-    const parsed_already_in_use = if (object.get("alreadyInUse")) |field_value| try parseBool(field_value) else null;
-    const parsed_session_was_active = if (object.get("sessionWasActive")) |field_value| try parseBool(field_value) else null;
-    const parsed_remote_steerable = if (object.get("remoteSteerable")) |field_value| try parseBool(field_value) else null;
-    const parsed_continue_pending_work = if (object.get("continuePendingWork")) |field_value| try parseBool(field_value) else null;
+    const parsed_already_in_use = if (object.get("alreadyInUse")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_session_was_active = if (object.get("sessionWasActive")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_remote_steerable = if (object.get("remoteSteerable")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_continue_pending_work = if (object.get("continuePendingWork")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .resume_time = parsed_resume_time,
         .event_count = parsed_event_count,
@@ -16060,37 +16060,37 @@ fn parseScheduleOrigin(_: std.mem.Allocator, value: std.json.Value) !ScheduleOri
 fn parseScheduleCreatedData(allocator: std.mem.Allocator, value: std.json.Value) !ScheduleCreatedData {
     const object = try payloads.requiredObject(value);
     const parsed_id = try parseInteger(u64, object.get("id") orelse return error.InvalidSessionEvent, null, 0, null);
-    const parsed_interval_ms = if (object.get("intervalMs")) |field_value| try parseInteger(u64, field_value, null, 0, null) else null;
-    const parsed_cron = if (object.get("cron")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_interval_ms = if (object.get("intervalMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, null, 0, null) else null;
+    const parsed_cron = if (object.get("cron")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_cron = parsed_cron;
         if (cleanup_cron) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_tz = if (object.get("tz")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_tz = if (object.get("tz")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tz = parsed_tz;
         if (cleanup_tz) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_at = if (object.get("at")) |field_value| try parseInteger(u64, field_value, null, 0, null) else null;
+    const parsed_at = if (object.get("at")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, null, 0, null) else null;
     const parsed_prompt = try parseString(allocator, object.get("prompt") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_prompt = parsed_prompt;
         wipeString(cleanup_prompt);
     }
-    const parsed_recurring = if (object.get("recurring")) |field_value| try parseBool(field_value) else null;
-    const parsed_self_paced = if (object.get("selfPaced")) |field_value| try parseBool(field_value) else null;
-    const parsed_display_prompt = if (object.get("displayPrompt")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_recurring = if (object.get("recurring")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_self_paced = if (object.get("selfPaced")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_display_prompt = if (object.get("displayPrompt")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_display_prompt = parsed_display_prompt;
         if (cleanup_display_prompt) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_origin = if (object.get("origin")) |field_value| try parseScheduleOrigin(allocator, field_value) else null;
+    const parsed_origin = if (object.get("origin")) |field_value| if ((field_value) == .null) null else try parseScheduleOrigin(allocator, field_value) else null;
     errdefer {
         var cleanup_origin = parsed_origin;
         if (cleanup_origin) |*present| {
@@ -16170,8 +16170,8 @@ fn parseShutdownCodeChanges(allocator: std.mem.Allocator, value: std.json.Value)
 
 fn parseShutdownModelMetricRequests(_: std.mem.Allocator, value: std.json.Value) !ShutdownModelMetricRequests {
     const object = try payloads.requiredObject(value);
-    const parsed_count = if (object.get("count")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_cost = if (object.get("cost")) |field_value| try parseNumber(field_value, null, null, null) else null;
+    const parsed_count = if (object.get("count")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_cost = if (object.get("cost")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, null, null) else null;
     return .{
         .count = parsed_count,
         .cost = parsed_cost,
@@ -16184,7 +16184,7 @@ fn parseShutdownModelMetricUsage(_: std.mem.Allocator, value: std.json.Value) !S
     const parsed_output_tokens = try parseInteger(u64, object.get("outputTokens") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_cache_read_tokens = try parseInteger(u64, object.get("cacheReadTokens") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_cache_write_tokens = try parseInteger(u64, object.get("cacheWriteTokens") orelse return error.InvalidSessionEvent, 0, null, null);
-    const parsed_reasoning_tokens = if (object.get("reasoningTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_reasoning_tokens = if (object.get("reasoningTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     return .{
         .input_tokens = parsed_input_tokens,
         .output_tokens = parsed_output_tokens,
@@ -16214,8 +16214,8 @@ fn parseShutdownModelMetric(allocator: std.mem.Allocator, value: std.json.Value)
         var cleanup_usage = parsed_usage;
         wipeShutdownModelMetricUsage(&cleanup_usage);
     }
-    const parsed_total_nano_aiu = if (object.get("totalNanoAiu")) |field_value| try parseNumber(field_value, 0, null, null) else null;
-    const parsed_token_details = if (object.get("tokenDetails")) |field_value| try parseShutdownModelMetricTokenDetailsMap(allocator, field_value) else null;
+    const parsed_total_nano_aiu = if (object.get("totalNanoAiu")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_token_details = if (object.get("tokenDetails")) |field_value| if ((field_value) == .null) null else try parseShutdownModelMetricTokenDetailsMap(allocator, field_value) else null;
     errdefer {
         var cleanup_token_details = parsed_token_details;
         if (cleanup_token_details) |*present| {
@@ -16238,14 +16238,14 @@ fn parseShutdownModelMetric(allocator: std.mem.Allocator, value: std.json.Value)
 
 fn parseShutdownAgentMetric(allocator: std.mem.Allocator, value: std.json.Value) !ShutdownAgentMetric {
     const object = try payloads.requiredObject(value);
-    const parsed_agent_name = if (object.get("agentName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_agent_name = if (object.get("agentName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_agent_name = parsed_agent_name;
         if (cleanup_agent_name) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_agent_display_name = if (object.get("agentDisplayName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_agent_display_name = if (object.get("agentDisplayName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_agent_display_name = parsed_agent_display_name;
         if (cleanup_agent_display_name) |*present| {
@@ -16281,16 +16281,16 @@ fn parseShutdownData(allocator: std.mem.Allocator, value: std.json.Value) !Shutd
         var cleanup_shutdown_type = parsed_shutdown_type;
         wipeShutdownType(&cleanup_shutdown_type);
     }
-    const parsed_error_reason = if (object.get("errorReason")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_error_reason = if (object.get("errorReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_error_reason = parsed_error_reason;
         if (cleanup_error_reason) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_total_premium_requests = if (object.get("totalPremiumRequests")) |field_value| try parseNumber(field_value, 0, null, null) else null;
-    const parsed_total_nano_aiu = if (object.get("totalNanoAiu")) |field_value| try parseNumber(field_value, 0, null, null) else null;
-    const parsed_token_details = if (object.get("tokenDetails")) |field_value| try parseShutdownDataTokenDetailsMap(allocator, field_value) else null;
+    const parsed_total_premium_requests = if (object.get("totalPremiumRequests")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_total_nano_aiu = if (object.get("totalNanoAiu")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_token_details = if (object.get("tokenDetails")) |field_value| if ((field_value) == .null) null else try parseShutdownDataTokenDetailsMap(allocator, field_value) else null;
     errdefer {
         var cleanup_token_details = parsed_token_details;
         if (cleanup_token_details) |*present| {
@@ -16305,7 +16305,7 @@ fn parseShutdownData(allocator: std.mem.Allocator, value: std.json.Value) !Shutd
     }
     const parsed_total_api_duration_ms = try parseInteger(u64, object.get("totalApiDurationMs") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_session_start_time = try parseInteger(u64, object.get("sessionStartTime") orelse return error.InvalidSessionEvent, 0, null, null);
-    const parsed_events_file_size_bytes = if (object.get("eventsFileSizeBytes")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_events_file_size_bytes = if (object.get("eventsFileSizeBytes")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_code_changes = try parseShutdownCodeChanges(allocator, object.get("codeChanges") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_code_changes = parsed_code_changes;
@@ -16322,7 +16322,7 @@ fn parseShutdownData(allocator: std.mem.Allocator, value: std.json.Value) !Shutd
             }
         }
     }
-    const parsed_agent_metrics = if (object.get("agentMetrics")) |field_value| try parseShutdownDataAgentMetricsMap(allocator, field_value) else null;
+    const parsed_agent_metrics = if (object.get("agentMetrics")) |field_value| if ((field_value) == .null) null else try parseShutdownDataAgentMetricsMap(allocator, field_value) else null;
     errdefer {
         var cleanup_agent_metrics = parsed_agent_metrics;
         if (cleanup_agent_metrics) |*present| {
@@ -16335,17 +16335,17 @@ fn parseShutdownData(allocator: std.mem.Allocator, value: std.json.Value) !Shutd
             }
         }
     }
-    const parsed_current_model = if (object.get("currentModel")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_current_model = if (object.get("currentModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_current_model = parsed_current_model;
         if (cleanup_current_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_current_tokens = if (object.get("currentTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_system_tokens = if (object.get("systemTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_conversation_tokens = if (object.get("conversationTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_tool_definitions_tokens = if (object.get("toolDefinitionsTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_current_tokens = if (object.get("currentTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_system_tokens = if (object.get("systemTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_conversation_tokens = if (object.get("conversationTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_tool_definitions_tokens = if (object.get("toolDefinitionsTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     return .{
         .shutdown_type = parsed_shutdown_type,
         .error_reason = parsed_error_reason,
@@ -16386,7 +16386,7 @@ fn parseSkillsLoadedSkill(allocator: std.mem.Allocator, value: std.json.Value) !
         const cleanup_name = parsed_name;
         wipeString(cleanup_name);
     }
-    const parsed_command_name = if (object.get("commandName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_command_name = if (object.get("commandName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_command_name = parsed_command_name;
         if (cleanup_command_name) |*present| {
@@ -16405,14 +16405,14 @@ fn parseSkillsLoadedSkill(allocator: std.mem.Allocator, value: std.json.Value) !
     }
     const parsed_user_invocable = try parseBool(object.get("userInvocable") orelse return error.InvalidSessionEvent);
     const parsed_enabled = try parseBool(object.get("enabled") orelse return error.InvalidSessionEvent);
-    const parsed_path = if (object.get("path")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_path = if (object.get("path")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_path = parsed_path;
         if (cleanup_path) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_argument_hint = if (object.get("argumentHint")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_argument_hint = if (object.get("argumentHint")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_argument_hint = parsed_argument_hint;
         if (cleanup_argument_hint) |*present| {
@@ -16461,8 +16461,8 @@ fn parseSnapshotRewindData(allocator: std.mem.Allocator, value: std.json.Value) 
 
 fn parseGitHubMcpToolConfig(allocator: std.mem.Allocator, value: std.json.Value) !GitHubMcpToolConfig {
     const object = try payloads.requiredObject(value);
-    const parsed_enable_all_tools = if (object.get("enableAllTools")) |field_value| try parseBool(field_value) else null;
-    const parsed_additional_toolsets = if (object.get("additionalToolsets")) |field_value| try parseGitHubMcpToolConfigAdditionalToolsetsArray(allocator, field_value) else null;
+    const parsed_enable_all_tools = if (object.get("enableAllTools")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_additional_toolsets = if (object.get("additionalToolsets")) |field_value| if ((field_value) == .null) null else try parseGitHubMcpToolConfigAdditionalToolsetsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_additional_toolsets = parsed_additional_toolsets;
         if (cleanup_additional_toolsets) |*present| {
@@ -16471,7 +16471,7 @@ fn parseGitHubMcpToolConfig(allocator: std.mem.Allocator, value: std.json.Value)
             }
         }
     }
-    const parsed_additional_tools = if (object.get("additionalTools")) |field_value| try parseGitHubMcpToolConfigAdditionalToolsArray(allocator, field_value) else null;
+    const parsed_additional_tools = if (object.get("additionalTools")) |field_value| if ((field_value) == .null) null else try parseGitHubMcpToolConfigAdditionalToolsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_additional_tools = parsed_additional_tools;
         if (cleanup_additional_tools) |*present| {
@@ -16480,7 +16480,7 @@ fn parseGitHubMcpToolConfig(allocator: std.mem.Allocator, value: std.json.Value)
             }
         }
     }
-    const parsed_enable_insiders_mode = if (object.get("enableInsidersMode")) |field_value| try parseBool(field_value) else null;
+    const parsed_enable_insiders_mode = if (object.get("enableInsidersMode")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .enable_all_tools = parsed_enable_all_tools,
         .additional_toolsets = parsed_additional_toolsets,
@@ -16512,28 +16512,28 @@ fn parseStartData(allocator: std.mem.Allocator, value: std.json.Value) !StartDat
         const cleanup_start_time = parsed_start_time;
         wipeString(cleanup_start_time);
     }
-    const parsed_selected_model = if (object.get("selectedModel")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_selected_model = if (object.get("selectedModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_selected_model = parsed_selected_model;
         if (cleanup_selected_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_reasoning_effort = parsed_reasoning_effort;
         if (cleanup_reasoning_effort) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_reasoning_summary = if (object.get("reasoningSummary")) |field_value| try parseReasoningSummary(allocator, field_value) else null;
+    const parsed_reasoning_summary = if (object.get("reasoningSummary")) |field_value| if ((field_value) == .null) null else try parseReasoningSummary(allocator, field_value) else null;
     errdefer {
         var cleanup_reasoning_summary = parsed_reasoning_summary;
         if (cleanup_reasoning_summary) |*present| {
             wipeReasoningSummary(&present.*);
         }
     }
-    const parsed_verbosity = if (object.get("verbosity")) |field_value| try parseVerbosity(allocator, field_value) else null;
+    const parsed_verbosity = if (object.get("verbosity")) |field_value| if ((field_value) == .null) null else try parseVerbosity(allocator, field_value) else null;
     errdefer {
         var cleanup_verbosity = parsed_verbosity;
         if (cleanup_verbosity) |*present| {
@@ -16547,37 +16547,37 @@ fn parseStartData(allocator: std.mem.Allocator, value: std.json.Value) !StartDat
             wipeContextTier(&present.*);
         }
     }
-    const parsed_auto_tier = if (object.get("autoTier")) |field_value| try parseAutoTier(allocator, field_value) else null;
+    const parsed_auto_tier = if (object.get("autoTier")) |field_value| if ((field_value) == .null) null else try parseAutoTier(allocator, field_value) else null;
     errdefer {
         var cleanup_auto_tier = parsed_auto_tier;
         if (cleanup_auto_tier) |*present| {
             wipeAutoTier(&present.*);
         }
     }
-    const parsed_session_limits = if (object.get("sessionLimits")) |field_value| try parseSessionLimitsConfig(allocator, field_value) else null;
+    const parsed_session_limits = if (object.get("sessionLimits")) |field_value| if ((field_value) == .null) null else try parseSessionLimitsConfig(allocator, field_value) else null;
     errdefer {
         var cleanup_session_limits = parsed_session_limits;
         if (cleanup_session_limits) |*present| {
             wipeSessionLimitsConfig(&present.*);
         }
     }
-    const parsed_context = if (object.get("context")) |field_value| try parseWorkingDirectoryContext(allocator, field_value) else null;
+    const parsed_context = if (object.get("context")) |field_value| if ((field_value) == .null) null else try parseWorkingDirectoryContext(allocator, field_value) else null;
     errdefer {
         var cleanup_context = parsed_context;
         if (cleanup_context) |*present| {
             wipeWorkingDirectoryContext(&present.*);
         }
     }
-    const parsed_github_mcp_tool_config = if (object.get("githubMcpToolConfig")) |field_value| try parseGitHubMcpToolConfig(allocator, field_value) else null;
+    const parsed_github_mcp_tool_config = if (object.get("githubMcpToolConfig")) |field_value| if ((field_value) == .null) null else try parseGitHubMcpToolConfig(allocator, field_value) else null;
     errdefer {
         var cleanup_github_mcp_tool_config = parsed_github_mcp_tool_config;
         if (cleanup_github_mcp_tool_config) |*present| {
             wipeGitHubMcpToolConfig(&present.*);
         }
     }
-    const parsed_already_in_use = if (object.get("alreadyInUse")) |field_value| try parseBool(field_value) else null;
-    const parsed_remote_steerable = if (object.get("remoteSteerable")) |field_value| try parseBool(field_value) else null;
-    const parsed_detached_from_spawning_parent_session_id = if (object.get("detachedFromSpawningParentSessionId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_already_in_use = if (object.get("alreadyInUse")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_remote_steerable = if (object.get("remoteSteerable")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_detached_from_spawning_parent_session_id = if (object.get("detachedFromSpawningParentSessionId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_detached_from_spawning_parent_session_id = parsed_detached_from_spawning_parent_session_id;
         if (cleanup_detached_from_spawning_parent_session_id) |*present| {
@@ -16615,29 +16615,29 @@ fn parseTaskCompletionOutcome(_: std.mem.Allocator, value: std.json.Value) !Task
 
 fn parseTaskCompleteData(allocator: std.mem.Allocator, value: std.json.Value) !TaskCompleteData {
     const object = try payloads.requiredObject(value);
-    const parsed_summary = if (object.get("summary")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_summary = if (object.get("summary")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_summary = parsed_summary;
         if (cleanup_summary) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_success = if (object.get("success")) |field_value| try parseBool(field_value) else null;
-    const parsed_outcome = if (object.get("outcome")) |field_value| try parseTaskCompletionOutcome(allocator, field_value) else null;
+    const parsed_success = if (object.get("success")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_outcome = if (object.get("outcome")) |field_value| if ((field_value) == .null) null else try parseTaskCompletionOutcome(allocator, field_value) else null;
     errdefer {
         var cleanup_outcome = parsed_outcome;
         if (cleanup_outcome) |*present| {
             wipeTaskCompletionOutcome(&present.*);
         }
     }
-    const parsed_reason = if (object.get("reason")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_reason = if (object.get("reason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_reason = parsed_reason;
         if (cleanup_reason) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_objective_id = if (object.get("objectiveId")) |field_value| try parseInteger(i64, field_value, null, null, null) else null;
+    const parsed_objective_id = if (object.get("objectiveId")) |field_value| if ((field_value) == .null) null else try parseInteger(i64, field_value, null, null, null) else null;
     return .{
         .summary = parsed_summary,
         .success = parsed_success,
@@ -16726,8 +16726,8 @@ fn parseUsageCheckpointModelCacheState(allocator: std.mem.Allocator, value: std.
 fn parseUsageCheckpointData(allocator: std.mem.Allocator, value: std.json.Value) !UsageCheckpointData {
     const object = try payloads.requiredObject(value);
     const parsed_total_nano_aiu = try parseNumber(object.get("totalNanoAiu") orelse return error.InvalidSessionEvent, 0, null, null);
-    const parsed_total_premium_requests = if (object.get("totalPremiumRequests")) |field_value| try parseNumber(field_value, 0, null, null) else null;
-    const parsed_model_cache_state = if (object.get("modelCacheState")) |field_value| try parseUsageCheckpointDataModelCacheStateArray(allocator, field_value) else null;
+    const parsed_total_premium_requests = if (object.get("totalPremiumRequests")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_model_cache_state = if (object.get("modelCacheState")) |field_value| if ((field_value) == .null) null else try parseUsageCheckpointDataModelCacheStateArray(allocator, field_value) else null;
     errdefer {
         var cleanup_model_cache_state = parsed_model_cache_state;
         if (cleanup_model_cache_state) |*present| {
@@ -16736,7 +16736,7 @@ fn parseUsageCheckpointData(allocator: std.mem.Allocator, value: std.json.Value)
             }
         }
     }
-    const parsed_prompt_cache_break_state = if (object.get("promptCacheBreakState")) |field_value| try parseUsageCheckpointDataPromptCacheBreakStateArray(allocator, field_value) else null;
+    const parsed_prompt_cache_break_state = if (object.get("promptCacheBreakState")) |field_value| if ((field_value) == .null) null else try parseUsageCheckpointDataPromptCacheBreakStateArray(allocator, field_value) else null;
     errdefer {
         var cleanup_prompt_cache_break_state = parsed_prompt_cache_break_state;
         if (cleanup_prompt_cache_break_state) |*present| {
@@ -16758,10 +16758,10 @@ fn parseUsageInfoData(_: std.mem.Allocator, value: std.json.Value) !UsageInfoDat
     const parsed_token_limit = try parseInteger(u64, object.get("tokenLimit") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_current_tokens = try parseInteger(u64, object.get("currentTokens") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_messages_length = try parseInteger(u64, object.get("messagesLength") orelse return error.InvalidSessionEvent, 0, null, null);
-    const parsed_system_tokens = if (object.get("systemTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_conversation_tokens = if (object.get("conversationTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_tool_definitions_tokens = if (object.get("toolDefinitionsTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_is_initial = if (object.get("isInitial")) |field_value| try parseBool(field_value) else null;
+    const parsed_system_tokens = if (object.get("systemTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_conversation_tokens = if (object.get("conversationTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_tool_definitions_tokens = if (object.get("toolDefinitionsTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_is_initial = if (object.get("isInitial")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .token_limit = parsed_token_limit,
         .current_tokens = parsed_current_tokens,
@@ -16785,14 +16785,14 @@ fn parseWarningData(allocator: std.mem.Allocator, value: std.json.Value) !Warnin
         const cleanup_message = parsed_message;
         wipeString(cleanup_message);
     }
-    const parsed_url = if (object.get("url")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_url = if (object.get("url")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_url = parsed_url;
         if (cleanup_url) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_remediation = if (object.get("remediation")) |field_value| try parseRemediationAction(allocator, field_value) else null;
+    const parsed_remediation = if (object.get("remediation")) |field_value| if ((field_value) == .null) null else try parseRemediationAction(allocator, field_value) else null;
     errdefer {
         var cleanup_remediation = parsed_remediation;
         if (cleanup_remediation) |*present| {
@@ -16848,8 +16848,8 @@ fn parseSessionLimitsExhaustedResponse(allocator: std.mem.Allocator, value: std.
         var cleanup_action = parsed_action;
         wipeSessionLimitsExhaustedResponseAction(&cleanup_action);
     }
-    const parsed_additional_ai_credits = if (object.get("additionalAiCredits")) |field_value| try parseNumber(field_value, null, 0, null) else null;
-    const parsed_max_ai_credits = if (object.get("maxAiCredits")) |field_value| try parseNumber(field_value, null, 0, null) else null;
+    const parsed_additional_ai_credits = if (object.get("additionalAiCredits")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, 0, null) else null;
+    const parsed_max_ai_credits = if (object.get("maxAiCredits")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, 0, null) else null;
     return .{
         .action = parsed_action,
         .additional_ai_credits = parsed_additional_ai_credits,
@@ -16906,7 +16906,7 @@ fn parseSkillInvokedData(allocator: std.mem.Allocator, value: std.json.Value) !S
         const cleanup_name = parsed_name;
         wipeString(cleanup_name);
     }
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
@@ -16923,7 +16923,7 @@ fn parseSkillInvokedData(allocator: std.mem.Allocator, value: std.json.Value) !S
         const cleanup_content = parsed_content;
         wipeString(cleanup_content);
     }
-    const parsed_allowed_tools = if (object.get("allowedTools")) |field_value| try parseSkillInvokedDataAllowedToolsArray(allocator, field_value) else null;
+    const parsed_allowed_tools = if (object.get("allowedTools")) |field_value| if ((field_value) == .null) null else try parseSkillInvokedDataAllowedToolsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_allowed_tools = parsed_allowed_tools;
         if (cleanup_allowed_tools) |*present| {
@@ -16932,36 +16932,36 @@ fn parseSkillInvokedData(allocator: std.mem.Allocator, value: std.json.Value) !S
             }
         }
     }
-    const parsed_disable_model_invocation = if (object.get("disableModelInvocation")) |field_value| try parseBool(field_value) else null;
-    const parsed_source = if (object.get("source")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_disable_model_invocation = if (object.get("disableModelInvocation")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_source = if (object.get("source")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_source = parsed_source;
         if (cleanup_source) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_plugin_name = if (object.get("pluginName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_plugin_name = if (object.get("pluginName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_plugin_name = parsed_plugin_name;
         if (cleanup_plugin_name) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_plugin_version = if (object.get("pluginVersion")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_plugin_version = if (object.get("pluginVersion")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_plugin_version = parsed_plugin_version;
         if (cleanup_plugin_version) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_description = if (object.get("description")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_description = if (object.get("description")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_description = parsed_description;
         if (cleanup_description) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_trigger = if (object.get("trigger")) |field_value| try parseSkillInvokedTrigger(allocator, field_value) else null;
+    const parsed_trigger = if (object.get("trigger")) |field_value| if ((field_value) == .null) null else try parseSkillInvokedTrigger(allocator, field_value) else null;
     errdefer {
         var cleanup_trigger = parsed_trigger;
         if (cleanup_trigger) |*present| {
@@ -17012,54 +17012,54 @@ fn parseSubagentCompletedData(allocator: std.mem.Allocator, value: std.json.Valu
         const cleanup_agent_display_name = parsed_agent_display_name;
         wipeString(cleanup_agent_display_name);
     }
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_first_dispatched_model = if (object.get("firstDispatchedModel")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_first_dispatched_model = if (object.get("firstDispatchedModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_first_dispatched_model = parsed_first_dispatched_model;
         if (cleanup_first_dispatched_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_configured_model_preference = if (object.get("configuredModelPreference")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_configured_model_preference = if (object.get("configuredModelPreference")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_configured_model_preference = parsed_configured_model_preference;
         if (cleanup_configured_model_preference) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_explicit_model_override = if (object.get("explicitModelOverride")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_explicit_model_override = if (object.get("explicitModelOverride")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_explicit_model_override = parsed_explicit_model_override;
         if (cleanup_explicit_model_override) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_explicit_model_matches_preference = if (object.get("explicitModelMatchesPreference")) |field_value| try parseBool(field_value) else null;
-    const parsed_model_override_reason = if (object.get("modelOverrideReason")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_explicit_model_matches_preference = if (object.get("explicitModelMatchesPreference")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_model_override_reason = if (object.get("modelOverrideReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model_override_reason = parsed_model_override_reason;
         if (cleanup_model_override_reason) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_model_selection_source = if (object.get("modelSelectionSource")) |field_value| try parseSubagentModelSelectionSource(allocator, field_value) else null;
+    const parsed_model_selection_source = if (object.get("modelSelectionSource")) |field_value| if ((field_value) == .null) null else try parseSubagentModelSelectionSource(allocator, field_value) else null;
     errdefer {
         var cleanup_model_selection_source = parsed_model_selection_source;
         if (cleanup_model_selection_source) |*present| {
             wipeSubagentModelSelectionSource(&present.*);
         }
     }
-    const parsed_configured_model_matches_actual = if (object.get("configuredModelMatchesActual")) |field_value| try parseBool(field_value) else null;
-    const parsed_total_tool_calls = if (object.get("totalToolCalls")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_total_tokens = if (object.get("totalTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_duration_ms = if (object.get("durationMs")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_cancelled = if (object.get("cancelled")) |field_value| try parseBool(field_value) else null;
+    const parsed_configured_model_matches_actual = if (object.get("configuredModelMatchesActual")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_total_tool_calls = if (object.get("totalToolCalls")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_total_tokens = if (object.get("totalTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_duration_ms = if (object.get("durationMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_cancelled = if (object.get("cancelled")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .tool_call_id = parsed_tool_call_id,
         .agent_name = parsed_agent_name,
@@ -17086,14 +17086,14 @@ fn parseSubagentConfiguredData(allocator: std.mem.Allocator, value: std.json.Val
         const cleanup_model = parsed_model;
         wipeString(cleanup_model);
     }
-    const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_reasoning_effort = parsed_reasoning_effort;
         if (cleanup_reasoning_effort) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_context_tier = if (object.get("contextTier")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_context_tier = if (object.get("contextTier")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_context_tier = parsed_context_tier;
         if (cleanup_context_tier) |*present| {
@@ -17137,53 +17137,53 @@ fn parseSubagentFailedData(allocator: std.mem.Allocator, value: std.json.Value) 
         const cleanup_error_ = parsed_error_;
         wipeString(cleanup_error_);
     }
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_first_dispatched_model = if (object.get("firstDispatchedModel")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_first_dispatched_model = if (object.get("firstDispatchedModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_first_dispatched_model = parsed_first_dispatched_model;
         if (cleanup_first_dispatched_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_configured_model_preference = if (object.get("configuredModelPreference")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_configured_model_preference = if (object.get("configuredModelPreference")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_configured_model_preference = parsed_configured_model_preference;
         if (cleanup_configured_model_preference) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_explicit_model_override = if (object.get("explicitModelOverride")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_explicit_model_override = if (object.get("explicitModelOverride")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_explicit_model_override = parsed_explicit_model_override;
         if (cleanup_explicit_model_override) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_explicit_model_matches_preference = if (object.get("explicitModelMatchesPreference")) |field_value| try parseBool(field_value) else null;
-    const parsed_model_override_reason = if (object.get("modelOverrideReason")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_explicit_model_matches_preference = if (object.get("explicitModelMatchesPreference")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_model_override_reason = if (object.get("modelOverrideReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model_override_reason = parsed_model_override_reason;
         if (cleanup_model_override_reason) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_model_selection_source = if (object.get("modelSelectionSource")) |field_value| try parseSubagentModelSelectionSource(allocator, field_value) else null;
+    const parsed_model_selection_source = if (object.get("modelSelectionSource")) |field_value| if ((field_value) == .null) null else try parseSubagentModelSelectionSource(allocator, field_value) else null;
     errdefer {
         var cleanup_model_selection_source = parsed_model_selection_source;
         if (cleanup_model_selection_source) |*present| {
             wipeSubagentModelSelectionSource(&present.*);
         }
     }
-    const parsed_configured_model_matches_actual = if (object.get("configuredModelMatchesActual")) |field_value| try parseBool(field_value) else null;
-    const parsed_total_tool_calls = if (object.get("totalToolCalls")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_total_tokens = if (object.get("totalTokens")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
-    const parsed_duration_ms = if (object.get("durationMs")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_configured_model_matches_actual = if (object.get("configuredModelMatchesActual")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_total_tool_calls = if (object.get("totalToolCalls")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_total_tokens = if (object.get("totalTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_duration_ms = if (object.get("durationMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     return .{
         .tool_call_id = parsed_tool_call_id,
         .agent_name = parsed_agent_name,
@@ -17262,43 +17262,43 @@ fn parseSubagentStartedData(allocator: std.mem.Allocator, value: std.json.Value)
         const cleanup_agent_description = parsed_agent_description;
         wipeString(cleanup_agent_description);
     }
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_task_model_source = if (object.get("taskModelSource")) |field_value| try parseSubagentTaskModelSource(allocator, field_value) else null;
+    const parsed_task_model_source = if (object.get("taskModelSource")) |field_value| if ((field_value) == .null) null else try parseSubagentTaskModelSource(allocator, field_value) else null;
     errdefer {
         var cleanup_task_model_source = parsed_task_model_source;
         if (cleanup_task_model_source) |*present| {
             wipeSubagentTaskModelSource(&present.*);
         }
     }
-    const parsed_factory_run_id = if (object.get("factoryRunId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_factory_run_id = if (object.get("factoryRunId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_factory_run_id = parsed_factory_run_id;
         if (cleanup_factory_run_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_parent_id = if (object.get("parentId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_parent_id = if (object.get("parentId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_parent_id = parsed_parent_id;
         if (cleanup_parent_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_resumable = if (object.get("resumable")) |field_value| try parseBool(field_value) else null;
-    const parsed_agent_type = if (object.get("agentType")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_resumable = if (object.get("resumable")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_agent_type = if (object.get("agentType")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_agent_type = parsed_agent_type;
         if (cleanup_agent_type) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_execution_mode = if (object.get("executionMode")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_execution_mode = if (object.get("executionMode")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_execution_mode = parsed_execution_mode;
         if (cleanup_execution_mode) |*present| {
@@ -17329,14 +17329,14 @@ fn parseSystemMessageRole(_: std.mem.Allocator, value: std.json.Value) !SystemMe
 
 fn parseSystemMessageMetadata(allocator: std.mem.Allocator, value: std.json.Value) !SystemMessageMetadata {
     const object = try payloads.requiredObject(value);
-    const parsed_prompt_version = if (object.get("promptVersion")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_prompt_version = if (object.get("promptVersion")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_prompt_version = parsed_prompt_version;
         if (cleanup_prompt_version) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_variables = if (object.get("variables")) |field_value| try parseSystemMessageMetadataVariablesMap(allocator, field_value) else null;
+    const parsed_variables = if (object.get("variables")) |field_value| if ((field_value) == .null) null else try parseSystemMessageMetadataVariablesMap(allocator, field_value) else null;
     errdefer {
         var cleanup_variables = parsed_variables;
         if (cleanup_variables) |*present| {
@@ -17362,7 +17362,7 @@ fn parseSystemMessageData(allocator: std.mem.Allocator, value: std.json.Value) !
         const cleanup_content = parsed_content;
         wipeString(cleanup_content);
     }
-    const parsed_interaction_id = if (object.get("interactionId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_interaction_id = if (object.get("interactionId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_interaction_id = parsed_interaction_id;
         if (cleanup_interaction_id) |*present| {
@@ -17374,14 +17374,14 @@ fn parseSystemMessageData(allocator: std.mem.Allocator, value: std.json.Value) !
         var cleanup_role = parsed_role;
         wipeSystemMessageRole(&cleanup_role);
     }
-    const parsed_name = if (object.get("name")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_name = if (object.get("name")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_name = parsed_name;
         if (cleanup_name) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_metadata = if (object.get("metadata")) |field_value| try parseSystemMessageMetadata(allocator, field_value) else null;
+    const parsed_metadata = if (object.get("metadata")) |field_value| if ((field_value) == .null) null else try parseSystemMessageMetadata(allocator, field_value) else null;
     errdefer {
         var cleanup_metadata = parsed_metadata;
         if (cleanup_metadata) |*present| {
@@ -17416,7 +17416,7 @@ fn parseSystemNotificationAgentCompleted(allocator: std.mem.Allocator, value: st
         const cleanup_agent_id = parsed_agent_id;
         wipeString(cleanup_agent_id);
     }
-    const parsed_display_name = if (object.get("displayName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_display_name = if (object.get("displayName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_display_name = parsed_display_name;
         if (cleanup_display_name) |*present| {
@@ -17433,14 +17433,14 @@ fn parseSystemNotificationAgentCompleted(allocator: std.mem.Allocator, value: st
         var cleanup_status = parsed_status;
         wipeSystemNotificationAgentCompletedStatus(&cleanup_status);
     }
-    const parsed_description = if (object.get("description")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_description = if (object.get("description")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_description = parsed_description;
         if (cleanup_description) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_prompt = if (object.get("prompt")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_prompt = if (object.get("prompt")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_prompt = parsed_prompt;
         if (cleanup_prompt) |*present| {
@@ -17470,7 +17470,7 @@ fn parseSystemNotificationAgentIdle(allocator: std.mem.Allocator, value: std.jso
         const cleanup_agent_id = parsed_agent_id;
         wipeString(cleanup_agent_id);
     }
-    const parsed_display_name = if (object.get("displayName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_display_name = if (object.get("displayName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_display_name = parsed_display_name;
         if (cleanup_display_name) |*present| {
@@ -17482,7 +17482,7 @@ fn parseSystemNotificationAgentIdle(allocator: std.mem.Allocator, value: std.jso
         const cleanup_agent_type = parsed_agent_type;
         wipeString(cleanup_agent_type);
     }
-    const parsed_description = if (object.get("description")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_description = if (object.get("description")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_description = parsed_description;
         if (cleanup_description) |*present| {
@@ -17546,8 +17546,8 @@ fn parseSystemNotificationShellCompleted(allocator: std.mem.Allocator, value: st
         const cleanup_shell_id = parsed_shell_id;
         wipeString(cleanup_shell_id);
     }
-    const parsed_exit_code = if (object.get("exitCode")) |field_value| try parseInteger(i64, field_value, null, null, null) else null;
-    const parsed_description = if (object.get("description")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_exit_code = if (object.get("exitCode")) |field_value| if ((field_value) == .null) null else try parseInteger(i64, field_value, null, null, null) else null;
+    const parsed_description = if (object.get("description")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_description = parsed_description;
         if (cleanup_description) |*present| {
@@ -17574,7 +17574,7 @@ fn parseSystemNotificationShellDetachedCompleted(allocator: std.mem.Allocator, v
         const cleanup_shell_id = parsed_shell_id;
         wipeString(cleanup_shell_id);
     }
-    const parsed_description = if (object.get("description")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_description = if (object.get("description")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_description = parsed_description;
         if (cleanup_description) |*present| {
@@ -17610,7 +17610,7 @@ fn parseSystemNotificationInstructionDiscovered(allocator: std.mem.Allocator, va
         const cleanup_trigger_tool = parsed_trigger_tool;
         wipeString(cleanup_trigger_tool);
     }
-    const parsed_description = if (object.get("description")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_description = if (object.get("description")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_description = parsed_description;
         if (cleanup_description) |*present| {
@@ -17700,28 +17700,28 @@ fn parseSystemNotificationFactoryCompleted(allocator: std.mem.Allocator, value: 
     const parsed_elapsed_ms = try parseInteger(u64, object.get("elapsedMs") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_consumed_nano_aiu = try parseInteger(u64, object.get("consumedNanoAiu") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_attempt = try parseInteger(u64, object.get("attempt") orelse return error.InvalidSessionEvent, 1, null, null);
-    const parsed_result_preview = if (object.get("resultPreview")) |field_value| try parseString(allocator, field_value, null, 256) else null;
+    const parsed_result_preview = if (object.get("resultPreview")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, 256) else null;
     errdefer {
         var cleanup_result_preview = parsed_result_preview;
         if (cleanup_result_preview) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_failure = if (object.get("failure")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_failure = if (object.get("failure")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_failure = parsed_failure;
         if (cleanup_failure) |*present| {
             wipeJsonValue(&present.*);
         }
     }
-    const parsed_retry_guidance = if (object.get("retryGuidance")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_retry_guidance = if (object.get("retryGuidance")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_retry_guidance = parsed_retry_guidance;
         if (cleanup_retry_guidance) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_pause_info = if (object.get("pauseInfo")) |field_value| try parseSystemNotificationFactoryPauseInfo(allocator, field_value) else null;
+    const parsed_pause_info = if (object.get("pauseInfo")) |field_value| if ((field_value) == .null) null else try parseSystemNotificationFactoryPauseInfo(allocator, field_value) else null;
     errdefer {
         var cleanup_pause_info = parsed_pause_info;
         if (cleanup_pause_info) |*present| {
@@ -17751,7 +17751,7 @@ fn parseSystemNotificationUnclassified(allocator: std.mem.Allocator, value: std.
         const cleanup_type = parsed_type;
         wipeString(cleanup_type);
     }
-    const parsed_metadata = if (object.get("metadata")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_metadata = if (object.get("metadata")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_metadata = parsed_metadata;
         if (cleanup_metadata) |*present| {
@@ -17826,8 +17826,8 @@ fn parseToolExecutionCompleteContentTerminal(allocator: std.mem.Allocator, value
         const cleanup_text = parsed_text;
         wipeString(cleanup_text);
     }
-    const parsed_exit_code = if (object.get("exitCode")) |field_value| try parseInteger(i64, field_value, null, null, null) else null;
-    const parsed_cwd = if (object.get("cwd")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_exit_code = if (object.get("exitCode")) |field_value| if ((field_value) == .null) null else try parseInteger(i64, field_value, null, null, null) else null;
+    const parsed_cwd = if (object.get("cwd")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_cwd = parsed_cwd;
         if (cleanup_cwd) |*present| {
@@ -17855,22 +17855,22 @@ fn parseToolExecutionCompleteContentShellExit(allocator: std.mem.Allocator, valu
         wipeString(cleanup_shell_id);
     }
     const parsed_exit_code = try parseInteger(i64, object.get("exitCode") orelse return error.InvalidSessionEvent, null, null, null);
-    const parsed_cwd = if (object.get("cwd")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_cwd = if (object.get("cwd")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_cwd = parsed_cwd;
         if (cleanup_cwd) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_output_preview = if (object.get("outputPreview")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_output_preview = if (object.get("outputPreview")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_output_preview = parsed_output_preview;
         if (cleanup_output_preview) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_output_truncated = if (object.get("outputTruncated")) |field_value| try parseBool(field_value) else null;
-    const parsed_output_file_path = if (object.get("outputFilePath")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_output_truncated = if (object.get("outputTruncated")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_output_file_path = if (object.get("outputFilePath")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_output_file_path = parsed_output_file_path;
         if (cleanup_output_file_path) |*present| {
@@ -17950,14 +17950,14 @@ fn parseToolExecutionCompleteContentResourceLinkIcon(allocator: std.mem.Allocato
         const cleanup_src = parsed_src;
         wipeString(cleanup_src);
     }
-    const parsed_mime_type = if (object.get("mimeType")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_mime_type = if (object.get("mimeType")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_mime_type = parsed_mime_type;
         if (cleanup_mime_type) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_sizes = if (object.get("sizes")) |field_value| try parseToolExecutionCompleteContentResourceLinkIconSizesArray(allocator, field_value) else null;
+    const parsed_sizes = if (object.get("sizes")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteContentResourceLinkIconSizesArray(allocator, field_value) else null;
     errdefer {
         var cleanup_sizes = parsed_sizes;
         if (cleanup_sizes) |*present| {
@@ -17966,7 +17966,7 @@ fn parseToolExecutionCompleteContentResourceLinkIcon(allocator: std.mem.Allocato
             }
         }
     }
-    const parsed_theme = if (object.get("theme")) |field_value| try parseToolExecutionCompleteContentResourceLinkIconTheme(allocator, field_value) else null;
+    const parsed_theme = if (object.get("theme")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteContentResourceLinkIconTheme(allocator, field_value) else null;
     errdefer {
         var cleanup_theme = parsed_theme;
         if (cleanup_theme) |*present| {
@@ -17983,7 +17983,7 @@ fn parseToolExecutionCompleteContentResourceLinkIcon(allocator: std.mem.Allocato
 
 fn parseToolExecutionCompleteContentResourceLink(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteContentResourceLink {
     const object = try payloads.requiredObject(value);
-    const parsed_icons = if (object.get("icons")) |field_value| try parseToolExecutionCompleteContentResourceLinkIconsArray(allocator, field_value) else null;
+    const parsed_icons = if (object.get("icons")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteContentResourceLinkIconsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_icons = parsed_icons;
         if (cleanup_icons) |*present| {
@@ -17997,7 +17997,7 @@ fn parseToolExecutionCompleteContentResourceLink(allocator: std.mem.Allocator, v
         const cleanup_name = parsed_name;
         wipeString(cleanup_name);
     }
-    const parsed_title = if (object.get("title")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_title = if (object.get("title")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_title = parsed_title;
         if (cleanup_title) |*present| {
@@ -18009,21 +18009,21 @@ fn parseToolExecutionCompleteContentResourceLink(allocator: std.mem.Allocator, v
         const cleanup_uri = parsed_uri;
         wipeString(cleanup_uri);
     }
-    const parsed_description = if (object.get("description")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_description = if (object.get("description")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_description = parsed_description;
         if (cleanup_description) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_mime_type = if (object.get("mimeType")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_mime_type = if (object.get("mimeType")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_mime_type = parsed_mime_type;
         if (cleanup_mime_type) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_size = if (object.get("size")) |field_value| try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_size = if (object.get("size")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "resource_link");
     errdefer {
         const cleanup_type = parsed_type;
@@ -18048,7 +18048,7 @@ fn parseEmbeddedTextResourceContents(allocator: std.mem.Allocator, value: std.js
         const cleanup_uri = parsed_uri;
         wipeString(cleanup_uri);
     }
-    const parsed_mime_type = if (object.get("mimeType")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_mime_type = if (object.get("mimeType")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_mime_type = parsed_mime_type;
         if (cleanup_mime_type) |*present| {
@@ -18074,7 +18074,7 @@ fn parseEmbeddedBlobResourceContents(allocator: std.mem.Allocator, value: std.js
         const cleanup_uri = parsed_uri;
         wipeString(cleanup_uri);
     }
-    const parsed_mime_type = if (object.get("mimeType")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_mime_type = if (object.get("mimeType")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_mime_type = parsed_mime_type;
         if (cleanup_mime_type) |*present| {
@@ -18159,14 +18159,14 @@ fn parsePersistedBinaryImage(allocator: std.mem.Allocator, value: std.json.Value
         const cleanup_mime_type = parsed_mime_type;
         wipeString(cleanup_mime_type);
     }
-    const parsed_description = if (object.get("description")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_description = if (object.get("description")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_description = parsed_description;
         if (cleanup_description) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_metadata = if (object.get("metadata")) |field_value| try parsePersistedBinaryImageMetadataMap(allocator, field_value) else null;
+    const parsed_metadata = if (object.get("metadata")) |field_value| if ((field_value) == .null) null else try parsePersistedBinaryImageMetadataMap(allocator, field_value) else null;
     errdefer {
         var cleanup_metadata = parsed_metadata;
         if (cleanup_metadata) |*present| {
@@ -18213,14 +18213,14 @@ fn parseOmittedBinaryResult(allocator: std.mem.Allocator, value: std.json.Value)
         var cleanup_omitted_reason = parsed_omitted_reason;
         wipeOmittedBinaryOmittedReason(&cleanup_omitted_reason);
     }
-    const parsed_description = if (object.get("description")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_description = if (object.get("description")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_description = parsed_description;
         if (cleanup_description) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_metadata = if (object.get("metadata")) |field_value| try parseOmittedBinaryResultMetadataMap(allocator, field_value) else null;
+    const parsed_metadata = if (object.get("metadata")) |field_value| if ((field_value) == .null) null else try parseOmittedBinaryResultMetadataMap(allocator, field_value) else null;
     errdefer {
         var cleanup_metadata = parsed_metadata;
         if (cleanup_metadata) |*present| {
@@ -18268,14 +18268,14 @@ fn parseBinaryAssetReference(allocator: std.mem.Allocator, value: std.json.Value
         wipeString(cleanup_mime_type);
     }
     const parsed_byte_length = try parseInteger(u64, object.get("byteLength") orelse return error.InvalidSessionEvent, 0, null, null);
-    const parsed_description = if (object.get("description")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_description = if (object.get("description")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_description = parsed_description;
         if (cleanup_description) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_metadata = if (object.get("metadata")) |field_value| try parseBinaryAssetReferenceMetadataMap(allocator, field_value) else null;
+    const parsed_metadata = if (object.get("metadata")) |field_value| if ((field_value) == .null) null else try parseBinaryAssetReferenceMetadataMap(allocator, field_value) else null;
     errdefer {
         var cleanup_metadata = parsed_metadata;
         if (cleanup_metadata) |*present| {
@@ -18313,7 +18313,7 @@ fn parsePersistedBinaryResult(allocator: std.mem.Allocator, value: std.json.Valu
 
 fn parseToolExecutionCompleteUIResourceMetaUICsp(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteUIResourceMetaUICsp {
     const object = try payloads.requiredObject(value);
-    const parsed_connect_domains = if (object.get("connectDomains")) |field_value| try parseToolExecutionCompleteUIResourceMetaUICspConnectDomainsArray(allocator, field_value) else null;
+    const parsed_connect_domains = if (object.get("connectDomains")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteUIResourceMetaUICspConnectDomainsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_connect_domains = parsed_connect_domains;
         if (cleanup_connect_domains) |*present| {
@@ -18322,7 +18322,7 @@ fn parseToolExecutionCompleteUIResourceMetaUICsp(allocator: std.mem.Allocator, v
             }
         }
     }
-    const parsed_resource_domains = if (object.get("resourceDomains")) |field_value| try parseToolExecutionCompleteUIResourceMetaUICspResourceDomainsArray(allocator, field_value) else null;
+    const parsed_resource_domains = if (object.get("resourceDomains")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteUIResourceMetaUICspResourceDomainsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_resource_domains = parsed_resource_domains;
         if (cleanup_resource_domains) |*present| {
@@ -18331,7 +18331,7 @@ fn parseToolExecutionCompleteUIResourceMetaUICsp(allocator: std.mem.Allocator, v
             }
         }
     }
-    const parsed_frame_domains = if (object.get("frameDomains")) |field_value| try parseToolExecutionCompleteUIResourceMetaUICspFrameDomainsArray(allocator, field_value) else null;
+    const parsed_frame_domains = if (object.get("frameDomains")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteUIResourceMetaUICspFrameDomainsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_frame_domains = parsed_frame_domains;
         if (cleanup_frame_domains) |*present| {
@@ -18340,7 +18340,7 @@ fn parseToolExecutionCompleteUIResourceMetaUICsp(allocator: std.mem.Allocator, v
             }
         }
     }
-    const parsed_base_uri_domains = if (object.get("baseUriDomains")) |field_value| try parseToolExecutionCompleteUIResourceMetaUICspBaseUriDomainsArray(allocator, field_value) else null;
+    const parsed_base_uri_domains = if (object.get("baseUriDomains")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteUIResourceMetaUICspBaseUriDomainsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_base_uri_domains = parsed_base_uri_domains;
         if (cleanup_base_uri_domains) |*present| {
@@ -18383,28 +18383,28 @@ fn parseToolExecutionCompleteUIResourceMetaUIPermissionsClipboardWrite(_: std.me
 
 fn parseToolExecutionCompleteUIResourceMetaUIPermissions(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteUIResourceMetaUIPermissions {
     const object = try payloads.requiredObject(value);
-    const parsed_camera = if (object.get("camera")) |field_value| try parseToolExecutionCompleteUIResourceMetaUIPermissionsCamera(allocator, field_value) else null;
+    const parsed_camera = if (object.get("camera")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteUIResourceMetaUIPermissionsCamera(allocator, field_value) else null;
     errdefer {
         var cleanup_camera = parsed_camera;
         if (cleanup_camera) |*present| {
             wipeToolExecutionCompleteUIResourceMetaUIPermissionsCamera(&present.*);
         }
     }
-    const parsed_microphone = if (object.get("microphone")) |field_value| try parseToolExecutionCompleteUIResourceMetaUIPermissionsMicrophone(allocator, field_value) else null;
+    const parsed_microphone = if (object.get("microphone")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteUIResourceMetaUIPermissionsMicrophone(allocator, field_value) else null;
     errdefer {
         var cleanup_microphone = parsed_microphone;
         if (cleanup_microphone) |*present| {
             wipeToolExecutionCompleteUIResourceMetaUIPermissionsMicrophone(&present.*);
         }
     }
-    const parsed_geolocation = if (object.get("geolocation")) |field_value| try parseToolExecutionCompleteUIResourceMetaUIPermissionsGeolocation(allocator, field_value) else null;
+    const parsed_geolocation = if (object.get("geolocation")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteUIResourceMetaUIPermissionsGeolocation(allocator, field_value) else null;
     errdefer {
         var cleanup_geolocation = parsed_geolocation;
         if (cleanup_geolocation) |*present| {
             wipeToolExecutionCompleteUIResourceMetaUIPermissionsGeolocation(&present.*);
         }
     }
-    const parsed_clipboard_write = if (object.get("clipboardWrite")) |field_value| try parseToolExecutionCompleteUIResourceMetaUIPermissionsClipboardWrite(allocator, field_value) else null;
+    const parsed_clipboard_write = if (object.get("clipboardWrite")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteUIResourceMetaUIPermissionsClipboardWrite(allocator, field_value) else null;
     errdefer {
         var cleanup_clipboard_write = parsed_clipboard_write;
         if (cleanup_clipboard_write) |*present| {
@@ -18421,28 +18421,28 @@ fn parseToolExecutionCompleteUIResourceMetaUIPermissions(allocator: std.mem.Allo
 
 fn parseToolExecutionCompleteUIResourceMetaUI(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteUIResourceMetaUI {
     const object = try payloads.requiredObject(value);
-    const parsed_csp = if (object.get("csp")) |field_value| try parseToolExecutionCompleteUIResourceMetaUICsp(allocator, field_value) else null;
+    const parsed_csp = if (object.get("csp")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteUIResourceMetaUICsp(allocator, field_value) else null;
     errdefer {
         var cleanup_csp = parsed_csp;
         if (cleanup_csp) |*present| {
             wipeToolExecutionCompleteUIResourceMetaUICsp(&present.*);
         }
     }
-    const parsed_permissions = if (object.get("permissions")) |field_value| try parseToolExecutionCompleteUIResourceMetaUIPermissions(allocator, field_value) else null;
+    const parsed_permissions = if (object.get("permissions")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteUIResourceMetaUIPermissions(allocator, field_value) else null;
     errdefer {
         var cleanup_permissions = parsed_permissions;
         if (cleanup_permissions) |*present| {
             wipeToolExecutionCompleteUIResourceMetaUIPermissions(&present.*);
         }
     }
-    const parsed_domain = if (object.get("domain")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_domain = if (object.get("domain")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_domain = parsed_domain;
         if (cleanup_domain) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_prefers_border = if (object.get("prefersBorder")) |field_value| try parseBool(field_value) else null;
+    const parsed_prefers_border = if (object.get("prefersBorder")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .csp = parsed_csp,
         .permissions = parsed_permissions,
@@ -18453,7 +18453,7 @@ fn parseToolExecutionCompleteUIResourceMetaUI(allocator: std.mem.Allocator, valu
 
 fn parseToolExecutionCompleteUIResourceMeta(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteUIResourceMeta {
     const object = try payloads.requiredObject(value);
-    const parsed_ui = if (object.get("ui")) |field_value| try parseToolExecutionCompleteUIResourceMetaUI(allocator, field_value) else null;
+    const parsed_ui = if (object.get("ui")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteUIResourceMetaUI(allocator, field_value) else null;
     errdefer {
         var cleanup_ui = parsed_ui;
         if (cleanup_ui) |*present| {
@@ -18477,21 +18477,21 @@ fn parseToolExecutionCompleteUIResource(allocator: std.mem.Allocator, value: std
         const cleanup_mime_type = parsed_mime_type;
         wipeString(cleanup_mime_type);
     }
-    const parsed_text = if (object.get("text")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_text = if (object.get("text")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_text = parsed_text;
         if (cleanup_text) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_blob = if (object.get("blob")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_blob = if (object.get("blob")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_blob = parsed_blob;
         if (cleanup_blob) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_meta = if (object.get("_meta")) |field_value| try parseToolExecutionCompleteUIResourceMeta(allocator, field_value) else null;
+    const parsed_meta = if (object.get("_meta")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteUIResourceMeta(allocator, field_value) else null;
     errdefer {
         var cleanup_meta = parsed_meta;
         if (cleanup_meta) |*present| {
@@ -18514,7 +18514,7 @@ fn parseCitableSource(allocator: std.mem.Allocator, value: std.json.Value) !Cita
         const cleanup_id = parsed_id;
         wipeString(cleanup_id);
     }
-    const parsed_title = if (object.get("title")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_title = if (object.get("title")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_title = parsed_title;
         if (cleanup_title) |*present| {
@@ -18526,14 +18526,14 @@ fn parseCitableSource(allocator: std.mem.Allocator, value: std.json.Value) !Cita
         const cleanup_content = parsed_content;
         wipeString(cleanup_content);
     }
-    const parsed_url = if (object.get("url")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_url = if (object.get("url")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_url = parsed_url;
         if (cleanup_url) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_path = if (object.get("path")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_path = if (object.get("path")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_path = parsed_path;
         if (cleanup_path) |*present| {
@@ -18556,14 +18556,14 @@ fn parseToolExecutionCompleteResult(allocator: std.mem.Allocator, value: std.jso
         const cleanup_content = parsed_content;
         wipeString(cleanup_content);
     }
-    const parsed_detailed_content = if (object.get("detailedContent")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_detailed_content = if (object.get("detailedContent")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_detailed_content = parsed_detailed_content;
         if (cleanup_detailed_content) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_contents = if (object.get("contents")) |field_value| try parseToolExecutionCompleteResultContentsArray(allocator, field_value) else null;
+    const parsed_contents = if (object.get("contents")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteResultContentsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_contents = parsed_contents;
         if (cleanup_contents) |*present| {
@@ -18572,7 +18572,7 @@ fn parseToolExecutionCompleteResult(allocator: std.mem.Allocator, value: std.jso
             }
         }
     }
-    const parsed_binary_results_for_llm = if (object.get("binaryResultsForLlm")) |field_value| try parseToolExecutionCompleteResultBinaryResultsForLlmArray(allocator, field_value) else null;
+    const parsed_binary_results_for_llm = if (object.get("binaryResultsForLlm")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteResultBinaryResultsForLlmArray(allocator, field_value) else null;
     errdefer {
         var cleanup_binary_results_for_llm = parsed_binary_results_for_llm;
         if (cleanup_binary_results_for_llm) |*present| {
@@ -18581,21 +18581,21 @@ fn parseToolExecutionCompleteResult(allocator: std.mem.Allocator, value: std.jso
             }
         }
     }
-    const parsed_ui_resource = if (object.get("uiResource")) |field_value| try parseToolExecutionCompleteUIResource(allocator, field_value) else null;
+    const parsed_ui_resource = if (object.get("uiResource")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteUIResource(allocator, field_value) else null;
     errdefer {
         var cleanup_ui_resource = parsed_ui_resource;
         if (cleanup_ui_resource) |*present| {
             wipeToolExecutionCompleteUIResource(&present.*);
         }
     }
-    const parsed_structured_content = if (object.get("structuredContent")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_structured_content = if (object.get("structuredContent")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_structured_content = parsed_structured_content;
         if (cleanup_structured_content) |*present| {
             wipeJsonValue(&present.*);
         }
     }
-    const parsed_citable_sources = if (object.get("citableSources")) |field_value| try parseToolExecutionCompleteResultCitableSourcesArray(allocator, field_value) else null;
+    const parsed_citable_sources = if (object.get("citableSources")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteResultCitableSourcesArray(allocator, field_value) else null;
     errdefer {
         var cleanup_citable_sources = parsed_citable_sources;
         if (cleanup_citable_sources) |*present| {
@@ -18604,7 +18604,7 @@ fn parseToolExecutionCompleteResult(allocator: std.mem.Allocator, value: std.jso
             }
         }
     }
-    const parsed_mcp_meta = if (object.get("mcpMeta")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_mcp_meta = if (object.get("mcpMeta")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_mcp_meta = parsed_mcp_meta;
         if (cleanup_mcp_meta) |*present| {
@@ -18630,14 +18630,14 @@ fn parseToolExecutionCompleteError(allocator: std.mem.Allocator, value: std.json
         const cleanup_message = parsed_message;
         wipeString(cleanup_message);
     }
-    const parsed_code = if (object.get("code")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_code = if (object.get("code")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_code = parsed_code;
         if (cleanup_code) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_remediation = if (object.get("remediation")) |field_value| try parseRemediationAction(allocator, field_value) else null;
+    const parsed_remediation = if (object.get("remediation")) |field_value| if ((field_value) == .null) null else try parseRemediationAction(allocator, field_value) else null;
     errdefer {
         var cleanup_remediation = parsed_remediation;
         if (cleanup_remediation) |*present| {
@@ -18660,14 +18660,14 @@ fn parseToolExecutionCompleteToolDescriptionMetaUIVisibility(_: std.mem.Allocato
 
 fn parseToolExecutionCompleteToolDescriptionMetaUI(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteToolDescriptionMetaUI {
     const object = try payloads.requiredObject(value);
-    const parsed_resource_uri = if (object.get("resourceUri")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_resource_uri = if (object.get("resourceUri")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_resource_uri = parsed_resource_uri;
         if (cleanup_resource_uri) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_visibility = if (object.get("visibility")) |field_value| try parseToolExecutionCompleteToolDescriptionMetaUIVisibilityArray(allocator, field_value) else null;
+    const parsed_visibility = if (object.get("visibility")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteToolDescriptionMetaUIVisibilityArray(allocator, field_value) else null;
     errdefer {
         var cleanup_visibility = parsed_visibility;
         if (cleanup_visibility) |*present| {
@@ -18684,7 +18684,7 @@ fn parseToolExecutionCompleteToolDescriptionMetaUI(allocator: std.mem.Allocator,
 
 fn parseToolExecutionCompleteToolDescriptionMeta(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteToolDescriptionMeta {
     const object = try payloads.requiredObject(value);
-    const parsed_ui = if (object.get("ui")) |field_value| try parseToolExecutionCompleteToolDescriptionMetaUI(allocator, field_value) else null;
+    const parsed_ui = if (object.get("ui")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteToolDescriptionMetaUI(allocator, field_value) else null;
     errdefer {
         var cleanup_ui = parsed_ui;
         if (cleanup_ui) |*present| {
@@ -18703,14 +18703,14 @@ fn parseToolExecutionCompleteToolDescription(allocator: std.mem.Allocator, value
         const cleanup_name = parsed_name;
         wipeString(cleanup_name);
     }
-    const parsed_description = if (object.get("description")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_description = if (object.get("description")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_description = parsed_description;
         if (cleanup_description) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_meta = if (object.get("_meta")) |field_value| try parseToolExecutionCompleteToolDescriptionMeta(allocator, field_value) else null;
+    const parsed_meta = if (object.get("_meta")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteToolDescriptionMeta(allocator, field_value) else null;
     errdefer {
         var cleanup_meta = parsed_meta;
         if (cleanup_meta) |*present| {
@@ -18732,44 +18732,44 @@ fn parseToolExecutionCompleteData(allocator: std.mem.Allocator, value: std.json.
         wipeString(cleanup_tool_call_id);
     }
     const parsed_success = try parseBool(object.get("success") orelse return error.InvalidSessionEvent);
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_mcp_meta = if (object.get("mcpMeta")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_mcp_meta = if (object.get("mcpMeta")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_mcp_meta = parsed_mcp_meta;
         if (cleanup_mcp_meta) |*present| {
             wipeJsonValue(&present.*);
         }
     }
-    const parsed_interaction_id = if (object.get("interactionId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_interaction_id = if (object.get("interactionId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_interaction_id = parsed_interaction_id;
         if (cleanup_interaction_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_rte = if (object.get("rte")) |field_value| try parseBool(field_value) else null;
-    const parsed_is_user_requested = if (object.get("isUserRequested")) |field_value| try parseBool(field_value) else null;
-    const parsed_result = if (object.get("result")) |field_value| try parseToolExecutionCompleteResult(allocator, field_value) else null;
+    const parsed_rte = if (object.get("rte")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_is_user_requested = if (object.get("isUserRequested")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_result = if (object.get("result")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteResult(allocator, field_value) else null;
     errdefer {
         var cleanup_result = parsed_result;
         if (cleanup_result) |*present| {
             wipeToolExecutionCompleteResult(&present.*);
         }
     }
-    const parsed_error_ = if (object.get("error")) |field_value| try parseToolExecutionCompleteError(allocator, field_value) else null;
+    const parsed_error_ = if (object.get("error")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteError(allocator, field_value) else null;
     errdefer {
         var cleanup_error_ = parsed_error_;
         if (cleanup_error_) |*present| {
             wipeToolExecutionCompleteError(&present.*);
         }
     }
-    const parsed_tool_telemetry = if (object.get("toolTelemetry")) |field_value| try parseToolExecutionCompleteDataToolTelemetryMap(allocator, field_value) else null;
+    const parsed_tool_telemetry = if (object.get("toolTelemetry")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteDataToolTelemetryMap(allocator, field_value) else null;
     errdefer {
         var cleanup_tool_telemetry = parsed_tool_telemetry;
         if (cleanup_tool_telemetry) |*present| {
@@ -18782,29 +18782,29 @@ fn parseToolExecutionCompleteData(allocator: std.mem.Allocator, value: std.json.
             }
         }
     }
-    const parsed_turn_id = if (object.get("turnId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_turn_id = if (object.get("turnId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_turn_id = parsed_turn_id;
         if (cleanup_turn_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_tool_description = if (object.get("toolDescription")) |field_value| try parseToolExecutionCompleteToolDescription(allocator, field_value) else null;
+    const parsed_tool_description = if (object.get("toolDescription")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteToolDescription(allocator, field_value) else null;
     errdefer {
         var cleanup_tool_description = parsed_tool_description;
         if (cleanup_tool_description) |*present| {
             wipeToolExecutionCompleteToolDescription(&present.*);
         }
     }
-    const parsed_sandboxed = if (object.get("sandboxed")) |field_value| try parseBool(field_value) else null;
-    const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_sandboxed = if (object.get("sandboxed")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_parent_tool_call_id = parsed_parent_tool_call_id;
         if (cleanup_parent_tool_call_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_fusion = if (object.get("fusion")) |field_value| try parseFusionAttribution(allocator, field_value) else null;
+    const parsed_fusion = if (object.get("fusion")) |field_value| if ((field_value) == .null) null else try parseFusionAttribution(allocator, field_value) else null;
     errdefer {
         var cleanup_fusion = parsed_fusion;
         if (cleanup_fusion) |*present| {
@@ -18876,7 +18876,7 @@ fn parseToolExecutionStartShellToolInfo(allocator: std.mem.Allocator, value: std
         }
     }
     const parsed_has_write_file_redirection = try parseBool(object.get("hasWriteFileRedirection") orelse return error.InvalidSessionEvent);
-    const parsed_display_command = if (object.get("displayCommand")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_display_command = if (object.get("displayCommand")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_display_command = parsed_display_command;
         if (cleanup_display_command) |*present| {
@@ -18899,14 +18899,14 @@ fn parseToolExecutionStartToolDescriptionMetaUIVisibility(_: std.mem.Allocator, 
 
 fn parseToolExecutionStartToolDescriptionMetaUI(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionStartToolDescriptionMetaUI {
     const object = try payloads.requiredObject(value);
-    const parsed_resource_uri = if (object.get("resourceUri")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_resource_uri = if (object.get("resourceUri")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_resource_uri = parsed_resource_uri;
         if (cleanup_resource_uri) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_visibility = if (object.get("visibility")) |field_value| try parseToolExecutionStartToolDescriptionMetaUIVisibilityArray(allocator, field_value) else null;
+    const parsed_visibility = if (object.get("visibility")) |field_value| if ((field_value) == .null) null else try parseToolExecutionStartToolDescriptionMetaUIVisibilityArray(allocator, field_value) else null;
     errdefer {
         var cleanup_visibility = parsed_visibility;
         if (cleanup_visibility) |*present| {
@@ -18923,7 +18923,7 @@ fn parseToolExecutionStartToolDescriptionMetaUI(allocator: std.mem.Allocator, va
 
 fn parseToolExecutionStartToolDescriptionMeta(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionStartToolDescriptionMeta {
     const object = try payloads.requiredObject(value);
-    const parsed_ui = if (object.get("ui")) |field_value| try parseToolExecutionStartToolDescriptionMetaUI(allocator, field_value) else null;
+    const parsed_ui = if (object.get("ui")) |field_value| if ((field_value) == .null) null else try parseToolExecutionStartToolDescriptionMetaUI(allocator, field_value) else null;
     errdefer {
         var cleanup_ui = parsed_ui;
         if (cleanup_ui) |*present| {
@@ -18942,14 +18942,14 @@ fn parseToolExecutionStartToolDescription(allocator: std.mem.Allocator, value: s
         const cleanup_name = parsed_name;
         wipeString(cleanup_name);
     }
-    const parsed_description = if (object.get("description")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_description = if (object.get("description")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_description = parsed_description;
         if (cleanup_description) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_meta = if (object.get("_meta")) |field_value| try parseToolExecutionStartToolDescriptionMeta(allocator, field_value) else null;
+    const parsed_meta = if (object.get("_meta")) |field_value| if ((field_value) == .null) null else try parseToolExecutionStartToolDescriptionMeta(allocator, field_value) else null;
     errdefer {
         var cleanup_meta = parsed_meta;
         if (cleanup_meta) |*present| {
@@ -18975,65 +18975,65 @@ fn parseToolExecutionStartData(allocator: std.mem.Allocator, value: std.json.Val
         const cleanup_tool_name = parsed_tool_name;
         wipeString(cleanup_tool_name);
     }
-    const parsed_arguments = if (object.get("arguments")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_arguments = if (object.get("arguments")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_arguments = parsed_arguments;
         if (cleanup_arguments) |*present| {
             wipeJsonValue(&present.*);
         }
     }
-    const parsed_shell_tool_info = if (object.get("shellToolInfo")) |field_value| try parseToolExecutionStartShellToolInfo(allocator, field_value) else null;
+    const parsed_shell_tool_info = if (object.get("shellToolInfo")) |field_value| if ((field_value) == .null) null else try parseToolExecutionStartShellToolInfo(allocator, field_value) else null;
     errdefer {
         var cleanup_shell_tool_info = parsed_shell_tool_info;
         if (cleanup_shell_tool_info) |*present| {
             wipeToolExecutionStartShellToolInfo(&present.*);
         }
     }
-    const parsed_model = if (object.get("model")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
         if (cleanup_model) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_rte = if (object.get("rte")) |field_value| try parseBool(field_value) else null;
-    const parsed_mcp_server_name = if (object.get("mcpServerName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_rte = if (object.get("rte")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_mcp_server_name = if (object.get("mcpServerName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_mcp_server_name = parsed_mcp_server_name;
         if (cleanup_mcp_server_name) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_mcp_tool_name = if (object.get("mcpToolName")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_mcp_tool_name = if (object.get("mcpToolName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_mcp_tool_name = parsed_mcp_tool_name;
         if (cleanup_mcp_tool_name) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_turn_id = if (object.get("turnId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_turn_id = if (object.get("turnId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_turn_id = parsed_turn_id;
         if (cleanup_turn_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_display_verbatim = if (object.get("displayVerbatim")) |field_value| try parseBool(field_value) else null;
-    const parsed_tool_description = if (object.get("toolDescription")) |field_value| try parseToolExecutionStartToolDescription(allocator, field_value) else null;
+    const parsed_display_verbatim = if (object.get("displayVerbatim")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_tool_description = if (object.get("toolDescription")) |field_value| if ((field_value) == .null) null else try parseToolExecutionStartToolDescription(allocator, field_value) else null;
     errdefer {
         var cleanup_tool_description = parsed_tool_description;
         if (cleanup_tool_description) |*present| {
             wipeToolExecutionStartToolDescription(&present.*);
         }
     }
-    const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_parent_tool_call_id = parsed_parent_tool_call_id;
         if (cleanup_parent_tool_call_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_fusion = if (object.get("fusion")) |field_value| try parseFusionAttribution(allocator, field_value) else null;
+    const parsed_fusion = if (object.get("fusion")) |field_value| if ((field_value) == .null) null else try parseFusionAttribution(allocator, field_value) else null;
     errdefer {
         var cleanup_fusion = parsed_fusion;
         if (cleanup_fusion) |*present| {
@@ -19069,7 +19069,7 @@ fn parseToolUserRequestedData(allocator: std.mem.Allocator, value: std.json.Valu
         const cleanup_tool_name = parsed_tool_name;
         wipeString(cleanup_tool_name);
     }
-    const parsed_arguments = if (object.get("arguments")) |field_value| try cloneJsonValue(allocator, field_value) else null;
+    const parsed_arguments = if (object.get("arguments")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_arguments = parsed_arguments;
         if (cleanup_arguments) |*present| {
@@ -19125,21 +19125,21 @@ fn parseUIEphemeralQueryData(allocator: std.mem.Allocator, value: std.json.Value
         var cleanup_phase = parsed_phase;
         wipeUIEphemeralQueryPhase(&cleanup_phase);
     }
-    const parsed_chunk = if (object.get("chunk")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_chunk = if (object.get("chunk")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_chunk = parsed_chunk;
         if (cleanup_chunk) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_answer = if (object.get("answer")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_answer = if (object.get("answer")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_answer = parsed_answer;
         if (cleanup_answer) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_error_ = if (object.get("error")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_error_ = if (object.get("error")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_error_ = parsed_error_;
         if (cleanup_error_) |*present| {
@@ -19179,21 +19179,21 @@ fn parseUserMessageData(allocator: std.mem.Allocator, value: std.json.Value) !Us
         const cleanup_content = parsed_content;
         wipeString(cleanup_content);
     }
-    const parsed_message_id = if (object.get("messageId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_message_id = if (object.get("messageId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_message_id = parsed_message_id;
         if (cleanup_message_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_transformed_content = if (object.get("transformedContent")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_transformed_content = if (object.get("transformedContent")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_transformed_content = parsed_transformed_content;
         if (cleanup_transformed_content) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_attachments = if (object.get("attachments")) |field_value| try parseUserMessageDataAttachmentsArray(allocator, field_value) else null;
+    const parsed_attachments = if (object.get("attachments")) |field_value| if ((field_value) == .null) null else try parseUserMessageDataAttachmentsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_attachments = parsed_attachments;
         if (cleanup_attachments) |*present| {
@@ -19202,7 +19202,7 @@ fn parseUserMessageData(allocator: std.mem.Allocator, value: std.json.Value) !Us
             }
         }
     }
-    const parsed_supported_native_document_mime_types = if (object.get("supportedNativeDocumentMimeTypes")) |field_value| try parseUserMessageDataSupportedNativeDocumentMimeTypesArray(allocator, field_value) else null;
+    const parsed_supported_native_document_mime_types = if (object.get("supportedNativeDocumentMimeTypes")) |field_value| if ((field_value) == .null) null else try parseUserMessageDataSupportedNativeDocumentMimeTypesArray(allocator, field_value) else null;
     errdefer {
         var cleanup_supported_native_document_mime_types = parsed_supported_native_document_mime_types;
         if (cleanup_supported_native_document_mime_types) |*present| {
@@ -19211,7 +19211,7 @@ fn parseUserMessageData(allocator: std.mem.Allocator, value: std.json.Value) !Us
             }
         }
     }
-    const parsed_native_document_path_fallback_paths = if (object.get("nativeDocumentPathFallbackPaths")) |field_value| try parseUserMessageDataNativeDocumentPathFallbackPathsArray(allocator, field_value) else null;
+    const parsed_native_document_path_fallback_paths = if (object.get("nativeDocumentPathFallbackPaths")) |field_value| if ((field_value) == .null) null else try parseUserMessageDataNativeDocumentPathFallbackPathsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_native_document_path_fallback_paths = parsed_native_document_path_fallback_paths;
         if (cleanup_native_document_path_fallback_paths) |*present| {
@@ -19220,43 +19220,43 @@ fn parseUserMessageData(allocator: std.mem.Allocator, value: std.json.Value) !Us
             }
         }
     }
-    const parsed_source = if (object.get("source")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_source = if (object.get("source")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_source = parsed_source;
         if (cleanup_source) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_delivery = if (object.get("delivery")) |field_value| try parseUserMessageDelivery(allocator, field_value) else null;
+    const parsed_delivery = if (object.get("delivery")) |field_value| if ((field_value) == .null) null else try parseUserMessageDelivery(allocator, field_value) else null;
     errdefer {
         var cleanup_delivery = parsed_delivery;
         if (cleanup_delivery) |*present| {
             wipeUserMessageDelivery(&present.*);
         }
     }
-    const parsed_agent_mode = if (object.get("agentMode")) |field_value| try parseUserMessageAgentMode(allocator, field_value) else null;
+    const parsed_agent_mode = if (object.get("agentMode")) |field_value| if ((field_value) == .null) null else try parseUserMessageAgentMode(allocator, field_value) else null;
     errdefer {
         var cleanup_agent_mode = parsed_agent_mode;
         if (cleanup_agent_mode) |*present| {
             wipeUserMessageAgentMode(&present.*);
         }
     }
-    const parsed_is_autopilot_continuation = if (object.get("isAutopilotContinuation")) |field_value| try parseBool(field_value) else null;
-    const parsed_interaction_id = if (object.get("interactionId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_is_autopilot_continuation = if (object.get("isAutopilotContinuation")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_interaction_id = if (object.get("interactionId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_interaction_id = parsed_interaction_id;
         if (cleanup_interaction_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_turn_id = if (object.get("turnId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_turn_id = if (object.get("turnId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_turn_id = parsed_turn_id;
         if (cleanup_turn_id) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_parent_agent_task_id = if (object.get("parentAgentTaskId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_parent_agent_task_id = if (object.get("parentAgentTaskId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_parent_agent_task_id = parsed_parent_agent_task_id;
         if (cleanup_parent_agent_task_id) |*present| {
@@ -19287,14 +19287,14 @@ fn parseUserInputCompletedData(allocator: std.mem.Allocator, value: std.json.Val
         const cleanup_request_id = parsed_request_id;
         wipeString(cleanup_request_id);
     }
-    const parsed_answer = if (object.get("answer")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_answer = if (object.get("answer")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_answer = parsed_answer;
         if (cleanup_answer) |*present| {
             wipeString(present.*);
         }
     }
-    const parsed_was_freeform = if (object.get("wasFreeform")) |field_value| try parseBool(field_value) else null;
+    const parsed_was_freeform = if (object.get("wasFreeform")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .request_id = parsed_request_id,
         .answer = parsed_answer,
@@ -19314,7 +19314,7 @@ fn parseUserInputRequestedData(allocator: std.mem.Allocator, value: std.json.Val
         const cleanup_question = parsed_question;
         wipeString(cleanup_question);
     }
-    const parsed_choices = if (object.get("choices")) |field_value| try parseUserInputRequestedDataChoicesArray(allocator, field_value) else null;
+    const parsed_choices = if (object.get("choices")) |field_value| if ((field_value) == .null) null else try parseUserInputRequestedDataChoicesArray(allocator, field_value) else null;
     errdefer {
         var cleanup_choices = parsed_choices;
         if (cleanup_choices) |*present| {
@@ -19323,8 +19323,8 @@ fn parseUserInputRequestedData(allocator: std.mem.Allocator, value: std.json.Val
             }
         }
     }
-    const parsed_allow_freeform = if (object.get("allowFreeform")) |field_value| try parseBool(field_value) else null;
-    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| try parseString(allocator, field_value, null, null) else null;
+    const parsed_allow_freeform = if (object.get("allowFreeform")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_tool_call_id = parsed_tool_call_id;
         if (cleanup_tool_call_id) |*present| {
@@ -30050,18 +30050,18 @@ fn parsePermissionRequested(
         errdefer arena.deinit();
         const parsed_request_id = try parseString(arena.allocator(), data.get("requestId") orelse return error.InvalidSessionEvent, null, null);
         errdefer wipeString(parsed_request_id);
-        const parsed_prompt_request = if (data.get("promptRequest")) |field_value| try parsePermissionPromptRequest(arena.allocator(), field_value) else null;
+        const parsed_prompt_request = if (data.get("promptRequest")) |field_value| if (field_value == .null) null else try parsePermissionPromptRequest(arena.allocator(), field_value) else null;
         errdefer {
             var cleanup_prompt_request = parsed_prompt_request;
             if (cleanup_prompt_request) |*present| wipePermissionPromptRequest(&present.*);
         }
-        const parsed_agent_mode = if (data.get("agentMode")) |field_value| try parseSessionMode(arena.allocator(), field_value) else null;
-        const parsed_risk_assessment = if (data.get("riskAssessment")) |field_value| try cloneJsonValue(arena.allocator(), field_value) else null;
+        const parsed_agent_mode = if (data.get("agentMode")) |field_value| if (field_value == .null) null else try parseSessionMode(arena.allocator(), field_value) else null;
+        const parsed_risk_assessment = if (data.get("riskAssessment")) |field_value| if (field_value == .null) null else try cloneJsonValue(arena.allocator(), field_value) else null;
         errdefer {
             var cleanup_risk_assessment = parsed_risk_assessment;
             if (cleanup_risk_assessment) |*present| wipeJsonValue(&present.*);
         }
-        const parsed_resolved_by_hook = if (data.get("resolvedByHook")) |field_value| try parseBool(field_value) else null;
+        const parsed_resolved_by_hook = if (data.get("resolvedByHook")) |field_value| if (field_value == .null) null else try parseBool(field_value) else null;
         const helper_json = try std.json.Stringify.valueAlloc(allocator, request_value, .{});
         errdefer {
             @memset(helper_json, 0);
@@ -31777,6 +31777,26 @@ test "every pinned discriminator parses to its explicit tag" {
         try std.testing.expectEqual(sample.tag, std.meta.activeTag(event));
         try std.testing.expectEqualStrings(sample.json[9 .. 9 + event.eventType().len], event.eventType());
     }
+}
+
+test "future permission requests accept explicit null optional fields" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        "{\"type\":\"permission.requested\",\"data\":{\"requestId\":\"permission-1\",\"permissionRequest\":{\"kind\":\"future_permission\"},\"promptRequest\":null,\"agentMode\":null,\"riskAssessment\":null,\"resolvedByHook\":null}}",
+        .{},
+    );
+    defer parsed.deinit();
+    var event = try parseEvent(allocator, parsed.value);
+    defer event.deinit(allocator);
+
+    try std.testing.expect(event == .permission_requested);
+    try std.testing.expect(event.permission_requested.permission_request == null);
+    try std.testing.expect(event.permission_requested.prompt_request == null);
+    try std.testing.expect(event.permission_requested.agent_mode == null);
+    try std.testing.expect(event.permission_requested.risk_assessment == null);
+    try std.testing.expect(event.permission_requested.resolved_by_hook == null);
 }
 
 const malformed_event_samples = [_][]const u8{

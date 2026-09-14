@@ -178,3 +178,15 @@ test("opaque JSON is emitted only for schema-marked values", () => {
     /unsupported schema construct at #\/definitions\/ToolExecutionCompleteData\/properties\/mcpMeta/,
   );
 });
+
+test("optional fields accept explicit null from the CLI", () => {
+  const rendered = renderSessionEvents(schema());
+  assert.match(
+    rendered,
+    /const parsed_previous_model = if \(object\.get\("previousModel"\)\) \|field_value\| if \(\(field_value\) == \.null\) null else try parseString/,
+  );
+  assert.match(
+    rendered,
+    /const parsed_previous_reasoning_summary = if \(object\.get\("previousReasoningSummary"\)\) \|field_value\| if \(\(field_value\) == \.null\) null else try parseReasoningSummary/,
+  );
+});

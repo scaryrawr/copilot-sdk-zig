@@ -27300,6 +27300,7 @@ test "nextEventDetailed owns complete session diagnostics after frame teardown" 
         for (client.sessions.items) |*record| record.deinit(allocator);
         client.sessions.deinit(allocator);
     }
+
     const session = try addTestSession(&client, "session-1");
     var failure = switch (try session.nextEventDetailed()) {
         .success => |event_value| {
@@ -27333,6 +27334,67 @@ test "nextEventDetailed owns complete session diagnostics after frame teardown" 
         },
         else => return error.TestExpectedSessionFailure,
     }
+}
+
+test "nextEventDetailed delivers model changes with explicit null optional fields" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const session_event =
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"session-1","event":{"type":"session.model_change","data":{"previousModel":null,"newModel":"Qwen3.8-Flash-Next-oQ4e-mtp","previousReasoningEffort":null,"reasoningEffort":null,"previousReasoningSummary":null,"reasoningSummary":null,"source":"startup"}}}}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ session_event.len, session_event },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = responses });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [2048]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestEventLogs(&client);
+        client.events.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    const session = try addTestSession(&client, "session-1");
+
+    var event = switch (try session.nextEventDetailed()) {
+        .success => |value| value,
+        .failure => |failure_value| {
+            var failure = failure_value;
+            defer failure.deinit();
+            return failure.native_error;
+        },
+    };
+    defer event.deinit(allocator);
+
+    try std.testing.expect(event == .session_model_change);
+    const change = event.session_model_change.data;
+    try std.testing.expectEqualStrings("Qwen3.8-Flash-Next-oQ4e-mtp", change.new_model);
+    try std.testing.expect(change.previous_model == null);
+    try std.testing.expect(change.previous_reasoning_effort == null);
+    try std.testing.expect(change.reasoning_effort == null);
+    try std.testing.expect(change.previous_reasoning_summary == null);
+    try std.testing.expect(change.reasoning_summary == null);
+    try std.testing.expectEqual(session_types.SessionEventTypes.ModelChangeSource.startup, change.source.?);
 }
 
 test "nextEventDetailed preserves pumped protocol diagnostics" {

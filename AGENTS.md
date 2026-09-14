@@ -64,6 +64,10 @@
   Use `-32602` for malformed input and `-32603` for invalid handler output.
 - Derive wire names and required/null semantics from the pinned schemas and
   upstream wire normalization, not from public TypeScript names.
+- Treat optional inbound session-event fields as nullable at the decode
+  boundary. The CLI may emit explicit JSON `null` where the pinned schema only
+  documents omission; all generated and event-specific parser branches must
+  preserve required-field checks while accepting both optional shapes.
 - Preserve omitted versus explicitly empty optional arrays when the protocol
   gives them different meanings. Reject duplicate HTTP header names
   case-insensitively.

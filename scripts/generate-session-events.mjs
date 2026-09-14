@@ -667,7 +667,7 @@ function renderObjectParser(model) {
         "allocator",
       )
       : `if (${source}) |field_value| ${parseExpression(
-        field.model,
+        effectiveModel,
         "field_value",
         "allocator",
       )} else null`;
@@ -1121,18 +1121,18 @@ function renderRichParser(entry) {
         errdefer arena.deinit();
         const parsed_request_id = try parseString(arena.allocator(), data.get("requestId") orelse return error.InvalidSessionEvent, null, null);
         errdefer wipeString(parsed_request_id);
-        const parsed_prompt_request = if (data.get("promptRequest")) |field_value| try parsePermissionPromptRequest(arena.allocator(), field_value) else null;
+        const parsed_prompt_request = if (data.get("promptRequest")) |field_value| if (field_value == .null) null else try parsePermissionPromptRequest(arena.allocator(), field_value) else null;
         errdefer {
             var cleanup_prompt_request = parsed_prompt_request;
             if (cleanup_prompt_request) |*present| wipePermissionPromptRequest(&present.*);
         }
-        const parsed_agent_mode = if (data.get("agentMode")) |field_value| try parseSessionMode(arena.allocator(), field_value) else null;
-        const parsed_risk_assessment = if (data.get("riskAssessment")) |field_value| try cloneJsonValue(arena.allocator(), field_value) else null;
+        const parsed_agent_mode = if (data.get("agentMode")) |field_value| if (field_value == .null) null else try parseSessionMode(arena.allocator(), field_value) else null;
+        const parsed_risk_assessment = if (data.get("riskAssessment")) |field_value| if (field_value == .null) null else try cloneJsonValue(arena.allocator(), field_value) else null;
         errdefer {
             var cleanup_risk_assessment = parsed_risk_assessment;
             if (cleanup_risk_assessment) |*present| wipeJsonValue(&present.*);
         }
-        const parsed_resolved_by_hook = if (data.get("resolvedByHook")) |field_value| try parseBool(field_value) else null;
+        const parsed_resolved_by_hook = if (data.get("resolvedByHook")) |field_value| if (field_value == .null) null else try parseBool(field_value) else null;
         const helper_json = try std.json.Stringify.valueAlloc(allocator, request_value, .{});
         errdefer {
             @memset(helper_json, 0);
@@ -1555,6 +1555,27 @@ test "every pinned discriminator parses to its explicit tag" {
         try std.testing.expectEqual(sample.tag, std.meta.activeTag(event));
         try std.testing.expectEqualStrings(sample.json[9 .. 9 + event.eventType().len], event.eventType());
     }
+}
+
+test "future permission requests accept explicit null optional fields" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        ${zigString('{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"future_permission"},"promptRequest":null,"agentMode":null,"riskAssessment":null,"resolvedByHook":null}}')}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    var event = try parseEvent(allocator, parsed.value);
+    defer event.deinit(allocator);
+
+    try std.testing.expect(event == .permission_requested);
+    try std.testing.expect(event.permission_requested.permission_request == null);
+    try std.testing.expect(event.permission_requested.prompt_request == null);
+    try std.testing.expect(event.permission_requested.agent_mode == null);
+    try std.testing.expect(event.permission_requested.risk_assessment == null);
+    try std.testing.expect(event.permission_requested.resolved_by_hook == null);
 }
 
 const malformed_event_samples = [_][]const u8{
