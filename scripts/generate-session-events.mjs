@@ -1127,7 +1127,7 @@ function renderRichParser(entry) {
             if (cleanup_prompt_request) |*present| wipePermissionPromptRequest(&present.*);
         }
         const parsed_agent_mode = if (data.get("agentMode")) |field_value| if (field_value == .null) null else try parseSessionMode(arena.allocator(), field_value) else null;
-        const parsed_risk_assessment = if (data.get("riskAssessment")) |field_value| try cloneJsonValue(arena.allocator(), field_value) else null;
+        const parsed_risk_assessment = if (data.get("riskAssessment")) |field_value| if (field_value == .null) null else try cloneJsonValue(arena.allocator(), field_value) else null;
         errdefer {
             var cleanup_risk_assessment = parsed_risk_assessment;
             if (cleanup_risk_assessment) |*present| wipeJsonValue(&present.*);
@@ -1562,7 +1562,7 @@ test "future permission requests accept explicit null optional fields" {
     const parsed = try std.json.parseFromSlice(
         std.json.Value,
         allocator,
-        ${zigString('{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"future_permission"},"promptRequest":null,"agentMode":null,"resolvedByHook":null}}')}
+        ${zigString('{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"future_permission"},"promptRequest":null,"agentMode":null,"riskAssessment":null,"resolvedByHook":null}}')}
     ,
         .{},
     );
@@ -1574,6 +1574,7 @@ test "future permission requests accept explicit null optional fields" {
     try std.testing.expect(event.permission_requested.permission_request == null);
     try std.testing.expect(event.permission_requested.prompt_request == null);
     try std.testing.expect(event.permission_requested.agent_mode == null);
+    try std.testing.expect(event.permission_requested.risk_assessment == null);
     try std.testing.expect(event.permission_requested.resolved_by_hook == null);
 }
 
