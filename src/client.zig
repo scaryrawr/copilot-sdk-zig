@@ -9601,11 +9601,7 @@ pub const Client = struct {
     }!EventLogLease {
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
-        if (record_index >= self.sessions.items.len)
-            return error.SessionNotActive;
-        const record = &self.sessions.items[record_index];
-        if (!record.isActive() or record.generation != generation)
-            return error.SessionNotActive;
+        const record = try self.activeSessionRecordLocked(record_index, generation);
         var lease = try self.ensureEventLogLease(record.id.?, generation);
         errdefer lease.deinit();
         lease.log.beginIngress() catch |err| switch (err) {
@@ -9613,6 +9609,40 @@ pub const Client = struct {
             error.Canceled => return error.Canceled,
         };
         return lease;
+    }
+
+    fn ensureSessionHandleEventLogLease(
+        self: *Client,
+        record_index: usize,
+        generation: u64,
+    ) !EventLogLease {
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
+        const record = try self.activeSessionRecordLocked(record_index, generation);
+        return self.ensureEventLogLease(record.id.?, generation);
+    }
+
+    fn validateSessionHandle(
+        self: *Client,
+        record_index: usize,
+        generation: u64,
+    ) !void {
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
+        _ = try self.activeSessionRecordLocked(record_index, generation);
+    }
+
+    fn activeSessionRecordLocked(
+        self: *Client,
+        record_index: usize,
+        generation: u64,
+    ) !*SessionRecord {
+        if (record_index >= self.sessions.items.len)
+            return error.SessionNotActive;
+        const record = &self.sessions.items[record_index];
+        if (!record.isActive() or record.generation != generation)
+            return error.SessionNotActive;
+        return record;
     }
 
     fn removeSessionState(self: *Client, session_id: []const u8) void {
@@ -10455,8 +10485,32 @@ pub const Session = struct {
     }
 
     fn eventLog(self: Session) !EventLogLease {
-        const resolved = try self.resolve();
-        return self.client.ensureEventLogLease(resolved.id, self.generation);
+        return self.client.ensureSessionHandleEventLogLease(
+            self.record_index,
+            self.generation,
+        );
+    }
+
+    fn eventLogForPolicy(
+        self: Session,
+        comptime failure_policy: FailurePolicy,
+    ) errors.DetailedError!PolicyResult(failure_policy, EventLogLease) {
+        const lease = self.eventLog() catch |err|
+            return .{ .failure = if (err == error.SessionNotActive)
+                try policyFailure(
+                    failure_policy,
+                    err,
+                    recordInvalidConfig,
+                    .{ self.client.allocator, "session_id", err },
+                )
+            else
+                try policyFailure(
+                    failure_policy,
+                    err,
+                    recordClientIo,
+                    .{ self.client.allocator, .read, err },
+                ) };
+        return .{ .success = lease };
     }
 
     pub fn subscribe(self: Session) !EventSubscriber {
@@ -10502,21 +10556,13 @@ pub const Session = struct {
                     err,
                 },
             ) };
-        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+        var lease = switch (try self.eventLogForPolicy(failure_policy)) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
         };
-        var lease = self.client.ensureEventLogLease(
-            resolved.id,
-            self.generation,
-        ) catch |err| return .{ .failure = try policyFailure(
-            failure_policy,
-            err,
-            recordClientIo,
-            .{ self.client.allocator, .read, err },
-        ) };
         defer lease.deinit();
         const session_log = lease.log;
+        const session_id = session_log.session_id;
         const receipt = session_log.reserveTurn(.raw) catch |err|
             return .{ .failure = try policyFailure(
                 failure_policy,
@@ -10545,8 +10591,8 @@ pub const Session = struct {
             failure_policy,
             struct { messageId: []const u8 },
             "session.send",
-            lowerMessage(resolved.id, options, source, trace_context),
-            .{ .session = .{ .session_id = resolved.id } },
+            lowerMessage(session_id, options, source, trace_context),
+            .{ .session = .{ .session_id = session_id } },
         )) {
             .success => |value| value,
             .failure => |failure| {
@@ -10700,10 +10746,15 @@ pub const Session = struct {
                     err,
                 },
             ) };
-        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
-            .success => |value| value,
-            .failure => |failure| return .{ .failure = failure },
-        };
+        self.client.validateSessionHandle(
+            self.record_index,
+            self.generation,
+        ) catch |err| return .{ .failure = try policyFailure(
+            failure_policy,
+            err,
+            recordInvalidConfig,
+            .{ self.client.allocator, "session_id", err },
+        ) };
         const deadline = if (wait_options.timeout_ns) |timeout_ns|
             std.Io.Clock.Timestamp.fromNow(self.client.io, .{
                 .raw = std.Io.Duration.fromNanoseconds(@intCast(timeout_ns)),
@@ -10719,15 +10770,10 @@ pub const Session = struct {
                 .{ self.client.allocator, .read, error.Canceled },
             ) };
         }
-        var lease = self.client.ensureEventLogLease(
-            resolved.id,
-            self.generation,
-        ) catch |err| return .{ .failure = try policyFailure(
-            failure_policy,
-            err,
-            recordClientIo,
-            .{ self.client.allocator, .read, err },
-        ) };
+        var lease = switch (try self.eventLogForPolicy(failure_policy)) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
         defer lease.deinit();
         const session_log = lease.log;
         const receipt = session_log.reserveTurn(.waited) catch |err|
@@ -11025,8 +11071,10 @@ pub const Session = struct {
     }
 
     pub fn nextEvent(self: Session) !session_types.SessionEvent {
-        const resolved = try self.resolve();
-        if (self.client.hasQueuedSessionEvent(resolved.id)) {
+        var lease = try self.eventLog();
+        defer lease.deinit();
+        const session_id = lease.log.session_id;
+        if (self.client.hasQueuedSessionEvent(session_id)) {
             return switch (try self.nextEventDeliveryImpl(.legacy)) {
                 .success => |delivery_value| {
                     var delivery = delivery_value;
@@ -11035,10 +11083,8 @@ pub const Session = struct {
                 .failure => |failure| failure.native_error,
             };
         }
-        var lease = try self.client.ensureEventLogLease(resolved.id, self.generation);
-        defer lease.deinit();
         try self.client.ensurePump();
-        if (self.client.hasQueuedSessionEvent(resolved.id)) {
+        if (self.client.hasQueuedSessionEvent(session_id)) {
             return switch (try self.nextEventDeliveryImpl(.legacy)) {
                 .success => |delivery_value| {
                     var delivery = delivery_value;
@@ -11073,11 +11119,13 @@ pub const Session = struct {
     pub fn nextEventDetailed(
         self: Session,
     ) errors.DetailedError!errors.DetailedResult(session_types.SessionEvent) {
-        const resolved = switch (try self.resolveForPolicy(.detailed)) {
+        var lease = switch (try self.eventLogForPolicy(.detailed)) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
         };
-        if (self.client.hasQueuedSessionEvent(resolved.id)) {
+        defer lease.deinit();
+        const session_id = lease.log.session_id;
+        if (self.client.hasQueuedSessionEvent(session_id)) {
             return switch (try self.nextEventDeliveryImpl(.detailed)) {
                 .success => |delivery_value| {
                     var delivery = delivery_value;
@@ -11091,15 +11139,6 @@ pub const Session = struct {
                 .failure => |failure| .{ .failure = failure },
             };
         }
-        var lease = self.client.ensureEventLogLease(
-            resolved.id,
-            self.generation,
-        ) catch |err| return .{ .failure = try recordClientIo(
-            self.client.allocator,
-            .read,
-            err,
-        ) };
-        defer lease.deinit();
         self.client.ensurePump() catch |err| return .{ .failure = if (err ==
             error.ReentrantRpcCall)
             try recordReentrant(self.client.allocator, "session.event")
@@ -11109,7 +11148,7 @@ pub const Session = struct {
                 .read,
                 err,
             ) };
-        if (self.client.hasQueuedSessionEvent(resolved.id)) {
+        if (self.client.hasQueuedSessionEvent(session_id)) {
             return switch (try self.nextEventDeliveryImpl(.detailed)) {
                 .success => |delivery_value| {
                     var delivery = delivery_value;
@@ -20727,6 +20766,7 @@ test "sendAndWait cancellation before send emits no request" {
             .{ .cancellation = &cancellation },
         ),
     );
+    try std.testing.expectEqual(@as(usize, 0), client.event_logs.items.len);
     try writer.interface.flush();
     const request = try tmp.dir.readFileAlloc(
         std.testing.io,
@@ -24109,6 +24149,26 @@ fn addTestSession(client: *Client, session_id: []const u8) !Session {
         .id = try client.allocator.dupe(u8, session_id),
     });
     return client.sessionForId(session_id);
+}
+
+test "session event log lease owns its session id through removal" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+    const active = try addTestSession(&client, "session-1");
+    var lease = try active.eventLog();
+    defer lease.deinit();
+
+    client.removeSessionAt(0);
+
+    try std.testing.expectEqualStrings("session-1", lease.log.session_id);
+    try std.testing.expectError(error.SessionNotActive, active.eventLog());
 }
 
 test "session failure conversion rolls back every allocation failure" {
