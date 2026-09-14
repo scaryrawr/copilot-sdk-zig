@@ -444,14 +444,103 @@ pub const JoinSessionConfig = struct {
 /// Use `CreateSessionConfig` in new code.
 pub const SessionConfig = CreateSessionConfig;
 
+/// Options for all send, sendDetailed, sendAndWait, and sendAndWaitDetailed variants.
 /// Message options borrow all caller-provided data until the call returns.
 /// No deinit is required.
 pub const MessageOptions = struct {
     prompt: []const u8,
+    source: ?MessageSource = null,
     attachments: ?[]const Attachment = null,
+    message_attachments: ?[]const MessageAttachment = null,
+    mode: ?MessageDeliveryMode = null,
+    agent_mode: ?AgentMode = null,
+    request_headers: ?[]const RequestHeader = null,
+    display_prompt: ?[]const u8 = null,
 };
 
-/// A borrowed attachment sent with a user message. No deinit is required.
+pub const MessageSource = union(enum) {
+    user,
+    system,
+    agent: []const u8,
+};
+
+pub const MessageDeliveryMode = enum {
+    enqueue,
+    immediate,
+};
+
+pub const AgentMode = enum {
+    interactive,
+    plan,
+    autopilot,
+    shell,
+};
+
+pub const RequestHeader = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+pub const WaitOptions = struct {
+    timeout_ns: ?u64 = 60 * std.time.ns_per_s,
+    cancellation: ?*Cancellation = null,
+};
+
+pub const Cancellation = struct {
+    event: std.Io.Event = .unset,
+
+    pub fn cancel(self: *Cancellation, io: std.Io) void {
+        self.event.set(io);
+    }
+
+    pub fn isCancelled(self: *const Cancellation) bool {
+        return self.event.isSet();
+    }
+};
+
+/// A borrowed stable attachment sent with a user message. No deinit is required.
+pub const MessageAttachment = union(enum) {
+    file: File,
+    directory: Directory,
+    selection: Selection,
+    blob: Blob,
+
+    pub const SelectionPosition = struct {
+        line: u32,
+        character: u32,
+    };
+
+    pub const SelectionRange = struct {
+        start: SelectionPosition,
+        end: SelectionPosition,
+    };
+
+    pub const File = struct {
+        path: []const u8,
+        display_name: ?[]const u8 = null,
+    };
+
+    pub const Directory = struct {
+        path: []const u8,
+        display_name: ?[]const u8 = null,
+    };
+
+    pub const Selection = struct {
+        file_path: []const u8,
+        display_name: []const u8,
+        selection: ?SelectionRange = null,
+        text: ?[]const u8 = null,
+    };
+
+    pub const Blob = struct {
+        data: []const u8,
+        mime_type: []const u8,
+        display_name: ?[]const u8 = null,
+    };
+};
+
+/// Compatibility attachment model retained for existing outbound callers and
+/// inbound/protocol-shaped values.
 pub const Attachment = union(enum) {
     file: File,
     directory: Directory,
@@ -839,6 +928,167 @@ pub const SessionEventHistory = struct {
 };
 pub const parseEvent = session_events.parseEvent;
 
+fn wipeSecret(value: []const u8) void {
+    @memset(@constCast(value), 0);
+}
+
+const WipingAllocator = struct {
+    backing: std.mem.Allocator,
+
+    fn allocator(self: *WipingAllocator) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            },
+        };
+    }
+
+    fn alloc(
+        context: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *WipingAllocator = @ptrCast(@alignCast(context));
+        return self.backing.rawAlloc(len, alignment, return_address);
+    }
+
+    fn resize(
+        _: *anyopaque,
+        _: []u8,
+        _: std.mem.Alignment,
+        _: usize,
+        _: usize,
+    ) bool {
+        return false;
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *WipingAllocator = @ptrCast(@alignCast(context));
+        const replacement = self.backing.rawAlloc(
+            new_len,
+            alignment,
+            return_address,
+        ) orelse return null;
+        @memcpy(replacement[0..@min(memory.len, new_len)], memory[0..@min(memory.len, new_len)]);
+        @memset(memory, 0);
+        self.backing.rawFree(memory, alignment, return_address);
+        return replacement;
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) void {
+        const self: *WipingAllocator = @ptrCast(@alignCast(context));
+        @memset(memory, 0);
+        self.backing.rawFree(memory, alignment, return_address);
+    }
+};
+
+pub fn cloneEvent(
+    allocator: std.mem.Allocator,
+    event: SessionEvent,
+) !SessionEvent {
+    var wiping_allocator: WipingAllocator = .{ .backing = allocator };
+    const temporary_allocator = wiping_allocator.allocator();
+    const data = try std.json.parseFromSlice(
+        std.json.Value,
+        temporary_allocator,
+        event.rawData(),
+        .{},
+    );
+    defer data.deinit();
+    const envelope_json = try std.json.Stringify.valueAlloc(temporary_allocator, .{
+        .type = event.eventType(),
+        .data = data.value,
+    }, .{});
+    defer temporary_allocator.free(envelope_json);
+    const envelope = try std.json.parseFromSlice(
+        std.json.Value,
+        temporary_allocator,
+        envelope_json,
+        .{},
+    );
+    defer envelope.deinit();
+    var cloned = parseEvent(allocator, envelope.value) catch |err| {
+        if (event != .session_error or event.session_error.remediation != null)
+            return err;
+        const source = event.session_error;
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+        const arena_allocator = arena.allocator();
+        const raw_json = try allocator.dupe(u8, source.raw.data_json);
+        errdefer {
+            wipeSecret(raw_json);
+            allocator.free(raw_json);
+        }
+        const error_type = try arena_allocator.dupe(u8, source.error_type);
+        errdefer wipeSecret(error_type);
+        const error_code = if (source.error_code) |value|
+            try arena_allocator.dupe(u8, value)
+        else
+            null;
+        errdefer if (error_code) |value| wipeSecret(value);
+        const message = try arena_allocator.dupe(u8, source.message);
+        errdefer wipeSecret(message);
+        const stack = if (source.stack) |value|
+            try arena_allocator.dupe(u8, value)
+        else
+            null;
+        errdefer if (stack) |value| wipeSecret(value);
+        const provider_call_id = if (source.provider_call_id) |value|
+            try arena_allocator.dupe(u8, value)
+        else
+            null;
+        errdefer if (provider_call_id) |value| wipeSecret(value);
+        const service_request_id = if (source.service_request_id) |value|
+            try arena_allocator.dupe(u8, value)
+        else
+            null;
+        errdefer if (service_request_id) |value| wipeSecret(value);
+        const url = if (source.url) |value|
+            try arena_allocator.dupe(u8, value)
+        else
+            null;
+        errdefer if (url) |value| wipeSecret(value);
+        return .{ .session_error = .{
+            .error_type = error_type,
+            .error_code = error_code,
+            .eligible_for_auto_switch = source.eligible_for_auto_switch,
+            .message = message,
+            .remediation = null,
+            .stack = stack,
+            .status_code = source.status_code,
+            .provider_call_id = provider_call_id,
+            .service_request_id = service_request_id,
+            .url = url,
+            .raw = .{ .data_json = raw_json, .owns_data = true },
+            .arena = arena,
+        } };
+    };
+    switch (event) {
+        .command_execute => |value| cloned.command_execute.automatic_handling = value.automatic_handling,
+        .elicitation_requested => |value| cloned.elicitation_requested.automatic_handling = value.automatic_handling,
+        .mcp_oauth_required => |value| cloned.mcp_oauth_required.automatic_handling = value.automatic_handling,
+        .permission_requested => |value| cloned.permission_requested.automatic_handling = value.automatic_handling,
+        else => {},
+    }
+    return cloned;
+}
+
 pub const ClassifiedParseError = error{
     MissingField,
     MalformedFieldType,
@@ -1186,6 +1436,53 @@ test "failed generated parsing wipes initialized fields" {
     try std.testing.expectEqual(
         null,
         std.mem.indexOf(u8, &storage, "wipe-me"),
+    );
+}
+
+test "event cloning wipes secret-bearing temporary representations" {
+    const source_allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        source_allocator,
+        \\{"type":"mcp.oauth_required","data":{"requestId":"r1","serverName":"server","serverUrl":"https://example.test","staticClientConfig":{"clientId":"client","clientSecret":"wipe-clone-secret"},"reason":"initial"}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    var event = try parseEvent(source_allocator, parsed.value);
+    defer event.deinit(source_allocator);
+
+    var storage = [_]u8{0xaa} ** 32_768;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var cloned = try cloneEvent(fixed.allocator(), event);
+    cloned.deinit(fixed.allocator());
+
+    try std.testing.expectEqual(
+        null,
+        std.mem.indexOf(u8, &storage, "wipe-clone-secret"),
+    );
+}
+
+fn cloneSecretEventForAllocationFailures(allocator: std.mem.Allocator) !void {
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"mcp.oauth_required","data":{"requestId":"r1","serverName":"server","serverUrl":"https://example.test","staticClientConfig":{"clientId":"client","clientSecret":"secret"},"reason":"initial"}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    var event = try parseEvent(allocator, parsed.value);
+    defer event.deinit(allocator);
+    var cloned = try cloneEvent(allocator, event);
+    cloned.deinit(allocator);
+}
+
+test "event cloning handles every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        cloneSecretEventForAllocationFailures,
+        .{},
     );
 }
 

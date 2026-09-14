@@ -28,6 +28,14 @@ pub const Failure = struct {
     native_error: anyerror = error.UnknownFailure,
     detail: FailureDetail,
 
+    pub fn clone(self: *const Failure, allocator: std.mem.Allocator) DetailedError!Failure {
+        return .{
+            .allocator = allocator,
+            .native_error = self.native_error,
+            .detail = try cloneDetail(allocator, self.detail),
+        };
+    }
+
     pub fn deinit(self: *Failure) void {
         deinitDetail(self.allocator, &self.detail);
         self.* = undefined;
@@ -448,6 +456,433 @@ fn deinitAgent(allocator: std.mem.Allocator, agent: SessionAgentFailure) void {
     freeOptional(allocator, agent.stack);
 }
 
+fn cloneSlice(allocator: std.mem.Allocator, value: []const u8) DetailedError![]u8 {
+    return try allocator.dupe(u8, value);
+}
+
+fn cloneOptionalSlice(
+    allocator: std.mem.Allocator,
+    value: ?[]const u8,
+) DetailedError!?[]u8 {
+    return if (value) |slice| try cloneSlice(allocator, slice) else null;
+}
+
+fn cloneCause(allocator: std.mem.Allocator, cause: Cause) DetailedError!Cause {
+    return .{
+        .code = cause.code,
+        .message = try cloneOptionalSlice(allocator, cause.message),
+    };
+}
+
+fn cloneFailures(
+    allocator: std.mem.Allocator,
+    failures: []const Failure,
+) DetailedError![]Failure {
+    const cloned = try allocator.alloc(Failure, failures.len);
+    errdefer allocator.free(cloned);
+
+    var initialized: usize = 0;
+    errdefer for (cloned[0..initialized]) |*failure| failure.deinit();
+
+    for (failures, cloned) |*failure, *destination| {
+        destination.* = try failure.clone(allocator);
+        initialized += 1;
+    }
+    return cloned;
+}
+
+fn cloneRpcContext(
+    allocator: std.mem.Allocator,
+    context: RpcOperationContext,
+) DetailedError!RpcOperationContext {
+    return switch (context) {
+        .generic => .generic,
+        .session => |value| .{ .session = .{
+            .session_id = try cloneSlice(allocator, value.session_id),
+        } },
+        .queue => |value| .{ .queue = .{
+            .session_id = try cloneSlice(allocator, value.session_id),
+        } },
+        .permission => |value| permission: {
+            const session_id = try cloneSlice(allocator, value.session_id);
+            errdefer allocator.free(session_id);
+            break :permission .{ .permission = .{
+                .session_id = session_id,
+                .request_id = try cloneSlice(allocator, value.request_id),
+            } };
+        },
+        .tool => |value| tool: {
+            const session_id = try cloneSlice(allocator, value.session_id);
+            errdefer allocator.free(session_id);
+            const request_id = try cloneSlice(allocator, value.request_id);
+            errdefer allocator.free(request_id);
+            const tool_call_id = try cloneOptionalSlice(allocator, value.tool_call_id);
+            errdefer freeOptional(allocator, tool_call_id);
+            break :tool .{ .tool = .{
+                .session_id = session_id,
+                .request_id = request_id,
+                .tool_call_id = tool_call_id,
+                .tool_name = try cloneOptionalSlice(allocator, value.tool_name),
+            } };
+        },
+    };
+}
+
+fn cloneRpc(allocator: std.mem.Allocator, rpc: RpcFailure) DetailedError!RpcFailure {
+    const method = try cloneSlice(allocator, rpc.method);
+    errdefer allocator.free(method);
+    const machine_code = try cloneOptionalSlice(allocator, rpc.machine_code);
+    errdefer freeOptional(allocator, machine_code);
+    const message = try cloneSlice(allocator, rpc.message);
+    errdefer allocator.free(message);
+    const data_json = try cloneOptionalSlice(allocator, rpc.data_json);
+    errdefer if (data_json) |value| freeRpcData(allocator, value);
+
+    return .{
+        .method = method,
+        .request_id = rpc.request_id,
+        .code = rpc.code,
+        .machine_code = machine_code,
+        .message = message,
+        .data_json = data_json,
+        .context = try cloneRpcContext(allocator, rpc.context),
+    };
+}
+
+fn cloneAgent(
+    allocator: std.mem.Allocator,
+    agent: SessionAgentFailure,
+) DetailedError!SessionAgentFailure {
+    const session_id = try cloneSlice(allocator, agent.session_id);
+    errdefer allocator.free(session_id);
+    const error_type = try cloneSlice(allocator, agent.error_type);
+    errdefer allocator.free(error_type);
+    const error_code = try cloneOptionalSlice(allocator, agent.error_code);
+    errdefer freeOptional(allocator, error_code);
+    const message = try cloneSlice(allocator, agent.message);
+    errdefer allocator.free(message);
+    const provider_call_id = try cloneOptionalSlice(allocator, agent.provider_call_id);
+    errdefer freeOptional(allocator, provider_call_id);
+    const service_request_id = try cloneOptionalSlice(allocator, agent.service_request_id);
+    errdefer freeOptional(allocator, service_request_id);
+    const remediation_json = try cloneOptionalSlice(allocator, agent.remediation_json);
+    errdefer freeOptional(allocator, remediation_json);
+    const url = try cloneOptionalSlice(allocator, agent.url);
+    errdefer freeOptional(allocator, url);
+
+    return .{
+        .session_id = session_id,
+        .error_type = error_type,
+        .error_code = error_code,
+        .message = message,
+        .status_code = agent.status_code,
+        .provider_call_id = provider_call_id,
+        .service_request_id = service_request_id,
+        .remediation_json = remediation_json,
+        .url = url,
+        .stack = try cloneOptionalSlice(allocator, agent.stack),
+        .eligible_for_auto_switch = agent.eligible_for_auto_switch,
+    };
+}
+
+fn cloneDetail(
+    allocator: std.mem.Allocator,
+    detail: FailureDetail,
+) DetailedError!FailureDetail {
+    return switch (detail) {
+        .process => |value| .{ .process = switch (value) {
+            .spawn => |item| spawn: {
+                const executable = try cloneSlice(allocator, item.executable);
+                errdefer allocator.free(executable);
+                const message = try cloneSlice(allocator, item.message);
+                errdefer allocator.free(message);
+                break :spawn .{ .spawn = .{
+                    .executable = executable,
+                    .message = message,
+                    .cause = try cloneCause(allocator, item.cause),
+                } };
+            },
+            .exited => |item| .{ .exited = .{
+                .exit = item.exit,
+                .message = try cloneSlice(allocator, item.message),
+            } },
+            .terminate => |item| terminate: {
+                const message = try cloneSlice(allocator, item.message);
+                errdefer allocator.free(message);
+                break :terminate .{ .terminate = .{
+                    .exit = item.exit,
+                    .message = message,
+                    .cause = try cloneCause(allocator, item.cause),
+                } };
+            },
+        } },
+        .client => |value| .{ .client = switch (value) {
+            .io => |item| io: {
+                const message = try cloneSlice(allocator, item.message);
+                errdefer allocator.free(message);
+                break :io .{ .io = .{
+                    .operation = item.operation,
+                    .message = message,
+                    .cause = try cloneCause(allocator, item.cause),
+                } };
+            },
+            .json => |item| json: {
+                const message = try cloneSlice(allocator, item.message);
+                errdefer allocator.free(message);
+                break :json .{ .json = .{
+                    .operation = item.operation,
+                    .message = message,
+                    .cause = try cloneCause(allocator, item.cause),
+                } };
+            },
+            .invalid_config => |item| invalid_config: {
+                const field = try cloneOptionalSlice(allocator, item.field);
+                errdefer freeOptional(allocator, field);
+                break :invalid_config .{ .invalid_config = .{
+                    .field = field,
+                    .message = try cloneSlice(allocator, item.message),
+                } };
+            },
+            .reentrant_call => |item| reentrant_call: {
+                const method = try cloneSlice(allocator, item.method);
+                errdefer allocator.free(method);
+                break :reentrant_call .{ .reentrant_call = .{
+                    .method = method,
+                    .message = try cloneSlice(allocator, item.message),
+                } };
+            },
+            .request_cancelled => |item| request_cancelled: {
+                const method = try cloneSlice(allocator, item.method);
+                errdefer allocator.free(method);
+                break :request_cancelled .{ .request_cancelled = .{
+                    .method = method,
+                    .request_id = item.request_id,
+                    .message = try cloneSlice(allocator, item.message),
+                } };
+            },
+            .operation_rejected => |item| operation_rejected: {
+                const session_id = try cloneSlice(allocator, item.session_id);
+                errdefer allocator.free(session_id);
+                break :operation_rejected .{ .operation_rejected = .{
+                    .operation = item.operation,
+                    .session_id = session_id,
+                    .message = try cloneOptionalSlice(allocator, item.message),
+                } };
+            },
+            .stop => |item| .{ .stop = .{
+                .failures = try cloneFailures(allocator, item.failures),
+            } },
+        } },
+        .protocol => |value| .{ .protocol = switch (value) {
+            .missing_content_length => .missing_content_length,
+            .invalid_content_length => |item| .{ .invalid_content_length = .{
+                .value = try cloneSlice(allocator, item.value),
+            } },
+            .frame_too_large => |item| .{ .frame_too_large = item },
+            .truncated_frame => |item| .{ .truncated_frame = item },
+            .invalid_json => |item| invalid_json: {
+                const message = try cloneSlice(allocator, item.message);
+                errdefer allocator.free(message);
+                break :invalid_json .{ .invalid_json = .{
+                    .message = message,
+                    .cause = try cloneCause(allocator, item.cause),
+                } };
+            },
+            .invalid_envelope => |item| .{ .invalid_envelope = .{
+                .reason = item.reason,
+                .message_json = try cloneOptionalSlice(allocator, item.message_json),
+            } },
+            .unexpected_response => |item| .{ .unexpected_response = .{
+                .expected_id = item.expected_id,
+                .actual_id_json = try cloneOptionalSlice(allocator, item.actual_id_json),
+            } },
+            .mismatch => |item| .{ .mismatch = switch (item) {
+                .unsupported => |version| .{ .unsupported = version },
+                .invalid_server_version => |version| .{ .invalid_server_version = .{
+                    .server_json = try cloneSlice(allocator, version.server_json),
+                } },
+                .changed => |version| .{ .changed = version },
+            } },
+        } },
+        .rpc => |value| .{ .rpc = try cloneRpc(allocator, value) },
+        .session => |value| .{ .session = switch (value) {
+            .not_found => |item| not_found: {
+                const session_id = try cloneSlice(allocator, item.session_id);
+                errdefer allocator.free(session_id);
+                break :not_found .{ .not_found = .{
+                    .session_id = session_id,
+                    .rpc = try cloneRpc(allocator, item.rpc),
+                } };
+            },
+            .agent => |item| .{ .agent = try cloneAgent(allocator, item) },
+            .timeout => |item| .{ .timeout = .{
+                .session_id = try cloneSlice(allocator, item.session_id),
+                .timeout_ns = item.timeout_ns,
+            } },
+            .send_while_waiting => |item| .{ .send_while_waiting = .{
+                .session_id = try cloneSlice(allocator, item.session_id),
+            } },
+            .event_loop_closed => |item| event_loop_closed: {
+                const session_id = try cloneSlice(allocator, item.session_id);
+                errdefer allocator.free(session_id);
+                break :event_loop_closed .{ .event_loop_closed = .{
+                    .session_id = session_id,
+                    .cause = if (item.cause) |cause| try cloneCause(allocator, cause) else null,
+                } };
+            },
+            .id_mismatch => |item| id_mismatch: {
+                const requested = try cloneSlice(allocator, item.requested);
+                errdefer allocator.free(requested);
+                break :id_mismatch .{ .id_mismatch = .{
+                    .requested = requested,
+                    .returned = try cloneSlice(allocator, item.returned),
+                } };
+            },
+            .detach_failed => |item| detach_failed: {
+                const session_id = try cloneSlice(allocator, item.session_id);
+                errdefer allocator.free(session_id);
+                const rpc = if (item.rpc) |rpc| try cloneRpc(allocator, rpc) else null;
+                errdefer if (rpc) |failure| deinitRpc(allocator, failure);
+                break :detach_failed .{ .detach_failed = .{
+                    .session_id = session_id,
+                    .attempts = item.attempts,
+                    .rpc = rpc,
+                    .message = try cloneOptionalSlice(allocator, item.message),
+                } };
+            },
+        } },
+        .queue => |value| .{ .queue = switch (value) {
+            .full => |item| full: {
+                const session_id = try cloneOptionalSlice(allocator, item.session_id);
+                errdefer freeOptional(allocator, session_id);
+                break :full .{ .full = .{
+                    .session_id = session_id,
+                    .event_type = try cloneOptionalSlice(allocator, item.event_type),
+                    .length = item.length,
+                    .capacity = item.capacity,
+                } };
+            },
+            .rejected => |item| .{ .rejected = try cloneRpc(allocator, item) },
+        } },
+        .permission => |value| .{ .permission = switch (value) {
+            .invalid_decision => |item| invalid_decision: {
+                const session_id = try cloneSlice(allocator, item.session_id);
+                errdefer allocator.free(session_id);
+                const request_id = try cloneSlice(allocator, item.request_id);
+                errdefer allocator.free(request_id);
+                const message = try cloneSlice(allocator, item.message);
+                errdefer allocator.free(message);
+                break :invalid_decision .{ .invalid_decision = .{
+                    .session_id = session_id,
+                    .request_id = request_id,
+                    .message = message,
+                    .cause = if (item.cause) |cause| try cloneCause(allocator, cause) else null,
+                } };
+            },
+            .handler_failed => |item| handler_failed: {
+                const session_id = try cloneSlice(allocator, item.session_id);
+                errdefer allocator.free(session_id);
+                const request_id = try cloneSlice(allocator, item.request_id);
+                errdefer allocator.free(request_id);
+                break :handler_failed .{ .handler_failed = .{
+                    .session_id = session_id,
+                    .request_id = request_id,
+                    .cause = try cloneCause(allocator, item.cause),
+                } };
+            },
+            .delivery_failed => |item| .{ .delivery_failed = try cloneRpc(allocator, item) },
+            .not_accepted => |item| not_accepted: {
+                const session_id = try cloneSlice(allocator, item.session_id);
+                errdefer allocator.free(session_id);
+                const request_id = try cloneSlice(allocator, item.request_id);
+                errdefer allocator.free(request_id);
+                break :not_accepted .{ .not_accepted = .{
+                    .session_id = session_id,
+                    .request_id = request_id,
+                    .message = try cloneSlice(allocator, item.message),
+                } };
+            },
+        } },
+        .tool => |value| .{ .tool = switch (value) {
+            .invalid_result => |item| invalid_result: {
+                const session_id = try cloneSlice(allocator, item.session_id);
+                errdefer allocator.free(session_id);
+                const request_id = try cloneSlice(allocator, item.request_id);
+                errdefer allocator.free(request_id);
+                const tool_call_id = try cloneOptionalSlice(allocator, item.tool_call_id);
+                errdefer freeOptional(allocator, tool_call_id);
+                const tool_name = try cloneOptionalSlice(allocator, item.tool_name);
+                errdefer freeOptional(allocator, tool_name);
+                const message = try cloneSlice(allocator, item.message);
+                errdefer allocator.free(message);
+                break :invalid_result .{ .invalid_result = .{
+                    .session_id = session_id,
+                    .request_id = request_id,
+                    .tool_call_id = tool_call_id,
+                    .tool_name = tool_name,
+                    .message = message,
+                    .cause = if (item.cause) |cause| try cloneCause(allocator, cause) else null,
+                } };
+            },
+            .handler_failed => |item| handler_failed: {
+                const session_id = try cloneSlice(allocator, item.session_id);
+                errdefer allocator.free(session_id);
+                const request_id = try cloneSlice(allocator, item.request_id);
+                errdefer allocator.free(request_id);
+                const tool_call_id = try cloneSlice(allocator, item.tool_call_id);
+                errdefer allocator.free(tool_call_id);
+                const tool_name = try cloneSlice(allocator, item.tool_name);
+                errdefer allocator.free(tool_name);
+                break :handler_failed .{ .handler_failed = .{
+                    .session_id = session_id,
+                    .request_id = request_id,
+                    .tool_call_id = tool_call_id,
+                    .tool_name = tool_name,
+                    .cause = try cloneCause(allocator, item.cause),
+                } };
+            },
+            .delivery_failed => |item| .{ .delivery_failed = try cloneRpc(allocator, item) },
+            .not_accepted => |item| not_accepted: {
+                const session_id = try cloneSlice(allocator, item.session_id);
+                errdefer allocator.free(session_id);
+                const request_id = try cloneSlice(allocator, item.request_id);
+                errdefer allocator.free(request_id);
+                const tool_call_id = try cloneOptionalSlice(allocator, item.tool_call_id);
+                errdefer freeOptional(allocator, tool_call_id);
+                break :not_accepted .{ .not_accepted = .{
+                    .session_id = session_id,
+                    .request_id = request_id,
+                    .tool_call_id = tool_call_id,
+                    .message = try cloneSlice(allocator, item.message),
+                } };
+            },
+        } },
+        .shutdown => |item| shutdown: {
+            const failure_storage = try allocator.alloc(Failure, item.failure_storage.len);
+            errdefer allocator.free(failure_storage);
+
+            var initialized: usize = 0;
+            errdefer for (failure_storage[0..initialized]) |*failure| failure.deinit();
+
+            for (
+                item.failure_storage[0..item.failure_count],
+                failure_storage[0..item.failure_count],
+            ) |*failure, *destination| {
+                destination.* = try failure.clone(allocator);
+                initialized += 1;
+            }
+
+            break :shutdown .{ .shutdown = .{
+                .sessions_attempted = item.sessions_attempted,
+                .child_termination_attempted = item.child_termination_attempted,
+                .failure_storage = failure_storage,
+                .failure_count = item.failure_count,
+                .diagnostics_dropped = item.diagnostics_dropped,
+            } };
+        },
+    };
+}
+
 fn deinitDetail(allocator: std.mem.Allocator, detail: *FailureDetail) void {
     switch (detail.*) {
         .process => |value| switch (value) {
@@ -588,6 +1023,151 @@ fn deinitDetail(allocator: std.mem.Allocator, detail: *FailureDetail) void {
             if (item.failure_storage.len != 0) allocator.free(item.failure_storage);
         },
     }
+}
+
+const CloneTestData = struct {
+    var rpc_method = "rpc.method".*;
+    var rpc_message = "rpc message".*;
+    var rpc_secret = "{\"token\":\"rpc-secret\"}".*;
+    var envelope_secret = "{\"token\":\"envelope-secret\"}".*;
+    var tail = "tail".*;
+    var tail_message = "force trailing allocation".*;
+};
+
+fn testRpc(data_json: ?[]u8) RpcFailure {
+    return .{
+        .method = &CloneTestData.rpc_method,
+        .request_id = 91,
+        .code = -32091,
+        .machine_code = null,
+        .message = &CloneTestData.rpc_message,
+        .data_json = data_json,
+        .context = .generic,
+    };
+}
+
+test "failure clone returns independent pump diagnostics" {
+    var value = "nope".*;
+    const source = Failure{
+        .allocator = std.heap.page_allocator,
+        .native_error = error.InvalidCharacter,
+        .detail = .{ .protocol = .{ .invalid_content_length = .{
+            .value = &value,
+        } } },
+    };
+    var cloned = try source.clone(std.testing.allocator);
+    defer cloned.deinit();
+
+    try std.testing.expectEqual(source.native_error, cloned.native_error);
+    try std.testing.expectEqualStrings(
+        source.detail.protocol.invalid_content_length.value,
+        cloned.detail.protocol.invalid_content_length.value,
+    );
+    try std.testing.expect(
+        source.detail.protocol.invalid_content_length.value.ptr !=
+            cloned.detail.protocol.invalid_content_length.value.ptr,
+    );
+}
+
+const TestWipeProbe = struct {
+    var calls: usize = 0;
+    var saw_nonzero: bool = false;
+
+    fn reset() void {
+        calls = 0;
+        saw_nonzero = false;
+    }
+
+    fn observe(value: []const u8) void {
+        calls += 1;
+        for (value) |byte| {
+            if (byte != 0) saw_nonzero = true;
+        }
+    }
+};
+
+fn testSecretFailure() Failure {
+    return .{
+        .allocator = std.heap.page_allocator,
+        .native_error = error.SecretFailure,
+        .detail = .{ .client = .{ .stop = .{ .failures = testBorrowedFailures: {
+            const failures = struct {
+                var values = [_]Failure{
+                    .{
+                        .allocator = std.heap.page_allocator,
+                        .native_error = error.SecretRpcFailure,
+                        .detail = .{ .rpc = testRpc(
+                            &CloneTestData.rpc_secret,
+                        ) },
+                    },
+                    .{
+                        .allocator = std.heap.page_allocator,
+                        .native_error = error.SecretEnvelopeFailure,
+                        .detail = .{ .protocol = .{ .invalid_envelope = .{
+                            .reason = .invalid_error_object,
+                            .message_json = &CloneTestData.envelope_secret,
+                        } } },
+                    },
+                    .{
+                        .allocator = std.heap.page_allocator,
+                        .native_error = error.RollbackTailFailure,
+                        .detail = .{ .client = .{ .reentrant_call = .{
+                            .method = &CloneTestData.tail,
+                            .message = &CloneTestData.tail_message,
+                        } } },
+                    },
+                };
+            };
+            break :testBorrowedFailures failures.values[0..];
+        } } } },
+    };
+}
+
+fn cloneSecretFailureForAllocationTest(allocator: std.mem.Allocator) !void {
+    const source = testSecretFailure();
+    var cloned = try source.clone(allocator);
+    cloned.deinit();
+}
+
+test "failure clone rolls back every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        cloneSecretFailureForAllocationTest,
+        .{},
+    );
+}
+
+test "failure clone normal deinit securely wipes cloned secret JSON" {
+    const source = testSecretFailure();
+    var cloned = try source.clone(std.testing.allocator);
+
+    TestWipeProbe.reset();
+    setRpcDataWipeObserverForTest(TestWipeProbe.observe);
+    defer setRpcDataWipeObserverForTest(null);
+    cloned.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), TestWipeProbe.calls);
+    try std.testing.expect(!TestWipeProbe.saw_nonzero);
+}
+
+test "failure clone rollback securely wipes cloned secret JSON" {
+    const source = testSecretFailure();
+
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var counted = try source.clone(counting.allocator());
+    counted.deinit();
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = counting.alloc_index - 1,
+    });
+    TestWipeProbe.reset();
+    setRpcDataWipeObserverForTest(TestWipeProbe.observe);
+    defer setRpcDataWipeObserverForTest(null);
+
+    try std.testing.expectError(error.OutOfMemory, source.clone(failing.allocator()));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 2), TestWipeProbe.calls);
+    try std.testing.expect(!TestWipeProbe.saw_nonzero);
 }
 
 test "session operation wire methods" {

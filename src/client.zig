@@ -8,9 +8,16 @@ const provider = @import("provider.zig");
 const protocol = @import("protocol_version.zig");
 const runtime_types = @import("runtime.zig");
 const session_types = @import("session.zig");
+const event_log = @import("event_log.zig");
+const turn_tracker = @import("turn_tracker.zig");
 const ext = @import("extensibility.zig");
 
 const max_queued_events: usize = 1024;
+const retained_event_limit: usize = 64;
+const event_subscriber_limit: usize = 16;
+const retained_log_limit: usize = 128;
+const retained_response_limit: usize = 256;
+const detached_send_limit: usize = 64;
 const event_queue_capacity_message = "SDK event queue capacity exceeded";
 const teardown_oauth_release_timeout = std.Io.Duration.fromMilliseconds(250);
 const runtime_shutdown_timeout = std.Io.Duration.fromSeconds(10);
@@ -475,6 +482,18 @@ fn recordSessionAgentFailure(
     });
 }
 
+fn recordSessionTimeout(
+    allocator: std.mem.Allocator,
+    session_id: []const u8,
+    timeout_ns: u64,
+) !errors.Failure {
+    const owned_session_id = try allocator.dupe(u8, session_id);
+    return recordFailure(allocator, error.Timeout, .{ .session = .{ .timeout = .{
+        .session_id = owned_session_id,
+        .timeout_ns = timeout_ns,
+    } } });
+}
+
 const SessionAgentWireView = struct {
     error_type: []const u8,
     error_code: ?[]const u8,
@@ -565,6 +584,52 @@ fn ownFallbackSessionErrorEvent(
         .raw = .{ .data_json = raw_json, .owns_data = true },
         .arena = arena,
     } };
+}
+
+fn sessionFailureFromEvent(
+    allocator: std.mem.Allocator,
+    session_id: []const u8,
+    event: session_types.SessionError,
+) errors.DetailedError!errors.Failure {
+    const owned_session_id = try allocator.dupe(u8, session_id);
+    errdefer allocator.free(owned_session_id);
+
+    var parsed_data: ?std.json.Parsed(std.json.Value) = null;
+    defer if (parsed_data) |*parsed| parsed.deinit();
+    const remediation: ?std.json.Value = if (event.raw.data_json.len == 0)
+        null
+    else blk: {
+        parsed_data = std.json.parseFromSlice(
+            std.json.Value,
+            allocator,
+            event.raw.data_json,
+            .{},
+        ) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            break :blk null;
+        };
+        break :blk switch (parsed_data.?.value) {
+            .object => |object| object.get("remediation"),
+            else => null,
+        };
+    };
+
+    const agent = try ownSessionAgentFailure(allocator, owned_session_id, .{
+        .error_type = event.error_type,
+        .error_code = event.error_code,
+        .message = event.message,
+        .status_code = if (event.status_code) |status|
+            std.math.cast(u16, status)
+        else
+            null,
+        .provider_call_id = event.provider_call_id,
+        .service_request_id = event.service_request_id,
+        .remediation = remediation,
+        .url = event.url,
+        .stack = event.stack,
+        .eligible_for_auto_switch = event.eligible_for_auto_switch,
+    });
+    return recordSessionAgentFailure(allocator, agent);
 }
 
 fn sessionFailureFromFrame(
@@ -1108,6 +1173,7 @@ fn isValidElicitationContent(value: std.json.Value) bool {
 const EventDelivery = struct {
     id: u64 = 0,
     session_id: []u8,
+    generation: u64 = 0,
     event: session_types.SessionEvent,
     diagnostic_frame: ?[]u8 = null,
     automatic_handling_in_progress: bool = false,
@@ -1145,6 +1211,131 @@ const EventDelivery = struct {
         self.event.deinit(allocator);
         self.* = undefined;
     }
+};
+
+const PendingFailureDetail = union(enum) {
+    none,
+    unavailable,
+    failure: errors.Failure,
+
+    fn deinit(self: *PendingFailureDetail) void {
+        switch (self.*) {
+            .failure => |*failure| failure.deinit(),
+            .none, .unavailable => {},
+        }
+        self.* = .none;
+    }
+};
+
+const PendingCall = struct {
+    id: u64,
+    wants_detail: bool,
+    completed: std.Io.Event = .unset,
+    response: ?[]u8 = null,
+    failure: ?anyerror = null,
+    failure_detail: PendingFailureDetail = .none,
+};
+
+const PendingCallAdmissionProbe = struct {
+    target: usize,
+    ready: std.Io.Event = .unset,
+    release: ?*std.Io.Event = null,
+};
+
+const RetainedResponse = struct {
+    id: u64,
+    body: []u8,
+};
+
+const QueuedLogEvent = struct {
+    log: ?*event_log.EventLog,
+    event_id: u64,
+    delivery: EventDelivery,
+    delivery_class: EventDeliveryClass,
+};
+
+const SessionIngressScope = struct {
+    log: *event_log.EventLog,
+    previous: ?*SessionIngressScope,
+};
+
+threadlocal var active_session_ingress: ?*SessionIngressScope = null;
+
+const RuntimeCallbackScope = struct {
+    client: *Client,
+    previous: ?*RuntimeCallbackScope,
+};
+
+threadlocal var active_runtime_callback: ?*RuntimeCallbackScope = null;
+
+const ServerRequestLifetime = union(enum) {
+    unscoped,
+    pending,
+    active: EventLogLease,
+    inactive,
+};
+
+fn beginSessionIngressScope(
+    scope: *SessionIngressScope,
+    log: *event_log.EventLog,
+) void {
+    scope.* = .{
+        .log = log,
+        .previous = active_session_ingress,
+    };
+    active_session_ingress = scope;
+}
+
+fn endSessionIngressScope(scope: *SessionIngressScope) void {
+    std.debug.assert(active_session_ingress == scope);
+    active_session_ingress = scope.previous;
+}
+
+fn isCurrentSessionIngress(log: *event_log.EventLog) bool {
+    var current = active_session_ingress;
+    while (current) |scope| {
+        if (scope.log == log) return true;
+        current = scope.previous;
+    }
+    return false;
+}
+
+const EventLogLease = struct {
+    client: *Client,
+    log: *event_log.EventLog,
+    active: bool = true,
+
+    fn clone(self: EventLogLease) EventLogLease {
+        std.debug.assert(self.active);
+        self.log.retainOperation();
+        return .{ .client = self.client, .log = self.log };
+    }
+
+    fn deinit(self: *EventLogLease) void {
+        if (!self.active) return;
+        self.active = false;
+        self.log.releaseOperation();
+        self.client.reclaimClosedEventLogs();
+    }
+};
+
+const EventIngressAdmission = union(enum) {
+    unknown,
+    unavailable,
+    active: EventLogLease,
+};
+
+const SendOperation = struct {
+    client: *Client,
+    log_lease: EventLogLease,
+    receipt: turn_tracker.ReceiptToken,
+    request_id: u64,
+    request: []u8,
+    completed: std.Io.Event = .unset,
+    future: ?std.Io.Future(void) = null,
+    future_published: bool = false,
+    detached: bool = false,
+    failure: ?errors.Failure = null,
 };
 
 const EventDeliveryClass = enum {
@@ -1220,6 +1411,11 @@ const OwnedCanvas = struct {
 
 const RuntimeTool = struct {
     name: []u8,
+    handler: session_types.ToolHandler,
+    context: ?*anyopaque,
+};
+
+const ToolHandlerSnapshot = struct {
     handler: session_types.ToolHandler,
     context: ?*anyopaque,
 };
@@ -1493,27 +1689,68 @@ const WireModelsListRequest = struct {
 const WireSendRequest = struct {
     sessionId: []const u8,
     prompt: []const u8,
+    source: ?[]const u8 = null,
     attachments: ?WireAttachments = null,
+    mode: ?session_types.MessageDeliveryMode = null,
+    agentMode: ?session_types.AgentMode = null,
+    requestHeaders: ?WireRequestHeaders = null,
+    displayPrompt: ?[]const u8 = null,
     traceparent: ?[]const u8 = null,
     tracestate: ?[]const u8 = null,
 };
 
-const WireAttachments = struct {
-    values: []const session_types.Attachment,
+const WireAttachments = union(enum) {
+    legacy: []const session_types.Attachment,
+    stable: []const session_types.MessageAttachment,
 
     pub fn jsonStringify(self: WireAttachments, writer: anytype) !void {
         try writer.beginArray();
-        for (self.values) |value| {
-            try writer.write(WireAttachment{ .value = value });
+        switch (self) {
+            .legacy => |values| for (values) |value|
+                try writer.write(WireLegacyAttachment{ .value = value }),
+            .stable => |values| for (values) |value|
+                try writer.write(WireMessageAttachment{ .value = value }),
         }
         try writer.endArray();
     }
 };
 
-const WireAttachment = struct {
+const WireMessageAttachment = struct {
+    value: session_types.MessageAttachment,
+
+    pub fn jsonStringify(self: WireMessageAttachment, writer: anytype) !void {
+        switch (self.value) {
+            .file => |value| try writer.write(.{
+                .type = "file",
+                .path = value.path,
+                .displayName = value.display_name,
+            }),
+            .directory => |value| try writer.write(.{
+                .type = "directory",
+                .path = value.path,
+                .displayName = value.display_name,
+            }),
+            .selection => |value| try writer.write(.{
+                .type = "selection",
+                .filePath = value.file_path,
+                .displayName = value.display_name,
+                .selection = value.selection,
+                .text = value.text,
+            }),
+            .blob => |value| try writer.write(.{
+                .type = "blob",
+                .data = value.data,
+                .mimeType = value.mime_type,
+                .displayName = value.display_name,
+            }),
+        }
+    }
+};
+
+const WireLegacyAttachment = struct {
     value: session_types.Attachment,
 
-    pub fn jsonStringify(self: WireAttachment, writer: anytype) !void {
+    pub fn jsonStringify(self: WireLegacyAttachment, writer: anytype) !void {
         switch (self.value) {
             .file => |value| try writer.write(.{
                 .type = "file",
@@ -1680,21 +1917,139 @@ fn wireTreeComparisonSide(
     };
 }
 
+const WireRequestHeaders = struct {
+    values: []const session_types.RequestHeader,
+
+    pub fn jsonStringify(self: WireRequestHeaders, writer: anytype) !void {
+        try writer.beginObject();
+        for (self.values) |header| {
+            try writer.objectField(header.name);
+            try writer.write(header.value);
+        }
+        try writer.endObject();
+    }
+};
+
 fn lowerMessage(
     session_id: []const u8,
     options: session_types.MessageOptions,
+    attachments: ?WireAttachments,
+    source: ?[]const u8,
     trace_context: runtime_types.TraceContext,
 ) WireSendRequest {
     return .{
         .sessionId = session_id,
         .prompt = options.prompt,
-        .attachments = if (options.attachments) |values|
+        .source = source,
+        .attachments = attachments,
+        .mode = options.mode,
+        .agentMode = options.agent_mode,
+        .requestHeaders = if (options.request_headers) |values|
             .{ .values = values }
         else
             null,
+        .displayPrompt = options.display_prompt,
         .traceparent = trace_context.traceparent,
         .tracestate = trace_context.tracestate,
     };
+}
+
+fn validateMessageOptions(
+    options: session_types.MessageOptions,
+) !?WireAttachments {
+    const selected = try selectedAttachments(options);
+    if (options.source) |source| switch (source) {
+        .agent => |name| if (name.len == 0) return error.InvalidMessageSource,
+        else => {},
+    };
+    if (options.message_attachments) |attachments| {
+        for (attachments) |attachment| switch (attachment) {
+            .file => |file| if (file.display_name == null)
+                return error.MissingAttachmentDisplayName,
+            .directory => |directory| if (directory.display_name == null)
+                return error.MissingAttachmentDisplayName,
+            .selection => |selection| if (selection.selection == null or
+                selection.text == null)
+            {
+                return error.IncompleteSelectionAttachment;
+            },
+            .blob => {},
+        };
+    }
+    if (options.request_headers) |headers| {
+        for (headers, 0..) |header, index| {
+            if (!isValidHeaderName(header.name)) return error.InvalidRequestHeaderName;
+            for (headers[0..index]) |previous| {
+                if (std.ascii.eqlIgnoreCase(previous.name, header.name))
+                    return error.DuplicateRequestHeader;
+            }
+        }
+    }
+    return selected;
+}
+
+fn messageValidationField(
+    options: session_types.MessageOptions,
+    err: anyerror,
+    buffer: []u8,
+) []const u8 {
+    if (err == error.ConflictingAttachmentInputs) return "attachments";
+    if (options.message_attachments) |attachments| {
+        for (attachments, 0..) |attachment, index| switch (attachment) {
+            .file => |file| if (file.display_name == null and
+                err == error.MissingAttachmentDisplayName)
+            {
+                return std.fmt.bufPrint(
+                    buffer,
+                    "message_attachments[{d}].file.display_name",
+                    .{index},
+                ) catch "message_attachments";
+            },
+            .directory => |directory| if (directory.display_name == null and
+                err == error.MissingAttachmentDisplayName)
+            {
+                return std.fmt.bufPrint(
+                    buffer,
+                    "message_attachments[{d}].directory.display_name",
+                    .{index},
+                ) catch "message_attachments";
+            },
+            .selection => |selection| if ((selection.selection == null or
+                selection.text == null) and
+                err == error.IncompleteSelectionAttachment)
+            {
+                return std.fmt.bufPrint(
+                    buffer,
+                    "message_attachments[{d}].selection",
+                    .{index},
+                ) catch "message_attachments";
+            },
+            .blob => {},
+        };
+    }
+    return "message";
+}
+
+fn selectedAttachments(
+    options: session_types.MessageOptions,
+) !?WireAttachments {
+    if (options.attachments != null and options.message_attachments != null)
+        return error.ConflictingAttachmentInputs;
+    if (options.attachments) |values| return .{ .legacy = values };
+    if (options.message_attachments) |values| return .{ .stable = values };
+    return null;
+}
+
+fn isValidHeaderName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |byte| {
+        if (std.ascii.isAlphanumeric(byte)) continue;
+        switch (byte) {
+            '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => {},
+            else => return false,
+        }
+    }
+    return true;
 }
 
 const RegisteredRpcHandler = struct {
@@ -1744,6 +2099,7 @@ const Transport = union(enum) {
         reader_buffer: []u8,
         writer_buffer: []u8,
         owns_allocations: bool = false,
+        eof_is_idle: bool = false,
     },
 
     fn reader(self: *Transport) *std.Io.Reader {
@@ -1776,6 +2132,13 @@ const Transport = union(enum) {
             .uri => |*value| value.io.writer_buffer,
             .parent_stdio => |*value| value.writer_buffer,
             .fixture => |value| value.writer_buffer,
+        };
+    }
+
+    fn eofIsIdle(self: *const Transport) bool {
+        return switch (self.*) {
+            .fixture => |value| value.eof_is_idle,
+            else => false,
         };
     }
 
@@ -2684,9 +3047,17 @@ const SessionRecord = struct {
     id: ?[]u8 = null,
     generation: u64 = 1,
     workspace_path: ?[]u8 = null,
+    removal: enum {
+        none,
+        draining,
+        deferred,
+    } = .none,
+    replacement_pending: bool = false,
 
     fn isActive(self: SessionRecord) bool {
-        return self.id != null;
+        return self.id != null and
+            self.removal == .none and
+            !self.replacement_pending;
     }
 
     fn deactivate(self: *SessionRecord, allocator: std.mem.Allocator) void {
@@ -2695,6 +3066,8 @@ const SessionRecord = struct {
         if (self.workspace_path) |path| allocator.free(path);
         self.id = null;
         self.workspace_path = null;
+        self.removal = .none;
+        self.replacement_pending = false;
     }
 
     fn deinit(self: *SessionRecord, allocator: std.mem.Allocator) void {
@@ -2714,6 +3087,19 @@ const PendingSessionRecord = struct {
         if (self.id) |id| allocator.free(id);
         self.* = undefined;
     }
+};
+
+const SessionRecordCommit = struct {
+    pending: PendingSessionRecord,
+    prior_log: ?*event_log.EventLog,
+    replacing: bool,
+};
+
+const SessionRemoval = struct {
+    record_index: usize,
+    session_id: []u8,
+    generation: u64,
+    log: ?*event_log.EventLog,
 };
 
 fn nextSessionGeneration(generation: u64) !u64 {
@@ -2910,21 +3296,55 @@ pub const Client = struct {
     writer_buffer: []u8 = &.{},
     next_request_id: u64 = 1,
     sessions: std.ArrayList(SessionRecord) = .empty,
+    sessions_mutex: std.Io.Mutex = .init,
     pending_session: ?PendingSessionRecord = null,
     events: std.ArrayList(EventDelivery) = .empty,
+    events_mutex: std.Io.Mutex = .init,
+    event_logs: std.ArrayList(*event_log.EventLog) = .empty,
+    event_logs_mutex: std.Io.Mutex = .init,
+    pending_calls: std.ArrayList(*PendingCall) = .empty,
+    pending_call_admission_probe: ?*PendingCallAdmissionProbe = null,
+    retained_responses: std.ArrayList(RetainedResponse) = .empty,
+    pending_mutex: std.Io.Mutex = .init,
+    direct_call_active: bool = false,
+    direct_call_owner: ?std.Thread.Id = null,
+    direct_call_depth: usize = 0,
+    direct_call_done: std.Io.Event = .is_set,
+    writer_mutex: std.Io.Mutex = .init,
+    pump_future: ?std.Io.Future(void) = null,
+    pump_closing: bool = false,
+    pump_read_gate: ?*std.Io.Event = null,
+    pump_failure: ?errors.Failure = null,
+    pump_terminal_error: ?anyerror = null,
+    send_operations: std.ArrayList(*SendOperation) = .empty,
+    send_operations_mutex: std.Io.Mutex = .init,
+    event_queue: std.ArrayList(QueuedLogEvent) = .empty,
+    event_queue_mutex: std.Io.Mutex = .init,
+    event_queue_ready: std.Io.Event = .unset,
+    event_worker_future: ?std.Io.Future(void) = null,
+    event_worker_closing: bool = false,
     next_queued_event_id: u64 = 1,
     lifecycle_events: admin.LifecycleQueue = .{},
+    lifecycle_events_mutex: std.Io.Mutex = .init,
+    lifecycle_event_ready: std.Io.Event = .unset,
     tools: std.ArrayList(RegisteredTool) = .empty,
     user_input_handlers: std.ArrayList(RegisteredUserInputHandler) = .empty,
     permission_handlers: std.ArrayList(RegisteredPermissionHandler) = .empty,
     extension_runtimes: std.ArrayList(SessionExtensionRuntime) = .empty,
+    extension_runtimes_mutex: std.Io.Mutex = .init,
+    runtime_callbacks_drained: std.Io.Event = .is_set,
+    runtime_callbacks_ready: std.Io.Event = .is_set,
+    runtime_callback_count: usize = 0,
+    runtime_callbacks_blocked: bool = false,
+    runtime_rollback_pending: bool = false,
     pending_extension_runtime: ?SessionExtensionRuntime = null,
     provider_tokens: std.ArrayList(RegisteredProviderTokens) = .empty,
     pending_provider_tokens: ?RegisteredProviderTokens = null,
     rpc_handlers: std.ArrayList(RegisteredRpcHandler) = .empty,
-    dispatching_rpc_handler: bool = false,
-    active_request_ids: [8]u64 = undefined,
-    active_request_count: usize = 0,
+    rpc_handler_owner: ?std.Thread.Id = null,
+    rpc_handler_depth: usize = 0,
+    direct_request_ids: [8]u64 = undefined,
+    direct_request_count: usize = 0,
     buffered_responses: std.ArrayList(BufferedResponse) = .empty,
     rpc_ready: bool = false,
 
@@ -3123,7 +3543,10 @@ pub const Client = struct {
 
     pub fn deinit(self: *Client) void {
         self.releaseInterestsAndDetachSessionsBounded();
+        self.stopEventWorker();
         self.shutdownOwnedRuntimeBounded();
+        self.stopPump();
+        self.finishSendOperations();
         if (self.transport == .none and !self.transport_closed) {
             if (self.child) |*child| {
                 if (child.id != null) child.kill(self.io);
@@ -3140,6 +3563,21 @@ pub const Client = struct {
         self.session_filesystems.deinit(self.allocator);
         for (self.events.items) |*event| event.deinit(self.allocator);
         self.events.deinit(self.allocator);
+        for (self.event_logs.items) |log| {
+            log.close();
+            log.deinit();
+            self.allocator.destroy(log);
+        }
+        self.event_logs.deinit(self.allocator);
+        for (self.retained_responses.items) |response| {
+            wipeSecret(response.body);
+            self.allocator.free(response.body);
+        }
+        self.retained_responses.deinit(self.allocator);
+        self.pending_calls.deinit(self.allocator);
+        if (self.pump_failure) |*failure| failure.deinit();
+        self.send_operations.deinit(self.allocator);
+        self.event_queue.deinit(self.allocator);
         self.lifecycle_events.deinit();
         for (self.tools.items) |tool| tool.deinit(self.allocator);
         self.tools.deinit(self.allocator);
@@ -3345,6 +3783,13 @@ pub const Client = struct {
                 var frame_failure = failure_value;
                 if (isTransportEndOfStream(&frame_failure)) {
                     frame_failure.deinit();
+                    if (self.transport.eofIsIdle()) {
+                        return .{ .failure = try recordClientIo(
+                            self.allocator,
+                            .read,
+                            error.EndOfStream,
+                        ) };
+                    }
                     return .{ .failure = try self.recordReadFailure(error.EndOfStream) };
                 }
                 return .{ .failure = frame_failure };
@@ -3619,7 +4064,6 @@ pub const Client = struct {
         defer if (owned_detach_on_failure) |id| self.allocator.free(id);
         var detach_on_failure: ?[]const u8 = owned_session_id;
         defer if (!lifecycle_committed) {
-            self.quarantinePendingCredentials();
             self.rollbackProviderTokens();
             self.rollbackExtensionRuntime();
             if (lifecycle_rpc_dispatched) {
@@ -3826,7 +4270,14 @@ pub const Client = struct {
             .success => {},
             .failure => |failure| return .{ .failure = failure },
         }
-        self.commitExtensionRuntime(runtime_session_id, parsed.value, &.{}) catch |err|
+        self.prepareExtensionRuntimeCommit(runtime_session_id, parsed.value, &.{}) catch |err|
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordInvalidConfig,
+                .{ self.allocator, "extensions", err },
+            ) };
+        const session_index = self.commitSessionRecord() catch |err|
             return .{ .failure = try policyFailure(
                 failure_policy,
                 err,
@@ -3835,7 +4286,6 @@ pub const Client = struct {
             ) };
         self.session_filesystems.commitReplacement(self.allocator, runtime_session_id);
         self.commitProviderTokens();
-        const session_index = self.commitSessionRecord();
         lifecycle_committed = true;
         return .{ .success = self.sessionHandle(session_index) };
     }
@@ -4137,7 +4587,7 @@ pub const Client = struct {
             .success => {},
             .failure => |failure| return .{ .failure = failure },
         }
-        self.commitExtensionRuntime(
+        self.prepareExtensionRuntimeCommit(
             runtime_session_id,
             parsed.value,
             requested_environment_variables,
@@ -4147,9 +4597,23 @@ pub const Client = struct {
             recordInvalidConfig,
             .{ self.allocator, "extensions", err },
         ) };
+        const session_index = self.commitSessionRecord() catch |err|
+            if (err == error.ReentrantRpcCall)
+                return .{ .failure = try policyFailure(
+                    failure_policy,
+                    err,
+                    recordReentrant,
+                    .{ self.allocator, "session.resume" },
+                ) }
+            else
+                return .{ .failure = try policyFailure(
+                    failure_policy,
+                    err,
+                    recordInvalidConfig,
+                    .{ self.allocator, "extensions", err },
+                ) };
         self.session_filesystems.commitReplacement(self.allocator, runtime_session_id);
         self.commitProviderTokens();
-        const session_index = self.commitSessionRecord();
         lifecycle_committed = true;
         return .{ .success = self.sessionHandle(session_index) };
     }
@@ -4245,16 +4709,39 @@ pub const Client = struct {
     }
 
     fn rollbackExtensionRuntime(self: *Client) void {
-        self.quarantinePendingCredentials();
-        if (self.pending_extension_runtime) |*runtime| {
+        if (isCurrentRuntimeCallback(self)) {
+            self.extension_runtimes_mutex.lockUncancelable(self.io);
+            self.runtime_callbacks_blocked = true;
+            self.runtime_callbacks_ready.reset();
+            self.runtime_rollback_pending = true;
+            self.extension_runtimes_mutex.unlock(self.io);
+            return;
+        }
+        self.blockRuntimeCallbacks();
+        defer self.unblockRuntimeCallbacks();
+        self.rollbackExtensionRuntimeNow();
+    }
+
+    fn rollbackExtensionRuntimeNow(self: *Client) void {
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
+        var pending = self.pending_extension_runtime;
+        self.pending_extension_runtime = null;
+        self.extension_runtimes_mutex.unlock(self.io);
+        if (pending) |*runtime| {
+            runtime.quarantineCredentials(self.allocator);
             self.releaseMcpOAuthInterest(runtime) catch |err|
                 std.log.warn("failed to release MCP OAuth interest during rollback: {s}", .{@errorName(err)});
             runtime.deinit(self.allocator);
         }
-        self.pending_extension_runtime = null;
+        if (self.pending_provider_tokens) |provider_tokens| {
+            self.pending_provider_tokens = null;
+            provider_tokens.deinit(self.allocator);
+        }
     }
 
     fn quarantinePendingCredentials(self: *Client) void {
+        self.blockRuntimeCallbacks();
+        defer self.unblockRuntimeCallbacks();
         if (self.pending_extension_runtime) |*runtime| {
             runtime.quarantineCredentials(self.allocator);
         }
@@ -4262,6 +4749,80 @@ pub const Client = struct {
             self.pending_provider_tokens = null;
             pending.deinit(self.allocator);
         }
+    }
+
+    fn beginRuntimeCallback(
+        self: *Client,
+        scope: *RuntimeCallbackScope,
+    ) void {
+        while (true) {
+            self.extension_runtimes_mutex.lockUncancelable(self.io);
+            if (!self.runtime_callbacks_blocked) {
+                self.runtime_callback_count += 1;
+                self.runtime_callbacks_drained.reset();
+                self.extension_runtimes_mutex.unlock(self.io);
+                scope.* = .{
+                    .client = self,
+                    .previous = active_runtime_callback,
+                };
+                active_runtime_callback = scope;
+                return;
+            }
+            self.extension_runtimes_mutex.unlock(self.io);
+            self.runtime_callbacks_ready.waitUncancelable(self.io);
+        }
+    }
+
+    fn endRuntimeCallback(
+        self: *Client,
+        scope: *RuntimeCallbackScope,
+    ) void {
+        std.debug.assert(active_runtime_callback == scope);
+        active_runtime_callback = scope.previous;
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
+        std.debug.assert(self.runtime_callback_count != 0);
+        self.runtime_callback_count -= 1;
+        const finish_rollback =
+            self.runtime_callback_count == 0 and self.runtime_rollback_pending;
+        if (self.runtime_callback_count == 0)
+            self.runtime_callbacks_drained.set(self.io);
+        self.extension_runtimes_mutex.unlock(self.io);
+        if (finish_rollback) {
+            self.rollbackExtensionRuntimeNow();
+            self.extension_runtimes_mutex.lockUncancelable(self.io);
+            self.runtime_rollback_pending = false;
+            self.runtime_callbacks_blocked = false;
+            self.runtime_callbacks_ready.set(self.io);
+            self.extension_runtimes_mutex.unlock(self.io);
+        }
+    }
+
+    fn blockRuntimeCallbacks(self: *Client) void {
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
+        self.runtime_callbacks_blocked = true;
+        self.runtime_callbacks_ready.reset();
+        while (self.runtime_callback_count != 0) {
+            self.extension_runtimes_mutex.unlock(self.io);
+            self.runtime_callbacks_drained.waitUncancelable(self.io);
+            self.extension_runtimes_mutex.lockUncancelable(self.io);
+        }
+        self.extension_runtimes_mutex.unlock(self.io);
+    }
+
+    fn unblockRuntimeCallbacks(self: *Client) void {
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
+        self.runtime_callbacks_blocked = false;
+        self.runtime_callbacks_ready.set(self.io);
+        self.extension_runtimes_mutex.unlock(self.io);
+    }
+
+    fn isCurrentRuntimeCallback(self: *Client) bool {
+        var current = active_runtime_callback;
+        while (current) |scope| {
+            if (scope.client == self) return true;
+            current = scope.previous;
+        }
+        return false;
     }
 
     fn quarantineSessionCredentials(self: *Client, session_id: []const u8) void {
@@ -4321,7 +4882,7 @@ pub const Client = struct {
             return error.MissingSessionFilesystemProviderFactory;
     }
 
-    fn commitExtensionRuntime(
+    fn prepareExtensionRuntimeCommit(
         self: *Client,
         session_id: []const u8,
         response: WireSessionLifecycleResponse,
@@ -4388,69 +4949,94 @@ pub const Client = struct {
         const runtime_session_id = runtime.session_id orelse return error.MissingSessionId;
         if (!std.mem.eql(u8, runtime_session_id, owned_session_id))
             return error.UnexpectedSessionId;
-        for (self.extension_runtimes.items) |*existing| {
-            if (existing.session_id != null and
-                std.mem.eql(u8, existing.session_id.?, owned_session_id))
-            {
-                if (runtime.mcp_auth_handler != null and
-                    existing.mcp_oauth_interest == .none)
-                {
-                    try self.registerMcpOAuthInterest(runtime);
-                }
-                try self.commitPreparedExtensionRuntime(owned_session_id);
-                return;
-            }
-        }
-        try self.extension_runtimes.ensureUnusedCapacity(self.allocator, 1);
-        if (runtime.mcp_auth_handler != null) {
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
+        const existing_index = self.findCommittedExtensionRuntimeIndex(owned_session_id);
+        const existing_interest = if (existing_index) |index|
+            std.meta.activeTag(self.extension_runtimes.items[index].mcp_oauth_interest)
+        else
+            null;
+        if (existing_index == null)
+            self.extension_runtimes.ensureUnusedCapacity(self.allocator, 1) catch |err| {
+                self.extension_runtimes_mutex.unlock(self.io);
+                return err;
+            };
+        self.extension_runtimes_mutex.unlock(self.io);
+        if (runtime.mcp_auth_handler != null and
+            (existing_interest == null or existing_interest.? == .none))
+        {
             try self.registerMcpOAuthInterest(runtime);
         }
-        try self.commitPreparedExtensionRuntime(owned_session_id);
+        if (runtime.mcp_auth_handler == null and existing_index != null)
+            try self.releaseCommittedMcpOAuthInterest(owned_session_id);
     }
 
-    fn commitPreparedExtensionRuntime(self: *Client, owned_session_id: []const u8) !void {
-        const pending_has_auth_handler = pending: {
-            const pending = self.resolveMcpOAuthRuntime(owned_session_id, .pending) orelse
-                return error.MissingExtensionRuntime;
-            break :pending pending.mcp_auth_handler != null;
-        };
-        if (self.findCommittedExtensionRuntimeIndex(owned_session_id) == null) {
-            try self.extension_runtimes.ensureUnusedCapacity(self.allocator, 1);
+    fn commitPreparedExtensionRuntimeLocked(
+        self: *Client,
+        owned_session_id: []const u8,
+    ) void {
+        const pending = &self.pending_extension_runtime.?;
+        const pending_session_id = pending.session_id.?;
+        std.debug.assert(std.mem.eql(u8, pending_session_id, owned_session_id));
+        const existing_index = self.findCommittedExtensionRuntimeIndex(owned_session_id);
+        if (existing_index == null) {
             const committed = self.pending_extension_runtime.?;
             self.pending_extension_runtime = null;
             self.extension_runtimes.appendAssumeCapacity(committed);
             return;
         }
-        if (!pending_has_auth_handler) {
-            const release_index = self.findCommittedExtensionRuntimeIndex(owned_session_id) orelse
-                return error.MissingExtensionRuntime;
-            self.releaseMcpOAuthInterest(&self.extension_runtimes.items[release_index]) catch |err| {
-                if (err == error.MissingExtensionRuntime) return err;
-                return error.EventInterestNotReleased;
-            };
+        const existing = &self.extension_runtimes.items[existing_index.?];
+        if (pending.mcp_auth_handler != null and pending.mcp_oauth_interest == .none) {
+            pending.mcp_oauth_interest = existing.mcp_oauth_interest;
+            existing.mcp_oauth_interest = .none;
         }
-
-        const current_pending = self.resolveMcpOAuthRuntime(owned_session_id, .pending) orelse
-            return error.MissingExtensionRuntime;
-        const current_index = self.findCommittedExtensionRuntimeIndex(owned_session_id) orelse
-            return error.MissingExtensionRuntime;
-        const current_existing = &self.extension_runtimes.items[current_index];
-        if (pending_has_auth_handler and current_pending.mcp_oauth_interest == .none) {
-            switch (current_existing.mcp_oauth_interest) {
-                .registered => |interest| {
-                    current_pending.mcp_oauth_interest = .{ .registered = interest };
-                    current_existing.mcp_oauth_interest = .none;
-                },
-                .restore_required => return error.EventInterestRestoreRequired,
-                .registering, .releasing => return error.EventInterestOperationInProgress,
-                .none => {},
-            }
-        }
-        current_pending.event_queue_failure = current_existing.event_queue_failure;
+        pending.event_queue_failure = existing.event_queue_failure;
         const replacement = self.pending_extension_runtime.?;
         self.pending_extension_runtime = null;
-        current_existing.deinit(self.allocator);
-        self.extension_runtimes.items[current_index] = replacement;
+        existing.deinit(self.allocator);
+        self.extension_runtimes.items[existing_index.?] = replacement;
+    }
+
+    fn releaseCommittedMcpOAuthInterest(
+        self: *Client,
+        session_id: []const u8,
+    ) !void {
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
+        const index = self.findCommittedExtensionRuntimeIndex(session_id) orelse {
+            self.extension_runtimes_mutex.unlock(self.io);
+            return error.MissingExtensionRuntime;
+        };
+        const runtime = &self.extension_runtimes.items[index];
+        var interest = switch (runtime.mcp_oauth_interest) {
+            .none => {
+                self.extension_runtimes_mutex.unlock(self.io);
+                return;
+            },
+            .restore_required => {
+                self.extension_runtimes_mutex.unlock(self.io);
+                return error.EventInterestRestoreRequired;
+            },
+            .registering, .releasing => {
+                self.extension_runtimes_mutex.unlock(self.io);
+                return error.EventInterestOperationInProgress;
+            },
+            .registered => |owned| owned,
+        };
+        runtime.mcp_oauth_interest = .none;
+        self.extension_runtimes_mutex.unlock(self.io);
+        self.releaseMcpOAuthInterestOwner(session_id, &interest) catch |err| {
+            self.extension_runtimes_mutex.lockUncancelable(self.io);
+            if (self.findCommittedExtensionRuntime(session_id)) |current| {
+                if (current.mcp_oauth_interest == .none) {
+                    current.mcp_oauth_interest = .{ .registered = interest };
+                    self.extension_runtimes_mutex.unlock(self.io);
+                    return err;
+                }
+            }
+            self.extension_runtimes_mutex.unlock(self.io);
+            interest.deinitSecure();
+            return err;
+        };
+        interest.deinitSecure();
     }
 
     fn registerMcpOAuthInterest(
@@ -4605,24 +5191,32 @@ pub const Client = struct {
         session_id: []const u8,
         config: session_types.JoinSessionConfig,
     ) !JoinedSession {
+        const owned_session_id = try self.allocator.dupe(u8, session_id);
+        defer self.allocator.free(owned_session_id);
         const resume_config = resumeConfigFromJoin(config);
-        // Extension SDK overrides are structurally impossible here.
         const session = try legacyResult(
             Session,
             self.resumeSessionWithEnvironment(
                 .legacy,
-                session_id,
+                owned_session_id,
                 resume_config,
                 config.extensions.requested_environment_variables,
             ),
         );
         const grants = session.snapshotEnvironmentGrants(self.allocator) catch |err| {
             session.disconnect() catch |cleanup_err| {
-                if (self.findExtensionRuntime(session.id)) |runtime| {
+                if (self.findExtensionRuntime(owned_session_id)) |runtime| {
                     self.releaseMcpOAuthInterest(runtime) catch |release_err|
                         std.log.warn("failed to release MCP OAuth interest after join cleanup: {s}", .{@errorName(release_err)});
                 }
-                self.removeSession(session.id);
+                self.removeSessionExpected(
+                    session.record_index,
+                    owned_session_id,
+                    session.generation,
+                ) catch |remove_err| switch (remove_err) {
+                    error.SessionNotActive => {},
+                    else => return remove_err,
+                };
                 return cleanup_err;
             };
             return err;
@@ -4982,7 +5576,14 @@ pub const Client = struct {
         );
         return switch (deletion) {
             .success => {
-                self.removeSession(session_id);
+                self.removeSession(session_id) catch |err| return .{
+                    .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordClientIo,
+                        .{ self.allocator, .callback, err },
+                    ),
+                };
                 return .{ .success = {} };
             },
             .failure => |failure| .{ .failure = failure },
@@ -5057,7 +5658,7 @@ pub const Client = struct {
         context: OperationContext,
         dispatched: ?*bool,
     ) errors.DetailedError!PolicyResult(failure_policy, std.json.Parsed(Result)) {
-        if (self.dispatching_rpc_handler)
+        if (self.isRpcHandlerThread())
             return .{ .failure = try policyFailure(
                 failure_policy,
                 error.ReentrantRpcCall,
@@ -5066,8 +5667,7 @@ pub const Client = struct {
             ) };
         if (self.transport_closed)
             return .{ .failure = try self.closedTransportFailure(failure_policy) };
-        const id = self.next_request_id;
-        self.next_request_id += 1;
+        const id = self.nextRequestId();
 
         const request = json_rpc.encodeRequest(self.allocator, id, method, params) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
@@ -5082,6 +5682,33 @@ pub const Client = struct {
             wipeSecret(request);
             self.allocator.free(request);
         }
+        if (self.beginRpcCall()) {
+            return self.callPumped(
+                failure_policy,
+                Result,
+                id,
+                method,
+                request,
+                context,
+                dispatched,
+            );
+        }
+        defer self.endDirectRpcCall();
+        if (self.direct_request_count == self.direct_request_ids.len)
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                error.ReentrantRpcCall,
+                recordReentrant,
+                .{ self.allocator, method },
+            ) };
+        self.direct_request_ids[self.direct_request_count] = id;
+        self.direct_request_count += 1;
+        defer {
+            std.debug.assert(self.direct_request_count != 0);
+            std.debug.assert(self.direct_request_ids[self.direct_request_count - 1] == id);
+            self.direct_request_count -= 1;
+            self.discardBufferedResponse(id);
+        }
         if (dispatched) |value| value.* = true;
         writeFrameAndWipe(
             self.transportWriter(),
@@ -5095,16 +5722,22 @@ pub const Client = struct {
         ) };
 
         while (true) {
-            const body = switch (try self.readTransportFrame(failure_policy)) {
-                .success => |value| value,
-                .failure => |failure| return .{ .failure = failure },
-            };
+            const body = self.takeBufferedResponse(id) orelse
+                switch (try self.readTransportFrame(failure_policy)) {
+                    .success => |value| value,
+                    .failure => |failure| return .{ .failure = failure },
+                };
             var body_owned = true;
             defer if (body_owned) {
                 wipeSecret(body);
                 self.allocator.free(body);
             };
-            const value = std.json.parseFromSlice(std.json.Value, self.allocator, body, .{}) catch |err| {
+            const value = std.json.parseFromSlice(
+                std.json.Value,
+                self.allocator,
+                body,
+                .{},
+            ) catch |err| {
                 if (err == error.OutOfMemory) return error.OutOfMemory;
                 return .{ .failure = try policyFailure(
                     failure_policy,
@@ -5163,13 +5796,24 @@ pub const Client = struct {
                     continue;
                 },
                 .response => |response| {
-                    if (response.id != id)
+                    if (response.id != id) {
+                        if (self.isDirectRequestActive(response.id) and
+                            !self.hasBufferedResponse(response.id))
+                        {
+                            try self.buffered_responses.append(self.allocator, .{
+                                .id = response.id,
+                                .body = body,
+                            });
+                            body_owned = false;
+                            continue;
+                        }
                         return .{ .failure = try policyFailure(
                             failure_policy,
                             error.UnexpectedResponse,
                             recordUnexpectedResponse,
                             .{ self.allocator, id, response.id_value },
                         ) };
+                    }
                     if (response.rpc_error) |rpc_error| {
                         const rpc_failure = switch (validateRpcFailure(
                             method,
@@ -5226,8 +5870,726 @@ pub const Client = struct {
         }
     }
 
-    fn isActiveRequest(self: *const Client, id: u64) bool {
-        for (self.active_request_ids[0..self.active_request_count]) |active_id| {
+    fn callPumped(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+        comptime Result: type,
+        id: u64,
+        method: []const u8,
+        request: []const u8,
+        context: OperationContext,
+        dispatched: ?*bool,
+    ) errors.DetailedError!PolicyResult(failure_policy, std.json.Parsed(Result)) {
+        var pending = PendingCall{
+            .id = id,
+            .wants_detail = failure_policy == .detailed,
+        };
+        self.pending_mutex.lockUncancelable(self.io);
+        if (self.pump_terminal_error) |native_error| {
+            if (comptime failure_policy == .detailed) {
+                if (self.pump_failure) |*failure| {
+                    const owned = failure.clone(self.allocator) catch |err| {
+                        self.pending_mutex.unlock(self.io);
+                        return err;
+                    };
+                    self.pending_mutex.unlock(self.io);
+                    return .{ .failure = owned };
+                }
+            }
+            self.pending_mutex.unlock(self.io);
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                native_error,
+                recordClientIo,
+                .{ self.allocator, .read, native_error },
+            ) };
+        }
+        self.pending_calls.append(self.allocator, &pending) catch |err| {
+            self.pending_mutex.unlock(self.io);
+            return err;
+        };
+        if (builtin.is_test) {
+            if (self.pending_call_admission_probe) |probe| {
+                if (self.pending_calls.items.len >= probe.target) {
+                    probe.ready.set(self.io);
+                    if (probe.release) |release| release.set(self.io);
+                }
+            }
+        }
+        for (self.retained_responses.items, 0..) |retained, index| {
+            if (retained.id != id) continue;
+            pending.response = retained.body;
+            _ = self.retained_responses.orderedRemove(index);
+            pending.completed.set(self.io);
+            break;
+        }
+        self.pending_mutex.unlock(self.io);
+        defer {
+            if (self.removePendingCallAndTakeResponse(&pending)) |response| {
+                wipeSecret(response);
+                self.allocator.free(response);
+            }
+            pending.failure_detail.deinit();
+        }
+
+        self.ensurePump() catch |err| return .{ .failure = try policyFailure(
+            failure_policy,
+            err,
+            recordClientIo,
+            .{ self.allocator, .read, err },
+        ) };
+
+        if (dispatched) |value| value.* = true;
+        self.writer_mutex.lockUncancelable(self.io);
+        const write_result = writeFrameAndWipe(
+            self.transportWriter(),
+            self.transportWriterBuffer(),
+            request,
+        );
+        self.writer_mutex.unlock(self.io);
+        write_result catch |err| return .{ .failure = try policyFailure(
+            failure_policy,
+            err,
+            recordClientIo,
+            .{ self.allocator, .write, err },
+        ) };
+
+        pending.completed.wait(self.io) catch |err| return .{ .failure = try policyFailure(
+            failure_policy,
+            err,
+            recordClientIo,
+            .{ self.allocator, .read, err },
+        ) };
+        self.pending_mutex.lockUncancelable(self.io);
+        const response = pending.response;
+        pending.response = null;
+        const native_failure = pending.failure;
+        var detailed_failure = pending.failure_detail;
+        pending.failure_detail = .none;
+        self.pending_mutex.unlock(self.io);
+        if (native_failure) |err| {
+            if (comptime failure_policy == .detailed) {
+                switch (detailed_failure) {
+                    .failure => |failure| return .{ .failure = failure },
+                    .unavailable => return error.OutOfMemory,
+                    .none => {},
+                }
+            } else {
+                detailed_failure.deinit();
+            }
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordClientIo,
+                .{ self.allocator, .read, err },
+            ) };
+        }
+        detailed_failure.deinit();
+        const body = response orelse
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                error.MissingResponse,
+                recordClientIo,
+                .{ self.allocator, .read, error.MissingResponse },
+            ) };
+        defer {
+            wipeSecret(body);
+            self.allocator.free(body);
+        }
+        return self.parseCallResponse(failure_policy, Result, id, method, context, body);
+    }
+
+    fn parseCallResponse(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+        comptime Result: type,
+        id: u64,
+        method: []const u8,
+        context: OperationContext,
+        body: []const u8,
+    ) errors.DetailedError!PolicyResult(failure_policy, std.json.Parsed(Result)) {
+        const value = std.json.parseFromSlice(
+            std.json.Value,
+            self.allocator,
+            body,
+            .{},
+        ) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordInvalidJson,
+                .{ self.allocator, err },
+            ) };
+        };
+        defer {
+            wipeJsonStrings(value.value);
+            value.deinit();
+        }
+        const inbound = switch (try parseInboundMessage(
+            failure_policy,
+            self.allocator,
+            value.value,
+        )) {
+            .success => |message| message,
+            .failure => |failure| return .{ .failure = failure },
+        };
+        const response = switch (inbound) {
+            .response => |response| response,
+            else => return .{ .failure = try policyFailure(
+                failure_policy,
+                error.UnexpectedResponse,
+                recordUnexpectedResponse,
+                .{ self.allocator, id, value.value },
+            ) },
+        };
+        if (response.id != id)
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                error.UnexpectedResponse,
+                recordUnexpectedResponse,
+                .{ self.allocator, id, response.id_value },
+            ) };
+        if (response.rpc_error) |rpc_error| {
+            const rpc_failure = switch (validateRpcFailure(
+                method,
+                id,
+                context,
+                rpc_error,
+            )) {
+                .valid => |failure| failure,
+                .invalid => |reason| return .{ .failure = try policyFailure(
+                    failure_policy,
+                    envelopeError(reason),
+                    recordEnvelope,
+                    .{ self.allocator, reason, value.value },
+                ) },
+            };
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                error.JsonRpcError,
+                recordRpcFailure,
+                .{ self.allocator, rpc_failure },
+            ) };
+        }
+        const result = response.result orelse
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                envelopeError(.missing_result_and_error),
+                recordEnvelope,
+                .{ self.allocator, .missing_result_and_error, value.value },
+            ) };
+        const result_json = try std.json.Stringify.valueAlloc(self.allocator, result, .{});
+        defer {
+            wipeSecret(result_json);
+            self.allocator.free(result_json);
+        }
+        const parsed = std.json.parseFromSlice(Result, self.allocator, result_json, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        }) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordClientJson,
+                .{ self.allocator, .read, err },
+            ) };
+        };
+        return .{ .success = parsed };
+    }
+
+    fn ensurePump(
+        self: *Client,
+    ) error{ OutOfMemory, ClientDeinitialized, ReentrantRpcCall }!void {
+        const current_thread = std.Thread.getCurrentId();
+        while (true) {
+            self.pending_mutex.lockUncancelable(self.io);
+            if (self.pump_closing) {
+                self.pending_mutex.unlock(self.io);
+                return error.ClientDeinitialized;
+            }
+            if (self.pump_future != null) {
+                self.pending_mutex.unlock(self.io);
+                return;
+            }
+            if (self.direct_call_active) {
+                if (self.direct_call_owner == current_thread) {
+                    self.pending_mutex.unlock(self.io);
+                    return error.ReentrantRpcCall;
+                }
+                self.pending_mutex.unlock(self.io);
+                self.direct_call_done.waitUncancelable(self.io);
+                continue;
+            }
+            self.pump_future = self.io.concurrent(pumpMain, .{self}) catch {
+                self.pending_mutex.unlock(self.io);
+                return error.OutOfMemory;
+            };
+            self.pending_mutex.unlock(self.io);
+            return;
+        }
+    }
+
+    fn isPumpRunning(self: *Client) bool {
+        self.pending_mutex.lockUncancelable(self.io);
+        defer self.pending_mutex.unlock(self.io);
+        return self.pump_future != null and !self.pump_closing;
+    }
+
+    fn isRpcHandlerThread(self: *Client) bool {
+        self.pending_mutex.lockUncancelable(self.io);
+        defer self.pending_mutex.unlock(self.io);
+        return self.rpc_handler_depth != 0 and
+            self.rpc_handler_owner == std.Thread.getCurrentId();
+    }
+
+    fn beginRpcHandler(self: *Client) void {
+        const current_thread = std.Thread.getCurrentId();
+        self.pending_mutex.lockUncancelable(self.io);
+        defer self.pending_mutex.unlock(self.io);
+        std.debug.assert(
+            self.rpc_handler_owner == null or self.rpc_handler_owner == current_thread,
+        );
+        self.rpc_handler_owner = current_thread;
+        self.rpc_handler_depth += 1;
+    }
+
+    fn endRpcHandler(self: *Client) void {
+        self.pending_mutex.lockUncancelable(self.io);
+        defer self.pending_mutex.unlock(self.io);
+        std.debug.assert(self.rpc_handler_owner == std.Thread.getCurrentId());
+        std.debug.assert(self.rpc_handler_depth != 0);
+        self.rpc_handler_depth -= 1;
+        if (self.rpc_handler_depth == 0) self.rpc_handler_owner = null;
+    }
+
+    fn beginRpcCall(self: *Client) bool {
+        const current_thread = std.Thread.getCurrentId();
+        while (true) {
+            self.pending_mutex.lockUncancelable(self.io);
+            if (self.pump_future != null) {
+                self.pending_mutex.unlock(self.io);
+                return true;
+            }
+            if (self.direct_call_owner == current_thread) {
+                self.direct_call_depth += 1;
+                self.pending_mutex.unlock(self.io);
+                return false;
+            }
+            if (!self.direct_call_active) {
+                self.direct_call_active = true;
+                self.direct_call_owner = current_thread;
+                self.direct_call_depth = 1;
+                self.direct_call_done.reset();
+                self.pending_mutex.unlock(self.io);
+                return false;
+            }
+            self.pending_mutex.unlock(self.io);
+            self.direct_call_done.waitUncancelable(self.io);
+        }
+    }
+
+    fn endDirectRpcCall(self: *Client) void {
+        self.pending_mutex.lockUncancelable(self.io);
+        std.debug.assert(self.direct_call_owner == std.Thread.getCurrentId());
+        std.debug.assert(self.direct_call_depth > 0);
+        self.direct_call_depth -= 1;
+        if (self.direct_call_depth != 0) {
+            self.pending_mutex.unlock(self.io);
+            return;
+        }
+        self.direct_call_active = false;
+        self.direct_call_owner = null;
+        self.direct_call_done.set(self.io);
+        self.pending_mutex.unlock(self.io);
+    }
+
+    fn stopPump(self: *Client) void {
+        self.pending_mutex.lockUncancelable(self.io);
+        self.pump_closing = true;
+        var future = self.pump_future;
+        self.pump_future = null;
+        self.pending_mutex.unlock(self.io);
+        if (future) |*pump| pump.cancel(self.io);
+        self.finishPumpWithoutDetail(error.ClientDeinitialized);
+    }
+
+    fn removePendingCallAndTakeResponse(
+        self: *Client,
+        pending: *PendingCall,
+    ) ?[]u8 {
+        self.pending_mutex.lockUncancelable(self.io);
+        defer self.pending_mutex.unlock(self.io);
+        for (self.pending_calls.items, 0..) |candidate, index| {
+            if (candidate != pending) continue;
+            _ = self.pending_calls.orderedRemove(index);
+            const response = pending.response;
+            pending.response = null;
+            return response;
+        }
+        return null;
+    }
+
+    fn pumpMain(self: *Client) void {
+        if (builtin.is_test) {
+            if (self.pump_read_gate) |gate| gate.wait(self.io) catch return;
+        }
+        while (true) {
+            const read = self.readTransportFrame(.detailed) catch |err| {
+                self.finishPumpNative(err);
+                return;
+            };
+            const body = switch (read) {
+                .success => |value| value,
+                .failure => |failure| {
+                    if (self.transport.eofIsIdle() and
+                        (failure.native_error == error.EndOfStream or
+                            failure.native_error == error.MissingContentLength))
+                    {
+                        var ignored = failure;
+                        ignored.deinit();
+                        return;
+                    }
+                    self.finishPumpFailure(failure);
+                    return;
+                },
+            };
+            var body_owned = true;
+            defer if (body_owned) {
+                wipeSecret(body);
+                self.allocator.free(body);
+            };
+            const value = std.json.parseFromSlice(
+                std.json.Value,
+                self.allocator,
+                body,
+                .{},
+            ) catch |err| {
+                const failure = recordInvalidJson(self.allocator, err) catch {
+                    self.finishPumpWithoutDetail(err);
+                    return;
+                };
+                self.finishPumpFailure(failure);
+                return;
+            };
+            defer {
+                wipeJsonStrings(value.value);
+                value.deinit();
+            }
+            const inbound = parseInboundMessage(
+                .detailed,
+                self.allocator,
+                value.value,
+            ) catch |err| {
+                self.finishPumpNative(err);
+                return;
+            };
+            switch (inbound) {
+                .failure => |failure| {
+                    self.finishPumpFailure(failure);
+                    return;
+                },
+                .success => |message| switch (message) {
+                    .request => |request| {
+                        self.writer_mutex.lockUncancelable(self.io);
+                        var operation: errors.ClientOperation = .callback;
+                        const result = self.dispatchServerRequestTracked(
+                            self.transportWriter(),
+                            request.id,
+                            request.method,
+                            request.params,
+                            &operation,
+                        );
+                        self.writer_mutex.unlock(self.io);
+                        result catch |err| {
+                            self.finishPumpNative(err);
+                            return;
+                        };
+                    },
+                    .notification => |notification| {
+                        const routed = self.routeNotification(
+                            .detailed,
+                            body,
+                            notification.method,
+                            notification.params,
+                            value.value,
+                        ) catch |err| {
+                            self.finishPumpNative(err);
+                            return;
+                        };
+                        switch (routed) {
+                            .failure => |failure| {
+                                self.finishPumpFailure(failure);
+                                return;
+                            },
+                            .success => |disposition| {
+                                body_owned = disposition == .reader_releases_frame;
+                            },
+                        }
+                    },
+                    .response => |response| {
+                        const owned = self.allocator.dupe(u8, body) catch |err| {
+                            self.finishPumpNative(err);
+                            return;
+                        };
+                        self.routePumpedResponse(response.id, owned) catch |err| {
+                            wipeSecret(owned);
+                            self.allocator.free(owned);
+                            self.finishPumpNative(err);
+                            return;
+                        };
+                    },
+                },
+            }
+        }
+    }
+
+    fn routePumpedResponse(self: *Client, id: u64, body: []u8) !void {
+        self.pending_mutex.lockUncancelable(self.io);
+        defer self.pending_mutex.unlock(self.io);
+        for (self.pending_calls.items) |pending| {
+            if (pending.id != id) continue;
+            if (pending.response != null or pending.failure != null) {
+                wipeSecret(body);
+                self.allocator.free(body);
+                return;
+            }
+            pending.response = body;
+            pending.completed.set(self.io);
+            return;
+        }
+        if (self.retained_responses.items.len >= retained_response_limit)
+            return error.TooManyRetainedResponses;
+        try self.retained_responses.append(self.allocator, .{ .id = id, .body = body });
+    }
+
+    fn finishPumpNative(self: *Client, err: anyerror) void {
+        const failure = recordClientIo(self.allocator, .read, err) catch {
+            self.finishPumpWithoutDetail(err);
+            return;
+        };
+        self.finishPumpFailure(failure);
+    }
+
+    fn finishPumpWithoutDetail(self: *Client, err: anyerror) void {
+        self.pending_mutex.lockUncancelable(self.io);
+        if (self.pump_terminal_error == null) self.pump_terminal_error = err;
+        for (self.pending_calls.items) |pending| {
+            if (pending.response == null) pending.failure = err;
+            pending.completed.set(self.io);
+        }
+        self.pending_mutex.unlock(self.io);
+        self.lifecycle_event_ready.set(self.io);
+        self.failEventLogs(err);
+    }
+
+    fn finishPumpFailure(self: *Client, failure_value: errors.Failure) void {
+        var failure = failure_value;
+        const native_error = failure.native_error;
+        self.pending_mutex.lockUncancelable(self.io);
+        if (self.pump_terminal_error == null) self.pump_terminal_error = native_error;
+        if (self.pump_failure == null) {
+            self.pump_failure = failure;
+        } else {
+            failure.deinit();
+        }
+        const retained_failure = &self.pump_failure.?;
+        const terminal_error = retained_failure.native_error;
+        for (self.pending_calls.items) |pending| {
+            if (pending.response == null) {
+                pending.failure = terminal_error;
+                if (pending.wants_detail) {
+                    pending.failure_detail.deinit();
+                    pending.failure_detail = if (retained_failure.clone(self.allocator)) |detail|
+                        .{ .failure = detail }
+                    else |_|
+                        .unavailable;
+                }
+            }
+            pending.completed.set(self.io);
+        }
+        self.pending_mutex.unlock(self.io);
+        self.lifecycle_event_ready.set(self.io);
+        self.failEventLogsDetailed(retained_failure);
+    }
+
+    fn failEventLogsDetailed(self: *Client, failure: *const errors.Failure) void {
+        self.event_logs_mutex.lockUncancelable(self.io);
+        defer self.event_logs_mutex.unlock(self.io);
+        for (self.event_logs.items) |log| {
+            var terminal_failure = failure.clone(self.allocator) catch {
+                log.fail(failure.native_error);
+                continue;
+            };
+            const turn_failure = failure.clone(self.allocator) catch {
+                terminal_failure.deinit();
+                log.fail(failure.native_error);
+                continue;
+            };
+            log.failPumpDetailed(terminal_failure, turn_failure) catch {
+                log.fail(failure.native_error);
+            };
+        }
+    }
+
+    fn failEventLogs(self: *Client, err: anyerror) void {
+        self.event_logs_mutex.lockUncancelable(self.io);
+        defer self.event_logs_mutex.unlock(self.io);
+        for (self.event_logs.items) |log| log.fail(err);
+    }
+
+    fn clonePumpFailure(self: *Client) !?errors.Failure {
+        self.pending_mutex.lockUncancelable(self.io);
+        defer self.pending_mutex.unlock(self.io);
+        const failure = if (self.pump_failure) |*value| value else return null;
+        return try failure.clone(self.allocator);
+    }
+
+    fn startSendOperation(
+        self: *Client,
+        lease: EventLogLease,
+        receipt: turn_tracker.ReceiptToken,
+        options: session_types.MessageOptions,
+        attachments: ?WireAttachments,
+        source: ?[]const u8,
+        trace_context: runtime_types.TraceContext,
+    ) !*SendOperation {
+        self.reapSendOperations();
+        const request_id = self.nextRequestId();
+        const request = try json_rpc.encodeRequest(
+            self.allocator,
+            request_id,
+            "session.send",
+            lowerMessage(
+                lease.log.session_id,
+                options,
+                attachments,
+                source,
+                trace_context,
+            ),
+        );
+        errdefer {
+            wipeSecret(request);
+            self.allocator.free(request);
+        }
+        const operation = try self.allocator.create(SendOperation);
+        errdefer self.allocator.destroy(operation);
+        operation.* = .{
+            .client = self,
+            .log_lease = lease.clone(),
+            .receipt = receipt,
+            .request_id = request_id,
+            .request = request,
+        };
+        errdefer operation.log_lease.deinit();
+        self.send_operations_mutex.lockUncancelable(self.io);
+        if (self.send_operations.items.len >= detached_send_limit) {
+            self.send_operations_mutex.unlock(self.io);
+            return error.TooManyPendingSends;
+        }
+        self.send_operations.append(self.allocator, operation) catch |err| {
+            self.send_operations_mutex.unlock(self.io);
+            return err;
+        };
+        self.send_operations_mutex.unlock(self.io);
+        const future = self.io.concurrent(sendOperationMain, .{operation}) catch |err| {
+            self.send_operations_mutex.lockUncancelable(self.io);
+            for (self.send_operations.items, 0..) |candidate, index| {
+                if (candidate == operation) {
+                    _ = self.send_operations.orderedRemove(index);
+                    break;
+                }
+            }
+            self.send_operations_mutex.unlock(self.io);
+            return err;
+        };
+        self.send_operations_mutex.lockUncancelable(self.io);
+        operation.future = future;
+        operation.future_published = true;
+        self.send_operations_mutex.unlock(self.io);
+        return operation;
+    }
+
+    fn nextRequestId(self: *Client) u64 {
+        self.pending_mutex.lockUncancelable(self.io);
+        defer self.pending_mutex.unlock(self.io);
+        const id = self.next_request_id;
+        self.next_request_id += 1;
+        return id;
+    }
+
+    fn sendOperationMain(operation: *SendOperation) void {
+        defer operation.completed.set(operation.client.io);
+        const result = operation.client.callPumped(
+            .detailed,
+            struct { messageId: []const u8 },
+            operation.request_id,
+            "session.send",
+            operation.request,
+            .{ .session = .{ .session_id = operation.log_lease.log.session_id } },
+            null,
+        ) catch |err| {
+            operation.log_lease.log.failTurn(operation.receipt, err);
+            return;
+        };
+        switch (result) {
+            .failure => |failure| {
+                operation.failure = failure;
+                operation.log_lease.log.failTurn(operation.receipt, failure.native_error);
+            },
+            .success => |parsed_value| {
+                var parsed = parsed_value;
+                defer parsed.deinit();
+                operation.log_lease.log.bindTurnMessage(
+                    operation.receipt,
+                    parsed.value.messageId,
+                ) catch |err| {
+                    operation.failure = recordClientIo(
+                        operation.client.allocator,
+                        .read,
+                        err,
+                    ) catch null;
+                    operation.log_lease.log.failTurn(operation.receipt, err);
+                };
+            },
+        }
+    }
+
+    fn reapSendOperations(self: *Client) void {
+        while (true) {
+            self.send_operations_mutex.lockUncancelable(self.io);
+            var completed: ?*SendOperation = null;
+            for (self.send_operations.items, 0..) |operation, index| {
+                if (!operation.detached or
+                    !operation.future_published or
+                    !operation.completed.isSet())
+                {
+                    continue;
+                }
+                completed = self.send_operations.orderedRemove(index);
+                break;
+            }
+            self.send_operations_mutex.unlock(self.io);
+            const operation = completed orelse return;
+            self.destroySendOperation(operation);
+        }
+    }
+
+    fn claimSendOperation(self: *Client, operation: *SendOperation) ?*SendOperation {
+        self.send_operations_mutex.lockUncancelable(self.io);
+        defer self.send_operations_mutex.unlock(self.io);
+        for (self.send_operations.items, 0..) |candidate, index| {
+            if (candidate != operation or candidate.detached or
+                !candidate.future_published or
+                !candidate.completed.isSet()) continue;
+            return self.send_operations.orderedRemove(index);
+        }
+        return null;
+    }
+
+    fn isDirectRequestActive(self: *const Client, id: u64) bool {
+        for (self.direct_request_ids[0..self.direct_request_count]) |active_id| {
             if (active_id == id) return true;
         }
         return false;
@@ -5245,6 +6607,45 @@ pub const Client = struct {
             if (response.id == id) return self.buffered_responses.orderedRemove(index).body;
         }
         return null;
+    }
+
+    fn discardBufferedResponse(self: *Client, id: u64) void {
+        const body = self.takeBufferedResponse(id) orelse return;
+        wipeSecret(body);
+        self.allocator.free(body);
+    }
+
+    fn detachSendOperation(self: *Client, operation: *SendOperation) void {
+        self.send_operations_mutex.lockUncancelable(self.io);
+        defer self.send_operations_mutex.unlock(self.io);
+        for (self.send_operations.items) |candidate| {
+            if (candidate == operation) {
+                candidate.detached = true;
+                return;
+            }
+        }
+    }
+
+    fn destroySendOperation(self: *Client, operation: *SendOperation) void {
+        if (operation.future) |*future| future.await(self.io);
+        if (operation.failure) |*failure| failure.deinit();
+        wipeSecret(operation.request);
+        self.allocator.free(operation.request);
+        operation.log_lease.deinit();
+        self.allocator.destroy(operation);
+    }
+
+    fn finishSendOperations(self: *Client) void {
+        while (true) {
+            self.send_operations_mutex.lockUncancelable(self.io);
+            const operation = if (self.send_operations.items.len == 0)
+                null
+            else
+                self.send_operations.orderedRemove(0);
+            self.send_operations_mutex.unlock(self.io);
+            const value = operation orelse return;
+            self.destroySendOperation(value);
+        }
     }
 
     fn findCommittedExtensionRuntimeIndex(
@@ -5277,20 +6678,6 @@ pub const Client = struct {
         try json_rpc.writeFrame(writer, response);
     }
 
-    fn dispatchTransportServerRequest(
-        self: *Client,
-        id: std.json.Value,
-        method: []const u8,
-        params: ?std.json.Value,
-    ) !void {
-        const writer = self.transportWriter();
-        defer {
-            wipeSecret(self.transportWriterBuffer());
-            writer.end = 0;
-        }
-        try self.dispatchServerRequest(writer, id, method, params);
-    }
-
     fn dispatchServerRequest(
         self: *Client,
         writer: *std.Io.Writer,
@@ -5312,6 +6699,27 @@ pub const Client = struct {
     ) !void {
         const typed_request = typedServerRequest(method);
         if (typed_request) |request| {
+            var lifetime = try self.acquireServerRequestLifetime(params);
+            if (lifetime == .inactive)
+                return self.writeServerRequestError(
+                    writer,
+                    id,
+                    -32602,
+                    "inactive session",
+                );
+            defer if (lifetime == .active) {
+                var lease = &lifetime.active;
+                self.finishSessionIngress(lease.log);
+                lease.deinit();
+            };
+            var ingress_scope: SessionIngressScope = undefined;
+            if (lifetime == .active)
+                beginSessionIngressScope(&ingress_scope, lifetime.active.log);
+            defer if (lifetime == .active)
+                endSessionIngressScope(&ingress_scope);
+            var runtime_scope: RuntimeCallbackScope = undefined;
+            self.beginRuntimeCallback(&runtime_scope);
+            defer self.endRuntimeCallback(&runtime_scope);
             if (self.hasApplicableTypedRegistration(request, method, params)) {
                 return self.dispatchTypedServerRequest(
                     request,
@@ -5349,8 +6757,8 @@ pub const Client = struct {
             self.allocator.free(json);
         };
 
-        self.dispatching_rpc_handler = true;
-        defer self.dispatching_rpc_handler = false;
+        self.beginRpcHandler();
+        defer self.endRpcHandler();
         const result_json = registered.handler(
             self.allocator,
             params_json,
@@ -5408,6 +6816,40 @@ pub const Client = struct {
         try json_rpc.writeFrame(writer, response);
     }
 
+    fn acquireServerRequestLifetime(
+        self: *Client,
+        params: ?std.json.Value,
+    ) !ServerRequestLifetime {
+        const object = switch (params orelse return .unscoped) {
+            .object => |value| value,
+            else => return .unscoped,
+        };
+        const session_id = jsonString(object, "sessionId") orelse return .unscoped;
+        const admission = try self.acquireActiveEventIngress(session_id, true);
+        switch (admission) {
+            .active => |lease| return .{ .active = lease },
+            .unavailable => return .inactive,
+            .unknown => {},
+        }
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
+        if (self.pending_extension_runtime) |*pending| {
+            if (pending.session_id == null or
+                std.mem.eql(u8, pending.session_id.?, session_id))
+            {
+                self.extension_runtimes_mutex.unlock(self.io);
+                return .pending;
+            }
+        }
+        self.extension_runtimes_mutex.unlock(self.io);
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
+        for (self.sessions.items) |record| {
+            const id = record.id orelse continue;
+            if (std.mem.eql(u8, id, session_id)) return .inactive;
+        }
+        return .unscoped;
+    }
+
     fn findSessionFilesystem(
         self: *Client,
         session_id: []const u8,
@@ -5442,8 +6884,8 @@ pub const Client = struct {
             return;
         };
 
-        self.dispatching_rpc_handler = true;
-        defer self.dispatching_rpc_handler = false;
+        self.beginRpcHandler();
+        defer self.endRpcHandler();
 
         if (std.mem.eql(u8, method, "sessionFs.readFile")) {
             validateObjectFields(object, &.{ "sessionId", "path" }) catch {
@@ -6056,8 +7498,8 @@ pub const Client = struct {
         if (!std.mem.eql(u8, session_id, base.runtime_session_id))
             return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
         const invocation = ext.HookInvocation{ .session_id = session_id };
-        self.dispatching_rpc_handler = true;
-        defer self.dispatching_rpc_handler = false;
+        self.beginRpcHandler();
+        defer self.endRpcHandler();
 
         if (std.mem.eql(u8, hook_type, "preToolUse")) {
             const handler = runtime.hooks.on_pre_tool_use orelse
@@ -6380,8 +7822,8 @@ pub const Client = struct {
         else
             null;
         defer if (session_json) |value| self.allocator.free(value);
-        self.dispatching_rpc_handler = true;
-        defer self.dispatching_rpc_handler = false;
+        self.beginRpcHandler();
+        defer self.endRpcHandler();
 
         if (std.mem.eql(u8, method, "canvas.open")) {
             const input_json = if (object.get("input")) |value|
@@ -6492,8 +7934,8 @@ pub const Client = struct {
             "bearer token provider not registered",
         );
 
-        self.dispatching_rpc_handler = true;
-        defer self.dispatching_rpc_handler = false;
+        self.beginRpcHandler();
+        defer self.endRpcHandler();
         const token = token_provider.callback(self.allocator, .{
             .session_id = parsed.value.sessionId,
             .provider_name = parsed.value.providerName,
@@ -6564,8 +8006,8 @@ pub const Client = struct {
         const provider_config = runtime.git_hub_token_provider orelse
             return self.writeServerRequestError(writer, id, -32602, "unknown GitHub token registration");
 
-        self.dispatching_rpc_handler = true;
-        defer self.dispatching_rpc_handler = false;
+        self.beginRpcHandler();
+        defer self.endRpcHandler();
         var result = provider_config.callback(self.allocator, .{
             .host = parsed.value.host,
             .session_id = parsed.value.sessionId orelse runtime.session_id,
@@ -6616,8 +8058,8 @@ pub const Client = struct {
             return self.writeServerRequestError(writer, id, -32602, "unknown exit plan mode session");
         const handler = runtime.exit_plan_mode_handler orelse
             return self.writeTypedSuccess(writer, id, .{ .approved = true });
-        self.dispatching_rpc_handler = true;
-        defer self.dispatching_rpc_handler = false;
+        self.beginRpcHandler();
+        defer self.endRpcHandler();
         const result = handler(.{
             .session_id = parsed.value.sessionId,
             .summary = parsed.value.summary,
@@ -6669,8 +8111,8 @@ pub const Client = struct {
         const handler = runtime.auto_mode_switch_handler orelse
             return self.writeTypedSuccess(writer, id, .{ .response = session_types.AutoModeSwitchResponse.no });
 
-        self.dispatching_rpc_handler = true;
-        defer self.dispatching_rpc_handler = false;
+        self.beginRpcHandler();
+        defer self.endRpcHandler();
         const response = handler(.{
             .session_id = parsed.value.sessionId,
             .error_code = parsed.value.errorCode,
@@ -6718,8 +8160,8 @@ pub const Client = struct {
                 );
             };
 
-        self.dispatching_rpc_handler = true;
-        defer self.dispatching_rpc_handler = false;
+        self.beginRpcHandler();
+        defer self.endRpcHandler();
         const response = registered.handler(self.allocator, .{
             .session_id = parsed.value.sessionId,
             .question = parsed.value.question,
@@ -6841,7 +8283,9 @@ pub const Client = struct {
                 },
             ) },
         };
+        const owned_session_id = try self.allocator.dupe(u8, session_id);
         var transferred = false;
+        defer if (!transferred) self.allocator.free(owned_session_id);
         const event_value = params.get("event") orelse
             return .{ .failure = try policyFailure(
                 failure_policy,
@@ -6899,65 +8343,625 @@ pub const Client = struct {
             break :event parsed_event;
         };
         defer if (!transferred) event.deinit(self.allocator);
-        try self.applyExtensionEvent(session_id, &event);
-        const owned_session_id = try self.allocator.dupe(u8, session_id);
-        defer if (!transferred) self.allocator.free(owned_session_id);
+        const admission = self.acquireActiveEventIngress(
+            owned_session_id,
+            true,
+        ) catch |err| return .{ .failure = try policyFailure(
+            failure_policy,
+            err,
+            recordClientIo,
+            .{ self.allocator, .read, err },
+        ) };
+        var active_lease: ?EventLogLease = switch (admission) {
+            .unknown => null,
+            .unavailable => return .{ .success = false },
+            .active => |lease| lease,
+        };
+        defer if (active_lease) |*lease| lease.deinit();
+        const ingress_admitted = active_lease != null;
+        var ingress_transferred = false;
+        defer if (ingress_admitted and !ingress_transferred)
+            self.finishSessionIngress(active_lease.?.log);
+        const pump_running = self.isPumpRunning();
+        if (ingress_admitted) try self.applyExtensionEvent(owned_session_id, &event);
         const diagnostic_frame = if (agent_view != null) frame else null;
         const event_id = self.next_queued_event_id;
         self.next_queued_event_id +%= 1;
         if (self.next_queued_event_id == 0) self.next_queued_event_id = 1;
         const delivery_class: EventDeliveryClass = switch (event) {
             .command_execute, .elicitation_requested => .automatic,
-            .mcp_oauth_required => if (self.findExtensionRuntime(session_id)) |runtime|
-                if (!runtime.credentials_quarantined and runtime.mcp_auth_handler != null)
-                    .automatic
-                else
-                    .observation
+            .mcp_oauth_required => if (ingress_admitted and
+                self.extensionRuntimeHandlesMcpAuth(owned_session_id))
+                .automatic
             else
                 .observation,
             .permission_requested => .permission_request,
             .external_tool_requested => .external_tool_request,
             else => .observation,
         };
-        if (self.sessionEventQueueFailure(session_id) != null or
-            self.queuedEventCount(session_id) >= max_queued_events)
-        {
-            self.handleUnretainedEvent(
-                session_id,
-                &event,
-                delivery_class,
-                .capacity_exceeded,
+        const active_log = if (active_lease) |lease| lease.log else null;
+        const generation = if (active_log) |log| log.generation else 0;
+        const worker_async = pump_running and
+            (active_log != null or
+                (delivery_class == .automatic and ingress_admitted));
+        if (!worker_async and delivery_class == .automatic and ingress_admitted) {
+            var ingress_scope: SessionIngressScope = undefined;
+            beginSessionIngressScope(&ingress_scope, active_log.?);
+            defer endSessionIngressScope(&ingress_scope);
+            self.handleAutomaticSessionEvent(
+                owned_session_id,
+                .{ .transient = &event },
             );
+        }
+        var log_delivery: ?EventDelivery = if (worker_async)
+            self.cloneEventDelivery(
+                event_id,
+                owned_session_id,
+                generation,
+                event,
+                diagnostic_frame,
+                delivery_class == .automatic,
+            ) catch |err| return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordInvalidEvent,
+                .{ self.allocator, .malformed_field_type, event_value },
+            ) }
+        else
+            null;
+        defer if (log_delivery) |*delivery| delivery.deinit(self.allocator);
+
+        const prior_queue_failure = if (ingress_admitted)
+            self.sessionEventQueueFailure(owned_session_id)
+        else
+            null;
+        self.events_mutex.lockUncancelable(self.io);
+        if (prior_queue_failure != null or
+            self.queuedEventCount(owned_session_id, generation) >= max_queued_events)
+        {
+            self.events_mutex.unlock(self.io);
+            if (ingress_admitted) {
+                self.handleUnretainedEvent(
+                    owned_session_id,
+                    &event,
+                    delivery_class,
+                    .capacity_exceeded,
+                );
+            }
             return .{ .success = false };
         }
         self.events.append(self.allocator, .{
             .id = event_id,
             .session_id = owned_session_id,
+            .generation = generation,
             .event = event,
             .diagnostic_frame = diagnostic_frame,
-            .automatic_handling_in_progress = delivery_class == .automatic,
+            .automatic_handling_in_progress = worker_async,
         }) catch {
-            self.handleUnretainedEvent(
-                session_id,
-                &event,
-                delivery_class,
-                .allocation_failed,
-            );
+            self.events_mutex.unlock(self.io);
+            if (ingress_admitted) {
+                self.handleUnretainedEvent(
+                    owned_session_id,
+                    &event,
+                    delivery_class,
+                    .allocation_failed,
+                );
+            }
             return .{ .success = false };
         };
         transferred = true;
-        if (delivery_class == .automatic) {
-            const target = AutomaticEventTarget{ .queued = event_id };
-            defer self.finishAutomaticEvent(target);
-            self.handleAutomaticSessionEvent(session_id, target);
+        self.events_mutex.unlock(self.io);
+
+        if (active_log) |log| {
+            if (worker_async) {
+                self.enqueueLogEvent(.{
+                    .log = log,
+                    .event_id = event_id,
+                    .delivery = log_delivery.?,
+                    .delivery_class = delivery_class,
+                }) catch |err| {
+                    if (err == error.SessionDisconnected) {
+                        if (delivery_class == .automatic)
+                            self.setAutomaticDeliveryFailure(event_id, err)
+                        else
+                            self.finishRetainedEvent(event_id, event, false);
+                        return .{ .success = agent_view != null };
+                    }
+                    self.removeQueuedEvent(event_id);
+                    return .{ .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordClientIo,
+                        .{ self.allocator, .read, err },
+                    ) };
+                };
+                ingress_transferred = true;
+                log_delivery = null;
+            } else {
+                var cloned = session_types.cloneEvent(self.allocator, event) catch |err| {
+                    self.removeQueuedEvent(event_id);
+                    return .{ .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordInvalidEvent,
+                        .{ self.allocator, .malformed_field_type, event_value },
+                    ) };
+                };
+                var cloned_owned = true;
+                defer if (cloned_owned) cloned.deinit(self.allocator);
+                log.observeTurnEvent(cloned) catch |err| {
+                    self.removeQueuedEvent(event_id);
+                    return .{ .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordClientIo,
+                        .{ self.allocator, .read, err },
+                    ) };
+                };
+                log.appendCompatibilityConsumed(cloned) catch |err| {
+                    self.removeQueuedEvent(event_id);
+                    return .{ .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordClientIo,
+                        .{ self.allocator, .read, err },
+                    ) };
+                };
+                cloned_owned = false;
+            }
+        } else if (worker_async) {
+            self.enqueueLogEvent(.{
+                .log = null,
+                .event_id = event_id,
+                .delivery = log_delivery.?,
+                .delivery_class = delivery_class,
+            }) catch |err| {
+                if (err == error.SessionDisconnected) {
+                    self.setAutomaticDeliveryFailure(event_id, err);
+                    return .{ .success = agent_view != null };
+                }
+                self.removeQueuedEvent(event_id);
+                return .{ .failure = try policyFailure(
+                    failure_policy,
+                    err,
+                    recordClientIo,
+                    .{ self.allocator, .read, err },
+                ) };
+            };
+            log_delivery = null;
         }
         return .{ .success = agent_view != null };
     }
 
-    fn queuedEventCount(self: *const Client, session_id: []const u8) usize {
+    fn removeQueuedEvent(self: *Client, event_id: u64) void {
+        self.events_mutex.lockUncancelable(self.io);
+        defer self.events_mutex.unlock(self.io);
+        for (self.events.items, 0..) |queued, index| {
+            if (queued.id != event_id) continue;
+            var removed = self.events.orderedRemove(index);
+            removed.diagnostic_frame = null;
+            removed.deinit(self.allocator);
+            return;
+        }
+    }
+
+    fn cloneEventDelivery(
+        self: *Client,
+        id: u64,
+        session_id: []const u8,
+        generation: u64,
+        event: session_types.SessionEvent,
+        diagnostic_frame: ?[]const u8,
+        automatic_handling_in_progress: bool,
+    ) !EventDelivery {
+        const owned_session_id = try self.allocator.dupe(u8, session_id);
+        errdefer self.allocator.free(owned_session_id);
+        var owned_event = try session_types.cloneEvent(self.allocator, event);
+        errdefer owned_event.deinit(self.allocator);
+        const owned_frame = if (diagnostic_frame) |frame|
+            try self.allocator.dupe(u8, frame)
+        else
+            null;
+        return .{
+            .id = id,
+            .session_id = owned_session_id,
+            .generation = generation,
+            .event = owned_event,
+            .diagnostic_frame = owned_frame,
+            .automatic_handling_in_progress = automatic_handling_in_progress,
+        };
+    }
+
+    fn ensureEventLog(
+        self: *Client,
+        session_id: []const u8,
+        generation: u64,
+    ) error{ OutOfMemory, TooManyRetainedSessionLogs }!*event_log.EventLog {
+        self.event_logs_mutex.lockUncancelable(self.io);
+        defer self.event_logs_mutex.unlock(self.io);
+        return self.ensureEventLogLocked(session_id, generation);
+    }
+
+    fn ensureEventLogLease(
+        self: *Client,
+        session_id: []const u8,
+        generation: u64,
+    ) error{ OutOfMemory, TooManyRetainedSessionLogs }!EventLogLease {
+        self.event_logs_mutex.lockUncancelable(self.io);
+        defer self.event_logs_mutex.unlock(self.io);
+        const log = try self.ensureEventLogLocked(session_id, generation);
+        log.retainOperation();
+        return .{ .client = self, .log = log };
+    }
+
+    fn ensureEventLogLocked(
+        self: *Client,
+        session_id: []const u8,
+        generation: u64,
+    ) error{ OutOfMemory, TooManyRetainedSessionLogs }!*event_log.EventLog {
+        for (self.event_logs.items) |log| {
+            if (log.generation == generation and
+                std.mem.eql(u8, log.session_id, session_id))
+            {
+                return log;
+            }
+        }
+        self.reclaimClosedEventLogsLocked();
+        if (self.event_logs.items.len >= retained_log_limit)
+            return error.TooManyRetainedSessionLogs;
+        const log = try self.allocator.create(event_log.EventLog);
+        errdefer self.allocator.destroy(log);
+        log.* = event_log.EventLog.init(
+            self.allocator,
+            self.io,
+            session_id,
+            generation,
+            retained_event_limit,
+            event_subscriber_limit,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable,
+        };
+        errdefer log.deinit();
+        try self.event_logs.append(self.allocator, log);
+        return log;
+    }
+
+    fn findEventLog(
+        self: *Client,
+        session_id: []const u8,
+        generation: u64,
+    ) ?*event_log.EventLog {
+        self.event_logs_mutex.lockUncancelable(self.io);
+        defer self.event_logs_mutex.unlock(self.io);
+        for (self.event_logs.items) |log| {
+            if (log.generation == generation and
+                std.mem.eql(u8, log.session_id, session_id))
+            {
+                return log;
+            }
+        }
+        return null;
+    }
+
+    fn acquireEventLog(
+        self: *Client,
+        session_id: []const u8,
+        generation: u64,
+    ) !EventLogLease {
+        self.event_logs_mutex.lockUncancelable(self.io);
+        defer self.event_logs_mutex.unlock(self.io);
+        for (self.event_logs.items) |log| {
+            if (log.generation != generation or
+                !std.mem.eql(u8, log.session_id, session_id)) continue;
+            log.retainOperation();
+            return .{ .client = self, .log = log };
+        }
+        return error.SessionDisconnected;
+    }
+
+    fn acquireLatestEventLog(
+        self: *Client,
+        session_id: []const u8,
+    ) ?EventLogLease {
+        self.event_logs_mutex.lockUncancelable(self.io);
+        defer self.event_logs_mutex.unlock(self.io);
+        var index = self.event_logs.items.len;
+        while (index != 0) {
+            index -= 1;
+            const log = self.event_logs.items[index];
+            if (!std.mem.eql(u8, log.session_id, session_id)) continue;
+            if (!log.retainOperationIfAccepting()) continue;
+            return .{ .client = self, .log = log };
+        }
+        return null;
+    }
+
+    fn reclaimClosedEventLogs(self: *Client) void {
+        self.event_logs_mutex.lockUncancelable(self.io);
+        defer self.event_logs_mutex.unlock(self.io);
+        self.reclaimClosedEventLogsLocked();
+    }
+
+    fn reclaimClosedEventLogsLocked(self: *Client) void {
+        var index: usize = 0;
+        while (index < self.event_logs.items.len) {
+            const log = self.event_logs.items[index];
+            if (!log.isDiscardableClosed()) {
+                index += 1;
+                continue;
+            }
+            _ = self.event_logs.orderedRemove(index);
+            log.deinit();
+            self.allocator.destroy(log);
+        }
+    }
+
+    fn closeEventLog(self: *Client, session_id: []const u8, generation: u64) void {
+        const target = self.beginCloseEventLog(session_id, generation);
+        if (target) |log| log.drainAndClose();
+    }
+
+    fn beginCloseEventLog(
+        self: *Client,
+        session_id: []const u8,
+        generation: u64,
+    ) ?*event_log.EventLog {
+        self.event_logs_mutex.lockUncancelable(self.io);
+        var target: ?*event_log.EventLog = null;
+        for (self.event_logs.items) |log| {
+            if (log.generation == generation and
+                std.mem.eql(u8, log.session_id, session_id))
+            {
+                log.beginClose();
+                target = log;
+                break;
+            }
+        }
+        self.event_logs_mutex.unlock(self.io);
+        return target;
+    }
+
+    fn finishSessionIngress(self: *Client, log: *event_log.EventLog) void {
+        log.retainOperation();
+        defer {
+            log.releaseOperation();
+            self.reclaimClosedEventLogs();
+        }
+        log.finishIngress();
+        if (!log.ingress_drained.isSet()) return;
+        self.completeDeferredSessionRemoval(log);
+    }
+
+    fn completeDeferredSessionRemoval(
+        self: *Client,
+        log: *event_log.EventLog,
+    ) void {
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
+        const record_index = self.findSessionRecordIndex(
+            log.session_id,
+            log.generation,
+        ) orelse return;
+        const record = &self.sessions.items[record_index];
+        if (record.removal != .deferred) return;
+        log.drainAndClose();
+        self.removeSessionState(log.session_id, log.generation);
+        record.deactivate(self.allocator);
+    }
+
+    fn enqueueLogEvent(
+        self: *Client,
+        work: QueuedLogEvent,
+    ) !void {
+        self.event_queue_mutex.lockUncancelable(self.io);
+        defer self.event_queue_mutex.unlock(self.io);
+        if (self.event_worker_closing) return error.SessionDisconnected;
+        try self.event_queue.append(self.allocator, work);
+        if (self.event_worker_future == null) {
+            self.event_worker_future = self.io.concurrent(eventWorkerMain, .{self}) catch |err| {
+                _ = self.event_queue.pop();
+                return err;
+            };
+        }
+        self.event_queue_ready.set(self.io);
+    }
+
+    fn eventWorkerMain(self: *Client) void {
+        while (true) {
+            self.event_queue_mutex.lockUncancelable(self.io);
+            if (self.event_queue.items.len == 0) {
+                if (self.event_worker_closing) {
+                    self.event_queue_mutex.unlock(self.io);
+                    return;
+                }
+                self.event_queue_ready.reset();
+                self.event_queue_mutex.unlock(self.io);
+                self.event_queue_ready.waitUncancelable(self.io);
+                continue;
+            }
+            var work = self.event_queue.orderedRemove(0);
+            self.event_queue_mutex.unlock(self.io);
+            var ingress_scope: SessionIngressScope = undefined;
+            if (work.log) |log|
+                beginSessionIngressScope(&ingress_scope, log);
+            defer if (work.log) |log| {
+                endSessionIngressScope(&ingress_scope);
+                self.finishSessionIngress(log);
+            };
+            if (work.delivery_class == .automatic) {
+                self.handleAutomaticSessionEvent(
+                    work.delivery.session_id,
+                    .{ .transient = &work.delivery.event },
+                );
+            }
+            if (work.delivery_class == .permission_request or
+                work.delivery_class == .external_tool_request)
+            {
+                const session = self.sessionForId(work.delivery.session_id) catch {
+                    self.finishRetainedEvent(
+                        work.event_id,
+                        .{ .session_idle = .{} },
+                        false,
+                    );
+                    work.delivery.deinit(self.allocator);
+                    continue;
+                };
+                const processed = session.processEventDelivery(
+                    .legacy,
+                    work.delivery,
+                ) catch |err| {
+                    self.finishRetainedEvent(
+                        work.event_id,
+                        .{ .session_idle = .{} },
+                        false,
+                    );
+                    if (work.log) |log| log.failAdmitted(err);
+                    continue;
+                };
+                work.delivery = switch (processed) {
+                    .success => |delivery| delivery,
+                    .failure => |failure| {
+                        self.finishRetainedEvent(
+                            work.event_id,
+                            .{ .session_idle = .{} },
+                            false,
+                        );
+                        if (work.log) |log| log.failAdmitted(failure.native_error);
+                        continue;
+                    },
+                };
+            }
+            const log = work.log orelse {
+                self.finishRetainedEvent(
+                    work.event_id,
+                    work.delivery.event,
+                    false,
+                );
+                work.delivery.deinit(self.allocator);
+                continue;
+            };
+            if (work.delivery.event == .session_error and
+                work.delivery.diagnostic_frame != null)
+            {
+                var event = session_types.cloneEvent(
+                    self.allocator,
+                    work.delivery.event,
+                ) catch |err| {
+                    self.finishRetainedEvent(
+                        work.event_id,
+                        work.delivery.event,
+                        false,
+                    );
+                    work.delivery.deinit(self.allocator);
+                    log.failAdmitted(err);
+                    continue;
+                };
+                log.append(event) catch |err| {
+                    self.finishRetainedEvent(
+                        work.event_id,
+                        work.delivery.event,
+                        false,
+                    );
+                    event.deinit(self.allocator);
+                    work.delivery.deinit(self.allocator);
+                    log.failAdmitted(err);
+                    continue;
+                };
+                self.finishRetainedEvent(work.event_id, event, true);
+                const failure = work.delivery.intoFailure(self.allocator) catch |err| {
+                    log.failAdmitted(err);
+                    continue;
+                };
+                log.failTurnsDetailed(failure) catch |err| {
+                    log.failAdmitted(err);
+                };
+                continue;
+            }
+            var event = work.delivery.intoEvent(self.allocator);
+            log.observeTurnEvent(event) catch |err| {
+                self.finishRetainedEvent(work.event_id, event, false);
+                event.deinit(self.allocator);
+                log.failAdmitted(err);
+                continue;
+            };
+            log.append(event) catch |err| {
+                self.finishRetainedEvent(work.event_id, event, false);
+                event.deinit(self.allocator);
+                log.failAdmitted(err);
+                continue;
+            };
+            self.finishRetainedEvent(work.event_id, event, true);
+        }
+    }
+
+    fn stopEventWorker(self: *Client) void {
+        self.event_queue_mutex.lockUncancelable(self.io);
+        self.event_worker_closing = true;
+        self.event_queue_ready.set(self.io);
+        var future = self.event_worker_future;
+        self.event_worker_future = null;
+        self.event_queue_mutex.unlock(self.io);
+        if (future) |*worker| worker.cancel(self.io);
+        while (self.event_queue.items.len != 0) {
+            var work = self.event_queue.orderedRemove(0);
+            if (work.delivery_class == .automatic)
+                self.setAutomaticDeliveryFailure(work.event_id, error.Canceled)
+            else
+                self.finishRetainedEvent(work.event_id, work.delivery.event, false);
+            work.delivery.deinit(self.allocator);
+            if (work.log) |log| self.finishSessionIngress(log);
+        }
+    }
+
+    fn finishRetainedEvent(
+        self: *Client,
+        event_id: u64,
+        processed: session_types.SessionEvent,
+        remove: bool,
+    ) void {
+        self.events_mutex.lockUncancelable(self.io);
+        defer self.events_mutex.unlock(self.io);
+        for (self.events.items, 0..) |*queued, index| {
+            if (queued.id != event_id) continue;
+            if (queued.remove_after_automatic_handling) {
+                var removed = self.events.orderedRemove(index);
+                removed.deinit(self.allocator);
+                return;
+            }
+            switch (processed) {
+                .command_execute => |value| queued.event.command_execute.automatic_handling =
+                    value.automatic_handling,
+                .elicitation_requested => |value| queued.event.elicitation_requested.automatic_handling =
+                    value.automatic_handling,
+                .mcp_oauth_required => |value| queued.event.mcp_oauth_required.automatic_handling =
+                    value.automatic_handling,
+                .permission_requested => |value| queued.event.permission_requested.automatic_handling =
+                    value.automatic_handling,
+                else => {},
+            }
+            if (remove) {
+                var removed = self.events.orderedRemove(index);
+                removed.deinit(self.allocator);
+            } else {
+                queued.automatic_handling_in_progress = false;
+            }
+            return;
+        }
+    }
+
+    fn queuedEventCount(
+        self: *const Client,
+        session_id: []const u8,
+        generation: u64,
+    ) usize {
         var count: usize = 0;
         for (self.events.items) |queued| {
-            if (std.mem.eql(u8, queued.session_id, session_id)) count += 1;
+            if (queued.generation == generation and
+                std.mem.eql(u8, queued.session_id, session_id))
+            {
+                count += 1;
+            }
         }
         return count;
     }
@@ -6966,6 +8970,8 @@ pub const Client = struct {
         self: *Client,
         session_id: []const u8,
     ) ?EventQueueFailure {
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
+        defer self.extension_runtimes_mutex.unlock(self.io);
         var failure: ?EventQueueFailure = null;
         if (self.pending_extension_runtime) |*runtime| {
             if (runtime.session_id) |runtime_session_id| {
@@ -6989,6 +8995,8 @@ pub const Client = struct {
         session_id: []const u8,
         failure: EventQueueFailure,
     ) void {
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
+        defer self.extension_runtimes_mutex.unlock(self.io);
         if (self.pending_extension_runtime) |*runtime| {
             if (runtime.session_id) |runtime_session_id| {
                 if (std.mem.eql(u8, runtime_session_id, session_id) and
@@ -7076,7 +9084,10 @@ pub const Client = struct {
                 ),
             },
         };
+        self.lifecycle_events_mutex.lockUncancelable(self.io);
         self.lifecycle_events.push(event);
+        self.lifecycle_event_ready.set(self.io);
+        self.lifecycle_events_mutex.unlock(self.io);
         return .{ .success = {} };
     }
 
@@ -7215,17 +9226,33 @@ pub const Client = struct {
         event.mcp_oauth_required.automatic_handling = handling;
     }
 
+    fn setAutomaticDeliveryFailure(
+        self: *Client,
+        event_id: u64,
+        err: anyerror,
+    ) void {
+        self.events_mutex.lockUncancelable(self.io);
+        defer self.events_mutex.unlock(self.io);
+        const queued = self.queuedEvent(event_id) orelse return;
+        switch (queued.event) {
+            .command_execute => queued.event.command_execute.automatic_handling =
+                .{ .delivery_failed = err },
+            .elicitation_requested => queued.event.elicitation_requested.automatic_handling =
+                .{ .delivery_failed = err },
+            .mcp_oauth_required => queued.event.mcp_oauth_required.automatic_handling =
+                .{ .delivery_failed = err },
+            else => {},
+        }
+        queued.automatic_handling_in_progress = false;
+    }
+
     fn handleCommandEvent(
         self: *Client,
         session_id: []const u8,
         target: AutomaticEventTarget,
     ) void {
-        const runtime = self.findExtensionRuntime(session_id) orelse return;
         const request = (self.automaticEvent(target) orelse return).command_execute;
-        var matched = false;
-        for (runtime.commands) |command| {
-            if (!std.mem.eql(u8, command.name, request.command_name)) continue;
-            matched = true;
+        if (self.extensionRuntimeCommand(session_id, request.command_name)) |command| {
             command.handler(.{
                 .session_id = session_id,
                 .command = request.command,
@@ -7256,22 +9283,20 @@ pub const Client = struct {
             self.setCommandAutomaticHandling(target, .handled);
             return;
         }
-        if (!matched) {
-            const message = std.fmt.allocPrint(
-                self.allocator,
-                "Unknown command: {s}",
-                .{request.command_name},
-            ) catch |err| {
-                self.setCommandAutomaticHandling(target, .{ .delivery_failed = err });
-                return;
-            };
-            defer self.allocator.free(message);
-            self.completeCommand(session_id, request.request_id, message) catch |err| {
-                self.setCommandAutomaticHandling(target, .{ .delivery_failed = err });
-                return;
-            };
-            self.setCommandAutomaticHandling(target, .handled);
-        }
+        const message = std.fmt.allocPrint(
+            self.allocator,
+            "Unknown command: {s}",
+            .{request.command_name},
+        ) catch |err| {
+            self.setCommandAutomaticHandling(target, .{ .delivery_failed = err });
+            return;
+        };
+        defer self.allocator.free(message);
+        self.completeCommand(session_id, request.request_id, message) catch |err| {
+            self.setCommandAutomaticHandling(target, .{ .delivery_failed = err });
+            return;
+        };
+        self.setCommandAutomaticHandling(target, .handled);
     }
 
     fn completeCommand(
@@ -7308,9 +9333,9 @@ pub const Client = struct {
         session_id: []const u8,
         target: AutomaticEventTarget,
     ) void {
-        const runtime = self.findExtensionRuntime(session_id) orelse return;
+        const runtime = self.extensionRuntimeElicitation(session_id) orelse return;
         const payload = (self.automaticEvent(target) orelse return).elicitation_requested;
-        const handler = runtime.elicitation_handler orelse return;
+        const handler = runtime.handler;
         var requested_schema_json: ?[]u8 = null;
         defer if (requested_schema_json) |json| self.allocator.free(json);
         if (payload.requested_schema != null) {
@@ -7349,7 +9374,7 @@ pub const Client = struct {
             .mode = payload.mode,
             .elicitation_source = payload.elicitation_source,
             .url = payload.url,
-        }, runtime.elicitation_context) catch |err| {
+        }, runtime.context) catch |err| {
             self.setElicitationAutomaticHandling(target, .{ .handler_failed = err });
             return;
         };
@@ -7413,9 +9438,8 @@ pub const Client = struct {
         session_id: []const u8,
         target: AutomaticEventTarget,
     ) void {
-        const runtime = self.findExtensionRuntime(session_id) orelse return;
-        if (runtime.credentials_quarantined) return;
-        const handler = runtime.mcp_auth_handler orelse return;
+        const runtime = self.extensionRuntimeMcpAuth(session_id) orelse return;
+        const handler = runtime.handler;
         const payload = (self.automaticEvent(target) orelse return).mcp_oauth_required;
         const parsed = std.json.parseFromSlice(
             WireMcpAuthRequest,
@@ -7478,7 +9502,7 @@ pub const Client = struct {
             .www_authenticate_json = www_json,
             .http_response_json = http_json,
             .static_client_config_json = static_json,
-        }, runtime.mcp_auth_context) catch |err| {
+        }, runtime.context) catch |err| {
             self.setMcpAuthAutomaticHandling(target, .{ .handler_failed = err });
             return;
         };
@@ -7548,12 +9572,90 @@ pub const Client = struct {
         return null;
     }
 
+    fn findCommittedExtensionRuntime(
+        self: *Client,
+        session_id: []const u8,
+    ) ?*SessionExtensionRuntime {
+        for (self.extension_runtimes.items) |*runtime| {
+            if (runtime.session_id) |id| {
+                if (std.mem.eql(u8, id, session_id)) return runtime;
+            }
+        }
+        return null;
+    }
+
+    fn extensionRuntimeHandlesMcpAuth(
+        self: *Client,
+        session_id: []const u8,
+    ) bool {
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
+        defer self.extension_runtimes_mutex.unlock(self.io);
+        const runtime = self.findCommittedExtensionRuntime(session_id) orelse return false;
+        return !runtime.credentials_quarantined and runtime.mcp_auth_handler != null;
+    }
+
+    fn extensionRuntimeCommand(
+        self: *Client,
+        session_id: []const u8,
+        command_name: []const u8,
+    ) ?struct {
+        handler: session_types.CommandHandler,
+        context: ?*anyopaque,
+    } {
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
+        defer self.extension_runtimes_mutex.unlock(self.io);
+        const runtime = self.findCommittedExtensionRuntime(session_id) orelse return null;
+        for (runtime.commands) |command| {
+            if (!std.mem.eql(u8, command.name, command_name)) continue;
+            return .{
+                .handler = command.handler,
+                .context = command.context,
+            };
+        }
+        return null;
+    }
+
+    fn extensionRuntimeElicitation(
+        self: *Client,
+        session_id: []const u8,
+    ) ?struct {
+        handler: session_types.ElicitationHandler,
+        context: ?*anyopaque,
+    } {
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
+        defer self.extension_runtimes_mutex.unlock(self.io);
+        const runtime = self.findCommittedExtensionRuntime(session_id) orelse return null;
+        return .{
+            .handler = runtime.elicitation_handler orelse return null,
+            .context = runtime.elicitation_context,
+        };
+    }
+
+    fn extensionRuntimeMcpAuth(
+        self: *Client,
+        session_id: []const u8,
+    ) ?struct {
+        handler: ext.McpAuthHandler,
+        context: ?*anyopaque,
+    } {
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
+        defer self.extension_runtimes_mutex.unlock(self.io);
+        const runtime = self.findCommittedExtensionRuntime(session_id) orelse return null;
+        if (runtime.credentials_quarantined) return null;
+        return .{
+            .handler = runtime.mcp_auth_handler orelse return null,
+            .context = runtime.mcp_auth_context,
+        };
+    }
+
     fn applyExtensionEvent(
         self: *Client,
         session_id: []const u8,
         event: *const session_types.SessionEvent,
     ) !void {
-        const runtime = self.findExtensionRuntime(session_id) orelse return;
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
+        defer self.extension_runtimes_mutex.unlock(self.io);
+        const runtime = self.findCommittedExtensionRuntime(session_id) orelse return;
         try applyExtensionEventToRuntime(self.allocator, runtime, event);
     }
 
@@ -7594,6 +9696,8 @@ pub const Client = struct {
         prior_record_index: ?usize,
     ) !void {
         errdefer if (session_id) |id| self.allocator.free(id);
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
         if (self.pending_session != null) {
             return error.SessionLifecycleAlreadyInProgress;
         }
@@ -7608,11 +9712,13 @@ pub const Client = struct {
         }
         const record_index = prior_record_index orelse index: {
             for (self.sessions.items, 0..) |record, index| {
-                if (!record.isActive()) break :index index;
+                if (record.id == null) break :index index;
             }
             try self.sessions.ensureUnusedCapacity(self.allocator, 1);
             break :index self.sessions.items.len;
         };
+        if (session_id) |id|
+            try self.ensureNoOtherSessionIdLocked(id, record_index);
         const generation = if (record_index < self.sessions.items.len)
             try nextSessionGeneration(self.sessions.items[record_index].generation)
         else
@@ -7634,6 +9740,8 @@ pub const Client = struct {
         session_id: []const u8,
         workspace_path: ?[]const u8,
     ) !void {
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
         const pending = if (self.pending_session) |*value|
             value
         else
@@ -7642,8 +9750,12 @@ pub const Client = struct {
             if (!std.mem.eql(u8, id, session_id))
                 return error.UnexpectedSessionId;
         } else {
-            if (session_id.len == 0 or self.hasSession(session_id))
+            if (session_id.len == 0)
                 return error.InvalidServerAssignedSessionId;
+            self.ensureNoOtherSessionIdLocked(
+                session_id,
+                pending.record_index,
+            ) catch return error.InvalidServerAssignedSessionId;
             pending.id = try self.allocator.dupe(u8, session_id);
         }
         const replacement_path = if (workspace_path) |path|
@@ -7655,21 +9767,86 @@ pub const Client = struct {
         pending.workspace_path = replacement_path;
     }
 
-    fn commitSessionRecord(self: *Client) usize {
+    fn commitSessionRecord(self: *Client) !usize {
+        const commit = try self.beginSessionRecordCommit();
+        return self.finishSessionRecordCommit(commit);
+    }
+
+    fn beginSessionRecordCommit(self: *Client) !SessionRecordCommit {
+        self.sessions_mutex.lockUncancelable(self.io);
         const pending = self.pending_session.?;
+        var prior_log: ?*event_log.EventLog = null;
+        var replacing = false;
+        if (pending.record_index < self.sessions.items.len) {
+            const existing = &self.sessions.items[pending.record_index];
+            if (existing.id) |existing_id| {
+                if (!existing.isActive() or !std.mem.eql(u8, existing_id, pending.id.?)) {
+                    self.sessions_mutex.unlock(self.io);
+                    return error.SessionNotActive;
+                }
+                if (self.findEventLog(existing_id, existing.generation)) |log| {
+                    if (isCurrentSessionIngress(log)) {
+                        self.sessions_mutex.unlock(self.io);
+                        return error.ReentrantRpcCall;
+                    }
+                }
+                replacing = true;
+                existing.replacement_pending = true;
+                prior_log = self.beginCloseEventLog(existing_id, existing.generation);
+            }
+        }
+        self.sessions_mutex.unlock(self.io);
+        return .{
+            .pending = pending,
+            .prior_log = prior_log,
+            .replacing = replacing,
+        };
+    }
+
+    fn ensureNoOtherSessionIdLocked(
+        self: *Client,
+        session_id: []const u8,
+        excluded_record_index: usize,
+    ) error{SessionAlreadyActive}!void {
+        for (self.sessions.items, 0..) |record, record_index| {
+            if (record_index == excluded_record_index) continue;
+            const id = record.id orelse continue;
+            if (std.mem.eql(u8, id, session_id))
+                return error.SessionAlreadyActive;
+        }
+    }
+
+    fn finishSessionRecordCommit(
+        self: *Client,
+        commit: SessionRecordCommit,
+    ) !usize {
+        if (commit.prior_log) |log| log.drainAndClose();
+
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
+        if (commit.replacing) {
+            const existing = &self.sessions.items[commit.pending.record_index];
+            if (!existing.replacement_pending) return error.SessionNotActive;
+            self.removeQueuedSessionEvents(existing.id.?, existing.generation);
+        }
+        if (self.pending_extension_runtime != null) {
+            self.extension_runtimes_mutex.lockUncancelable(self.io);
+            defer self.extension_runtimes_mutex.unlock(self.io);
+            self.commitPreparedExtensionRuntimeLocked(commit.pending.id.?);
+        }
         self.pending_session = null;
         const record = SessionRecord{
-            .id = pending.id.?,
-            .generation = pending.generation,
-            .workspace_path = pending.workspace_path,
+            .id = commit.pending.id.?,
+            .generation = commit.pending.generation,
+            .workspace_path = commit.pending.workspace_path,
         };
-        if (pending.record_index == self.sessions.items.len) {
+        if (commit.pending.record_index == self.sessions.items.len) {
             self.sessions.appendAssumeCapacity(record);
         } else {
-            self.sessions.items[pending.record_index].deactivate(self.allocator);
-            self.sessions.items[pending.record_index] = record;
+            self.sessions.items[commit.pending.record_index].deactivate(self.allocator);
+            self.sessions.items[commit.pending.record_index] = record;
         }
-        return pending.record_index;
+        return commit.pending.record_index;
     }
 
     fn sessionHandle(self: *Client, record_index: usize) Session {
@@ -7690,6 +9867,7 @@ pub const Client = struct {
 
     fn findSessionIndex(self: *Client, session_id: []const u8) ?usize {
         for (self.sessions.items, 0..) |session, index| {
+            if (!session.isActive()) continue;
             if (session.id) |id| {
                 if (std.mem.eql(u8, id, session_id)) return index;
             }
@@ -7702,7 +9880,117 @@ pub const Client = struct {
         return &self.sessions.items[index];
     }
 
-    fn removeSessionState(self: *Client, session_id: []const u8) void {
+    fn findSessionRecordIndex(
+        self: *Client,
+        session_id: []const u8,
+        generation: u64,
+    ) ?usize {
+        for (self.sessions.items, 0..) |record, index| {
+            const id = record.id orelse continue;
+            if (record.generation == generation and
+                std.mem.eql(u8, id, session_id))
+            {
+                return index;
+            }
+        }
+        return null;
+    }
+
+    fn acquireActiveEventIngress(
+        self: *Client,
+        session_id: []const u8,
+        create_if_missing: bool,
+    ) error{ OutOfMemory, TooManyRetainedSessionLogs, Canceled }!EventIngressAdmission {
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
+        const record = record: {
+            for (self.sessions.items) |*candidate| {
+                const id = candidate.id orelse continue;
+                if (!std.mem.eql(u8, id, session_id)) continue;
+                if (!candidate.isActive()) return .unavailable;
+                break :record candidate;
+            }
+            return .unknown;
+        };
+        var lease = if (create_if_missing)
+            try self.ensureEventLogLease(session_id, record.generation)
+        else
+            self.acquireEventLog(
+                session_id,
+                record.generation,
+            ) catch |err| switch (err) {
+                error.SessionDisconnected => return .unavailable,
+            };
+        errdefer lease.deinit();
+        lease.log.beginIngress() catch |err| switch (err) {
+            error.SessionDisconnected => return .unavailable,
+            error.Canceled => return error.Canceled,
+        };
+        return .{ .active = lease };
+    }
+
+    fn acquireSessionHandleIngress(
+        self: *Client,
+        record_index: usize,
+        generation: u64,
+    ) error{
+        OutOfMemory,
+        TooManyRetainedSessionLogs,
+        Canceled,
+        SessionNotActive,
+    }!EventLogLease {
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
+        const record = try self.activeSessionRecordLocked(record_index, generation);
+        var lease = try self.ensureEventLogLease(record.id.?, generation);
+        errdefer lease.deinit();
+        lease.log.beginIngress() catch |err| switch (err) {
+            error.SessionDisconnected => return error.SessionNotActive,
+            error.Canceled => return error.Canceled,
+        };
+        return lease;
+    }
+
+    fn ensureSessionHandleEventLogLease(
+        self: *Client,
+        record_index: usize,
+        generation: u64,
+    ) !EventLogLease {
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
+        const record = try self.activeSessionRecordLocked(record_index, generation);
+        return self.ensureEventLogLease(record.id.?, generation);
+    }
+
+    fn validateSessionHandle(
+        self: *Client,
+        record_index: usize,
+        generation: u64,
+    ) !void {
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
+        _ = try self.activeSessionRecordLocked(record_index, generation);
+    }
+
+    fn activeSessionRecordLocked(
+        self: *Client,
+        record_index: usize,
+        generation: u64,
+    ) !*SessionRecord {
+        if (record_index >= self.sessions.items.len)
+            return error.SessionNotActive;
+        const record = &self.sessions.items[record_index];
+        if (!record.isActive() or record.generation != generation)
+            return error.SessionNotActive;
+        return record;
+    }
+
+    fn removeSessionState(
+        self: *Client,
+        session_id: []const u8,
+        generation: u64,
+    ) void {
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
         for (self.extension_runtimes.items, 0..) |runtime, runtime_index| {
             if (runtime.session_id != null and
                 std.mem.eql(u8, runtime.session_id.?, session_id))
@@ -7712,20 +10000,8 @@ pub const Client = struct {
                 break;
             }
         }
-        var index: usize = 0;
-        while (index < self.events.items.len) {
-            if (std.mem.eql(u8, self.events.items[index].session_id, session_id)) {
-                if (self.events.items[index].automatic_handling_in_progress) {
-                    self.events.items[index].remove_after_automatic_handling = true;
-                    index += 1;
-                    continue;
-                }
-                var event = self.events.orderedRemove(index);
-                event.deinit(self.allocator);
-            } else {
-                index += 1;
-            }
-        }
+        self.extension_runtimes_mutex.unlock(self.io);
+        self.removeQueuedSessionEvents(session_id, generation);
 
         var tool_index: usize = 0;
         while (tool_index < self.tools.items.len) {
@@ -7772,17 +10048,119 @@ pub const Client = struct {
         }
     }
 
-    fn removeSessionAt(self: *Client, record_index: usize) void {
-        if (record_index >= self.sessions.items.len) return;
+    fn removeQueuedSessionEvents(
+        self: *Client,
+        session_id: []const u8,
+        generation: u64,
+    ) void {
+        var index: usize = 0;
+        self.events_mutex.lockUncancelable(self.io);
+        defer self.events_mutex.unlock(self.io);
+        while (index < self.events.items.len) {
+            if (self.events.items[index].generation == generation and
+                std.mem.eql(u8, self.events.items[index].session_id, session_id))
+            {
+                if (self.events.items[index].automatic_handling_in_progress) {
+                    self.events.items[index].remove_after_automatic_handling = true;
+                    index += 1;
+                    continue;
+                }
+                var event = self.events.orderedRemove(index);
+                event.deinit(self.allocator);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn beginSessionRemoval(
+        self: *Client,
+        record_index: usize,
+        expected_session_id: []const u8,
+        expected_generation: u64,
+    ) !?SessionRemoval {
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
+        if (record_index >= self.sessions.items.len)
+            return error.SessionNotActive;
         const record = &self.sessions.items[record_index];
-        const id = record.id orelse return;
-        self.removeSessionState(id);
+        const id = record.id orelse return error.SessionNotActive;
+        if (!record.isActive() or
+            record.generation != expected_generation or
+            !std.mem.eql(u8, id, expected_session_id))
+        {
+            return error.SessionNotActive;
+        }
+        const owned_session_id = try self.allocator.dupe(u8, id);
+        errdefer self.allocator.free(owned_session_id);
+        const log = self.beginCloseEventLog(id, record.generation);
+        if (log) |active_log| {
+            if (isCurrentSessionIngress(active_log)) {
+                record.removal = .deferred;
+                self.allocator.free(owned_session_id);
+                return null;
+            }
+        }
+        record.removal = .draining;
+        return .{
+            .record_index = record_index,
+            .session_id = owned_session_id,
+            .generation = expected_generation,
+            .log = log,
+        };
+    }
+
+    fn finishSessionRemoval(self: *Client, removal: SessionRemoval) !void {
+        defer self.allocator.free(removal.session_id);
+        if (removal.log) |log| log.drainAndClose();
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
+        if (removal.record_index >= self.sessions.items.len)
+            return error.SessionNotActive;
+        const record = &self.sessions.items[removal.record_index];
+        const id = record.id orelse return error.SessionNotActive;
+        if (record.removal != .draining or
+            record.generation != removal.generation or
+            !std.mem.eql(u8, id, removal.session_id))
+        {
+            return error.SessionNotActive;
+        }
+        self.removeSessionState(removal.session_id, removal.generation);
         record.deactivate(self.allocator);
     }
 
-    fn removeSession(self: *Client, session_id: []const u8) void {
-        const record_index = self.findSessionIndex(session_id) orelse return;
-        self.removeSessionAt(record_index);
+    fn removeSessionExpected(
+        self: *Client,
+        record_index: usize,
+        expected_session_id: []const u8,
+        expected_generation: u64,
+    ) !void {
+        const removal = try self.beginSessionRemoval(
+            record_index,
+            expected_session_id,
+            expected_generation,
+        ) orelse return;
+        try self.finishSessionRemoval(removal);
+    }
+
+    fn removeSession(self: *Client, session_id: []const u8) !void {
+        self.sessions_mutex.lockUncancelable(self.io);
+        const record_index = self.findSessionIndex(session_id) orelse {
+            self.sessions_mutex.unlock(self.io);
+            return;
+        };
+        const generation = self.sessions.items[record_index].generation;
+        const owned_session_id = self.allocator.dupe(u8, session_id) catch |err| {
+            self.sessions_mutex.unlock(self.io);
+            return err;
+        };
+        self.sessions_mutex.unlock(self.io);
+        defer self.allocator.free(owned_session_id);
+        try self.removeSessionExpected(
+            record_index,
+            owned_session_id,
+            generation,
+        );
     }
 
     fn registerOwnedSession(
@@ -7797,10 +10175,21 @@ pub const Client = struct {
         }
 
         try self.beginSessionRecord(owned_session_id, null);
-        const record_index = self.commitSessionRecord();
-        errdefer self.removeSessionAt(record_index);
-
+        const record_index = try self.commitSessionRecord();
         const session_id = self.sessions.items[record_index].id.?;
+        const generation = self.sessions.items[record_index].generation;
+        self.registerSessionBindings(session_id, config, token_bindings) catch |err| {
+            try self.removeSessionExpected(record_index, session_id, generation);
+            return err;
+        };
+    }
+
+    fn registerSessionBindings(
+        self: *Client,
+        session_id: []const u8,
+        config: session_types.SessionConfig,
+        token_bindings: []const provider.TokenBinding,
+    ) !void {
         try self.registerToolHandlers(session_id, config.tools);
         try self.registerPermissionHandler(session_id, config);
         try self.registerUserInputHandler(
@@ -7965,12 +10354,12 @@ pub const Client = struct {
         self: *Client,
         session_id: []const u8,
         name: []const u8,
-    ) ?RegisteredTool {
-        if (self.findExtensionRuntime(session_id)) |runtime| {
+    ) ?ToolHandlerSnapshot {
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
+        defer self.extension_runtimes_mutex.unlock(self.io);
+        if (self.findCommittedExtensionRuntime(session_id)) |runtime| {
             for (runtime.tools) |tool| {
                 if (std.mem.eql(u8, tool.name, name)) return .{
-                    .session_id = session_id,
-                    .name = tool.name,
                     .handler = tool.handler,
                     .context = tool.context,
                 };
@@ -7980,7 +10369,10 @@ pub const Client = struct {
             if (std.mem.eql(u8, tool.session_id, session_id) and
                 std.mem.eql(u8, tool.name, name))
             {
-                return tool;
+                return .{
+                    .handler = tool.handler,
+                    .context = tool.context,
+                };
             }
         }
         return null;
@@ -8022,7 +10414,9 @@ pub const Client = struct {
         self: *Client,
         session_id: []const u8,
     ) ?RegisteredPermissionHandler {
-        if (self.findExtensionRuntime(session_id)) |runtime| {
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
+        defer self.extension_runtimes_mutex.unlock(self.io);
+        if (self.findCommittedExtensionRuntime(session_id)) |runtime| {
             if (runtime.permission_handler) |handler| return .{
                 .session_id = session_id,
                 .handler = handler,
@@ -8085,10 +10479,78 @@ pub const Client = struct {
         self: *Client,
         comptime failure_policy: FailurePolicy,
     ) errors.DetailedError!PolicyResult(failure_policy, admin.SessionLifecycleDelivery) {
+        self.lifecycle_events_mutex.lockUncancelable(self.io);
+        const queued = self.lifecycle_events.popDelivery();
+        self.lifecycle_events_mutex.unlock(self.io);
+        if (queued) |delivery| return .{ .success = delivery };
+        self.ensurePump() catch |err| return .{ .failure = if (err == error.ReentrantRpcCall)
+            try policyFailure(
+                failure_policy,
+                err,
+                recordReentrant,
+                .{ self.allocator, "session.lifecycle" },
+            )
+        else
+            try policyFailure(
+                failure_policy,
+                err,
+                recordClientIo,
+                .{ self.allocator, .read, err },
+            ) };
         while (true) {
-            if (self.lifecycle_events.popDelivery()) |delivery| {
-                return .{ .success = delivery };
+            self.lifecycle_events_mutex.lockUncancelable(self.io);
+            const delivery = self.lifecycle_events.popDelivery();
+            if (delivery == null) self.lifecycle_event_ready.reset();
+            self.lifecycle_events_mutex.unlock(self.io);
+            if (delivery) |value| {
+                return .{ .success = value };
             }
+
+            self.pending_mutex.lockUncancelable(self.io);
+            if (self.pump_terminal_error) |native_error| {
+                if (comptime failure_policy == .detailed) {
+                    if (self.pump_failure) |*failure| {
+                        const owned = failure.clone(self.allocator) catch |err| {
+                            self.pending_mutex.unlock(self.io);
+                            return err;
+                        };
+                        self.pending_mutex.unlock(self.io);
+                        return .{ .failure = owned };
+                    }
+                }
+                self.pending_mutex.unlock(self.io);
+                return .{ .failure = try policyFailure(
+                    failure_policy,
+                    native_error,
+                    recordClientIo,
+                    .{ self.allocator, .read, native_error },
+                ) };
+            }
+            const transport_closed = self.transport_closed;
+            self.pending_mutex.unlock(self.io);
+            if (transport_closed) {
+                return .{ .failure = try self.closedTransportFailure(failure_policy) };
+            }
+
+            self.lifecycle_event_ready.wait(self.io) catch |err|
+                return .{ .failure = try policyFailure(
+                    failure_policy,
+                    err,
+                    recordClientIo,
+                    .{ self.allocator, .read, err },
+                ) };
+        }
+    }
+
+    fn nextLifecycleEventDirect(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+    ) errors.DetailedError!PolicyResult(failure_policy, admin.SessionLifecycleDelivery) {
+        while (true) {
+            self.lifecycle_events_mutex.lockUncancelable(self.io);
+            const queued = self.lifecycle_events.popDelivery();
+            self.lifecycle_events_mutex.unlock(self.io);
+            if (queued) |delivery| return .{ .success = delivery };
 
             const body = switch (try self.readTransportFrame(failure_policy)) {
                 .success => |value| value,
@@ -8172,17 +10634,26 @@ pub const Client = struct {
         self: *Client,
         comptime failure_policy: FailurePolicy,
         session_id: []const u8,
+        generation: u64,
     ) errors.DetailedError!PolicyResult(failure_policy, EventDelivery) {
         while (true) {
+            self.events_mutex.lockUncancelable(self.io);
+            var queued_delivery: ?EventDelivery = null;
             for (self.events.items, 0..) |queued, index| {
-                if (std.mem.eql(u8, queued.session_id, session_id)) {
+                if (queued.generation == generation and
+                    std.mem.eql(u8, queued.session_id, session_id))
+                {
                     if (queued.automatic_handling_in_progress) {
                         self.events.items[index].remove_after_automatic_handling = true;
                         continue;
                     }
-                    return .{ .success = self.events.orderedRemove(index) };
+                    queued_delivery = self.events.orderedRemove(index);
+                    break;
                 }
             }
+            const queued_count = self.queuedEventCount(session_id, generation);
+            self.events_mutex.unlock(self.io);
+            if (queued_delivery) |delivery| return .{ .success = delivery };
             if (self.sessionEventQueueFailure(session_id)) |failure| {
                 const native_error = switch (failure) {
                     .capacity_exceeded => error.EventQueueFull,
@@ -8197,7 +10668,7 @@ pub const Client = struct {
                         self.allocator,
                         session_id,
                         @as(?[]const u8, null),
-                        self.queuedEventCount(session_id),
+                        queued_count,
                     },
                 ) };
             }
@@ -8213,7 +10684,12 @@ pub const Client = struct {
                 wipeSecret(body);
                 self.allocator.free(body);
             };
-            const value = std.json.parseFromSlice(std.json.Value, self.allocator, body, .{}) catch |err| {
+            const value = std.json.parseFromSlice(
+                std.json.Value,
+                self.allocator,
+                body,
+                .{},
+            ) catch |err| {
                 if (err == error.OutOfMemory) return error.OutOfMemory;
                 return .{ .failure = try policyFailure(
                     failure_policy,
@@ -8277,11 +10753,125 @@ pub const Client = struct {
             }
         }
     }
+
+    fn hasQueuedSessionEvent(
+        self: *Client,
+        session_id: []const u8,
+        generation: u64,
+    ) bool {
+        self.events_mutex.lockUncancelable(self.io);
+        defer self.events_mutex.unlock(self.io);
+        for (self.events.items) |queued| {
+            if (queued.generation == generation and
+                std.mem.eql(u8, queued.session_id, session_id) and
+                !queued.automatic_handling_in_progress) return true;
+        }
+        return false;
+    }
+
+    fn nextSubscriberEvent(
+        self: *Client,
+        log: *event_log.EventLog,
+        token: event_log.SubscriberToken,
+        deadline: ?std.Io.Clock.Timestamp,
+        cancellation: ?*session_types.Cancellation,
+    ) !session_types.SessionEvent {
+        try self.ensurePump();
+        while (true) {
+            switch (try log.inspect(token)) {
+                .event => |event| return event,
+                .overflow => return error.EventLogOverflow,
+                .failure => |err| return err,
+                .closed => {
+                    self.reclaimClosedEventLogs();
+                    return error.SessionDisconnected;
+                },
+                .wait => |ready| {
+                    if (cancellation) |value| {
+                        if (value.isCancelled()) return error.Canceled;
+                    }
+                    if (deadline == null and cancellation == null) {
+                        try ready.wait(self.io);
+                        continue;
+                    }
+                    const WaitResult = union(enum) {
+                        ready: anyerror!void,
+                        canceled: anyerror!void,
+                        timeout: anyerror!void,
+                    };
+                    var results: [3]WaitResult = undefined;
+                    var select = std.Io.Select(WaitResult).init(self.io, &results);
+                    select.async(.ready, waitForEvent, .{ ready, self.io });
+                    if (cancellation) |value|
+                        select.async(.canceled, waitForEvent, .{ &value.event, self.io });
+                    if (deadline) |value|
+                        select.async(.timeout, waitForDeadline, .{ value, self.io });
+                    const result = select.await() catch |err| {
+                        select.cancelDiscard();
+                        return err;
+                    };
+                    select.cancelDiscard();
+                    switch (try log.inspect(token)) {
+                        .event => |event| return event,
+                        .overflow => return error.EventLogOverflow,
+                        .failure => |err| return err,
+                        .closed => return error.SessionDisconnected,
+                        .wait => {},
+                    }
+                    if (cancellation) |value| {
+                        if (value.isCancelled()) return error.Canceled;
+                    }
+                    switch (result) {
+                        .ready => |wait_result| try wait_result,
+                        .canceled => |wait_result| {
+                            try wait_result;
+                            return error.Canceled;
+                        },
+                        .timeout => |wait_result| {
+                            try wait_result;
+                            return error.Timeout;
+                        },
+                    }
+                },
+            }
+        }
+    }
 };
+
+fn waitForEvent(event: *std.Io.Event, io: std.Io) anyerror!void {
+    return event.wait(io);
+}
+
+fn waitForDeadline(deadline: std.Io.Clock.Timestamp, io: std.Io) anyerror!void {
+    return deadline.wait(io);
+}
 
 const ResolvedSession = struct {
     record_index: usize,
     id: []const u8,
+};
+
+pub const EventSubscriber = struct {
+    lease: EventLogLease,
+    token: event_log.SubscriberToken,
+    active: bool = true,
+
+    pub fn nextEvent(self: *EventSubscriber) !session_types.SessionEvent {
+        if (!self.active) return error.InvalidEventSubscriber;
+        return self.lease.client.nextSubscriberEvent(
+            self.lease.log,
+            self.token,
+            null,
+            null,
+        );
+    }
+
+    pub fn deinit(self: *EventSubscriber) void {
+        if (!self.active) return;
+        self.lease.log.unsubscribe(self.token);
+        self.active = false;
+        self.lease.deinit();
+    }
 };
 
 const ElicitationResponse = union(enum) {
@@ -8321,6 +10911,63 @@ pub const Session = struct {
         return .{ .success = resolved };
     }
 
+    fn acquireIngressForPolicy(
+        self: Session,
+        comptime failure_policy: FailurePolicy,
+    ) errors.DetailedError!PolicyResult(failure_policy, EventLogLease) {
+        const lease = self.client.acquireSessionHandleIngress(
+            self.record_index,
+            self.generation,
+        ) catch |err| return .{ .failure = try policyFailure(
+            failure_policy,
+            err,
+            recordClientIo,
+            .{ self.client.allocator, .callback, err },
+        ) };
+        return .{ .success = lease };
+    }
+
+    fn eventLog(self: Session) !EventLogLease {
+        return self.client.ensureSessionHandleEventLogLease(
+            self.record_index,
+            self.generation,
+        );
+    }
+
+    fn eventLogForPolicy(
+        self: Session,
+        comptime failure_policy: FailurePolicy,
+    ) errors.DetailedError!PolicyResult(failure_policy, EventLogLease) {
+        const lease = self.eventLog() catch |err|
+            return .{ .failure = if (err == error.SessionNotActive)
+                try policyFailure(
+                    failure_policy,
+                    err,
+                    recordInvalidConfig,
+                    .{ self.client.allocator, "session_id", err },
+                )
+            else
+                try policyFailure(
+                    failure_policy,
+                    err,
+                    recordClientIo,
+                    .{ self.client.allocator, .read, err },
+                ) };
+        return .{ .success = lease };
+    }
+
+    pub fn subscribe(self: Session) !EventSubscriber {
+        var lease = try self.eventLog();
+        errdefer lease.deinit();
+        const token = try lease.log.subscribe();
+        errdefer lease.log.unsubscribe(token);
+        try self.client.ensurePump();
+        return .{
+            .lease = lease,
+            .token = token,
+        };
+    }
+
     pub fn send(
         self: Session,
         options: session_types.MessageOptions,
@@ -8340,23 +10987,82 @@ pub const Session = struct {
         comptime failure_policy: FailurePolicy,
         options: session_types.MessageOptions,
     ) errors.DetailedError!PolicyResult(failure_policy, []u8) {
-        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+        var validation_field_buffer: [96]u8 = undefined;
+        const attachments = validateMessageOptions(options) catch |err|
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordInvalidConfig,
+                .{
+                    self.client.allocator,
+                    messageValidationField(options, err, &validation_field_buffer),
+                    err,
+                },
+            ) };
+        var lease = switch (try self.eventLogForPolicy(failure_policy)) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
         };
+        defer lease.deinit();
+        const session_log = lease.log;
+        const session_id = session_log.session_id;
+        const receipt = session_log.reserveTurn(.raw) catch |err|
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordClientIo,
+                .{ self.client.allocator, .read, err },
+            ) };
+        var receipt_owned = true;
+        defer if (receipt_owned) session_log.abandonTurn(receipt);
+        const owned_source = if (options.source) |source| switch (source) {
+            .user, .system => null,
+            .agent => |name| try std.fmt.allocPrint(
+                self.client.allocator,
+                "agent-{s}",
+                .{name},
+            ),
+        } else null;
+        defer if (owned_source) |source| self.client.allocator.free(source);
+        const source: ?[]const u8 = if (options.source) |value| switch (value) {
+            .user => "user",
+            .system => "system",
+            .agent => owned_source.?,
+        } else null;
         const trace_context = self.client.traceContext();
         const parsed = switch (try self.client.callImpl(
             failure_policy,
             struct { messageId: []const u8 },
             "session.send",
-            lowerMessage(resolved.id, options, trace_context),
-            .{ .session = .{ .session_id = resolved.id } },
+            lowerMessage(
+                session_id,
+                options,
+                attachments,
+                source,
+                trace_context,
+            ),
+            .{ .session = .{ .session_id = session_id } },
         )) {
             .success => |value| value,
-            .failure => |failure| return .{ .failure = failure },
+            .failure => |failure| {
+                session_log.failTurn(receipt, failure.native_error);
+                receipt_owned = false;
+                return .{ .failure = failure };
+            },
         };
         defer parsed.deinit();
-        return .{ .success = try self.client.allocator.dupe(u8, parsed.value.messageId) };
+        const message_id = try self.client.allocator.dupe(u8, parsed.value.messageId);
+        session_log.bindTurnMessage(receipt, message_id) catch |err| {
+            self.client.allocator.free(message_id);
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordClientIo,
+                .{ self.client.allocator, .read, err },
+            ) };
+        };
+        receipt_owned = false;
+        return .{ .success = message_id };
     }
 
     pub fn getEvents(self: Session) !session_types.SessionEventHistory {
@@ -8441,7 +11147,18 @@ pub const Session = struct {
     ) !?session_types.AssistantMessage {
         return legacyResult(
             ?session_types.AssistantMessage,
-            self.sendAndWaitImpl(.legacy, options),
+            self.sendAndWaitImpl(.legacy, options, .{}),
+        );
+    }
+
+    pub fn sendAndWaitWithOptions(
+        self: Session,
+        options: session_types.MessageOptions,
+        wait_options: session_types.WaitOptions,
+    ) !?session_types.AssistantMessage {
+        return legacyResult(
+            ?session_types.AssistantMessage,
+            self.sendAndWaitImpl(.legacy, options, wait_options),
         );
     }
 
@@ -8449,59 +11166,398 @@ pub const Session = struct {
         self: Session,
         options: session_types.MessageOptions,
     ) errors.DetailedError!errors.DetailedResult(?session_types.AssistantMessage) {
-        return self.sendAndWaitImpl(.detailed, options);
+        return self.sendAndWaitImpl(.detailed, options, .{});
+    }
+
+    pub fn sendAndWaitDetailedWithOptions(
+        self: Session,
+        options: session_types.MessageOptions,
+        wait_options: session_types.WaitOptions,
+    ) errors.DetailedError!errors.DetailedResult(?session_types.AssistantMessage) {
+        return self.sendAndWaitImpl(.detailed, options, wait_options);
     }
 
     fn sendAndWaitImpl(
         self: Session,
         comptime failure_policy: FailurePolicy,
         options: session_types.MessageOptions,
+        wait_options: session_types.WaitOptions,
     ) errors.DetailedError!PolicyResult(failure_policy, ?session_types.AssistantMessage) {
-        const message_id = switch (try self.sendImpl(failure_policy, options)) {
+        var validation_field_buffer: [96]u8 = undefined;
+        const attachments = validateMessageOptions(options) catch |err|
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordInvalidConfig,
+                .{
+                    self.client.allocator,
+                    messageValidationField(options, err, &validation_field_buffer),
+                    err,
+                },
+            ) };
+        self.client.validateSessionHandle(
+            self.record_index,
+            self.generation,
+        ) catch |err| return .{ .failure = try policyFailure(
+            failure_policy,
+            err,
+            recordInvalidConfig,
+            .{ self.client.allocator, "session_id", err },
+        ) };
+        const deadline = if (wait_options.timeout_ns) |timeout_ns|
+            std.Io.Clock.Timestamp.fromNow(self.client.io, .{
+                .raw = std.Io.Duration.fromNanoseconds(@intCast(timeout_ns)),
+                .clock = .awake,
+            })
+        else
+            null;
+        if (wait_options.cancellation) |cancellation| {
+            if (cancellation.isCancelled()) return .{ .failure = try policyFailure(
+                failure_policy,
+                error.Canceled,
+                recordClientIo,
+                .{ self.client.allocator, .read, error.Canceled },
+            ) };
+        }
+        var lease = switch (try self.eventLogForPolicy(failure_policy)) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
         };
-        defer self.client.allocator.free(message_id);
-
-        var response: ?session_types.AssistantMessage = null;
-        var response_owned = true;
-        defer if (response_owned) {
-            if (response) |message| message.deinit(self.client.allocator);
+        defer lease.deinit();
+        const session_log = lease.log;
+        const receipt = session_log.reserveTurn(.waited) catch |err|
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordClientIo,
+                .{ self.client.allocator, .read, err },
+            ) };
+        var waiter_attached = true;
+        var operation_started = false;
+        defer if (waiter_attached) {
+            if (operation_started) {
+                session_log.detachTurnWaiter(receipt);
+            } else {
+                session_log.abandonTurn(receipt);
+            }
         };
 
-        while (true) {
-            var delivery = switch (try self.nextEventDeliveryImpl(failure_policy)) {
-                .success => |value| value,
-                .failure => |failure| return .{ .failure = failure },
+        const owned_source = if (options.source) |source| switch (source) {
+            .user, .system => null,
+            .agent => |name| try std.fmt.allocPrint(
+                self.client.allocator,
+                "agent-{s}",
+                .{name},
+            ),
+        } else null;
+        defer if (owned_source) |source| self.client.allocator.free(source);
+        const source: ?[]const u8 = if (options.source) |value| switch (value) {
+            .user => "user",
+            .system => "system",
+            .agent => owned_source.?,
+        } else null;
+        const operation = self.client.startSendOperation(
+            lease,
+            receipt,
+            options,
+            attachments,
+            source,
+            self.client.traceContext(),
+        ) catch |err| return .{ .failure = try policyFailure(
+            failure_policy,
+            err,
+            recordClientIo,
+            .{ self.client.allocator, .write, err },
+        ) };
+        operation_started = true;
+        var detach_operation = true;
+        defer if (detach_operation) self.client.detachSendOperation(operation);
+
+        while (!operation.completed.isSet()) {
+            const WaitResult = union(enum) {
+                completed: anyerror!void,
+                canceled: anyerror!void,
+                timeout: anyerror!void,
             };
-            var delivery_owned = true;
-            defer if (delivery_owned) delivery.deinit(self.client.allocator);
-            switch (delivery.event) {
-                .assistant_message => |*message| {
-                    if (response) |previous| previous.deinit(self.client.allocator);
-                    response = message.*;
-                    delivery.event = .{ .session_idle = .{} };
+            var results: [3]WaitResult = undefined;
+            var select = std.Io.Select(WaitResult).init(self.client.io, &results);
+            defer select.cancelDiscard();
+            select.async(.completed, waitForEvent, .{ &operation.completed, self.client.io });
+            if (wait_options.cancellation) |cancellation|
+                select.async(.canceled, waitForEvent, .{ &cancellation.event, self.client.io });
+            if (deadline) |value|
+                select.async(.timeout, waitForDeadline, .{ value, self.client.io });
+            const selected = select.await() catch |err|
+                return .{ .failure = try policyFailure(
+                    failure_policy,
+                    err,
+                    recordClientIo,
+                    .{ self.client.allocator, .read, err },
+                ) };
+            if (operation.completed.isSet()) break;
+            if (wait_options.cancellation) |cancellation| {
+                if (cancellation.isCancelled()) {
+                    return .{ .failure = try policyFailure(
+                        failure_policy,
+                        error.Canceled,
+                        recordClientIo,
+                        .{ self.client.allocator, .read, error.Canceled },
+                    ) };
+                }
+            }
+            switch (selected) {
+                .completed => |result| result catch |err|
+                    return .{ .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordClientIo,
+                        .{ self.client.allocator, .read, err },
+                    ) },
+                .canceled => |result| {
+                    result catch |err| return .{ .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordClientIo,
+                        .{ self.client.allocator, .read, err },
+                    ) };
+                    return .{ .failure = try policyFailure(
+                        failure_policy,
+                        error.Canceled,
+                        recordClientIo,
+                        .{ self.client.allocator, .read, error.Canceled },
+                    ) };
                 },
-                .session_idle => |idle| {
-                    if (completesSendAndWait(idle)) {
-                        response_owned = false;
-                        return .{ .success = response };
-                    }
+                .timeout => |result| {
+                    result catch |err| return .{ .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordClientIo,
+                        .{ self.client.allocator, .read, err },
+                    ) };
+                    return .{ .failure = try policyFailure(
+                        failure_policy,
+                        error.Timeout,
+                        recordSessionTimeout,
+                        .{
+                            self.client.allocator,
+                            session_log.session_id,
+                            wait_options.timeout_ns.?,
+                        },
+                    ) };
                 },
-                .session_error => {
+            }
+        }
+        const completed = self.client.claimSendOperation(operation) orelse unreachable;
+        detach_operation = false;
+        if (completed.future) |*future| future.await(self.client.io);
+        if (completed.failure) |failure| {
+            completed.failure = null;
+            wipeSecret(completed.request);
+            self.client.allocator.free(completed.request);
+            completed.log_lease.deinit();
+            self.client.allocator.destroy(completed);
+            if (comptime failure_policy == .detailed) return .{ .failure = failure };
+            const native_error = failure.native_error;
+            var owned_failure = failure;
+            owned_failure.deinit();
+            return .{ .failure = .{ .native_error = native_error } };
+        }
+        wipeSecret(completed.request);
+        self.client.allocator.free(completed.request);
+        completed.log_lease.deinit();
+        self.client.allocator.destroy(completed);
+
+        while (true) {
+            var inspected = self.inspectTurnForPolicy(
+                failure_policy,
+                session_log,
+                receipt,
+            ) catch |err| return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordClientIo,
+                .{ self.client.allocator, .read, err },
+            ) };
+            defer if (inspected.failure) |*failure| failure.deinit();
+            switch (inspected.read) {
+                .completed => |response| {
+                    waiter_attached = false;
+                    return .{ .success = response };
+                },
+                .failure => |err| {
                     if (comptime failure_policy == .detailed) {
-                        delivery_owned = false;
-                        return .{ .failure = try delivery.intoFailure(self.client.allocator) };
+                        if (inspected.failure) |failure| {
+                            inspected.failure = null;
+                            return .{ .failure = failure };
+                        }
                     }
-                    return .{ .failure = .{ .native_error = error.CopilotSessionError } };
+                    return .{ .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordClientIo,
+                        .{ self.client.allocator, .read, err },
+                    ) };
                 },
-                else => {},
+                .pending => |ready| {
+                    const WaitResult = union(enum) {
+                        ready: anyerror!void,
+                        canceled: anyerror!void,
+                        timeout: anyerror!void,
+                    };
+                    var results: [3]WaitResult = undefined;
+                    var select = std.Io.Select(WaitResult).init(self.client.io, &results);
+                    select.async(.ready, waitForEvent, .{ ready, self.client.io });
+                    if (wait_options.cancellation) |cancellation|
+                        select.async(.canceled, waitForEvent, .{ &cancellation.event, self.client.io });
+                    if (deadline) |value|
+                        select.async(.timeout, waitForDeadline, .{ value, self.client.io });
+                    const selected = select.await() catch |err| {
+                        select.cancelDiscard();
+                        return .{ .failure = try policyFailure(
+                            failure_policy,
+                            err,
+                            recordClientIo,
+                            .{ self.client.allocator, .read, err },
+                        ) };
+                    };
+                    select.cancelDiscard();
+                    var latest = self.inspectTurnForPolicy(
+                        failure_policy,
+                        session_log,
+                        receipt,
+                    ) catch |err| return .{ .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordClientIo,
+                        .{ self.client.allocator, .read, err },
+                    ) };
+                    defer if (latest.failure) |*failure| failure.deinit();
+                    switch (latest.read) {
+                        .completed => |response| {
+                            waiter_attached = false;
+                            return .{ .success = response };
+                        },
+                        .failure => |err| {
+                            if (comptime failure_policy == .detailed) {
+                                if (latest.failure) |failure| {
+                                    latest.failure = null;
+                                    return .{ .failure = failure };
+                                }
+                            }
+                            return .{ .failure = try policyFailure(
+                                failure_policy,
+                                err,
+                                recordClientIo,
+                                .{ self.client.allocator, .read, err },
+                            ) };
+                        },
+                        .pending => {},
+                    }
+                    if (wait_options.cancellation) |cancellation| {
+                        if (cancellation.isCancelled()) return .{ .failure = try policyFailure(
+                            failure_policy,
+                            error.Canceled,
+                            recordClientIo,
+                            .{ self.client.allocator, .read, error.Canceled },
+                        ) };
+                    }
+                    switch (selected) {
+                        .ready => |result| result catch |err|
+                            return .{ .failure = try policyFailure(
+                                failure_policy,
+                                err,
+                                recordClientIo,
+                                .{ self.client.allocator, .read, err },
+                            ) },
+                        .canceled => |result| {
+                            result catch |err| return .{ .failure = try policyFailure(
+                                failure_policy,
+                                err,
+                                recordClientIo,
+                                .{ self.client.allocator, .read, err },
+                            ) };
+                            return .{ .failure = try policyFailure(
+                                failure_policy,
+                                error.Canceled,
+                                recordClientIo,
+                                .{ self.client.allocator, .read, error.Canceled },
+                            ) };
+                        },
+                        .timeout => |result| {
+                            result catch |err| return .{ .failure = try policyFailure(
+                                failure_policy,
+                                err,
+                                recordClientIo,
+                                .{ self.client.allocator, .read, err },
+                            ) };
+                            return .{ .failure = try policyFailure(
+                                failure_policy,
+                                error.Timeout,
+                                recordSessionTimeout,
+                                .{
+                                    self.client.allocator,
+                                    session_log.session_id,
+                                    wait_options.timeout_ns.?,
+                                },
+                            ) };
+                        },
+                    }
+                },
             }
         }
     }
 
+    fn inspectTurnForPolicy(
+        self: Session,
+        comptime failure_policy: FailurePolicy,
+        session_log: *event_log.EventLog,
+        receipt: turn_tracker.ReceiptToken,
+    ) !event_log.DetailedReceiptRead {
+        _ = self;
+        return if (comptime failure_policy == .detailed)
+            session_log.inspectTurnDetailed(receipt)
+        else
+            .{ .read = try session_log.inspectTurn(receipt) };
+    }
+
     pub fn nextEvent(self: Session) !session_types.SessionEvent {
-        return switch (try self.nextEventDeliveryImpl(.legacy)) {
+        var lease = try self.eventLog();
+        defer lease.deinit();
+        const session_id = lease.log.session_id;
+        if (self.client.hasQueuedSessionEvent(session_id, self.generation)) {
+            return switch (try self.nextEventDeliveryImpl(.legacy)) {
+                .success => |delivery_value| {
+                    var delivery = delivery_value;
+                    return delivery.intoEvent(self.client.allocator);
+                },
+                .failure => |failure| failure.native_error,
+            };
+        }
+        try self.client.ensurePump();
+        if (self.client.hasQueuedSessionEvent(session_id, self.generation)) {
+            return switch (try self.nextEventDeliveryImpl(.legacy)) {
+                .success => |delivery_value| {
+                    var delivery = delivery_value;
+                    return delivery.intoEvent(self.client.allocator);
+                },
+                .failure => |failure| failure.native_error,
+            };
+        }
+        const event = self.client.nextSubscriberEvent(
+            lease.log,
+            lease.log.compatibilityToken(),
+            null,
+            null,
+        ) catch |err| {
+            if (self.client.transport_closed)
+                return (try self.client.closedTransportFailure(.legacy)).native_error;
+            return err;
+        };
+        return switch (try self.processRetainedEvent(
+            .legacy,
+            lease.log.session_id,
+            event,
+        )) {
             .success => |delivery_value| {
                 var delivery = delivery_value;
                 return delivery.intoEvent(self.client.allocator);
@@ -8513,15 +11569,83 @@ pub const Session = struct {
     pub fn nextEventDetailed(
         self: Session,
     ) errors.DetailedError!errors.DetailedResult(session_types.SessionEvent) {
-        return switch (try self.nextEventDeliveryImpl(.detailed)) {
+        var lease = switch (try self.eventLogForPolicy(.detailed)) {
+            .success => |value| value,
+            .failure => |failure| return .{ .failure = failure },
+        };
+        defer lease.deinit();
+        const session_id = lease.log.session_id;
+        if (self.client.hasQueuedSessionEvent(session_id, self.generation)) {
+            return switch (try self.nextEventDeliveryImpl(.detailed)) {
+                .success => |delivery_value| {
+                    var delivery = delivery_value;
+                    switch (delivery.event) {
+                        .session_error => return .{ .failure = try delivery.intoFailure(
+                            self.client.allocator,
+                        ) },
+                        else => return .{ .success = delivery.intoEvent(self.client.allocator) },
+                    }
+                },
+                .failure => |failure| .{ .failure = failure },
+            };
+        }
+        self.client.ensurePump() catch |err| return .{ .failure = if (err ==
+            error.ReentrantRpcCall)
+            try recordReentrant(self.client.allocator, "session.event")
+        else
+            try recordClientIo(
+                self.client.allocator,
+                .read,
+                err,
+            ) };
+        if (self.client.hasQueuedSessionEvent(session_id, self.generation)) {
+            return switch (try self.nextEventDeliveryImpl(.detailed)) {
+                .success => |delivery_value| {
+                    var delivery = delivery_value;
+                    switch (delivery.event) {
+                        .session_error => return .{ .failure = try delivery.intoFailure(
+                            self.client.allocator,
+                        ) },
+                        else => return .{ .success = delivery.intoEvent(self.client.allocator) },
+                    }
+                },
+                .failure => |failure| .{ .failure = failure },
+            };
+        }
+        var event = self.client.nextSubscriberEvent(
+            lease.log,
+            lease.log.compatibilityToken(),
+            null,
+            null,
+        ) catch |err| {
+            if (try lease.log.detailedFailure()) |failure|
+                return .{ .failure = failure };
+            if (try self.client.clonePumpFailure()) |failure|
+                return .{ .failure = failure };
+            if (self.client.transport_closed)
+                return .{ .failure = try self.client.closedTransportFailure(.detailed) };
+            return .{ .failure = try recordClientIo(
+                self.client.allocator,
+                .read,
+                err,
+            ) };
+        };
+        if (event == .session_error) {
+            defer event.deinit(self.client.allocator);
+            return .{ .failure = try sessionFailureFromEvent(
+                self.client.allocator,
+                lease.log.session_id,
+                event.session_error,
+            ) };
+        }
+        return switch (try self.processRetainedEvent(
+            .detailed,
+            lease.log.session_id,
+            event,
+        )) {
             .success => |delivery_value| {
                 var delivery = delivery_value;
-                switch (delivery.event) {
-                    .session_error => return .{ .failure = try delivery.intoFailure(
-                        self.client.allocator,
-                    ) },
-                    else => return .{ .success = delivery.intoEvent(self.client.allocator) },
-                }
+                return .{ .success = delivery.intoEvent(self.client.allocator) };
             },
             .failure => |failure| .{ .failure = failure },
         };
@@ -8535,16 +11659,40 @@ pub const Session = struct {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
         };
-        var delivery = switch (try self.client.nextEventImpl(failure_policy, initial.id)) {
+        const delivery = switch (try self.client.nextEventImpl(
+            failure_policy,
+            initial.id,
+            self.generation,
+        )) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
         };
+        return self.processEventDelivery(failure_policy, delivery);
+    }
+
+    fn processEventDelivery(
+        self: Session,
+        comptime failure_policy: FailurePolicy,
+        delivery_value: EventDelivery,
+    ) errors.DetailedError!PolicyResult(failure_policy, EventDelivery) {
+        var delivery = delivery_value;
         var delivery_owned = true;
         defer if (delivery_owned) delivery.deinit(self.client.allocator);
-        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+        var ingress_lease = switch (try self.acquireIngressForPolicy(failure_policy)) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
         };
+        defer {
+            self.client.finishSessionIngress(ingress_lease.log);
+            ingress_lease.deinit();
+        }
+        const resolved = ResolvedSession{
+            .record_index = self.record_index,
+            .id = ingress_lease.log.session_id,
+        };
+        var ingress_scope: SessionIngressScope = undefined;
+        beginSessionIngressScope(&ingress_scope, ingress_lease.log);
+        defer endSessionIngressScope(&ingress_scope);
         if (delivery.event == .external_tool_requested) {
             const request = delivery.event.external_tool_requested;
             if (self.client.findToolHandler(resolved.id, request.tool_name)) |tool| {
@@ -8608,6 +11756,7 @@ pub const Session = struct {
                         delivery_owned = false;
                         return .{ .success = delivery };
                     }
+
                     return .{ .failure = try recordPermissionHandlerFailure(
                         self.client.allocator,
                         resolved.id,
@@ -8675,6 +11824,23 @@ pub const Session = struct {
         }
         delivery_owned = false;
         return .{ .success = delivery };
+    }
+
+    fn processRetainedEvent(
+        self: Session,
+        comptime failure_policy: FailurePolicy,
+        session_id: []const u8,
+        event_value: session_types.SessionEvent,
+    ) errors.DetailedError!PolicyResult(failure_policy, EventDelivery) {
+        var event = event_value;
+        const owned_session_id = self.client.allocator.dupe(u8, session_id) catch |err| {
+            event.deinit(self.client.allocator);
+            return err;
+        };
+        return self.processEventDelivery(failure_policy, .{
+            .session_id = owned_session_id,
+            .event = event,
+        });
     }
 
     pub fn capabilities(self: Session) ext.CapabilitySet {
@@ -9050,23 +12216,16 @@ pub const Session = struct {
             };
             defer parsed.deinit();
             if (parsed.value.success) {
-                if (resolved.record_index >= self.client.sessions.items.len or
-                    !self.client.sessions.items[resolved.record_index].isActive() or
-                    self.client.sessions.items[resolved.record_index].generation != self.generation or
-                    !std.mem.eql(
-                        u8,
-                        self.client.sessions.items[resolved.record_index].id.?,
-                        owned_session_id,
-                    ))
-                {
-                    return .{ .failure = try policyFailure(
-                        failure_policy,
-                        error.SessionNotActive,
-                        recordInvalidConfig,
-                        .{ self.client.allocator, "session_id", error.SessionNotActive },
-                    ) };
-                }
-                self.client.removeSessionAt(resolved.record_index);
+                self.client.removeSessionExpected(
+                    resolved.record_index,
+                    owned_session_id,
+                    self.generation,
+                ) catch |err| return .{ .failure = try policyFailure(
+                    failure_policy,
+                    err,
+                    recordInvalidConfig,
+                    .{ self.client.allocator, "session_id", err },
+                ) };
                 return .{ .success = {} };
             }
         }
@@ -9306,9 +12465,17 @@ pub const Session = struct {
         comptime failure_policy: FailurePolicy,
         request_id: []const u8,
     ) errors.DetailedError!PolicyResult(failure_policy, void) {
-        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+        var ingress_lease = switch (try self.acquireIngressForPolicy(failure_policy)) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
+        };
+        defer {
+            self.client.finishSessionIngress(ingress_lease.log);
+            ingress_lease.deinit();
+        }
+        const resolved = ResolvedSession{
+            .record_index = self.record_index,
+            .id = ingress_lease.log.session_id,
         };
         const parsed = switch (try self.client.callImpl(failure_policy, RpcSuccess, "session.permissions.handlePendingPermissionRequest", .{
             .sessionId = resolved.id,
@@ -9354,9 +12521,17 @@ pub const Session = struct {
         request_id: []const u8,
         feedback: ?[]const u8,
     ) errors.DetailedError!PolicyResult(failure_policy, void) {
-        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+        var ingress_lease = switch (try self.acquireIngressForPolicy(failure_policy)) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
+        };
+        defer {
+            self.client.finishSessionIngress(ingress_lease.log);
+            ingress_lease.deinit();
+        }
+        const resolved = ResolvedSession{
+            .record_index = self.record_index,
+            .id = ingress_lease.log.session_id,
         };
         const parsed = switch (try self.client.callImpl(failure_policy, RpcSuccess, "session.permissions.handlePendingPermissionRequest", .{
             .sessionId = resolved.id,
@@ -9415,9 +12590,17 @@ pub const Session = struct {
         decision_json: []const u8,
         decision_context_json: ?[]const u8,
     ) errors.DetailedError!PolicyResult(failure_policy, void) {
-        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+        var ingress_lease = switch (try self.acquireIngressForPolicy(failure_policy)) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
+        };
+        defer {
+            self.client.finishSessionIngress(ingress_lease.log);
+            ingress_lease.deinit();
+        }
+        const resolved = ResolvedSession{
+            .record_index = self.record_index,
+            .id = ingress_lease.log.session_id,
         };
         const decision = std.json.parseFromSlice(
             std.json.Value,
@@ -9546,9 +12729,17 @@ pub const Session = struct {
         tool_call_id: ?[]const u8,
         tool_name: ?[]const u8,
     ) errors.DetailedError!PolicyResult(failure_policy, void) {
-        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+        var ingress_lease = switch (try self.acquireIngressForPolicy(failure_policy)) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
+        };
+        defer {
+            self.client.finishSessionIngress(ingress_lease.log);
+            ingress_lease.deinit();
+        }
+        const resolved = ResolvedSession{
+            .record_index = self.record_index,
+            .id = ingress_lease.log.session_id,
         };
         const parsed = switch (try self.client.callImpl(failure_policy, struct { success: bool }, "session.tools.handlePendingToolCall", .{
             .sessionId = resolved.id,
@@ -9600,9 +12791,17 @@ pub const Session = struct {
         request_id: []const u8,
         result_json: []const u8,
     ) errors.DetailedError!PolicyResult(failure_policy, void) {
-        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+        var ingress_lease = switch (try self.acquireIngressForPolicy(failure_policy)) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
+        };
+        defer {
+            self.client.finishSessionIngress(ingress_lease.log);
+            ingress_lease.deinit();
+        }
+        const resolved = ResolvedSession{
+            .record_index = self.record_index,
+            .id = ingress_lease.log.session_id,
         };
         const result = std.json.parseFromSlice(
             std.json.Value,
@@ -9701,9 +12900,17 @@ pub const Session = struct {
         tool_call_id: ?[]const u8,
         tool_name: ?[]const u8,
     ) errors.DetailedError!PolicyResult(failure_policy, void) {
-        const resolved = switch (try self.resolveForPolicy(failure_policy)) {
+        var ingress_lease = switch (try self.acquireIngressForPolicy(failure_policy)) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
+        };
+        defer {
+            self.client.finishSessionIngress(ingress_lease.log);
+            ingress_lease.deinit();
+        }
+        const resolved = ResolvedSession{
+            .record_index = self.record_index,
+            .id = ingress_lease.log.session_id,
         };
         const parsed = switch (try self.client.callImpl(failure_policy, struct { success: bool }, "session.tools.handlePendingToolCall", .{
             .sessionId = resolved.id,
@@ -10301,7 +13508,7 @@ test "session UI lowers confirm select and input exactly" {
     runtime.capabilities.elicitation = .supported;
     try client.extension_runtimes.append(allocator, runtime);
     try client.beginSessionRecord(try allocator.dupe(u8, "ui-session"), null);
-    const ui = client.sessionHandle(client.commitSessionRecord()).ui();
+    const ui = client.sessionHandle(try client.commitSessionRecord()).ui();
 
     try std.testing.expect(try ui.confirm("Proceed?"));
     const selected = (try ui.select("Choose", &.{ "one", "two" })).?;
@@ -10403,7 +13610,7 @@ test "session UI rejects invalid defaults and returned values" {
     runtime.capabilities.elicitation = .supported;
     try client.extension_runtimes.append(allocator, runtime);
     try client.beginSessionRecord(try allocator.dupe(u8, "ui-session"), null);
-    const ui = client.sessionHandle(client.commitSessionRecord()).ui();
+    const ui = client.sessionHandle(try client.commitSessionRecord()).ui();
 
     try std.testing.expectError(
         error.InvalidElicitationSchema,
@@ -10460,14 +13667,14 @@ test "session UI handles are generation safe" {
     }
 
     try client.beginSessionRecord(try allocator.dupe(u8, "session"), null);
-    const first_index = client.commitSessionRecord();
+    const first_index = try client.commitSessionRecord();
     const stale_ui = client.sessionHandle(first_index).ui();
 
     try client.beginSessionRecord(
         try allocator.dupe(u8, client.sessions.items[first_index].id.?),
         first_index,
     );
-    _ = client.commitSessionRecord();
+    _ = try client.commitSessionRecord();
 
     try std.testing.expectError(error.SessionNotActive, stale_ui.confirm("Proceed?"));
 }
@@ -11190,10 +14397,6 @@ fn invokeMcpAuthHandler(
         .result = handler(allocator, request, context) catch |err|
             return .{ .result = .cancelled, .handler_error = err },
     };
-}
-
-fn completesSendAndWait(idle: session_types.SessionIdle) bool {
-    return idle.mode == null or !std.mem.eql(u8, idle.mode.?, "autopilot");
 }
 
 const WireTool = struct {
@@ -12928,7 +16131,7 @@ test "workspace paths are copied and session handles are generation safe" {
     try client.beginSessionRecord(first_id, null);
     var first_path = [_]u8{ '/', 'o', 'l', 'd' };
     try client.prepareSessionCommit("session", &first_path);
-    const first_index = client.commitSessionRecord();
+    const first_index = try client.commitSessionRecord();
     const first = client.sessionHandle(first_index);
     const first_mcp_apps = McpApps{ .session = first };
     first_path[1] = 'X';
@@ -12939,7 +16142,7 @@ test "workspace paths are copied and session handles are generation safe" {
         first_index,
     );
     try client.prepareSessionCommit("session", "/replacement");
-    const replacement_index = client.commitSessionRecord();
+    const replacement_index = try client.commitSessionRecord();
     const replacement = client.sessionHandle(replacement_index);
 
     try std.testing.expectEqual(first_index, replacement_index);
@@ -12970,13 +16173,13 @@ test "inactive session record slots are reused without stale id access" {
 
     try client.beginSessionRecord(try allocator.dupe(u8, "first"), null);
     try client.prepareSessionCommit("first", "/first");
-    const first = client.sessionHandle(client.commitSessionRecord());
+    const first = client.sessionHandle(try client.commitSessionRecord());
     const first_mcp_apps = McpApps{ .session = first };
-    client.removeSessionAt(first.record_index);
+    try client.removeSessionExpected(first.record_index, first.id, first.generation);
 
     try client.beginSessionRecord(try allocator.dupe(u8, "second"), null);
     try client.prepareSessionCommit("second", "/second");
-    const second = client.sessionHandle(client.commitSessionRecord());
+    const second = client.sessionHandle(try client.commitSessionRecord());
 
     try std.testing.expectEqual(first.record_index, second.record_index);
     try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
@@ -12996,13 +16199,13 @@ test "inactive session record slots are reused without stale id access" {
     );
     try std.testing.expectEqualStrings("/second", (try second.workspacePath()).?);
 
-    client.removeSessionAt(second.record_index);
+    try client.removeSessionExpected(second.record_index, second.id, second.generation);
     for (0..8) |index| {
         const id = try std.fmt.allocPrint(allocator, "reuse-{d}", .{index});
         try client.beginSessionRecord(id, null);
-        const current = client.sessionHandle(client.commitSessionRecord());
+        const current = client.sessionHandle(try client.commitSessionRecord());
         try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
-        client.removeSessionAt(current.record_index);
+        try client.removeSessionExpected(current.record_index, current.id, current.generation);
     }
 }
 
@@ -13013,6 +16216,7 @@ test "inactive session slots skip bounded shutdown work" {
         .io = undefined,
     };
     defer {
+        deinitTestEventLogs(&client);
         for (client.sessions.items) |*record| record.deinit(allocator);
         client.sessions.deinit(allocator);
     }
@@ -13157,6 +16361,14 @@ test "public client API type checks" {
     _ = &Client.joinParentSession;
     _ = &Client.callRpc;
     _ = &Client.listModels;
+    _ = &Session.send;
+    _ = &Session.sendDetailed;
+    _ = &Session.sendAndWait;
+    _ = &Session.sendAndWaitWithOptions;
+    _ = &Session.sendAndWaitDetailed;
+    _ = &Session.sendAndWaitDetailedWithOptions;
+    _ = &Session.subscribe;
+    _ = &EventSubscriber.nextEvent;
 }
 
 test "stdio runtime lowers stable argv and environment options" {
@@ -13443,6 +16655,7 @@ test "shutdown attempts every initial session and child after all injected failu
         .writer_buffer = &.{},
     };
     defer {
+        deinitTestEventLogs(&client);
         for (client.sessions.items) |*record| record.deinit(allocator);
         client.sessions.deinit(allocator);
     }
@@ -13480,6 +16693,7 @@ test "stopDetailed retains detach RPC failure details and completes cleanup" {
         .writer_buffer = &.{},
     };
     defer {
+        deinitTestEventLogs(&client);
         for (client.sessions.items) |*record| record.deinit(allocator);
         client.sessions.deinit(allocator);
     }
@@ -16341,7 +19555,8 @@ test "permission handler receives events and can leave requests pending" {
     };
     try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "session-1") });
     defer {
-        client.removeSession("session-1");
+        removeTestSession(&client, "session-1");
+        deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
         for (client.sessions.items) |*record| record.deinit(allocator);
@@ -16382,6 +19597,7 @@ test "permission handler receives events and can leave requests pending" {
     defer parsed_event.deinit();
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "session-1"),
+        .generation = 1,
         .event = try deliveryEventForTest(
             allocator,
             try session_types.parseEvent(allocator, parsed_event.value),
@@ -16413,7 +19629,8 @@ test "permission handler receives injected managed settings metadata" {
     };
     try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "session-1") });
     defer {
-        client.removeSession("session-1");
+        removeTestSession(&client, "session-1");
+        deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
         for (client.sessions.items) |*record| record.deinit(allocator);
@@ -16450,6 +19667,7 @@ test "permission handler receives injected managed settings metadata" {
     defer parsed_event.deinit();
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "session-1"),
+        .generation = 1,
         .event = try deliveryEventForTest(
             allocator,
             try session_types.parseEvent(allocator, parsed_event.value),
@@ -16473,7 +19691,8 @@ test "permission handler failures leave requests available for manual handling" 
     };
     try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "session-1") });
     defer {
-        client.removeSession("session-1");
+        removeTestSession(&client, "session-1");
+        deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
         for (client.sessions.items) |*record| record.deinit(allocator);
@@ -16503,6 +19722,7 @@ test "permission handler failures leave requests available for manual handling" 
     defer parsed_event.deinit();
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "session-1"),
+        .generation = 1,
         .event = try deliveryEventForTest(
             allocator,
             try session_types.parseEvent(allocator, parsed_event.value),
@@ -16528,8 +19748,9 @@ test "approveAll leaves managed permission events observable" {
     try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "managed-session") });
     try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "managed-request") });
     defer {
-        client.removeSession("managed-session");
-        client.removeSession("managed-request");
+        removeTestSession(&client, "managed-session");
+        removeTestSession(&client, "managed-request");
+        deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
         for (client.sessions.items) |*record| record.deinit(allocator);
@@ -16553,6 +19774,7 @@ test "approveAll leaves managed permission events observable" {
     defer managed_session_event.deinit();
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "managed-session"),
+        .generation = 1,
         .event = try deliveryEventForTest(
             allocator,
             try session_types.parseEvent(allocator, managed_session_event.value),
@@ -16569,6 +19791,7 @@ test "approveAll leaves managed permission events observable" {
     defer managed_request_event.deinit();
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "managed-request"),
+        .generation = 1,
         .event = try deliveryEventForTest(
             allocator,
             try session_types.parseEvent(allocator, managed_request_event.value),
@@ -16642,7 +19865,8 @@ fn runAutomaticPermissionRpc(
     };
     try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "session-1") });
     defer {
-        client.removeSession("session-1");
+        removeTestSession(&client, "session-1");
+        deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
         for (client.sessions.items) |*record| record.deinit(allocator);
@@ -16672,6 +19896,7 @@ fn runAutomaticPermissionRpc(
     defer parsed_event.deinit();
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "session-1"),
+        .generation = 1,
         .event = try deliveryEventForTest(
             allocator,
             try session_types.parseEvent(allocator, parsed_event.value),
@@ -16775,7 +20000,8 @@ test "permission response delivery failures are explicit" {
     };
     try client.sessions.append(allocator, .{ .id = try allocator.dupe(u8, "session-1") });
     defer {
-        client.removeSession("session-1");
+        removeTestSession(&client, "session-1");
+        deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         client.permission_handlers.deinit(allocator);
         for (client.sessions.items) |*record| record.deinit(allocator);
@@ -16805,6 +20031,7 @@ test "permission response delivery failures are explicit" {
     defer parsed_event.deinit();
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "session-1"),
+        .generation = 1,
         .event = try deliveryEventForTest(
             allocator,
             try session_types.parseEvent(allocator, parsed_event.value),
@@ -16824,6 +20051,400 @@ test "permission response delivery failures are explicit" {
 fn framedBody(allocator: std.mem.Allocator, framed: []const u8) ![]u8 {
     var reader = std.Io.Reader.fixed(framed);
     return json_rpc.readFrame(allocator, &reader);
+}
+
+fn deinitTestMessaging(client: *Client) void {
+    client.stopEventWorker();
+    client.stopPump();
+    client.finishSendOperations();
+    deinitTestEventLogs(client);
+    for (client.retained_responses.items) |response| {
+        wipeSecret(response.body);
+        client.allocator.free(response.body);
+    }
+    client.retained_responses.deinit(client.allocator);
+    for (client.buffered_responses.items) |*response| response.deinit(client.allocator);
+    client.buffered_responses.deinit(client.allocator);
+    client.pending_calls.deinit(client.allocator);
+    client.send_operations.deinit(client.allocator);
+    client.event_queue.deinit(client.allocator);
+    if (client.pump_failure) |*failure| failure.deinit();
+}
+
+fn deinitTestEventLogs(client: *Client) void {
+    for (client.event_logs.items) |log| {
+        log.close();
+        log.deinit();
+        client.allocator.destroy(log);
+    }
+    client.event_logs.deinit(client.allocator);
+    client.event_logs = .empty;
+}
+
+fn ensureTestEventLog(client: *Client, session_id: []const u8) !void {
+    client.event_logs_mutex.lockUncancelable(client.io);
+    defer client.event_logs_mutex.unlock(client.io);
+    const generation = if (client.findSession(session_id)) |record|
+        record.generation
+    else
+        1;
+    _ = try client.ensureEventLogLocked(session_id, generation);
+}
+
+fn commitTestExtensionRuntime(
+    client: *Client,
+    session_id: []const u8,
+    response: WireSessionLifecycleResponse,
+    requested_environment_variables: []const []const u8,
+) !void {
+    try client.prepareExtensionRuntimeCommit(
+        session_id,
+        response,
+        requested_environment_variables,
+    );
+    client.extension_runtimes_mutex.lockUncancelable(client.io);
+    defer client.extension_runtimes_mutex.unlock(client.io);
+    client.commitPreparedExtensionRuntimeLocked(session_id);
+}
+
+const QueueEventProbeResult = struct {
+    failure: ?anyerror = null,
+    started: std.Io.Event = .unset,
+};
+
+fn queueEventForProbe(
+    client: *Client,
+    params: std.json.Value,
+    frame: []u8,
+    result: *QueueEventProbeResult,
+) void {
+    result.started.set(std.testing.io);
+    const routed = client.queueSessionEvent(.detailed, frame, params) catch |err| {
+        client.allocator.free(frame);
+        result.failure = err;
+        return;
+    };
+    switch (routed) {
+        .success => |retained| if (!retained) client.allocator.free(frame),
+        .failure => |failure_value| {
+            var failure = failure_value;
+            result.failure = failure.native_error;
+            failure.deinit();
+            client.allocator.free(frame);
+        },
+    }
+}
+
+fn stopPumpForProbe(
+    client: *Client,
+    started: *std.Io.Event,
+    completed: *std.Io.Event,
+) void {
+    started.set(std.testing.io);
+    client.stopPump();
+    completed.set(std.testing.io);
+}
+
+fn captureNextRequestId(client: *Client, result: *u64) void {
+    result.* = client.nextRequestId();
+}
+
+fn captureRpcHandlerState(client: *Client, result: *bool) void {
+    result.* = client.isRpcHandlerThread();
+}
+
+fn captureSessionEvent(
+    session: Session,
+    result: *?session_types.SessionEvent,
+    failure: *?anyerror,
+) void {
+    result.* = session.nextEvent() catch |err| {
+        failure.* = err;
+        return;
+    };
+}
+
+test "RPC handler reentrancy is scoped to the callback thread" {
+    var client = Client{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+    };
+    client.beginRpcHandler();
+    defer client.endRpcHandler();
+    try std.testing.expect(client.isRpcHandlerThread());
+
+    var other_thread_is_handler = true;
+    var future = try std.testing.io.concurrent(
+        captureRpcHandlerState,
+        .{ &client, &other_thread_is_handler },
+    );
+    future.await(std.testing.io);
+    try std.testing.expect(!other_thread_is_handler);
+}
+
+test "pump startup rejects same-thread direct-call reentrancy" {
+    var client = Client{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .direct_call_active = true,
+        .direct_call_owner = std.Thread.getCurrentId(),
+        .direct_call_done = .unset,
+    };
+    try std.testing.expectError(error.ReentrantRpcCall, client.ensurePump());
+}
+
+test "blocking nextEvent leaves the pump available to concurrent send" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"messageId\":\"message-1\"}}",
+    );
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.event\",\"params\":{\"sessionId\":\"session-1\",\"event\":{\"type\":\"session.idle\",\"data\":{}}}}",
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [2048]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+            .eof_is_idle = true,
+        } },
+    };
+    defer {
+        deinitTestMessaging(&client);
+        for (client.events.items) |*queued| queued.deinit(allocator);
+        deinitTestEventLogs(&client);
+        client.events.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    const session = try addTestSession(&client, "session-1");
+    var event: ?session_types.SessionEvent = null;
+    defer if (event) |*value| value.deinit(allocator);
+    var event_failure: ?anyerror = null;
+    var future = try std.testing.io.concurrent(
+        captureSessionEvent,
+        .{ session, &event, &event_failure },
+    );
+    for (0..100) |_| {
+        client.pending_mutex.lockUncancelable(client.io);
+        const started = client.pump_future != null;
+        client.pending_mutex.unlock(client.io);
+        if (started) break;
+        try std.Io.sleep(client.io, .fromMilliseconds(1), .awake);
+    }
+    client.pending_mutex.lockUncancelable(client.io);
+    const pump_started = client.pump_future != null;
+    client.pending_mutex.unlock(client.io);
+    try std.testing.expect(pump_started);
+
+    const message_id = try session.send(.{ .prompt = "question" });
+    defer allocator.free(message_id);
+    future.await(std.testing.io);
+    try std.testing.expect(event_failure == null);
+    try std.testing.expect(event.? == .session_idle);
+    try std.testing.expectEqualStrings("message-1", message_id);
+}
+
+test "nested direct calls retain outer responses by request ID" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const outer_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"outer":true}}
+    ;
+    const nested_response =
+        \\{"jsonrpc":"2.0","id":2,"result":null}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            outer_response.len,
+            outer_response,
+            nested_response.len,
+            nested_response,
+        },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = responses });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &writer_buffer,
+        .next_request_id = 2,
+    };
+    defer deinitTestMessaging(&client);
+
+    try std.testing.expect(!client.beginRpcCall());
+    defer client.endDirectRpcCall();
+    client.direct_request_ids[0] = 1;
+    client.direct_request_count = 1;
+    defer client.direct_request_count = 0;
+
+    const nested = try client.call(std.json.Value, "test.nested", .{});
+    defer nested.deinit();
+    try std.testing.expect(nested.value == .null);
+
+    const buffered = client.takeBufferedResponse(1) orelse
+        return error.TestExpectedBufferedResponse;
+    defer {
+        wipeSecret(buffered);
+        allocator.free(buffered);
+    }
+    try std.testing.expectEqualStrings(outer_response, buffered);
+}
+
+test "request IDs remain unique across concurrent callers" {
+    var client = Client{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+    };
+    var ids: [32]u64 = undefined;
+    var futures: [ids.len]std.Io.Future(void) = undefined;
+    for (&futures, &ids) |*future, *id| {
+        future.* = try std.testing.io.concurrent(captureNextRequestId, .{
+            &client,
+            id,
+        });
+    }
+    for (&futures) |*future| future.await(std.testing.io);
+    std.mem.sort(u64, &ids, {}, std.sort.asc(u64));
+    for (ids, 1..) |id, expected| {
+        try std.testing.expectEqual(@as(u64, @intCast(expected)), id);
+    }
+}
+
+test "direct transport ownership is reentrant and released at outer exit" {
+    var client = Client{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+    };
+
+    try std.testing.expect(!client.beginRpcCall());
+    try std.testing.expect(!client.beginRpcCall());
+    try std.testing.expect(client.direct_call_active);
+    try std.testing.expectEqual(@as(usize, 2), client.direct_call_depth);
+
+    client.endDirectRpcCall();
+    try std.testing.expect(client.direct_call_active);
+    try std.testing.expectEqual(@as(usize, 1), client.direct_call_depth);
+    client.endDirectRpcCall();
+    try std.testing.expect(!client.direct_call_active);
+    try std.testing.expectEqual(@as(usize, 0), client.direct_call_depth);
+}
+
+test "completed send operation is not reclaimed before future publication" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestEventLogs(&client);
+        client.events.deinit(allocator);
+    }
+    const log = try client.ensureEventLog("session-1", 1);
+    const receipt = try log.reserveTurn(.raw);
+    const operation = try allocator.create(SendOperation);
+    operation.* = .{
+        .client = &client,
+        .log_lease = try client.acquireEventLog("session-1", 1),
+        .receipt = receipt,
+        .request_id = 1,
+        .request = try allocator.dupe(u8, "{}"),
+        .detached = true,
+    };
+    try client.send_operations.append(allocator, operation);
+    operation.completed.set(std.testing.io);
+
+    client.reapSendOperations();
+    try std.testing.expectEqual(@as(usize, 1), client.send_operations.items.len);
+
+    operation.future_published = true;
+    client.reapSendOperations();
+    try std.testing.expectEqual(@as(usize, 0), client.send_operations.items.len);
+}
+
+test "failed send startup abandons its reserved turn receipt" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        deinitTestMessaging(&client);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+        deinitTestEventLogs(&client);
+        client.events.deinit(allocator);
+    }
+    try client.sessions.append(allocator, .{
+        .id = try allocator.dupe(u8, "session-1"),
+    });
+    const sentinel = try allocator.create(SendOperation);
+    defer allocator.destroy(sentinel);
+    for (0..detached_send_limit) |_|
+        try client.send_operations.append(allocator, sentinel);
+
+    try std.testing.expectError(
+        error.TooManyPendingSends,
+        (try client.sessionForId("session-1")).sendAndWait(.{ .prompt = "blocked" }),
+    );
+    client.send_operations.clearRetainingCapacity();
+
+    const log = client.findEventLog("session-1", 1).?;
+    var receipts: [32]turn_tracker.ReceiptToken = undefined;
+    for (&receipts) |*receipt| receipt.* = try log.reserveTurn(.raw);
+    try std.testing.expectError(
+        error.TooManyOutstandingTurns,
+        log.reserveTurn(.raw),
+    );
+    var message_id_buffer: [32]u8 = undefined;
+    for (receipts, 0..) |receipt, index| {
+        const message_id = try std.fmt.bufPrint(
+            &message_id_buffer,
+            "message-{d}",
+            .{index},
+        );
+        try log.bindTurnMessage(receipt, message_id);
+    }
+    const replacement = try log.reserveTurn(.raw);
+    log.abandonTurn(replacement);
+    for (receipts) |receipt| log.abandonTurn(receipt);
 }
 
 fn runSendRpc(
@@ -16875,6 +20496,8 @@ fn runSendRpc(
         } },
     };
     defer {
+        deinitTestMessaging(&client);
+        deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         for (client.sessions.items) |*record| record.deinit(allocator);
         client.sessions.deinit(allocator);
@@ -16899,6 +20522,250 @@ fn runSendRpc(
     };
 }
 
+const DetailedSendKind = enum {
+    send,
+    send_and_wait,
+};
+
+fn runConcurrentDetailedSend(active_session: Session) !errors.Failure {
+    return switch (try active_session.sendDetailed(.{ .prompt = "question" })) {
+        .failure => |failure| failure,
+        .success => |message_id| {
+            active_session.client.allocator.free(message_id);
+            return error.TestExpectedFailure;
+        },
+    };
+}
+
+fn runConcurrentDetailedSendAndWait(active_session: Session) !errors.Failure {
+    return switch (try active_session.sendAndWaitDetailedWithOptions(
+        .{ .prompt = "question" },
+        .{ .timeout_ns = std.time.ns_per_s },
+    )) {
+        .failure => |failure| failure,
+        .success => |maybe_message| {
+            if (maybe_message) |message_value| {
+                var message = message_value;
+                message.deinit(active_session.client.allocator);
+            }
+            return error.TestExpectedFailure;
+        },
+    };
+}
+
+fn runDetailedSendFailure(
+    allocator: std.mem.Allocator,
+    frames: []const u8,
+    kind: DetailedSendKind,
+    wait_options: session_types.WaitOptions,
+) !errors.Failure {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [4096]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &writer_buffer,
+            .eof_is_idle = true,
+        } },
+    };
+    defer {
+        deinitTestMessaging(&client);
+        for (client.events.items) |*event| event.deinit(allocator);
+        deinitTestEventLogs(&client);
+        client.events.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    try client.sessions.append(allocator, .{
+        .id = try allocator.dupe(u8, "session-1"),
+    });
+    const active_session = try client.sessionForId("session-1");
+    return switch (kind) {
+        .send => switch (try active_session.sendDetailed(.{ .prompt = "question" })) {
+            .failure => |failure| failure,
+            .success => |message_id| {
+                allocator.free(message_id);
+                return error.TestExpectedFailure;
+            },
+        },
+        .send_and_wait => switch (try active_session.sendAndWaitDetailedWithOptions(
+            .{ .prompt = "question" },
+            wait_options,
+        )) {
+            .failure => |failure| failure,
+            .success => |maybe_message| {
+                if (maybe_message) |message_value| {
+                    var message = message_value;
+                    message.deinit(allocator);
+                }
+                return error.TestExpectedFailure;
+            },
+        },
+    };
+}
+
+test "concurrent detailed sends retain equivalent pump diagnostics" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "responses",
+        .data = "Content-Length: nope\r\n\r\n",
+    });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var response_reader_buffer: [256]u8 = undefined;
+    var response_reader = response_file.readerStreaming(
+        std.testing.io,
+        &response_reader_buffer,
+    );
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var request_writer_buffer: [4096]u8 = undefined;
+    var request_writer = request_file.writerStreaming(
+        std.testing.io,
+        &request_writer_buffer,
+    );
+    var pump_gate: std.Io.Event = .unset;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .transport = .{ .fixture = .{
+            .reader = &response_reader,
+            .writer = &request_writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &request_writer_buffer,
+        } },
+        .pump_read_gate = &pump_gate,
+    };
+    var pending_probe = PendingCallAdmissionProbe{
+        .target = 2,
+        .release = &pump_gate,
+    };
+    client.pending_call_admission_probe = &pending_probe;
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestEventLogs(&client);
+        client.events.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    const first_session = try addTestSession(&client, "session-1");
+    const second_session = try addTestSession(&client, "session-2");
+    try client.ensurePump();
+    var first = try std.testing.io.concurrent(
+        runConcurrentDetailedSend,
+        .{first_session},
+    );
+    var second_failure = try runConcurrentDetailedSend(second_session);
+
+    var first_failure = try first.await(std.testing.io);
+    defer first_failure.deinit();
+    defer second_failure.deinit();
+    for ([_]*errors.Failure{ &first_failure, &second_failure }) |failure| {
+        try std.testing.expectEqual(error.InvalidCharacter, failure.native_error);
+        switch (failure.detail) {
+            .protocol => |protocol_failure| switch (protocol_failure) {
+                .invalid_content_length => |invalid| {
+                    try std.testing.expectEqualStrings("nope", invalid.value);
+                },
+                else => return error.TestExpectedInvalidContentLength,
+            },
+            else => return error.TestExpectedProtocolFailure,
+        }
+    }
+}
+
+test "sendAndWaitDetailed retains pump diagnostics after send response" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const send_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"messageId":"message-1"}}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: nope\r\n\r\n",
+        .{ send_response.len, send_response },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "responses",
+        .data = responses,
+    });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var response_reader_buffer: [256]u8 = undefined;
+    var response_reader = response_file.readerStreaming(
+        std.testing.io,
+        &response_reader_buffer,
+    );
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var request_writer_buffer: [4096]u8 = undefined;
+    var request_writer = request_file.writerStreaming(
+        std.testing.io,
+        &request_writer_buffer,
+    );
+    var pump_gate: std.Io.Event = .unset;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .transport = .{ .fixture = .{
+            .reader = &response_reader,
+            .writer = &request_writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &request_writer_buffer,
+        } },
+        .pump_read_gate = &pump_gate,
+    };
+    var pending_probe = PendingCallAdmissionProbe{
+        .target = 1,
+        .release = &pump_gate,
+    };
+    client.pending_call_admission_probe = &pending_probe;
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestEventLogs(&client);
+        client.events.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    const active_session = try addTestSession(&client, "session-1");
+    try client.ensurePump();
+    var send = try std.testing.io.concurrent(
+        runConcurrentDetailedSendAndWait,
+        .{active_session},
+    );
+    try pending_probe.ready.wait(std.testing.io);
+
+    var failure = try send.await(std.testing.io);
+    defer failure.deinit();
+    try std.testing.expectEqual(error.InvalidCharacter, failure.native_error);
+    switch (failure.detail) {
+        .protocol => |protocol_failure| switch (protocol_failure) {
+            .invalid_content_length => |invalid| {
+                try std.testing.expectEqualStrings("nope", invalid.value);
+            },
+            else => return error.TestExpectedInvalidContentLength,
+        },
+        else => return error.TestExpectedProtocolFailure,
+    }
+}
+
 test "session.send keeps prompt-only wire output unchanged" {
     const result = try runSendRpc(std.testing.allocator, .{ .prompt = "hello" });
     defer std.testing.allocator.free(result.message_id);
@@ -16910,168 +20777,42 @@ test "session.send keeps prompt-only wire output unchanged" {
     , result.request_body);
 }
 
-test "session.send serializes every attachment variant" {
-    const repo = session_types.Attachment.GitHubRepoPointer{
-        .id = 7,
-        .name = "repo",
-        .owner = "owner",
-    };
-    const diff_side = session_types.Attachment.GitHubFileDiffSide{
-        .path = "src/a.zig",
-        .git_ref = "main",
-        .repo = repo,
-    };
-    const attachments = [_]session_types.Attachment{
-        .{ .file = .{
-            .path = "/tmp/a.zig",
-            .display_name = "a.zig",
-            .line_range = .{ .start = 2, .end = 4 },
-        } },
-        .{ .directory = .{
-            .path = "/tmp/src",
-            .display_name = "src",
-        } },
+test "session.send serializes stable attachments and message options" {
+    const attachments = [_]session_types.MessageAttachment{
+        .{ .file = .{ .path = "src/a.zig", .display_name = "a.zig" } },
+        .{ .directory = .{ .path = "src", .display_name = "source" } },
         .{ .selection = .{
-            .file_path = "/tmp/a.zig",
-            .text = "const a = 1;",
-            .display_name = "a",
+            .file_path = "src/a.zig",
+            .display_name = "selection",
             .selection = .{
                 .start = .{ .line = 1, .character = 2 },
-                .end = .{ .line = 1, .character = 14 },
+                .end = .{ .line = 3, .character = 4 },
             },
-        } },
-        .{ .blob = .{
-            .data = "aGVsbG8=",
-            .mime_type = "text/plain",
-            .display_name = "hello.txt",
-        } },
-        .{ .github_reference = .{
-            .number = 42,
-            .title = "Issue",
-            .reference_type = .issue,
-            .state = "open",
-            .url = "https://github.com/owner/repo/issues/42",
-        } },
-        .{ .github_commit = .{
-            .message = "Commit",
-            .oid = "abc123",
-            .repo = repo,
-            .url = "https://github.com/owner/repo/commit/abc123",
-        } },
-        .{ .github_release = .{
-            .name = "Release",
-            .repo = repo,
-            .tag_name = "v1.0.0",
-            .url = "https://github.com/owner/repo/releases/tag/v1.0.0",
-        } },
-        .{ .github_actions_job = .{
-            .conclusion = "success",
-            .job_id = 99,
-            .job_name = "test",
-            .repo = repo,
-            .url = "https://github.com/owner/repo/actions/runs/1/job/99",
-            .workflow_name = "CI",
-        } },
-        .{ .github_repository = .{
-            .description = "A repo",
-            .git_ref = "main",
-            .repo = repo,
-            .url = "https://github.com/owner/repo",
-        } },
-        .{ .github_file_diff = .{
-            .sides = .{ .modified = .{
-                .base = diff_side,
-                .head = .{
-                    .path = "src/a.zig",
-                    .git_ref = "feature",
-                    .repo = repo,
-                },
-            } },
-            .url = "https://github.com/owner/repo/compare/main...feature",
-        } },
-        .{ .github_tree_comparison = .{
-            .base = .{ .repo = repo, .revision = "main" },
-            .head = .{ .repo = repo, .revision = "feature" },
-            .url = "https://github.com/owner/repo/compare/main...feature",
-        } },
-        .{ .github_url = .{
-            .url = "https://github.com/owner/repo",
-        } },
-        .{ .github_file = .{
-            .path = "src/a.zig",
-            .git_ref = "main",
-            .repo = repo,
-            .url = "https://github.com/owner/repo/blob/main/src/a.zig",
-        } },
-        .{ .github_snippet = .{
-            .line_range = .{ .start = 10, .end = 12 },
-            .path = "src/a.zig",
-            .git_ref = "main",
-            .repo = repo,
-            .url = "https://github.com/owner/repo/blob/main/src/a.zig#L10-L12",
-        } },
-    };
-
-    const result = try runSendRpc(std.testing.allocator, .{
-        .prompt = "inspect",
-        .attachments = &attachments,
-    });
-    defer std.testing.allocator.free(result.message_id);
-    defer std.testing.allocator.free(result.request_body);
-
-    try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"inspect","attachments":[{"type":"file","path":"/tmp/a.zig","displayName":"a.zig","lineRange":{"start":2,"end":4}},{"type":"directory","path":"/tmp/src","displayName":"src"},{"type":"selection","filePath":"/tmp/a.zig","text":"const a = 1;","displayName":"a","selection":{"start":{"line":1,"character":2},"end":{"line":1,"character":14}}},{"type":"blob","data":"aGVsbG8=","mimeType":"text/plain","displayName":"hello.txt"},{"type":"github_reference","number":42,"title":"Issue","referenceType":"issue","state":"open","url":"https://github.com/owner/repo/issues/42"},{"type":"github_commit","message":"Commit","oid":"abc123","repo":{"id":7,"name":"repo","owner":"owner"},"url":"https://github.com/owner/repo/commit/abc123"},{"type":"github_release","name":"Release","repo":{"id":7,"name":"repo","owner":"owner"},"tagName":"v1.0.0","url":"https://github.com/owner/repo/releases/tag/v1.0.0"},{"type":"github_actions_job","conclusion":"success","jobId":99,"jobName":"test","repo":{"id":7,"name":"repo","owner":"owner"},"url":"https://github.com/owner/repo/actions/runs/1/job/99","workflowName":"CI"},{"type":"github_repository","description":"A repo","ref":"main","repo":{"id":7,"name":"repo","owner":"owner"},"url":"https://github.com/owner/repo"},{"type":"github_file_diff","base":{"path":"src/a.zig","ref":"main","repo":{"id":7,"name":"repo","owner":"owner"}},"head":{"path":"src/a.zig","ref":"feature","repo":{"id":7,"name":"repo","owner":"owner"}},"url":"https://github.com/owner/repo/compare/main...feature"},{"type":"github_tree_comparison","base":{"repo":{"id":7,"name":"repo","owner":"owner"},"revision":"main"},"head":{"repo":{"id":7,"name":"repo","owner":"owner"},"revision":"feature"},"url":"https://github.com/owner/repo/compare/main...feature"},{"type":"github_url","url":"https://github.com/owner/repo"},{"type":"github_file","path":"src/a.zig","ref":"main","repo":{"id":7,"name":"repo","owner":"owner"},"url":"https://github.com/owner/repo/blob/main/src/a.zig"},{"type":"github_snippet","lineRange":{"start":10,"end":12},"path":"src/a.zig","ref":"main","repo":{"id":7,"name":"repo","owner":"owner"},"url":"https://github.com/owner/repo/blob/main/src/a.zig#L10-L12"}]}}
-    , result.request_body);
-}
-
-test "session.send normalizes display names and omits absent optional fields" {
-    const repo = session_types.Attachment.GitHubRepoPointer{
-        .name = "repo",
-        .owner = "owner",
-    };
-    const attachments = [_]session_types.Attachment{
-        .{ .file = .{ .path = "/tmp/a.zig" } },
-        .{ .directory = .{ .path = "/tmp", .display_name = "" } },
-        .{ .selection = .{
-            .file_path = "/tmp/a.zig",
-            .text = "a",
-            .display_name = " \t",
-            .selection = .{
-                .start = .{ .line = 0, .character = 0 },
-                .end = .{ .line = 0, .character = 1 },
-            },
+            .text = "selected",
         } },
         .{ .blob = .{ .data = "YQ==", .mime_type = "text/plain" } },
-        .{ .github_actions_job = .{
-            .job_id = 1,
-            .job_name = "test",
-            .repo = repo,
-            .url = "https://github.com/owner/repo/actions",
-            .workflow_name = "CI",
-        } },
-        .{ .github_repository = .{
-            .repo = repo,
-            .url = "https://github.com/owner/repo",
-        } },
     };
-
+    const headers = [_]session_types.RequestHeader{
+        .{ .name = "x-request-id", .value = "42" },
+    };
     const result = try runSendRpc(std.testing.allocator, .{
         .prompt = "inspect",
-        .attachments = &attachments,
+        .source = .{ .agent = "reviewer" },
+        .message_attachments = &attachments,
+        .mode = .immediate,
+        .agent_mode = .interactive,
+        .request_headers = &headers,
+        .display_prompt = "Inspect selection",
     });
     defer std.testing.allocator.free(result.message_id);
     defer std.testing.allocator.free(result.request_body);
-
     try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"inspect","attachments":[{"type":"file","path":"/tmp/a.zig","displayName":"a.zig"},{"type":"directory","path":"/tmp","displayName":"tmp"},{"type":"selection","filePath":"/tmp/a.zig","text":"a","displayName":"a.zig","selection":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}}},{"type":"blob","data":"YQ==","mimeType":"text/plain","displayName":"attachment"},{"type":"github_actions_job","jobId":1,"jobName":"test","repo":{"name":"repo","owner":"owner"},"url":"https://github.com/owner/repo/actions","workflowName":"CI"},{"type":"github_repository","repo":{"name":"repo","owner":"owner"},"url":"https://github.com/owner/repo"}]}}
+        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"inspect","source":"agent-reviewer","attachments":[{"type":"file","path":"src/a.zig","displayName":"a.zig"},{"type":"directory","path":"src","displayName":"source"},{"type":"selection","filePath":"src/a.zig","displayName":"selection","selection":{"start":{"line":1,"character":2},"end":{"line":3,"character":4}},"text":"selected"},{"type":"blob","data":"YQ==","mimeType":"text/plain"}],"mode":"immediate","agentMode":"interactive","requestHeaders":{"x-request-id":"42"},"displayPrompt":"Inspect selection"}}
     , result.request_body);
 }
 
-test "session.send distinguishes omitted and empty attachments" {
-    const omitted = try runSendRpc(std.testing.allocator, .{
-        .prompt = "omitted",
-        .attachments = null,
-    });
+test "session.send preserves omitted and empty collections" {
+    const omitted = try runSendRpc(std.testing.allocator, .{ .prompt = "omitted" });
     defer std.testing.allocator.free(omitted.message_id);
     defer std.testing.allocator.free(omitted.request_body);
     try std.testing.expectEqualStrings(
@@ -17080,142 +20821,243 @@ test "session.send distinguishes omitted and empty attachments" {
 
     const empty = try runSendRpc(std.testing.allocator, .{
         .prompt = "empty",
-        .attachments = &.{},
+        .message_attachments = &.{},
+        .request_headers = &.{},
     });
     defer std.testing.allocator.free(empty.message_id);
     defer std.testing.allocator.free(empty.request_body);
     try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"empty","attachments":[]}}
+        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"empty","attachments":[],"requestHeaders":{}}}
     , empty.request_body);
-}
 
-test "session.send serializes every GitHub reference type" {
-    const attachments = [_]session_types.Attachment{
-        .{ .github_reference = .{
-            .number = 1,
-            .title = "Issue",
-            .reference_type = .issue,
-            .state = "open",
-            .url = "issue",
-        } },
-        .{ .github_reference = .{
-            .number = 2,
-            .title = "PR",
-            .reference_type = .pr,
-            .state = "merged",
-            .url = "pr",
-        } },
-        .{ .github_reference = .{
-            .number = 3,
-            .title = "Discussion",
-            .reference_type = .discussion,
-            .state = "open",
-            .url = "discussion",
-        } },
-    };
-    const result = try runSendRpc(std.testing.allocator, .{
-        .prompt = "references",
-        .attachments = &attachments,
+    const legacy_empty = try runSendRpc(std.testing.allocator, .{
+        .prompt = "legacy-empty",
+        .attachments = &.{},
     });
-    defer std.testing.allocator.free(result.message_id);
-    defer std.testing.allocator.free(result.request_body);
-
+    defer std.testing.allocator.free(legacy_empty.message_id);
+    defer std.testing.allocator.free(legacy_empty.request_body);
     try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"references","attachments":[{"type":"github_reference","number":1,"title":"Issue","referenceType":"issue","state":"open","url":"issue"},{"type":"github_reference","number":2,"title":"PR","referenceType":"pr","state":"merged","url":"pr"},{"type":"github_reference","number":3,"title":"Discussion","referenceType":"discussion","state":"open","url":"discussion"}]}}
-    , result.request_body);
+        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"legacy-empty","attachments":[]}}
+    , legacy_empty.request_body);
 }
 
-test "session.send serializes every GitHub file diff shape" {
+test "optional public attachments fail closed at the pinned wire boundary" {
+    const cases = [_]struct {
+        attachment: session_types.MessageAttachment,
+        expected_error: anyerror,
+        expected_field: []const u8,
+    }{
+        .{
+            .attachment = .{ .file = .{ .path = "a" } },
+            .expected_error = error.MissingAttachmentDisplayName,
+            .expected_field = "message_attachments[0].file.display_name",
+        },
+        .{
+            .attachment = .{ .directory = .{ .path = "dir" } },
+            .expected_error = error.MissingAttachmentDisplayName,
+            .expected_field = "message_attachments[0].directory.display_name",
+        },
+        .{
+            .attachment = .{ .selection = .{
+                .file_path = "a",
+                .display_name = "neither",
+            } },
+            .expected_error = error.IncompleteSelectionAttachment,
+            .expected_field = "message_attachments[0].selection",
+        },
+        .{
+            .attachment = .{ .selection = .{
+                .file_path = "b",
+                .display_name = "range",
+                .selection = .{
+                    .start = .{ .line = 1, .character = 2 },
+                    .end = .{ .line = 3, .character = 4 },
+                },
+            } },
+            .expected_error = error.IncompleteSelectionAttachment,
+            .expected_field = "message_attachments[0].selection",
+        },
+        .{
+            .attachment = .{ .selection = .{
+                .file_path = "c",
+                .display_name = "text",
+                .text = "",
+            } },
+            .expected_error = error.IncompleteSelectionAttachment,
+            .expected_field = "message_attachments[0].selection",
+        },
+    };
+    for (cases) |case| {
+        var client = Client{
+            .allocator = std.testing.allocator,
+            .io = std.testing.io,
+        };
+        const attachments = [_]session_types.MessageAttachment{case.attachment};
+        const result = try (Session{
+            .client = &client,
+            .id = "inactive",
+        }).sendDetailed(.{
+            .prompt = "invalid",
+            .message_attachments = &attachments,
+        });
+        var failure = switch (result) {
+            .failure => |value| value,
+            .success => return error.TestExpectedFailure,
+        };
+        defer failure.deinit();
+        try std.testing.expectEqual(case.expected_error, failure.native_error);
+        switch (failure.detail) {
+            .client => |client_failure| switch (client_failure) {
+                .invalid_config => |detail| {
+                    try std.testing.expectEqualStrings(case.expected_field, detail.field.?);
+                },
+                else => return error.TestExpectedInvalidConfig,
+            },
+            else => return error.TestExpectedClientFailure,
+        }
+    }
+}
+
+test "session.send preserves legacy shared and GitHub attachments" {
     const repo = session_types.Attachment.GitHubRepoPointer{
+        .id = 7,
         .name = "repo",
         .owner = "owner",
     };
-    const base = session_types.Attachment.GitHubFileDiffSide{
-        .path = "old.zig",
-        .git_ref = "main",
-        .repo = repo,
-    };
-    const head = session_types.Attachment.GitHubFileDiffSide{
-        .path = "new.zig",
-        .git_ref = "feature",
-        .repo = repo,
-    };
     const attachments = [_]session_types.Attachment{
-        .{ .github_file_diff = .{
-            .sides = .{ .added = head },
-            .url = "added",
+        .{ .file = .{
+            .path = "/tmp/a.zig",
+            .line_range = .{ .start = 2, .end = 4 },
+        } },
+        .{ .selection = .{
+            .file_path = "/tmp/a.zig",
+            .text = "const a = 1;",
+            .selection = .{
+                .start = .{ .line = 1, .character = 2 },
+                .end = .{ .line = 1, .character = 14 },
+            },
+        } },
+        .{ .github_reference = .{
+            .number = 42,
+            .title = "Issue",
+            .reference_type = .issue,
+            .state = "open",
+            .url = "https://github.com/owner/repo/issues/42",
         } },
         .{ .github_file_diff = .{
-            .sides = .{ .deleted = base },
-            .url = "deleted",
+            .sides = .{ .modified = .{
+                .base = .{ .path = "a.zig", .git_ref = "main", .repo = repo },
+                .head = .{ .path = "a.zig", .git_ref = "feature", .repo = repo },
+            } },
+            .url = "https://github.com/owner/repo/compare/main...feature",
         } },
-        .{ .github_file_diff = .{
-            .sides = .{ .modified = .{ .base = base, .head = head } },
-            .url = "modified",
-        } },
+        .{ .github_url = .{ .url = "https://github.com/owner/repo" } },
     };
     const result = try runSendRpc(std.testing.allocator, .{
-        .prompt = "diffs",
+        .prompt = "legacy",
         .attachments = &attachments,
     });
     defer std.testing.allocator.free(result.message_id);
     defer std.testing.allocator.free(result.request_body);
 
     try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"diffs","attachments":[{"type":"github_file_diff","head":{"path":"new.zig","ref":"feature","repo":{"name":"repo","owner":"owner"}},"url":"added"},{"type":"github_file_diff","base":{"path":"old.zig","ref":"main","repo":{"name":"repo","owner":"owner"}},"url":"deleted"},{"type":"github_file_diff","base":{"path":"old.zig","ref":"main","repo":{"name":"repo","owner":"owner"}},"head":{"path":"new.zig","ref":"feature","repo":{"name":"repo","owner":"owner"}},"url":"modified"}]}}
+        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"legacy","attachments":[{"type":"file","path":"/tmp/a.zig","displayName":"a.zig","lineRange":{"start":2,"end":4}},{"type":"selection","filePath":"/tmp/a.zig","text":"const a = 1;","displayName":"a.zig","selection":{"start":{"line":1,"character":2},"end":{"line":1,"character":14}}},{"type":"github_reference","number":42,"title":"Issue","referenceType":"issue","state":"open","url":"https://github.com/owner/repo/issues/42"},{"type":"github_file_diff","base":{"path":"a.zig","ref":"main","repo":{"id":7,"name":"repo","owner":"owner"}},"head":{"path":"a.zig","ref":"feature","repo":{"id":7,"name":"repo","owner":"owner"}},"url":"https://github.com/owner/repo/compare/main...feature"},{"type":"github_url","url":"https://github.com/owner/repo"}]}}
     , result.request_body);
 }
 
-test "session.send preserves attachment order" {
-    const attachments = [_]session_types.Attachment{
-        .{ .github_url = .{ .url = "first" } },
-        .{ .directory = .{ .path = "second" } },
-        .{ .blob = .{ .data = "dGhpcmQ=", .mime_type = "text/plain" } },
+test "session.send rejects conflicting attachment inputs" {
+    const legacy = [_]session_types.Attachment{
+        .{ .github_url = .{ .url = "legacy" } },
     };
-    const result = try runSendRpc(std.testing.allocator, .{
-        .prompt = "order",
-        .attachments = &attachments,
-    });
-    defer std.testing.allocator.free(result.message_id);
-    defer std.testing.allocator.free(result.request_body);
-
-    try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"order","attachments":[{"type":"github_url","url":"first"},{"type":"directory","path":"second","displayName":"second"},{"type":"blob","data":"dGhpcmQ=","mimeType":"text/plain","displayName":"attachment"}]}}
-    , result.request_body);
+    const stable = [_]session_types.MessageAttachment{
+        .{ .blob = .{ .data = "YQ==", .mime_type = "text/plain" } },
+    };
+    const cases = [_]session_types.MessageOptions{
+        .{
+            .prompt = "values",
+            .attachments = &legacy,
+            .message_attachments = &stable,
+        },
+        .{
+            .prompt = "empty",
+            .attachments = &.{},
+            .message_attachments = &.{},
+        },
+    };
+    for (cases) |options| {
+        var client = Client{
+            .allocator = std.testing.allocator,
+            .io = std.testing.io,
+        };
+        const result = try (Session{
+            .client = &client,
+            .id = "inactive",
+        }).sendDetailed(options);
+        var failure = switch (result) {
+            .failure => |value| value,
+            .success => return error.TestExpectedFailure,
+        };
+        defer failure.deinit();
+        try std.testing.expectEqual(
+            error.ConflictingAttachmentInputs,
+            failure.native_error,
+        );
+        switch (failure.detail) {
+            .client => |client_failure| switch (client_failure) {
+                .invalid_config => |detail| {
+                    try std.testing.expectEqualStrings(
+                        "attachments",
+                        detail.field.?,
+                    );
+                },
+                else => return error.TestExpectedInvalidConfig,
+            },
+            else => return error.TestExpectedClientFailure,
+        }
+    }
 }
 
-test "session.sendAndWait cleans its message id and returns an owned assistant message" {
+test "sendAndWait default is sixty seconds" {
+    const options: session_types.WaitOptions = .{};
+    try std.testing.expectEqual(@as(?u64, 60 * std.time.ns_per_s), options.timeout_ns);
+}
+
+test "sendAndWait preserves correlated events for independent observers" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-
-    const response_body =
-        \\{"jsonrpc":"2.0","id":1,"result":{"messageId":"temporary-id"}}
+    const response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"messageId":"message-1"}}
     ;
-    const response_frame = try std.fmt.allocPrint(
+    const user =
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"session-1","event":{"type":"user.message","data":{"content":"question","messageId":"message-1","turnId":"turn-1"}}}}
+    ;
+    const assistant =
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"session-1","event":{"type":"assistant.message","data":{"content":"answer","messageId":"assistant-1","turnId":"turn-1"}}}}
+    ;
+    const turn_end =
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"session-1","event":{"type":"assistant.turn_end","data":{"turnId":"turn-1"}}}}
+    ;
+    const frames = try std.fmt.allocPrint(
         allocator,
-        "Content-Length: {d}\r\n\r\n{s}",
-        .{ response_body.len, response_body },
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{
+            response.len,  response,
+            user.len,      user,
+            assistant.len, assistant,
+            turn_end.len,  turn_end,
+        },
     );
-    defer allocator.free(response_frame);
-    try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "response",
-        .data = response_frame,
-    });
-    const response_file = try tmp.dir.openFile(
-        std.testing.io,
-        "response",
-        .{ .mode = .read_only },
-    );
+    defer allocator.free(frames);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
     defer response_file.close(std.testing.io);
-    var reader_buffer: [1024]u8 = undefined;
+    var reader_buffer: [4096]u8 = undefined;
     var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
-
-    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
     defer request_file.close(std.testing.io);
     var writer_buffer: [1024]u8 = undefined;
     var writer = request_file.writer(std.testing.io, &writer_buffer);
-
     var client = Client{
         .allocator = allocator,
         .io = std.testing.io,
@@ -17223,53 +21065,576 @@ test "session.sendAndWait cleans its message id and returns an owned assistant m
             .reader = &reader,
             .writer = &writer,
             .reader_buffer = &.{},
-            .writer_buffer = &.{},
+            .writer_buffer = &writer_buffer,
+            .eof_is_idle = true,
         } },
     };
     defer {
+        deinitTestMessaging(&client);
         for (client.events.items) |*event| event.deinit(allocator);
+        deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         for (client.sessions.items) |*record| record.deinit(allocator);
         client.sessions.deinit(allocator);
     }
-    try client.events.append(allocator, .{
-        .session_id = try allocator.dupe(u8, "session-1"),
-        .event = .{ .assistant_message = .{
-            .content = try allocator.dupe(u8, "answer"),
-            .message_id = try allocator.dupe(u8, "assistant-id"),
-        } },
-    });
-    try client.events.append(allocator, .{
-        .session_id = try allocator.dupe(u8, "session-1"),
-        .event = .{ .session_idle = .{} },
-    });
     try client.sessions.append(allocator, .{
         .id = try allocator.dupe(u8, "session-1"),
     });
+    const active_session = try client.sessionForId("session-1");
+    var observer = try active_session.subscribe();
+    defer observer.deinit();
 
-    const attachments = [_]session_types.Attachment{
-        .{ .file = .{ .path = "/tmp/a.zig" } },
+    const result = (try active_session.sendAndWait(.{ .prompt = "question" })).?;
+    defer result.deinit(allocator);
+    try std.testing.expectEqualStrings("answer", result.content);
+
+    const detailed_user = try active_session.nextEventDetailed();
+    var compatibility_user = switch (detailed_user) {
+        .success => |event| event,
+        .failure => |failure_value| {
+            var failure = failure_value;
+            defer failure.deinit();
+            return failure.native_error;
+        },
     };
-    const message = (try (try client.sessionForId("session-1")).sendAndWait(.{
-        .prompt = "inspect",
-        .attachments = &attachments,
-    })).?;
-    defer message.deinit(allocator);
+    defer compatibility_user.deinit(allocator);
+    var compatibility_assistant = try active_session.nextEvent();
+    defer compatibility_assistant.deinit(allocator);
+    var compatibility_end = try active_session.nextEvent();
+    defer compatibility_end.deinit(allocator);
+    var observer_user = try observer.nextEvent();
+    defer observer_user.deinit(allocator);
+    var observer_assistant = try observer.nextEvent();
+    defer observer_assistant.deinit(allocator);
+    var observer_end = try observer.nextEvent();
+    defer observer_end.deinit(allocator);
 
-    try std.testing.expectEqualStrings("answer", message.content);
-    try std.testing.expectEqualStrings("assistant-id", message.message_id.?);
-    const request_frame = try tmp.dir.readFileAlloc(
+    try std.testing.expect(compatibility_user == .user_message);
+    try std.testing.expectEqualStrings(
+        "answer",
+        compatibility_assistant.assistant_message.content,
+    );
+    try std.testing.expect(compatibility_end == .assistant_turn_end);
+    try std.testing.expect(observer_user == .user_message);
+    try std.testing.expectEqualStrings(
+        "answer",
+        observer_assistant.assistant_message.content,
+    );
+    try std.testing.expect(observer_end == .assistant_turn_end);
+}
+
+test "retained permission delivery failures stay detailed and nonterminal" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"success":false}}
+    ;
+    const response_frame = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ response.len, response },
+    );
+    defer allocator.free(response_frame);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "response",
+        .data = response_frame,
+    });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &writer_buffer,
+        } },
+    };
+    defer {
+        deinitTestMessaging(&client);
+        for (client.events.items) |*event| event.deinit(allocator);
+        deinitTestEventLogs(&client);
+        client.events.deinit(allocator);
+        client.permission_handlers.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    try client.sessions.append(allocator, .{
+        .id = try allocator.dupe(u8, "session-1"),
+    });
+    const handler = struct {
+        fn handle(
+            _: session_types.PermissionRequested,
+            _: session_types.PermissionInvocation,
+            _: ?*anyopaque,
+        ) !session_types.PermissionDecision {
+            return .approve_once;
+        }
+    }.handle;
+    try client.registerPermissionHandler("session-1", .{
+        .on_permission_request = handler,
+    });
+    const log = try client.ensureEventLog("session-1", 1);
+    var observer = EventSubscriber{
+        .lease = try client.acquireEventLog("session-1", 1),
+        .token = try log.subscribe(),
+    };
+    defer observer.deinit();
+
+    const params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"session-1","event":{"type":"permission.requested","data":{"requestId":"permission-1","permissionRequest":{"kind":"shell","fullCommandText":"pwd","intention":"show directory","commands":[],"possiblePaths":[],"possibleUrls":[],"hasWriteFileRedirection":false,"canOfferSessionApproval":false}}}}
+    ,
+        .{},
+    );
+    defer params.deinit();
+    const frame = try allocator.dupe(u8, "{}");
+    defer allocator.free(frame);
+    switch (try client.queueSessionEvent(.legacy, frame, params.value)) {
+        .success => {},
+        .failure => unreachable,
+    }
+
+    var observed = while (true) {
+        switch (try log.inspect(observer.token)) {
+            .event => |event| break event,
+            .wait => |ready| try ready.wait(std.testing.io),
+            else => return error.TestUnexpectedResult,
+        }
+    };
+    defer observed.deinit(allocator);
+    try std.testing.expect(
+        observed.permission_requested.automatic_handling == .not_configured,
+    );
+    const active_session = try client.sessionForId("session-1");
+    const detailed = try active_session.nextEventDetailed();
+    switch (detailed) {
+        .success => |event_value| {
+            var event = event_value;
+            defer event.deinit(allocator);
+            return error.TestUnexpectedResult;
+        },
+        .failure => |failure_value| {
+            var failure = failure_value;
+            defer failure.deinit();
+            try std.testing.expectEqual(
+                error.PermissionDecisionNotAccepted,
+                failure.native_error,
+            );
+        },
+    }
+    try std.testing.expect(log.terminal_error == null);
+    try std.testing.expectEqual(@as(usize, 0), client.events.items.len);
+
+    try writer.interface.flush();
+    const request = try tmp.dir.readFileAlloc(
         std.testing.io,
         "request",
         allocator,
         .limited(4096),
     );
-    defer allocator.free(request_frame);
-    const request_body = try framedBody(allocator, request_frame);
-    defer allocator.free(request_body);
+    defer allocator.free(request);
+    const expected_body =
+        \\{"jsonrpc":"2.0","id":1,"method":"session.permissions.handlePendingPermissionRequest","params":{"sessionId":"session-1","requestId":"permission-1","result":{"kind":"approve-once"}}}
+    ;
+    const expected = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ expected_body.len, expected_body },
+    );
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, request);
+}
+
+test "direct-reader handoff does not duplicate compatibility delivery" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        deinitTestMessaging(&client);
+        for (client.events.items) |*event| event.deinit(allocator);
+        deinitTestEventLogs(&client);
+        client.events.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    try client.sessions.append(allocator, .{
+        .id = try allocator.dupe(u8, "session-1"),
+    });
+    const log = try client.ensureEventLog("session-1", 1);
+    const subscriber = try log.subscribe();
+    defer log.unsubscribe(subscriber);
+    const params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"session-1","event":{"type":"assistant.message","data":{"content":"answer","messageId":"message-1","turnId":"turn-1"}}}
+    ,
+        .{},
+    );
+    defer params.deinit();
+    const frame = try allocator.dupe(u8, "{}");
+    defer allocator.free(frame);
+    switch (try client.queueSessionEvent(.legacy, frame, params.value)) {
+        .success => {},
+        .failure => unreachable,
+    }
+
+    var compatibility = switch (try client.nextEventImpl(.legacy, "session-1", 1)) {
+        .success => |delivery| delivery,
+        .failure => return error.TestUnexpectedResult,
+    };
+    defer compatibility.deinit(allocator);
     try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"inspect","attachments":[{"type":"file","path":"/tmp/a.zig","displayName":"a.zig"}]}}
-    , request_body);
+        "answer",
+        compatibility.event.assistant_message.content,
+    );
+    const observed = try log.inspect(subscriber);
+    var observer_event = switch (observed) {
+        .event => |event| event,
+        else => return error.TestUnexpectedResult,
+    };
+    defer observer_event.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "answer",
+        observer_event.assistant_message.content,
+    );
+    try std.testing.expect(
+        try log.inspect(log.compatibilityToken()) == .wait,
+    );
+}
+
+test "sendAndWait services registered permission handlers" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    const messages = [_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"messageId\":\"message-1\"}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.event\",\"params\":{\"sessionId\":\"session-1\",\"event\":{\"type\":\"permission.requested\",\"data\":{\"requestId\":\"permission-1\",\"permissionRequest\":{\"kind\":\"shell\",\"fullCommandText\":\"pwd\",\"intention\":\"show directory\",\"commands\":[],\"possiblePaths\":[],\"possibleUrls\":[],\"hasWriteFileRedirection\":false,\"canOfferSessionApproval\":false}}}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"success\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.event\",\"params\":{\"sessionId\":\"session-1\",\"event\":{\"type\":\"user.message\",\"data\":{\"content\":\"question\",\"messageId\":\"message-1\",\"turnId\":\"turn-1\"}}}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.event\",\"params\":{\"sessionId\":\"session-1\",\"event\":{\"type\":\"assistant.message\",\"data\":{\"content\":\"answer\",\"messageId\":\"assistant-1\",\"turnId\":\"turn-1\"}}}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.event\",\"params\":{\"sessionId\":\"session-1\",\"event\":{\"type\":\"assistant.turn_end\",\"data\":{\"turnId\":\"turn-1\"}}}}",
+    };
+    for (messages) |body| try appendTestFrame(allocator, &frames, body);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [4096]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &writer_buffer,
+            .eof_is_idle = true,
+        } },
+    };
+    defer {
+        deinitTestMessaging(&client);
+        for (client.events.items) |*event| event.deinit(allocator);
+        deinitTestEventLogs(&client);
+        client.events.deinit(allocator);
+        client.permission_handlers.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    const session = try addTestSession(&client, "session-1");
+    const handler = struct {
+        fn handle(
+            _: session_types.PermissionRequested,
+            _: session_types.PermissionInvocation,
+            called: ?*anyopaque,
+        ) !session_types.PermissionDecision {
+            @as(*bool, @ptrCast(@alignCast(called.?))).* = true;
+            return .approve_once;
+        }
+    }.handle;
+    var called = false;
+    try client.registerPermissionHandler("session-1", .{
+        .on_permission_request = handler,
+        .permission_context = &called,
+    });
+
+    const result = (try session.sendAndWait(.{ .prompt = "question" })).?;
+    defer result.deinit(allocator);
+    try std.testing.expect(called);
+    try std.testing.expectEqualStrings("answer", result.content);
+
+    try writer.interface.flush();
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "requests",
+        allocator,
+        .limited(8192),
+    );
+    defer allocator.free(requests);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        requests,
+        "session.permissions.handlePendingPermissionRequest",
+    ) != null);
+}
+
+test "sendAndWait timeout is local and does not abort the session" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"messageId":"message-1"}}
+    ;
+    const frame = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ response.len, response },
+    );
+    defer allocator.free(frame);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = frame });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &writer_buffer,
+            .eof_is_idle = true,
+        } },
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestEventLogs(&client);
+        client.events.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    try client.sessions.append(allocator, .{
+        .id = try allocator.dupe(u8, "session-1"),
+    });
+    try std.testing.expectError(
+        error.Timeout,
+        (try client.sessionForId("session-1")).sendAndWaitWithOptions(
+            .{ .prompt = "wait" },
+            .{ .timeout_ns = std.time.ns_per_ms },
+        ),
+    );
+    try writer.interface.flush();
+    const request = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "request",
+        allocator,
+        .limited(4096),
+    );
+    defer allocator.free(request);
+    try std.testing.expect(std.mem.indexOf(u8, request, "\"method\":\"session.send\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request, "session.abort") == null);
+}
+
+test "sendAndWait cancellation before send emits no request" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var cancellation: session_types.Cancellation = .{};
+    cancellation.cancel(std.testing.io);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .transport = .{ .fixture = .{
+            .reader = undefined,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &writer_buffer,
+        } },
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestEventLogs(&client);
+        client.events.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    try client.sessions.append(allocator, .{
+        .id = try allocator.dupe(u8, "session-1"),
+    });
+    try std.testing.expectError(
+        error.Canceled,
+        (try client.sessionForId("session-1")).sendAndWaitWithOptions(
+            .{ .prompt = "do not send" },
+            .{ .cancellation = &cancellation },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.event_logs.items.len);
+    try writer.interface.flush();
+    const request = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "request",
+        allocator,
+        .limited(1024),
+    );
+    defer allocator.free(request);
+    try std.testing.expectEqual(@as(usize, 0), request.len);
+}
+
+test "sendDetailed preserves typed validation diagnostics" {
+    var client = Client{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+    };
+    const result = try (Session{
+        .client = &client,
+        .id = "inactive",
+    }).sendDetailed(.{
+        .prompt = "invalid",
+        .source = .{ .agent = "" },
+    });
+    var failure = switch (result) {
+        .failure => |value| value,
+        .success => return error.TestExpectedFailure,
+    };
+    defer failure.deinit();
+    try std.testing.expectEqual(error.InvalidMessageSource, failure.native_error);
+}
+
+test "detailed send APIs preserve RPC rejection context" {
+    const allocator = std.testing.allocator;
+    const body =
+        \\{"jsonrpc":"2.0","id":1,"error":{"code":-32042,"message":"send rejected","data":{"code":"send_denied"}}}
+    ;
+    const frame = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ body.len, body },
+    );
+    defer allocator.free(frame);
+
+    for ([_]DetailedSendKind{ .send, .send_and_wait }) |kind| {
+        var failure = try runDetailedSendFailure(
+            allocator,
+            frame,
+            kind,
+            .{ .timeout_ns = std.time.ns_per_s },
+        );
+        defer failure.deinit();
+        try std.testing.expectEqual(error.JsonRpcError, failure.native_error);
+        const rpc = switch (failure.detail) {
+            .rpc => |rpc| rpc,
+            else => return error.TestExpectedRpcFailure,
+        };
+        try std.testing.expectEqualStrings("session.send", rpc.method);
+        try std.testing.expectEqual(@as(u64, 1), rpc.request_id);
+        try std.testing.expectEqualStrings("send_denied", rpc.machine_code.?);
+        switch (rpc.context) {
+            .session => |context| try std.testing.expectEqualStrings(
+                "session-1",
+                context.session_id,
+            ),
+            else => return error.TestExpectedSessionContext,
+        }
+    }
+}
+
+test "detailed sendAndWait timeout retains session and duration" {
+    const allocator = std.testing.allocator;
+    const body =
+        \\{"jsonrpc":"2.0","id":1,"result":{"messageId":"message-1"}}
+    ;
+    const frame = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ body.len, body },
+    );
+    defer allocator.free(frame);
+    const timeout_ns = std.time.ns_per_ms;
+
+    var failure = try runDetailedSendFailure(
+        allocator,
+        frame,
+        .send_and_wait,
+        .{ .timeout_ns = timeout_ns },
+    );
+    defer failure.deinit();
+    try std.testing.expectEqual(error.Timeout, failure.native_error);
+    try std.testing.expectEqual(error.SessionFailure, failure.errorTag());
+    const timeout = switch (failure.detail) {
+        .session => |session_failure| switch (session_failure) {
+            .timeout => |value| value,
+            else => return error.TestExpectedSessionTimeout,
+        },
+        else => return error.TestExpectedSessionTimeout,
+    };
+    try std.testing.expectEqualStrings("session-1", timeout.session_id);
+    try std.testing.expectEqual(timeout_ns, timeout.timeout_ns);
+}
+
+test "detailed sendAndWait retains session error provider diagnostics" {
+    const allocator = std.testing.allocator;
+    const response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"messageId":"message-1"}}
+    ;
+    const session_error =
+        \\{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"session-1","event":{"type":"session.error","data":{"errorType":"provider","errorCode":"rate_limited","message":"Try later","statusCode":429,"providerCallId":"provider-1","serviceRequestId":"service-1","remediation":{"retryAfter":30},"url":"https://example.test/help","stack":"trace","eligibleForAutoSwitch":true}}}}
+    ;
+    const frames = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{ response.len, response, session_error.len, session_error },
+    );
+    defer allocator.free(frames);
+
+    var failure = try runDetailedSendFailure(
+        allocator,
+        frames,
+        .send_and_wait,
+        .{ .timeout_ns = std.time.ns_per_s },
+    );
+    defer failure.deinit();
+    try std.testing.expectEqual(error.CopilotSessionError, failure.native_error);
+    try std.testing.expectEqual(error.SessionFailure, failure.errorTag());
+    const agent = switch (failure.detail) {
+        .session => |session_failure| switch (session_failure) {
+            .agent => |value| value,
+            else => return error.TestExpectedSessionAgentFailure,
+        },
+        else => return error.TestExpectedSessionAgentFailure,
+    };
+    try std.testing.expectEqualStrings("session-1", agent.session_id);
+    try std.testing.expectEqualStrings("rate_limited", agent.error_code.?);
+    try std.testing.expectEqual(@as(?u16, 429), agent.status_code);
+    try std.testing.expectEqualStrings("provider-1", agent.provider_call_id.?);
+    try std.testing.expectEqualStrings("service-1", agent.service_request_id.?);
+    try std.testing.expectEqualStrings("{\"retryAfter\":30}", agent.remediation_json.?);
 }
 
 test "client info maps to connect wire fields" {
@@ -17285,14 +21650,6 @@ test "client info maps to connect wire fields" {
     try std.testing.expectEqualStrings("zig", info.extensionName.?);
     try std.testing.expectEqualStrings("1.0.0", info.extensionVersion.?);
     try std.testing.expect(toWireClientInfo(.{}) == null);
-}
-
-test "sendAndWait ignores autopilot idle events" {
-    var autopilot = "autopilot".*;
-    try std.testing.expect(!completesSendAndWait(.{ .mode = &autopilot }));
-    try std.testing.expect(completesSendAndWait(.{}));
-    var interactive = "interactive".*;
-    try std.testing.expect(completesSendAndWait(.{ .mode = &interactive }));
 }
 
 test "tool definitions map current wire fields" {
@@ -18626,7 +22983,7 @@ test "capability updates are tri-state and canvas state is defensive" {
             .experimental = .{ .mcp_apps = true },
         } },
     }, &.{});
-    try client.commitExtensionRuntime("s1", .{
+    try commitTestExtensionRuntime(&client, "s1", .{
         .sessionId = "s1",
         .capabilities = .{ .ui = .{ .canvases = true } },
         .openCanvases = &.{.{
@@ -18810,7 +23167,7 @@ test "provisional create runtime is unreachable without an exact session id" {
             .context = &existing_context,
         } } },
     }, &.{});
-    try client.commitExtensionRuntime("existing", .{}, &.{});
+    try commitTestExtensionRuntime(&client, "existing", .{}, &.{});
     try client.beginExtensionRuntime(null, session_types.CreateSessionConfig{
         .extensions = .{ .common = .{ .hooks = .{
             .context = &create_context,
@@ -18992,7 +23349,7 @@ test "resident resume prefers and commits replacement runtime" {
             .context = &old_context,
         } } },
     }, &.{});
-    try client.commitExtensionRuntime("s1", .{}, &.{});
+    try commitTestExtensionRuntime(&client, "s1", .{}, &.{});
     try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
         .extensions = .{ .common = .{ .hooks = .{
             .context = &new_context,
@@ -19002,7 +23359,7 @@ test "resident resume prefers and commits replacement runtime" {
         @as(?*anyopaque, &new_context),
         client.findExtensionRuntime("s1").?.hooks.context,
     );
-    try client.commitExtensionRuntime("s1", .{}, &.{});
+    try commitTestExtensionRuntime(&client, "s1", .{}, &.{});
     try std.testing.expectEqual(@as(usize, 1), client.extension_runtimes.items.len);
     try std.testing.expectEqual(
         @as(?*anyopaque, &new_context),
@@ -19035,7 +23392,7 @@ test "failed resident resume preserves committed runtime and session id" {
     }, &.{});
     try client.beginSessionRecord(try allocator.dupe(u8, "s1"), old_session.record_index);
     try client.prepareSessionCommit("s1", "/replacement");
-    try client.commitExtensionRuntime("s1", .{}, &.{});
+    try commitTestExtensionRuntime(&client, "s1", .{}, &.{});
     try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{
         .extensions = .{ .common = .{ .hooks = .{
             .context = &new_context,
@@ -19051,7 +23408,7 @@ test "failed resident resume preserves committed runtime and session id" {
     defer response.deinit();
     try std.testing.expectError(
         error.InvalidGrantedEnvironmentVariables,
-        client.commitExtensionRuntime("s1", response.value, &.{"TOKEN"}),
+        commitTestExtensionRuntime(&client, "s1", response.value, &.{"TOKEN"}),
     );
     client.rollbackExtensionRuntime();
     client.rollbackSessionRecord();
@@ -19160,7 +23517,7 @@ test "MCP OAuth event interest is retained and released" {
             .on_auth_request = handler,
         } } },
     }, &.{});
-    try client.commitExtensionRuntime("s1", .{}, &.{});
+    try commitTestExtensionRuntime(&client, "s1", .{}, &.{});
     try (try client.sessionForId("s1")).disconnect();
     try std.testing.expect(client.findExtensionRuntime("s1") == null);
     try std.testing.expect(!client.hasSession("s1"));
@@ -19373,7 +23730,7 @@ test "disconnect retries pending OAuth restoration before detach" {
             .on_auth_request = handler,
         } } },
     }, &.{});
-    try client.commitExtensionRuntime("s1", .{}, &.{});
+    try commitTestExtensionRuntime(&client, "s1", .{}, &.{});
     const session_id = try allocator.dupe(u8, "s1");
     try client.sessions.append(allocator, .{ .id = session_id });
 
@@ -19503,7 +23860,7 @@ test "client teardown releases OAuth interests before event storage" {
         session_types.ResumeSessionConfig{},
         &.{},
     );
-    try client.commitExtensionRuntime("s1", .{}, &.{});
+    try commitTestExtensionRuntime(&client, "s1", .{}, &.{});
     client.findExtensionRuntime("s1").?.mcp_oauth_interest =
         try testMcpOAuthInterest(allocator, "interest-1");
 
@@ -19641,8 +23998,10 @@ test "invalid MCP OAuth token remains observable without cancellation" {
         } },
     };
     defer {
+        deinitTestMessaging(&client);
         if (client.pending_extension_runtime) |*runtime| runtime.deinit(allocator);
         for (client.events.items) |*queued| queued.deinit(allocator);
+        deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
         client.extension_runtimes.deinit(allocator);
@@ -19669,7 +24028,7 @@ test "invalid MCP OAuth token remains observable without cancellation" {
             .on_auth_request = handler,
         } } },
     }, &.{});
-    try client.commitExtensionRuntime("s1", .{}, &.{});
+    try commitTestExtensionRuntime(&client, "s1", .{}, &.{});
 
     const session = try client.sessionForId("s1");
     var oauth_event = try session.nextEvent();
@@ -19724,17 +24083,16 @@ test "MCP OAuth handler failure remains observable without cancellation" {
     var client = Client{
         .allocator = allocator,
         .io = std.testing.io,
-        .child = null,
-        .reader = &reader,
-        .writer = &writer,
-        .reader_buffer = &.{},
-        .writer_buffer = &.{},
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        } },
     };
     defer {
-        for (client.events.items) |*queued| queued.deinit(allocator);
-        client.events.deinit(allocator);
-        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
-        client.extension_runtimes.deinit(allocator);
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
     }
     const handler = struct {
         fn handle(
@@ -19758,6 +24116,8 @@ test "MCP OAuth handler failure remains observable without cancellation" {
             &.{},
         ),
     );
+    _ = try addTestSession(&client, "s1");
+    try ensureTestEventLog(&client, "s1");
     const outer = try client.callRpc(struct { value: []const u8 }, "test.outer", .{});
     defer outer.deinit();
 
@@ -19811,10 +24171,8 @@ test "explicit MCP OAuth cancellation sends the cancellation response" {
         .writer_buffer = &.{},
     };
     defer {
-        for (client.events.items) |*queued| queued.deinit(allocator);
-        client.events.deinit(allocator);
-        for (client.extension_runtimes.items) |*runtime| runtime.deinit(allocator);
-        client.extension_runtimes.deinit(allocator);
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
     }
     const handler = struct {
         fn handle(
@@ -19838,6 +24196,8 @@ test "explicit MCP OAuth cancellation sends the cancellation response" {
             &.{},
         ),
     );
+    _ = try addTestSession(&client, "s1");
+    try ensureTestEventLog(&client, "s1");
     const params = try std.json.parseFromSlice(
         std.json.Value,
         allocator,
@@ -19893,7 +24253,7 @@ test "review regressions preserve protocol semantics" {
         .{ .allocate = .alloc_always },
     );
     defer response.deinit();
-    try client.commitExtensionRuntime("s1", response.value, &.{"TOKEN"});
+    try commitTestExtensionRuntime(&client, "s1", response.value, &.{"TOKEN"});
     const session = try client.sessionForId("s1");
     var grants = try session.snapshotEnvironmentGrants(allocator);
     defer grants.deinit();
@@ -20080,6 +24440,7 @@ test "disconnect removes session-owned allocations" {
     };
     defer {
         for (client.events.items) |*event| event.deinit(allocator);
+        deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         for (client.tools.items) |tool| tool.deinit(allocator);
         client.tools.deinit(allocator);
@@ -20091,10 +24452,11 @@ test "disconnect removes session-owned allocations" {
     try client.sessions.append(allocator, .{ .id = session_id });
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "s1"),
+        .generation = 1,
         .event = .{ .session_idle = .{} },
     });
 
-    client.removeSession("s1");
+    try client.removeSession("s1");
 
     try std.testing.expectEqual(@as(usize, 1), client.sessions.items.len);
     try std.testing.expect(!client.sessions.items[0].isActive());
@@ -20519,6 +24881,331 @@ fn addTestSession(client: *Client, session_id: []const u8) !Session {
     return client.sessionForId(session_id);
 }
 
+fn removeTestSession(client: *Client, session_id: []const u8) void {
+    client.removeSession(session_id) catch |err|
+        std.debug.panic("test session cleanup failed: {s}", .{@errorName(err)});
+}
+
+const GatedSessionRemoval = struct {
+    client: *Client,
+    ready: *std.Io.Event,
+    started: *std.Io.Event,
+    record_index: usize,
+    session_id: []const u8,
+    generation: u64,
+    result: ?anyerror = null,
+
+    fn run(context: *@This()) void {
+        context.ready.wait(context.client.io) catch |err| {
+            context.result = err;
+            context.started.set(context.client.io);
+            return;
+        };
+        context.client.removeSessionExpected(
+            context.record_index,
+            context.session_id,
+            context.generation,
+        ) catch |err| {
+            context.result = err;
+        };
+        context.started.set(context.client.io);
+    }
+};
+
+const DrainingSessionRemoval = struct {
+    client: *Client,
+    started: *std.Io.Event,
+    record_index: usize,
+    session_id: []const u8,
+    generation: u64,
+    result: ?anyerror = null,
+
+    fn run(context: *@This()) void {
+        const removal = context.client.beginSessionRemoval(
+            context.record_index,
+            context.session_id,
+            context.generation,
+        ) catch |err| {
+            context.result = err;
+            context.started.set(context.client.io);
+            return;
+        } orelse {
+            context.started.set(context.client.io);
+            return;
+        };
+        context.started.set(context.client.io);
+        context.client.finishSessionRemoval(removal) catch |err| {
+            context.result = err;
+        };
+    }
+};
+
+test "session event log lease owns its session id through removal" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+    const active = try addTestSession(&client, "session-1");
+    var lease = try active.eventLog();
+    defer lease.deinit();
+
+    try client.removeSessionExpected(0, "session-1", 1);
+
+    try std.testing.expectEqualStrings("session-1", lease.log.session_id);
+    try std.testing.expectError(error.SessionNotActive, active.eventLog());
+}
+
+test "ordinary events without a prior log stay within their session generation" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+    _ = try addTestSession(&client, "target");
+
+    const old_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"target","event":{"type":"assistant.message","data":{"content":"old","messageId":"old-message"}}}
+    ,
+        .{},
+    );
+    defer old_params.deinit();
+    const old_frame = try allocator.dupe(u8, "{}");
+    switch (try client.queueSessionEvent(.detailed, old_frame, old_params.value)) {
+        .success => |retained| if (!retained) allocator.free(old_frame),
+        .failure => |failure_value| {
+            allocator.free(old_frame);
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    }
+    try std.testing.expectEqual(@as(u64, 1), client.events.items[0].generation);
+
+    try client.beginSessionRecord(try allocator.dupe(u8, "target"), 0);
+    const replacement_index = try client.commitSessionRecord();
+    const replacement = client.sessionHandle(replacement_index);
+    try std.testing.expectEqual(@as(u64, 2), replacement.generation);
+    try std.testing.expectEqual(@as(usize, 0), client.events.items.len);
+
+    const new_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"target","event":{"type":"assistant.message","data":{"content":"new","messageId":"new-message"}}}
+    ,
+        .{},
+    );
+    defer new_params.deinit();
+    const new_frame = try allocator.dupe(u8, "{}");
+    switch (try client.queueSessionEvent(.detailed, new_frame, new_params.value)) {
+        .success => |retained| if (!retained) allocator.free(new_frame),
+        .failure => |failure_value| {
+            allocator.free(new_frame);
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    }
+    var event = try replacement.nextEvent();
+    defer event.deinit(allocator);
+    try std.testing.expectEqualStrings("new", event.assistant_message.content);
+}
+
+test "stale session removal cannot deactivate a replacement generation" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+    _ = try addTestSession(&client, "target");
+    const stale_id = try allocator.dupe(u8, "target");
+    defer allocator.free(stale_id);
+    var ready: std.Io.Event = .unset;
+    var completed: std.Io.Event = .unset;
+    var context = GatedSessionRemoval{
+        .client = &client,
+        .ready = &ready,
+        .started = &completed,
+        .record_index = 0,
+        .session_id = stale_id,
+        .generation = 1,
+    };
+    var future = try std.testing.io.concurrent(GatedSessionRemoval.run, .{&context});
+
+    try client.removeSessionExpected(0, "target", 1);
+    try client.beginSessionRecord(try allocator.dupe(u8, "target"), null);
+    const replacement_index = try client.commitSessionRecord();
+    const replacement = client.sessionHandle(replacement_index);
+    ready.set(client.io);
+    try completed.wait(client.io);
+    future.await(client.io);
+
+    try std.testing.expectEqual(error.SessionNotActive, context.result.?);
+    try std.testing.expectEqual(@as(u64, 2), replacement.generation);
+    var lease = try replacement.eventLog();
+    lease.deinit();
+}
+
+test "same id cannot publish in another slot while an older generation drains" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        client.rollbackSessionRecord();
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+    try client.sessions.append(allocator, .{});
+    const original = try addTestSession(&client, "target");
+    try std.testing.expectEqual(@as(usize, 1), original.record_index);
+    const log = try client.ensureEventLog("target", original.generation);
+    try log.beginIngress();
+    var started: std.Io.Event = .unset;
+    var context = DrainingSessionRemoval{
+        .client = &client,
+        .started = &started,
+        .record_index = original.record_index,
+        .session_id = "target",
+        .generation = original.generation,
+    };
+    var future = try std.testing.io.concurrent(DrainingSessionRemoval.run, .{&context});
+    try started.wait(client.io);
+
+    try std.testing.expectError(
+        error.SessionAlreadyActive,
+        client.beginSessionRecord(try allocator.dupe(u8, "target"), null),
+    );
+    try std.testing.expect(client.pending_session == null);
+    try client.beginSessionRecord(null, null);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_session.?.record_index);
+    try std.testing.expectError(
+        error.InvalidServerAssignedSessionId,
+        client.prepareSessionCommit("target", null),
+    );
+    client.rollbackSessionRecord();
+
+    client.finishSessionIngress(log);
+    future.await(client.io);
+    try std.testing.expect(context.result == null);
+    try std.testing.expect(client.sessions.items[1].id == null);
+
+    try client.beginSessionRecord(try allocator.dupe(u8, "target"), null);
+    const replacement = client.sessionHandle(try client.commitSessionRecord());
+    try std.testing.expectEqual(@as(usize, 0), replacement.record_index);
+    try std.testing.expectEqualStrings("target", replacement.id);
+}
+
+test "session removal drains ingress without holding the sessions mutex" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+    const session = try addTestSession(&client, "target");
+    const log = try client.ensureEventLog("target", 1);
+    try log.beginIngress();
+    var ingress_scope: SessionIngressScope = undefined;
+    beginSessionIngressScope(&ingress_scope, log);
+    var started: std.Io.Event = .unset;
+    var context = DrainingSessionRemoval{
+        .client = &client,
+        .started = &started,
+        .record_index = 0,
+        .session_id = "target",
+        .generation = 1,
+    };
+    var future = try std.testing.io.concurrent(DrainingSessionRemoval.run, .{&context});
+    try started.wait(client.io);
+
+    const late_params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"target","event":{"type":"assistant.message","data":{"content":"late","messageId":"late-message"}}}
+    ,
+        .{},
+    );
+    defer late_params.deinit();
+    const late_frame = try allocator.dupe(u8, "{}");
+    switch (try client.queueSessionEvent(.detailed, late_frame, late_params.value)) {
+        .success => |retained| {
+            try std.testing.expect(!retained);
+            allocator.free(late_frame);
+        },
+        .failure => |failure_value| {
+            allocator.free(late_frame);
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    }
+    try std.testing.expectEqual(@as(usize, 0), client.events.items.len);
+    try std.testing.expectError(error.SessionNotActive, session.eventLog());
+    endSessionIngressScope(&ingress_scope);
+    client.finishSessionIngress(log);
+    future.await(client.io);
+
+    try std.testing.expect(context.result == null);
+    try std.testing.expect(!client.sessions.items[0].isActive());
+}
+
+test "closing session requests cannot bind a pending replacement runtime" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        client.rollbackExtensionRuntime();
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+    _ = try addTestSession(&client, "target");
+    client.sessions.items[0].removal = .draining;
+    try client.beginExtensionRuntime(
+        "target",
+        session_types.ResumeSessionConfig{},
+        &.{},
+    );
+    const params = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"target"}
+    ,
+        .{},
+    );
+    defer params.deinit();
+
+    switch (try client.acquireServerRequestLifetime(params.value)) {
+        .inactive => {},
+        .active => |lease_value| {
+            var lease = lease_value;
+            lease.deinit();
+            return error.TestExpectedInactiveSession;
+        },
+        .unscoped, .pending => return error.TestExpectedInactiveSession,
+    }
+}
+
 test "session failure conversion rolls back every allocation failure" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
@@ -20656,9 +25343,12 @@ test "session.event notifications queue by session" {
     const allocator = std.testing.allocator;
     var client = Client{
         .allocator = allocator,
-        .io = undefined,
+        .io = std.testing.io,
     };
-    defer deinitTestClientRegistries(&client);
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
 
     const parsed = try std.json.parseFromSlice(
         std.json.Value,
@@ -20687,6 +25377,414 @@ test "session.event notifications queue by session" {
     );
 }
 
+test "admitted session events block same-session removal before runtime access" {
+    const allocator = std.testing.allocator;
+    const cases = [_][]const u8{
+        \\{"sessionId":"target","event":{"type":"capabilities.changed","data":{"ui":{"canvases":false}}}}
+        ,
+        \\{"sessionId":"target","event":{"type":"session.canvas.opened","data":{"instanceId":"i1","extensionId":"e1","canvasId":"c1"}}}
+        ,
+        \\{"sessionId":"target","event":{"type":"mcp.oauth_required","data":{"requestId":"oauth-1","serverName":"server","serverUrl":"https://example.test","reason":"initial"}}}
+        ,
+        \\{"sessionId":"target","event":{"type":"elicitation.requested","data":{"requestId":"e1","message":"confirm"}}}
+        ,
+    };
+
+    for (cases) |event_json| {
+        var client = Client{
+            .allocator = allocator,
+            .io = std.testing.io,
+        };
+        defer {
+            deinitTestMessaging(&client);
+            deinitTestClientRegistries(&client);
+        }
+        _ = try addTestSession(&client, "target");
+        try client.beginExtensionRuntime(
+            "target",
+            session_types.ResumeSessionConfig{},
+            &.{},
+        );
+        try commitTestExtensionRuntime(&client, "target", .{}, &.{});
+        try ensureTestEventLog(&client, "target");
+
+        const parsed = try std.json.parseFromSlice(
+            std.json.Value,
+            allocator,
+            event_json,
+            .{},
+        );
+        defer parsed.deinit();
+        var event = try session_types.parseEventClassified(allocator, parsed.value.object.get("event").?);
+        defer event.deinit(allocator);
+        var lease = switch (try client.acquireActiveEventIngress("target", true)) {
+            .active => |value| value,
+            .unknown, .unavailable => return error.TestExpectedActiveSession,
+        };
+        var ingress_scope: SessionIngressScope = undefined;
+        beginSessionIngressScope(&ingress_scope, lease.log);
+        try client.removeSessionExpected(0, "target", 1);
+        try std.testing.expectEqual(
+            .deferred,
+            client.sessions.items[0].removal,
+        );
+        try client.applyExtensionEvent("target", &event);
+        endSessionIngressScope(&ingress_scope);
+        client.finishSessionIngress(lease.log);
+        lease.deinit();
+        try std.testing.expect(!client.sessions.items[0].isActive());
+    }
+}
+
+test "resumed session events admit only the active log generation" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+    _ = try addTestSession(&client, "target");
+    client.sessions.items[0].generation = 2;
+    _ = try client.ensureEventLog("target", 1);
+    const active_log = try client.ensureEventLog("target", 2);
+    try client.beginExtensionRuntime(
+        "target",
+        session_types.ResumeSessionConfig{},
+        &.{},
+    );
+    try commitTestExtensionRuntime(&client, "target", .{}, &.{});
+
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"target","event":{"type":"capabilities.changed","data":{"ui":{"canvases":false}}}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    var event = try session_types.parseEventClassified(allocator, parsed.value.object.get("event").?);
+    defer event.deinit(allocator);
+    var lease = switch (try client.acquireActiveEventIngress("target", true)) {
+        .active => |value| value,
+        .unknown, .unavailable => return error.TestExpectedActiveSession,
+    };
+    try std.testing.expect(lease.log == active_log);
+    const stale_log = client.findEventLog("target", 1).?;
+    stale_log.mutex.lockUncancelable(client.io);
+    const stale_ingress = stale_log.ingress_count;
+    stale_log.mutex.unlock(client.io);
+    try std.testing.expectEqual(@as(usize, 0), stale_ingress);
+
+    var ingress_scope: SessionIngressScope = undefined;
+    beginSessionIngressScope(&ingress_scope, lease.log);
+    try client.removeSessionExpected(0, "target", 2);
+    try client.applyExtensionEvent("target", &event);
+    endSessionIngressScope(&ingress_scope);
+    client.finishSessionIngress(lease.log);
+    lease.deinit();
+    try std.testing.expect(!client.sessions.items[0].isActive());
+}
+
+test "active generation events do not mutate a pending resume runtime" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+    _ = try addTestSession(&client, "target");
+    try client.beginExtensionRuntime(
+        "target",
+        session_types.ResumeSessionConfig{},
+        &.{},
+    );
+    try commitTestExtensionRuntime(&client, "target", .{}, &.{});
+    try client.beginExtensionRuntime(
+        "target",
+        session_types.ResumeSessionConfig{},
+        &.{},
+    );
+    try client.prepareExtensionRuntimeCommit("target", .{}, &.{});
+    client.pending_extension_runtime.?.capabilities.canvases = .supported;
+
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"target","event":{"type":"capabilities.changed","data":{"ui":{"canvases":false}}}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    const frame = try allocator.dupe(u8, "{}");
+    switch (try client.queueSessionEvent(.detailed, frame, parsed.value)) {
+        .success => |retained| if (!retained) allocator.free(frame),
+        .failure => |failure_value| {
+            allocator.free(frame);
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    }
+
+    try std.testing.expectEqual(
+        ext.CapabilityState.unsupported,
+        client.extension_runtimes.items[0].capabilities.canvases,
+    );
+    try std.testing.expectEqual(
+        ext.CapabilityState.supported,
+        client.pending_extension_runtime.?.capabilities.canvases,
+    );
+}
+
+test "resume publication drains admitted events before replacing runtime generation" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+    _ = try addTestSession(&client, "target");
+    try client.beginExtensionRuntime(
+        "target",
+        session_types.ResumeSessionConfig{},
+        &.{},
+    );
+    try commitTestExtensionRuntime(&client, "target", .{}, &.{});
+    try ensureTestEventLog(&client, "target");
+    const old_log = client.findEventLog("target", 1).?;
+    try old_log.beginIngress();
+
+    const candidate_id = try allocator.dupe(u8, "target");
+    try client.beginSessionRecord(candidate_id, 0);
+    try client.beginExtensionRuntime(
+        "target",
+        session_types.ResumeSessionConfig{},
+        &.{},
+    );
+    try client.prepareExtensionRuntimeCommit("target", .{}, &.{});
+    client.pending_extension_runtime.?.capabilities.canvases = .supported;
+
+    const commit = try client.beginSessionRecordCommit();
+    try std.testing.expect(client.sessions.items[0].replacement_pending);
+    try std.testing.expectEqual(
+        ext.CapabilityState.unknown,
+        client.extension_runtimes.items[0].capabilities.canvases,
+    );
+
+    client.finishSessionIngress(old_log);
+    _ = try client.finishSessionRecordCommit(commit);
+    try std.testing.expectEqual(@as(u64, 2), client.sessions.items[0].generation);
+    try std.testing.expectEqual(
+        ext.CapabilityState.supported,
+        client.extension_runtimes.items[0].capabilities.canvases,
+    );
+}
+
+test "same-session resume commit rejects callback ingress without closing active state" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        client.rollbackExtensionRuntime();
+        client.rollbackSessionRecord();
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+    _ = try addTestSession(&client, "target");
+    try client.beginExtensionRuntime(
+        "target",
+        session_types.ResumeSessionConfig{},
+        &.{},
+    );
+    try commitTestExtensionRuntime(&client, "target", .{}, &.{});
+    try ensureTestEventLog(&client, "target");
+    const active_log = client.findEventLog("target", 1).?;
+    try active_log.beginIngress();
+    var ingress_scope: SessionIngressScope = undefined;
+    beginSessionIngressScope(&ingress_scope, active_log);
+
+    const candidate_id = try allocator.dupe(u8, "target");
+    try client.beginSessionRecord(candidate_id, 0);
+    try client.beginExtensionRuntime(
+        "target",
+        session_types.ResumeSessionConfig{},
+        &.{},
+    );
+    try client.prepareExtensionRuntimeCommit("target", .{}, &.{});
+    try std.testing.expectError(error.ReentrantRpcCall, client.commitSessionRecord());
+    try std.testing.expect(client.sessions.items[0].isActive());
+    try std.testing.expect(!client.sessions.items[0].replacement_pending);
+
+    endSessionIngressScope(&ingress_scope);
+    client.finishSessionIngress(active_log);
+    try active_log.beginIngress();
+    client.finishSessionIngress(active_log);
+}
+
+test "automatic callback removal completes after its own ingress returns" {
+    const allocator = std.testing.allocator;
+    const response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"success":true}}
+    ;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const framed = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ response.len, response },
+    );
+    defer allocator.free(framed);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = framed });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{ .mode = .read_only });
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [512]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        } },
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+    _ = try addTestSession(&client, "target");
+    var callback_returned = false;
+    const CallbackContext = struct {
+        client: *Client,
+        returned: *bool,
+
+        fn handle(
+            _: session_types.CommandContext,
+            raw_context: ?*anyopaque,
+        ) !void {
+            const context: *@This() = @ptrCast(@alignCast(raw_context.?));
+            try context.client.removeSessionExpected(0, "target", 1);
+            context.returned.* = true;
+        }
+    };
+    var callback_context = CallbackContext{
+        .client = &client,
+        .returned = &callback_returned,
+    };
+    try client.beginExtensionRuntime(
+        "target",
+        session_types.ResumeSessionConfig{
+            .commands = &.{.{
+                .name = "ship",
+                .handler = CallbackContext.handle,
+                .context = &callback_context,
+            }},
+        },
+        &.{},
+    );
+    try commitTestExtensionRuntime(&client, "target", .{}, &.{});
+
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"target","event":{"type":"command.execute","data":{"requestId":"command-1","command":"/ship","commandName":"ship","args":""}}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    const frame = try allocator.dupe(u8, "{}");
+    switch (try client.queueSessionEvent(.detailed, frame, parsed.value)) {
+        .success => |retained| if (!retained) allocator.free(frame),
+        .failure => |failure_value| {
+            allocator.free(frame);
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    }
+
+    try std.testing.expect(callback_returned);
+    try std.testing.expect(!client.sessions.items[0].isActive());
+    try std.testing.expect(client.findCommittedExtensionRuntime("target") == null);
+}
+
+test "preceding session removal cannot redirect target extension events" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+    _ = try addTestSession(&client, "preceding");
+    _ = try addTestSession(&client, "target");
+    try client.beginExtensionRuntime(
+        "preceding",
+        session_types.ResumeSessionConfig{},
+        &.{},
+    );
+    try commitTestExtensionRuntime(&client, "preceding", .{}, &.{});
+    try client.beginExtensionRuntime(
+        "target",
+        session_types.ResumeSessionConfig{},
+        &.{},
+    );
+    try commitTestExtensionRuntime(&client, "target", .{}, &.{});
+    try ensureTestEventLog(&client, "target");
+
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"target","event":{"type":"session.canvas.opened","data":{"instanceId":"target-canvas","extensionId":"target-extension","canvasId":"target-kind"}}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    var event = try session_types.parseEventClassified(allocator, parsed.value.object.get("event").?);
+    defer event.deinit(allocator);
+    var lease = switch (try client.acquireActiveEventIngress("target", true)) {
+        .active => |value| value,
+        .unknown, .unavailable => return error.TestExpectedActiveSession,
+    };
+    var removed = client.extension_runtimes.orderedRemove(0);
+    removed.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), client.extension_runtimes.items.len);
+    try std.testing.expectEqualStrings(
+        "target",
+        client.extension_runtimes.items[0].session_id.?,
+    );
+
+    try client.applyExtensionEvent("target", &event);
+    client.finishSessionIngress(lease.log);
+    lease.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        client.extension_runtimes.items[0].open_canvases.items.len,
+    );
+    try std.testing.expectEqualStrings(
+        "target-canvas",
+        client.extension_runtimes.items[0].open_canvases.items[0].instance_id,
+    );
+}
+
 test "a full interaction queue does not evict another session" {
     const allocator = std.testing.allocator;
     var client = Client{
@@ -20696,14 +25794,15 @@ test "a full interaction queue does not evict another session" {
     defer deinitTestClientRegistries(&client);
 
     try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{}, &.{});
-    try client.commitExtensionRuntime("s1", .{}, &.{});
+    try commitTestExtensionRuntime(&client, "s1", .{}, &.{});
     try client.beginExtensionRuntime("s2", session_types.ResumeSessionConfig{}, &.{});
-    try client.commitExtensionRuntime("s2", .{}, &.{});
+    try commitTestExtensionRuntime(&client, "s2", .{}, &.{});
 
     try client.events.ensureTotalCapacity(allocator, max_queued_events + 1);
     for (0..max_queued_events) |_| {
         try client.events.append(allocator, .{
             .session_id = try allocator.dupe(u8, "s1"),
+            .generation = 1,
             .event = .{ .session_idle = .{} },
         });
     }
@@ -20735,20 +25834,26 @@ test "a full session queue records an observable failure without cross-session e
     const allocator = std.testing.allocator;
     var client = Client{
         .allocator = allocator,
-        .io = undefined,
+        .io = std.testing.io,
     };
-    defer deinitTestClientRegistries(&client);
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
 
+    _ = try addTestSession(&client, "session-1");
     try client.beginExtensionRuntime(
         "session-1",
         session_types.ResumeSessionConfig{},
         &.{},
     );
-    try client.commitExtensionRuntime("session-1", .{}, &.{});
+    try commitTestExtensionRuntime(&client, "session-1", .{}, &.{});
+    try ensureTestEventLog(&client, "session-1");
     try client.events.ensureTotalCapacity(allocator, max_queued_events);
     for (0..max_queued_events) |_| {
         try client.events.append(allocator, .{
             .session_id = try allocator.dupe(u8, "session-1"),
+            .generation = 1,
             .event = .{ .session_idle = .{} },
         });
     }
@@ -20781,7 +25886,7 @@ test "a full session queue records an observable failure without cross-session e
     for (client.events.items) |*event| event.deinit(allocator);
     client.events.clearRetainingCapacity();
     client.transport_closed = true;
-    const failure = switch (try client.nextEventImpl(.legacy, "session-1")) {
+    const failure = switch (try client.nextEventImpl(.legacy, "session-1", 1)) {
         .success => return error.TestExpectedQueueFailure,
         .failure => |value| value,
     };
@@ -20842,18 +25947,23 @@ test "a full session queue rejects unretained permission and tool requests" {
                 .writer_buffer = &.{},
             } },
         };
-        defer deinitTestClientRegistries(&client);
+        defer {
+            deinitTestMessaging(&client);
+            deinitTestClientRegistries(&client);
+        }
         _ = try addTestSession(&client, "s1");
+        try ensureTestEventLog(&client, "s1");
         try client.beginExtensionRuntime(
             "s1",
             session_types.ResumeSessionConfig{},
             &.{},
         );
-        try client.commitExtensionRuntime("s1", .{}, &.{});
+        try commitTestExtensionRuntime(&client, "s1", .{}, &.{});
         try client.events.ensureTotalCapacity(allocator, max_queued_events);
         for (0..max_queued_events) |_| {
             try client.events.append(allocator, .{
                 .session_id = try allocator.dupe(u8, "s1"),
+                .generation = 1,
                 .event = .{ .session_idle = .{} },
             });
         }
@@ -20913,11 +26023,12 @@ test "session removal defers in-progress automatic event cleanup" {
     try client.events.append(allocator, .{
         .id = 42,
         .session_id = try allocator.dupe(u8, "s1"),
+        .generation = 1,
         .event = try session_types.parseEvent(allocator, parsed.value),
         .automatic_handling_in_progress = true,
     });
 
-    client.removeSessionState("s1");
+    client.removeSessionState("s1", 1);
     try std.testing.expectEqual(@as(usize, 1), client.events.items.len);
     try std.testing.expect(client.events.items[0].remove_after_automatic_handling);
     try std.testing.expectEqualStrings(
@@ -20927,6 +26038,279 @@ test "session removal defers in-progress automatic event cleanup" {
 
     client.finishAutomaticEvent(.{ .queued = 42 });
     try std.testing.expectEqual(@as(usize, 0), client.events.items.len);
+}
+
+test "pump defers automatic events through admitted event ingress" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.event\",\"params\":{\"sessionId\":\"s1\",\"event\":{\"type\":\"command.execute\",\"data\":{\"requestId\":\"command-1\",\"command\":\"/ship\",\"commandName\":\"ship\",\"args\":\"\"}}}}",
+    );
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"success\":true}}",
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [2048]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+            .eof_is_idle = true,
+        } },
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+
+    _ = try addTestSession(&client, "s1");
+    try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{}, &.{});
+    try commitTestExtensionRuntime(&client, "s1", .{}, &.{});
+    try ensureTestEventLog(&client, "s1");
+    const log = client.findEventLog("s1", 1).?;
+    try client.ensurePump();
+    var observed: ?session_types.SessionEvent = null;
+    defer if (observed) |*event| event.deinit(allocator);
+    for (0..100) |_| {
+        switch (try log.inspect(log.compatibilityToken())) {
+            .event => |event| {
+                observed = event;
+                break;
+            },
+            .wait => {},
+            else => return error.TestUnexpectedEventLogState,
+        }
+        try std.Io.sleep(client.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(observed != null);
+    try std.testing.expect(
+        observed.?.command_execute.automatic_handling == .handled,
+    );
+
+    try writer.interface.flush();
+    const requests = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "requests",
+        allocator,
+        .limited(4096),
+    );
+    defer allocator.free(requests);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        requests,
+        "session.commands.handlePendingCommand",
+    ) != null);
+}
+
+test "event worker shutdown cancels a pending automatic RPC" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    try appendTestFrame(
+        allocator,
+        &frames,
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session.event\",\"params\":{\"sessionId\":\"s1\",\"event\":{\"type\":\"command.execute\",\"data\":{\"requestId\":\"command-1\",\"command\":\"/ship\",\"commandName\":\"ship\",\"args\":\"\"}}}}",
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "responses", .data = frames.items });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [2048]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [2048]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+            .eof_is_idle = true,
+        } },
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+
+    _ = try addTestSession(&client, "s1");
+    try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{}, &.{});
+    try commitTestExtensionRuntime(&client, "s1", .{}, &.{});
+    try ensureTestEventLog(&client, "s1");
+    const log = client.findEventLog("s1", 1).?;
+    try client.ensurePump();
+    for (0..100) |_| {
+        if ((try request_file.stat(std.testing.io)).size != 0) break;
+        try std.Io.sleep(client.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect((try request_file.stat(std.testing.io)).size != 0);
+
+    client.stopEventWorker();
+    const observed = switch (try log.inspect(log.compatibilityToken())) {
+        .event => |event| event,
+        else => return error.TestExpectedRetainedEvent,
+    };
+    defer {
+        var event = observed;
+        event.deinit(allocator);
+    }
+    const handling = observed.command_execute.automatic_handling;
+    try std.testing.expect(handling == .delivery_failed);
+    try std.testing.expectEqual(error.Canceled, handling.delivery_failed);
+    client.pending_mutex.lockUncancelable(client.io);
+    const pending_count = client.pending_calls.items.len;
+    client.pending_mutex.unlock(client.io);
+    try std.testing.expectEqual(@as(usize, 0), pending_count);
+    try client.routePumpedResponse(1, try allocator.dupe(u8, "{}"));
+    try std.testing.expectEqual(@as(usize, 1), client.retained_responses.items.len);
+}
+
+test "pump shutdown fixes the routing decision before event dispatch" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "responses",
+        .data = "",
+    });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [256]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [256]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+            .eof_is_idle = true,
+        } },
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+    _ = try addTestSession(&client, "s1");
+    try client.beginExtensionRuntime("s1", session_types.ResumeSessionConfig{}, &.{});
+    try commitTestExtensionRuntime(&client, "s1", .{}, &.{});
+    try ensureTestEventLog(&client, "s1");
+    try client.ensurePump();
+
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"s1","event":{"type":"elicitation.requested","data":{"requestId":"e1","message":"confirm"}}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    const frame = try allocator.dupe(u8, "{}");
+    client.pending_mutex.lockUncancelable(client.io);
+    var pending_locked = true;
+    defer if (pending_locked) client.pending_mutex.unlock(client.io);
+    var stop_started: std.Io.Event = .unset;
+    var stop_completed: std.Io.Event = .unset;
+    var stop_future = try std.testing.io.concurrent(
+        stopPumpForProbe,
+        .{ &client, &stop_started, &stop_completed },
+    );
+    stop_started.waitUncancelable(std.testing.io);
+    var queue_result: QueueEventProbeResult = .{};
+    var queue_future = try std.testing.io.concurrent(
+        queueEventForProbe,
+        .{ &client, parsed.value, frame, &queue_result },
+    );
+    queue_result.started.waitUncancelable(std.testing.io);
+
+    client.pending_mutex.unlock(client.io);
+    pending_locked = false;
+    stop_future.await(std.testing.io);
+    try std.testing.expect(!client.isPumpRunning());
+    try std.testing.expect(stop_completed.isSet());
+    queue_future.await(std.testing.io);
+
+    try std.testing.expectEqual(null, queue_result.failure);
+    client.event_queue_mutex.lockUncancelable(client.io);
+    const queued_work = client.event_queue.items.len;
+    client.event_queue_mutex.unlock(client.io);
+    try std.testing.expectEqual(@as(usize, 0), queued_work);
+    client.events_mutex.lockUncancelable(client.io);
+    const retained = client.events.items.len;
+    const handling_in_progress = if (retained == 1)
+        client.events.items[0].automatic_handling_in_progress
+    else
+        true;
+    client.events_mutex.unlock(client.io);
+    try std.testing.expectEqual(@as(usize, 1), retained);
+    try std.testing.expect(!handling_in_progress);
+}
+
+test "late events skip closed retained logs" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        deinitTestMessaging(&client);
+        for (client.events.items) |*queued| queued.deinit(allocator);
+        deinitTestEventLogs(&client);
+        client.events.deinit(allocator);
+    }
+    _ = try client.ensureEventLog("s1", 1);
+    client.closeEventLog("s1", 1);
+
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        "{\"sessionId\":\"s1\",\"event\":{\"type\":\"session.idle\",\"data\":{}}}",
+        .{},
+    );
+    defer parsed.deinit();
+    const frame = try allocator.dupe(u8, "{}");
+    const retained = switch (try client.queueSessionEvent(.detailed, frame, parsed.value)) {
+        .success => |value| value,
+        .failure => |failure_value| {
+            allocator.free(frame);
+            var failure = failure_value;
+            defer failure.deinit();
+            return error.TestUnexpectedFailure;
+        },
+    };
+    if (!retained) allocator.free(frame);
+    try std.testing.expectEqual(@as(usize, 1), client.events.items.len);
+    try std.testing.expect(client.events.items[0].event == .session_idle);
 }
 
 test "public RPC capture owns a specialized queue rejection" {
@@ -21237,6 +26621,7 @@ fn invalidPermissionDetailedFailure(allocator: std.mem.Allocator) !errors.Failur
         .writer_buffer = &.{},
     };
     defer {
+        deinitTestEventLogs(&client);
         for (client.sessions.items) |*record| record.deinit(allocator);
         client.sessions.deinit(allocator);
     }
@@ -21285,6 +26670,7 @@ fn detailedDeliveryFailure(
         .writer_buffer = &.{},
     };
     defer {
+        deinitTestEventLogs(&client);
         for (client.sessions.items) |*record| record.deinit(allocator);
         client.sessions.deinit(allocator);
     }
@@ -21386,6 +26772,7 @@ test "direct permission and tool validation failures retain request context" {
         .writer_buffer = &.{},
     };
     defer {
+        deinitTestEventLogs(&client);
         for (client.sessions.items) |*record| record.deinit(allocator);
         client.sessions.deinit(allocator);
     }
@@ -21855,7 +27242,7 @@ test "interleaved request response write failure is captured" {
         }
     }.handle, null);
 
-    var failure = switch (try client.nextEventImpl(.detailed, "session-1")) {
+    var failure = switch (try client.nextEventImpl(.detailed, "session-1", 1)) {
         .success => |delivery| {
             var owned = delivery;
             owned.deinit(allocator);
@@ -21907,6 +27294,8 @@ test "nextEventDetailed owns complete session diagnostics after frame teardown" 
         .writer_buffer = &.{},
     };
     defer {
+        deinitTestMessaging(&client);
+        deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         for (client.sessions.items) |*record| record.deinit(allocator);
         client.sessions.deinit(allocator);
@@ -21946,6 +27335,67 @@ test "nextEventDetailed owns complete session diagnostics after frame teardown" 
     }
 }
 
+test "nextEventDetailed preserves pumped protocol diagnostics" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const malformed = "{";
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ malformed.len, malformed },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = responses });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .child = null,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestEventLogs(&client);
+        client.events.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    const active_session = try addTestSession(&client, "session-1");
+    var observer = try active_session.subscribe();
+    defer observer.deinit();
+
+    var failure = switch (try active_session.nextEventDetailed()) {
+        .success => |event_value| {
+            var event = event_value;
+            event.deinit(allocator);
+            return error.TestExpectedProtocolFailure;
+        },
+        .failure => |value| value,
+    };
+    defer failure.deinit();
+    try std.testing.expectEqual(error.UnexpectedEndOfInput, failure.native_error);
+    switch (failure.detail) {
+        .protocol => |protocol_failure| switch (protocol_failure) {
+            .invalid_json => |detail| {
+                try std.testing.expectEqual(error.UnexpectedEndOfInput, detail.cause.code);
+            },
+            else => return error.TestExpectedInvalidJson,
+        },
+        else => return error.TestExpectedProtocolFailure,
+    }
+}
+
 test "cross-session errors retain diagnostics without eager failure construction" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -21981,7 +27431,9 @@ test "cross-session errors retain diagnostics without eager failure construction
         .writer_buffer = &.{},
     };
     defer {
+        deinitTestMessaging(&client);
         for (client.events.items) |*queued| queued.deinit(allocator);
+        deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         for (client.sessions.items) |*record| record.deinit(allocator);
         client.sessions.deinit(allocator);
@@ -22034,13 +27486,16 @@ test "nextEventDetailed retains framing diagnostics" {
     var client = Client{
         .allocator = allocator,
         .io = std.testing.io,
-        .child = null,
-        .reader = &reader,
-        .writer = &writer,
-        .reader_buffer = &.{},
-        .writer_buffer = &.{},
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        } },
     };
     defer {
+        deinitTestMessaging(&client);
+        deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         for (client.sessions.items) |*record| record.deinit(allocator);
         client.sessions.deinit(allocator);
@@ -22063,7 +27518,7 @@ test "nextEventDetailed retains framing diagnostics" {
     }
 }
 
-test "nextEvent preserves native framing error when diagnostics cannot allocate" {
+test "nextEvent reports allocation failure when pump diagnostics cannot allocate" {
     const allocator = std.testing.allocator;
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     var tmp = std.testing.tmpDir(.{});
@@ -22079,23 +27534,26 @@ test "nextEvent preserves native framing error when diagnostics cannot allocate"
     var client = Client{
         .allocator = allocator,
         .io = std.testing.io,
-        .child = null,
-        .reader = &reader,
-        .writer = &writer,
-        .reader_buffer = &.{},
-        .writer_buffer = &.{},
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        } },
     };
     const session = try addTestSession(&client, "session-1");
+    _ = try client.ensureEventLog("session-1", 1);
     client.allocator = failing.allocator();
     defer {
         client.events.deinit(failing.allocator());
         client.allocator = allocator;
+        deinitTestMessaging(&client);
         for (client.sessions.items) |*record| record.deinit(allocator);
         client.sessions.deinit(allocator);
     }
 
     try std.testing.expectError(
-        error.ReadFailed,
+        error.OutOfMemory,
         session.nextEvent(),
     );
 }
@@ -22132,19 +27590,22 @@ test "high-level clean EOF preserves legacy framing and detailed process exit" {
     var client = Client{
         .allocator = allocator,
         .io = std.testing.io,
-        .child = null,
         .child_wait = .{
             .context = &wait_probe,
             .wait = ChildWaitProbe.wait,
         },
-        .reader = &reader,
-        .writer = &writer,
-        .reader_buffer = &.{},
-        .writer_buffer = &.{},
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        } },
     };
     defer {
+        deinitTestMessaging(&client);
         for (client.sessions.items) |*record| record.deinit(allocator);
         client.sessions.deinit(allocator);
+        deinitTestEventLogs(&client);
         client.events.deinit(allocator);
     }
     try client.sessions.append(allocator, .{
@@ -22240,17 +27701,20 @@ test "child wait error still closes transport and blocks later writes" {
     var client = Client{
         .allocator = allocator,
         .io = std.testing.io,
-        .child = null,
         .child_wait = .{
             .context = &wait_probe,
             .wait = ChildWaitProbe.wait,
         },
-        .reader = &reader,
-        .writer = &writer,
-        .reader_buffer = &.{},
-        .writer_buffer = &.{},
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+        } },
     };
     defer {
+        deinitTestMessaging(&client);
+        deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         for (client.sessions.items) |*record| record.deinit(allocator);
         client.sessions.deinit(allocator);
@@ -22289,7 +27753,7 @@ test "child wait error still closes transport and blocks later writes" {
         .failure => |event_retry_failure| event_retry_failure,
     };
     defer event_retry_failure.deinit();
-    try std.testing.expectEqual(error.EndOfStream, event_retry_failure.native_error);
+    try std.testing.expectEqual(error.AccessDenied, event_retry_failure.native_error);
     try std.testing.expectEqual(size_before_retry, (try request_file.stat(std.testing.io)).size);
     try std.testing.expectEqual(@as(usize, 1), wait_probe.calls);
 }
@@ -22366,6 +27830,7 @@ fn runAutomaticToolFailure(
     };
     defer {
         for (client.events.items) |*queued| queued.deinit(allocator);
+        deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         for (client.tools.items) |tool| tool.deinit(allocator);
         client.tools.deinit(allocator);
@@ -22396,6 +27861,7 @@ fn runAutomaticToolFailure(
     defer event_json.deinit();
     try client.events.append(allocator, .{
         .session_id = try allocator.dupe(u8, "session-1"),
+        .generation = 1,
         .event = try deliveryEventForTest(
             allocator,
             try session_types.parseEvent(allocator, event_json.value),
@@ -22490,6 +27956,7 @@ fn expectInvalidSessionEventMapping(
     };
     defer {
         for (client.events.items) |*event| event.deinit(allocator);
+        deinitTestEventLogs(&client);
         client.events.deinit(allocator);
         for (client.tools.items) |tool| tool.deinit(allocator);
         client.tools.deinit(allocator);
@@ -22570,7 +28037,10 @@ fn expectInvalidSessionEventEnvelope(
             .reader_buffer = &.{},
             .writer_buffer = &.{},
         };
-        defer client.events.deinit(allocator);
+        defer {
+            deinitTestEventLogs(&client);
+            client.events.deinit(allocator);
+        }
 
         if (policy == .legacy) {
             const result = client.callRpc(std.json.Value, "test.method", .{});
@@ -22763,8 +28233,11 @@ test "session.event invalid envelope violation matrix" {
         .reader_buffer = &.{},
         .writer_buffer = &.{},
     };
-    defer client.events.deinit(allocator);
-    var delivery = switch (try client.nextEventImpl(.detailed, "s1")) {
+    defer {
+        deinitTestEventLogs(&client);
+        client.events.deinit(allocator);
+    }
+    var delivery = switch (try client.nextEventImpl(.detailed, "s1", 0)) {
         .success => |value| value,
         .failure => |failure| {
             var owned = failure;
@@ -23157,6 +28630,26 @@ test "custom agent validation precedes lifecycle state and RPC writes" {
     try std.testing.expectEqual(@as(u64, 1), client.next_request_id);
     try std.testing.expectEqual(@as(usize, 0), client.sessions.items.len);
     try std.testing.expectEqual(@as(usize, 0), client.extension_runtimes.items.len);
+    try std.testing.expect(client.pending_extension_runtime == null);
+}
+
+test "parent join id allocation failure precedes lifecycle mutation" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var client = Client{
+        .allocator = failing.allocator(),
+        .io = undefined,
+    };
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        client.joinParentSession("target", .{}),
+    );
+    try std.testing.expectEqual(@as(u64, 1), client.next_request_id);
+    try std.testing.expectEqual(@as(usize, 0), client.sessions.items.len);
+    try std.testing.expect(client.pending_session == null);
     try std.testing.expect(client.pending_extension_runtime == null);
 }
 
@@ -23582,6 +29075,7 @@ fn testGitHubTokenProvider(
 }
 
 fn deinitTestClientRegistries(client: *Client) void {
+    deinitTestEventLogs(client);
     if (client.pending_extension_runtime) |*runtime| runtime.deinit(client.allocator);
     for (client.extension_runtimes.items) |*runtime| runtime.deinit(client.allocator);
     client.extension_runtimes.deinit(client.allocator);
@@ -23630,7 +29124,7 @@ test "credential quarantine covers committed and pending routes idempotently" {
             .context = &old_provider,
         },
     }});
-    try client.commitExtensionRuntime("resident", .{}, &.{});
+    try commitTestExtensionRuntime(&client, "resident", .{}, &.{});
     client.commitProviderTokens();
 
     var new_github_calls: usize = 0;
@@ -23698,7 +29192,7 @@ test "resident resume preparation failure preserves committed credential routes"
             .context = &provider_context,
         },
     }});
-    try client.commitExtensionRuntime("resident", .{}, &.{});
+    try commitTestExtensionRuntime(&client, "resident", .{}, &.{});
     client.commitProviderTokens();
 
     try std.testing.expectError(
@@ -23716,8 +29210,8 @@ test "resident resume preparation failure preserves committed credential routes"
     try std.testing.expect(client.findGitHubTokenRuntime("old-registration") == runtime);
     try std.testing.expect(client.findProviderToken("resident", "old") != null);
 
-    client.dispatching_rpc_handler = true;
-    defer client.dispatching_rpc_handler = false;
+    client.beginRpcHandler();
+    defer client.endRpcHandler();
     try std.testing.expectError(
         error.ReentrantRpcCall,
         client.resumeSession("resident", .{}),
@@ -24373,12 +29867,13 @@ fn attachDeleteTestState(client: *Client, session_id: []const u8) !void {
         session_types.ResumeSessionConfig{},
         &.{},
     );
-    try client.commitExtensionRuntime(session_id, .{}, &.{});
+    try commitTestExtensionRuntime(client, session_id, .{}, &.{});
     const runtime = client.findExtensionRuntime(session_id).?;
     runtime.mcp_auth_handler = deleteTestMcpAuthHandler;
     runtime.mcp_oauth_interest = try testMcpOAuthInterest(client.allocator, "interest-1");
     try client.events.append(client.allocator, .{
         .session_id = try client.allocator.dupe(u8, session_id),
+        .generation = 1,
         .event = .{ .session_idle = .{} },
     });
 }
@@ -25031,13 +30526,16 @@ test "all three read loops share lifecycle and session event routing" {
     var client = Client{
         .allocator = allocator,
         .io = std.testing.io,
-        .child = null,
-        .reader = &reader,
-        .writer = &writer,
-        .reader_buffer = &.{},
-        .writer_buffer = &.{},
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+            .eof_is_idle = true,
+        } },
     };
     defer deinitTestClientRegistries(&client);
+    defer deinitTestMessaging(&client);
 
     var ping_result = try client.ping(null);
     defer ping_result.deinit();
@@ -25135,13 +30633,16 @@ test "lifecycle overflow through an RPC preserves prefix marker and next epoch" 
     var client = Client{
         .allocator = allocator,
         .io = std.testing.io,
-        .child = null,
-        .reader = &reader,
-        .writer = &writer,
-        .reader_buffer = &.{},
-        .writer_buffer = &.{},
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+            .eof_is_idle = true,
+        } },
     };
     defer deinitTestClientRegistries(&client);
+    defer deinitTestMessaging(&client);
 
     var pong = try client.ping(null);
     defer pong.deinit();
@@ -25192,13 +30693,16 @@ test "lifecycle malformed payload and saturated loss retain detailed classificat
     var client = Client{
         .allocator = allocator,
         .io = std.testing.io,
-        .child = null,
-        .reader = &reader,
-        .writer = &writer,
-        .reader_buffer = &.{},
-        .writer_buffer = &.{},
+        .transport = .{ .fixture = .{
+            .reader = &reader,
+            .writer = &writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &.{},
+            .eof_is_idle = true,
+        } },
     };
     defer deinitTestClientRegistries(&client);
+    defer deinitTestMessaging(&client);
 
     var failure = switch (try client.nextLifecycleEventDetailed()) {
         .success => |delivery_value| {

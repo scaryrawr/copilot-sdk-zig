@@ -65,6 +65,7 @@ pub const SessionFilesystemSqliteTransactionError = runtime.SessionFilesystemSql
 pub const SessionFilesystemSqliteTransactionResult = runtime.SessionFilesystemSqliteTransactionResult;
 pub const RpcHandler = client.RpcHandler;
 pub const Session = client.Session;
+pub const EventSubscriber = client.EventSubscriber;
 pub const SessionUi = client.SessionUi;
 pub const PingResponse = client_admin.PingResponse;
 pub const ClientStatus = client_admin.ClientStatus;
@@ -189,6 +190,13 @@ pub const ProviderTokenRequest = provider.ProviderTokenRequest;
 pub const NamedProviderConfig = provider.NamedProviderConfig;
 pub const ProviderModelConfig = provider.ProviderModelConfig;
 pub const MessageOptions = session.MessageOptions;
+pub const MessageSource = session.MessageSource;
+pub const MessageDeliveryMode = session.MessageDeliveryMode;
+pub const AgentMode = session.AgentMode;
+pub const RequestHeader = session.RequestHeader;
+pub const MessageAttachment = session.MessageAttachment;
+pub const WaitOptions = session.WaitOptions;
+pub const Cancellation = session.Cancellation;
 pub const Attachment = session.Attachment;
 pub const SessionEvent = session.SessionEvent;
 pub const SessionEventTag = session.SessionEventTag;
@@ -261,6 +269,10 @@ test "root declarations compile" {
     _ = ProviderTokenRequest;
     _ = NamedProviderConfig;
     _ = ProviderModelConfig;
+    _ = MessageAttachment;
+    _ = WaitOptions;
+    _ = Cancellation;
+    _ = EventSubscriber;
     _ = Attachment;
 }
 
