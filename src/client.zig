@@ -9437,6 +9437,8 @@ pub const Client = struct {
         prior_record_index: ?usize,
     ) !void {
         errdefer if (session_id) |id| self.allocator.free(id);
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
         if (self.pending_session != null) {
             return error.SessionLifecycleAlreadyInProgress;
         }
@@ -9451,11 +9453,13 @@ pub const Client = struct {
         }
         const record_index = prior_record_index orelse index: {
             for (self.sessions.items, 0..) |record, index| {
-                if (!record.isActive()) break :index index;
+                if (record.id == null) break :index index;
             }
             try self.sessions.ensureUnusedCapacity(self.allocator, 1);
             break :index self.sessions.items.len;
         };
+        if (session_id) |id|
+            try self.ensureNoOtherSessionIdLocked(id, record_index);
         const generation = if (record_index < self.sessions.items.len)
             try nextSessionGeneration(self.sessions.items[record_index].generation)
         else
@@ -9477,6 +9481,8 @@ pub const Client = struct {
         session_id: []const u8,
         workspace_path: ?[]const u8,
     ) !void {
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
         const pending = if (self.pending_session) |*value|
             value
         else
@@ -9485,8 +9491,12 @@ pub const Client = struct {
             if (!std.mem.eql(u8, id, session_id))
                 return error.UnexpectedSessionId;
         } else {
-            if (session_id.len == 0 or self.hasSession(session_id))
+            if (session_id.len == 0)
                 return error.InvalidServerAssignedSessionId;
+            self.ensureNoOtherSessionIdLocked(
+                session_id,
+                pending.record_index,
+            ) catch return error.InvalidServerAssignedSessionId;
             pending.id = try self.allocator.dupe(u8, session_id);
         }
         const replacement_path = if (workspace_path) |path|
@@ -9532,6 +9542,19 @@ pub const Client = struct {
             .prior_log = prior_log,
             .replacing = replacing,
         };
+    }
+
+    fn ensureNoOtherSessionIdLocked(
+        self: *Client,
+        session_id: []const u8,
+        excluded_record_index: usize,
+    ) error{SessionAlreadyActive}!void {
+        for (self.sessions.items, 0..) |record, record_index| {
+            if (record_index == excluded_record_index) continue;
+            const id = record.id orelse continue;
+            if (std.mem.eql(u8, id, session_id))
+                return error.SessionAlreadyActive;
+        }
     }
 
     fn finishSessionRecordCommit(
@@ -24482,6 +24505,57 @@ test "stale session removal cannot deactivate a replacement generation" {
     try std.testing.expectEqual(@as(u64, 2), replacement.generation);
     var lease = try replacement.eventLog();
     lease.deinit();
+}
+
+test "same id cannot publish in another slot while an older generation drains" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+    };
+    defer {
+        client.rollbackSessionRecord();
+        deinitTestMessaging(&client);
+        deinitTestClientRegistries(&client);
+    }
+    try client.sessions.append(allocator, .{});
+    const original = try addTestSession(&client, "target");
+    try std.testing.expectEqual(@as(usize, 1), original.record_index);
+    const log = try client.ensureEventLog("target", original.generation);
+    try log.beginIngress();
+    var started: std.Io.Event = .unset;
+    var context = DrainingSessionRemoval{
+        .client = &client,
+        .started = &started,
+        .record_index = original.record_index,
+        .session_id = "target",
+        .generation = original.generation,
+    };
+    var future = try std.testing.io.concurrent(DrainingSessionRemoval.run, .{&context});
+    try started.wait(client.io);
+
+    try std.testing.expectError(
+        error.SessionAlreadyActive,
+        client.beginSessionRecord(try allocator.dupe(u8, "target"), null),
+    );
+    try std.testing.expect(client.pending_session == null);
+    try client.beginSessionRecord(null, null);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_session.?.record_index);
+    try std.testing.expectError(
+        error.InvalidServerAssignedSessionId,
+        client.prepareSessionCommit("target", null),
+    );
+    client.rollbackSessionRecord();
+
+    client.finishSessionIngress(log);
+    future.await(client.io);
+    try std.testing.expect(context.result == null);
+    try std.testing.expect(client.sessions.items[1].id == null);
+
+    try client.beginSessionRecord(try allocator.dupe(u8, "target"), null);
+    const replacement = client.sessionHandle(try client.commitSessionRecord());
+    try std.testing.expectEqual(@as(usize, 0), replacement.record_index);
+    try std.testing.expectEqualStrings("target", replacement.id);
 }
 
 test "session removal drains ingress without holding the sessions mutex" {
