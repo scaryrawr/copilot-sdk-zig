@@ -1220,6 +1220,12 @@ const PendingCall = struct {
     failure: ?anyerror = null,
 };
 
+const PendingCallAdmissionProbe = struct {
+    target: usize,
+    ready: std.Io.Event = .unset,
+    release: ?*std.Io.Event = null,
+};
+
 const RetainedResponse = struct {
     id: u64,
     body: []u8,
@@ -3094,6 +3100,7 @@ pub const Client = struct {
     event_logs: std.ArrayList(*event_log.EventLog) = .empty,
     event_logs_mutex: std.Io.Mutex = .init,
     pending_calls: std.ArrayList(*PendingCall) = .empty,
+    pending_call_admission_probe: ?*PendingCallAdmissionProbe = null,
     retained_responses: std.ArrayList(RetainedResponse) = .empty,
     pending_mutex: std.Io.Mutex = .init,
     direct_call_active: bool = false,
@@ -3103,6 +3110,7 @@ pub const Client = struct {
     writer_mutex: std.Io.Mutex = .init,
     pump_future: ?std.Io.Future(void) = null,
     pump_closing: bool = false,
+    pump_read_gate: ?*std.Io.Event = null,
     pump_failure: ?errors.Failure = null,
     pump_terminal_error: ?anyerror = null,
     send_operations: std.ArrayList(*SendOperation) = .empty,
@@ -5700,6 +5708,15 @@ pub const Client = struct {
             self.pending_mutex.unlock(self.io);
             return err;
         };
+        if (builtin.is_test) {
+            if (self.pending_call_admission_probe) |probe| {
+                if (self.pending_calls.items.len >= probe.target)
+                    probe.ready.set(self.io);
+                if (self.pending_calls.items.len >= probe.target) {
+                    if (probe.release) |release| release.set(self.io);
+                }
+            }
+        }
         for (self.retained_responses.items, 0..) |retained, index| {
             if (retained.id != id) continue;
             pending.response = retained.body;
@@ -6012,6 +6029,9 @@ pub const Client = struct {
     }
 
     fn pumpMain(self: *Client) void {
+        if (builtin.is_test) {
+            if (self.pump_read_gate) |gate| gate.wait(self.io) catch return;
+        }
         while (true) {
             const read = self.readTransportFrame(.detailed) catch |err| {
                 self.finishPumpNative(err);
@@ -20258,6 +20278,32 @@ const DetailedSendKind = enum {
     send_and_wait,
 };
 
+fn runConcurrentDetailedSend(active_session: Session) !errors.Failure {
+    return switch (try active_session.sendDetailed(.{ .prompt = "question" })) {
+        .failure => |failure| failure,
+        .success => |message_id| {
+            active_session.client.allocator.free(message_id);
+            return error.TestExpectedFailure;
+        },
+    };
+}
+
+fn runConcurrentDetailedSendAndWait(active_session: Session) !errors.Failure {
+    return switch (try active_session.sendAndWaitDetailedWithOptions(
+        .{ .prompt = "question" },
+        .{ .timeout_ns = std.time.ns_per_s },
+    )) {
+        .failure => |failure| failure,
+        .success => |maybe_message| {
+            if (maybe_message) |message_value| {
+                var message = message_value;
+                message.deinit(active_session.client.allocator);
+            }
+            return error.TestExpectedFailure;
+        },
+    };
+}
+
 fn runDetailedSendFailure(
     allocator: std.mem.Allocator,
     frames: []const u8,
@@ -20320,6 +20366,155 @@ fn runDetailedSendFailure(
             },
         },
     };
+}
+
+test "concurrent detailed sends retain equivalent pump diagnostics" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "responses",
+        .data = "Content-Length: nope\r\n\r\n",
+    });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var response_reader_buffer: [256]u8 = undefined;
+    var response_reader = response_file.readerStreaming(
+        std.testing.io,
+        &response_reader_buffer,
+    );
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var request_writer_buffer: [4096]u8 = undefined;
+    var request_writer = request_file.writerStreaming(
+        std.testing.io,
+        &request_writer_buffer,
+    );
+    var pump_gate: std.Io.Event = .unset;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .transport = .{ .fixture = .{
+            .reader = &response_reader,
+            .writer = &request_writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &request_writer_buffer,
+        } },
+        .pump_read_gate = &pump_gate,
+    };
+    var pending_probe = PendingCallAdmissionProbe{
+        .target = 2,
+        .release = &pump_gate,
+    };
+    client.pending_call_admission_probe = &pending_probe;
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestEventLogs(&client);
+        client.events.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    const first_session = try addTestSession(&client, "session-1");
+    const second_session = try addTestSession(&client, "session-2");
+    try client.ensurePump();
+    var first = try std.testing.io.concurrent(
+        runConcurrentDetailedSend,
+        .{first_session},
+    );
+    var second_failure = try runConcurrentDetailedSend(second_session);
+
+    var first_failure = try first.await(std.testing.io);
+    defer first_failure.deinit();
+    defer second_failure.deinit();
+    for ([_]*errors.Failure{ &first_failure, &second_failure }) |failure| {
+        try std.testing.expectEqual(error.InvalidCharacter, failure.native_error);
+        switch (failure.detail) {
+            .protocol => |protocol_failure| switch (protocol_failure) {
+                .invalid_content_length => |invalid| {
+                    try std.testing.expectEqualStrings("nope", invalid.value);
+                },
+                else => return error.TestExpectedInvalidContentLength,
+            },
+            else => return error.TestExpectedProtocolFailure,
+        }
+    }
+}
+
+test "sendAndWaitDetailed retains pump diagnostics after send response" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const send_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"messageId":"message-1"}}
+    ;
+    const responses = try std.fmt.allocPrint(
+        allocator,
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: nope\r\n\r\n",
+        .{ send_response.len, send_response },
+    );
+    defer allocator.free(responses);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "responses",
+        .data = responses,
+    });
+    const response_file = try tmp.dir.openFile(std.testing.io, "responses", .{});
+    defer response_file.close(std.testing.io);
+    var response_reader_buffer: [256]u8 = undefined;
+    var response_reader = response_file.readerStreaming(
+        std.testing.io,
+        &response_reader_buffer,
+    );
+    const request_file = try tmp.dir.createFile(std.testing.io, "requests", .{});
+    defer request_file.close(std.testing.io);
+    var request_writer_buffer: [4096]u8 = undefined;
+    var request_writer = request_file.writerStreaming(
+        std.testing.io,
+        &request_writer_buffer,
+    );
+    var pump_gate: std.Io.Event = .unset;
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .transport = .{ .fixture = .{
+            .reader = &response_reader,
+            .writer = &request_writer,
+            .reader_buffer = &.{},
+            .writer_buffer = &request_writer_buffer,
+        } },
+        .pump_read_gate = &pump_gate,
+    };
+    var pending_probe = PendingCallAdmissionProbe{
+        .target = 1,
+        .release = &pump_gate,
+    };
+    client.pending_call_admission_probe = &pending_probe;
+    defer {
+        deinitTestMessaging(&client);
+        deinitTestEventLogs(&client);
+        client.events.deinit(allocator);
+        for (client.sessions.items) |*record| record.deinit(allocator);
+        client.sessions.deinit(allocator);
+    }
+    const active_session = try addTestSession(&client, "session-1");
+    try client.ensurePump();
+    var send = try std.testing.io.concurrent(
+        runConcurrentDetailedSendAndWait,
+        .{active_session},
+    );
+    try pending_probe.ready.wait(std.testing.io);
+
+    var failure = try send.await(std.testing.io);
+    defer failure.deinit();
+    try std.testing.expectEqual(error.InvalidCharacter, failure.native_error);
+    switch (failure.detail) {
+        .protocol => |protocol_failure| switch (protocol_failure) {
+            .invalid_content_length => |invalid| {
+                try std.testing.expectEqualStrings("nope", invalid.value);
+            },
+            else => return error.TestExpectedInvalidContentLength,
+        },
+        else => return error.TestExpectedProtocolFailure,
+    }
 }
 
 test "session.send keeps prompt-only wire output unchanged" {
