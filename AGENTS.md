@@ -1,80 +1,70 @@
 # Repository guidance
 
-## Upstream schema synchronization
+## Project stance
 
-- Treat `vendor/copilot/upstream.json`, `vendor/copilot/schemas/*.json`,
-  `src/protocol_version.zig`, `src/session_event_generated.zig`,
-  `sync/schema-snapshot.json`, `sync/public-rpc-surface.json`,
-  `sync/extensibility-contract.json`, and `sync/stable-parity-contract.json`
-  as generated outputs owned by `scripts/sync.mjs`; do not edit them by hand.
-- The weekly sync verifies the latest `github/copilot-sdk` public `main` even
-  when no new CLI schema package is available. A verifier failure opens or
-  refreshes the `Upstream Copilot SDK parity drift detected` issue; do not
-  dismiss it as schema-only drift. Successful verification closes that issue.
-- Generate and verify compatibility ledgers from the same canonical expected
-  structure; checking only their upstream commit allows manual drift to pass.
-  Run declaration/source assertions from both generation and `--check` paths so
-  CI verifies the evidence behind a checked-in ledger, not only its JSON shape.
-- When Zig manually mirrors an enum from the pinned schemas, verify the exact
-  upstream value set in `npm test`; pinning the schema does not update the Zig
-  type when upstream adds a variant.
-- Scope upstream API checks to the TypeScript declaration that owns each field,
-  including inherited lifecycle fields, `Omit` exclusions, intersection
-  re-declarations, startup initialization, and response handling; searching
-  concatenated source only proves that a name exists somewhere.
-- `npm run sync` advances to the latest upstream `github/copilot-sdk` commit and
-  Copilot CLI package. Do not use it when refreshing generated files for an
-  existing branch unless advancing the pin is intentional.
-- To preserve the repository's current pin, read `upstreamCommit` from
-  `vendor/copilot/upstream.json` and run:
+- This is an unofficial, vibe-maintained Zig fork of `github/copilot-sdk`.
+  Favor a clear Zig API and correct behavior against the pinned wire contracts.
+- Breaking public API changes are allowed. Do not add compatibility wrappers,
+  deprecated aliases, or migration layers unless the pinned protocol requires
+  them or the task explicitly asks for them.
+- Preserve exact commit/version pins in upstream metadata and GitHub Actions.
+  Do not loosen an existing pin for convenience.
+
+## Architecture
+
+- `src/root.zig` is the public module surface. `src/client.zig` owns the
+  blocking, single-threaded client and child CLI lifecycle; `src/session.zig`
+  owns public session types; `src/runtime.zig` owns transports and callback
+  runtime state; `src/extensibility.zig` owns hooks, MCP, skills, canvases, and
+  environment grants.
+- The client starts Copilot CLI and exchanges JSON-RPC over stdio by default.
+  Preserve explicit ownership and `deinit` behavior for allocated results.
+- `scripts/sync.mjs` owns `vendor/copilot/upstream.json`,
+  `vendor/copilot/schemas/*.json`, `src/protocol_version.zig`,
+  `src/session_event_generated.zig`, and the generated contract files under
+  `sync/`. Never edit those outputs manually.
+
+## Toolchain and validation
+
+- Use Zig 0.16.0 and Node.js 24. Install Node dependencies with `npm ci`.
+- Run the repository checks from the root:
+
+  ```sh
+  zig fmt --check build.zig src examples scripts/parity_census_runner.zig
+  zig build test
+  zig build
+  npm test
+  ```
+
+- Build an affected example with
+  `zig build --build-file examples/<name>/build.zig`. Examples other than
+  `join-session` also support `run -- --help` without authentication.
+- `npm test` runs the JavaScript contract tests and `scripts/sync.mjs --check`;
+  it is required after SDK, schema, generator, or synchronization changes.
+
+## Upstream synchronization
+
+- `npm run sync` intentionally advances both the public SDK commit and Copilot
+  CLI package. Do not run it merely to refresh generated files on a branch.
+- To regenerate at the existing pin, read `upstreamCommit` from
+  `vendor/copilot/upstream.json`, then run:
 
   ```sh
   npm run sync -- --commit <upstreamCommit>
   npm test
   ```
 
-## Validation
+## Implementation constraints
 
-Run `zig fmt --check build.zig src examples`, `zig build test`, and `npm test`
-after SDK or synchronization changes. Build affected examples with
-`zig build --build-file examples/<name>/build.zig`.
-
-## Extensibility lifecycle safety
-
-- A successful `session.create` or `session.resume` mutates CLI state before
-  local response processing finishes. Detach newly attached sessions on
-  post-response failure; for resident resume, keep the previous local runtime
-  and session-ID allocation until the replacement is fully prepared.
-- During lifecycle RPCs, resolve an exact pending session runtime first, then
-  committed runtimes, and use an ID-less create runtime only as a final fallback
-  so unrelated interleaved callbacks cannot mutate the new session.
-- Release remote event-interest handles before detaching the owning session or
-  deinitializing event queues, tools, callback registries, or extension
-  runtimes because the release RPC can dispatch interleaved notifications and
-  server requests. If pre-detach release fails, retain local session state; if
-  detach later fails, best-effort restore the released interest.
-- Treat OAuth tokens and granted environment variables as secrets in every
-  representation. Wipe encoded requests, raw responses, intermediate JSON,
-  owned copies, partial-construction cleanup paths, and both streaming transport
-  backing buffers before releasing their storage.
-- On clean child-transport EOF, mark the logical transport closed before
-  waiting so copied reader/writer handles cannot be reused after process cleanup.
-  Do not clear `Child.id` after a failed wait: Windows wait failures can leave
-  process and pipe handles live, which shutdown must still kill and clean up.
-- Validate handler-produced values against the wire schema before responding;
-  invalid OAuth token results must securely deinitialize and cancel the pending
-  request rather than sending a response the CLI will reject.
-- Inbound server requests must always receive a correlated JSON-RPC response;
-  map malformed fields to `-32602` and invalid handler output to `-32603`
-  instead of propagating errors out of the dispatch loop.
-- Derive wire field names from the pinned schemas, not upstream language SDK
-  public names; those layers may intentionally rename fields. When a callback
-  payload is schema-opaque, inspect the pinned SDK's wire normalization too
-  (for example, `stop_hook_active` becomes Node's `stopHookActive`). Required
-  `unknown` fields must reject omission while preserving explicit JSON `null`.
-  JSON Schema-valued fields accept boolean schemas as well as object schemas.
-- Preserve omitted versus explicitly empty optional arrays when the runtime
-  assigns them different semantics; model these as optional slices and cover
-  both JSON shapes in request-lowering tests.
-- Reject duplicate MCP HTTP header names case-insensitively; JSON object key
-  equality does not model HTTP header semantics.
+- Treat OAuth tokens and granted environment variables as secrets: wipe every
+  owned or encoded representation, including failure cleanup and transport
+  buffers.
+- Inbound server requests must always receive a correlated JSON-RPC response.
+  Use `-32602` for malformed input and `-32603` for invalid handler output.
+- Derive wire names and required/null semantics from the pinned schemas and
+  upstream wire normalization, not from public TypeScript names.
+- Preserve omitted versus explicitly empty optional arrays when the protocol
+  gives them different meanings. Reject duplicate HTTP header names
+  case-insensitively.
+- See `.github/skills/code-review/SKILL.md` for the lifecycle and parity checks
+  required when reviewing changes.
