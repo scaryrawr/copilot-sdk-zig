@@ -159,7 +159,7 @@ const headers = [_]copilot.RequestHeader{
 const message_id = try session.send(.{
     .prompt = "Explain this file.",
     .source = .user,
-    .attachments = &attachments,
+    .message_attachments = &attachments,
     .mode = .immediate,
     .agent_mode = .interactive,
     .request_headers = &headers,
@@ -170,6 +170,9 @@ defer allocator.free(message_id);
 
 `MessageOptions` borrows the prompt, the attachment slice, and all attachment
 data until `send` or `sendAndWait` returns. These inputs require no `deinit`.
+Existing `Attachment` callers continue to use `attachments`, including GitHub
+attachment variants. New stable `MessageAttachment` values use
+`message_attachments`. Setting both fields is rejected.
 The stable public types match the Node SDK: file, directory, and blob display
 names are optional, and a selection requires only a display name while its range
 and text are independently optional. The currently pinned CLI wire schema is

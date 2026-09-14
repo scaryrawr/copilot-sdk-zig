@@ -920,6 +920,10 @@ function verifyOutboundMessageEnumContract(typesSource, zigSessionSource) {
         default: "null",
       },
       attachments: {
+        type: "?[]const Attachment",
+        default: "null",
+      },
+      message_attachments: {
         type: "?[]const MessageAttachment",
         default: "null",
       },

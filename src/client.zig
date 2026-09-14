@@ -1699,22 +1699,26 @@ const WireSendRequest = struct {
     tracestate: ?[]const u8 = null,
 };
 
-const WireAttachments = struct {
-    values: []const session_types.MessageAttachment,
+const WireAttachments = union(enum) {
+    legacy: []const session_types.Attachment,
+    stable: []const session_types.MessageAttachment,
 
     pub fn jsonStringify(self: WireAttachments, writer: anytype) !void {
         try writer.beginArray();
-        for (self.values) |value| {
-            try writer.write(WireAttachment{ .value = value });
+        switch (self) {
+            .legacy => |values| for (values) |value|
+                try writer.write(WireLegacyAttachment{ .value = value }),
+            .stable => |values| for (values) |value|
+                try writer.write(WireMessageAttachment{ .value = value }),
         }
         try writer.endArray();
     }
 };
 
-const WireAttachment = struct {
+const WireMessageAttachment = struct {
     value: session_types.MessageAttachment,
 
-    pub fn jsonStringify(self: WireAttachment, writer: anytype) !void {
+    pub fn jsonStringify(self: WireMessageAttachment, writer: anytype) !void {
         switch (self.value) {
             .file => |value| try writer.write(.{
                 .type = "file",
@@ -1743,6 +1747,176 @@ const WireAttachment = struct {
     }
 };
 
+const WireLegacyAttachment = struct {
+    value: session_types.Attachment,
+
+    pub fn jsonStringify(self: WireLegacyAttachment, writer: anytype) !void {
+        switch (self.value) {
+            .file => |value| try writer.write(.{
+                .type = "file",
+                .path = value.path,
+                .displayName = attachmentDisplayName(value.display_name, value.path),
+                .lineRange = value.line_range,
+            }),
+            .directory => |value| try writer.write(.{
+                .type = "directory",
+                .path = value.path,
+                .displayName = attachmentDisplayName(value.display_name, value.path),
+            }),
+            .selection => |value| try writer.write(.{
+                .type = "selection",
+                .filePath = value.file_path,
+                .text = value.text,
+                .displayName = attachmentDisplayName(value.display_name, value.file_path),
+                .selection = value.selection,
+            }),
+            .blob => |value| try writer.write(.{
+                .type = "blob",
+                .data = value.data,
+                .mimeType = value.mime_type,
+                .displayName = nonEmptyDisplayName(value.display_name) orelse "attachment",
+            }),
+            .github_reference => |value| try writer.write(.{
+                .type = "github_reference",
+                .number = value.number,
+                .title = value.title,
+                .referenceType = value.reference_type,
+                .state = value.state,
+                .url = value.url,
+            }),
+            .github_commit => |value| try writer.write(.{
+                .type = "github_commit",
+                .message = value.message,
+                .oid = value.oid,
+                .repo = wireRepo(value.repo),
+                .url = value.url,
+            }),
+            .github_release => |value| try writer.write(.{
+                .type = "github_release",
+                .name = value.name,
+                .repo = wireRepo(value.repo),
+                .tagName = value.tag_name,
+                .url = value.url,
+            }),
+            .github_actions_job => |value| try writer.write(.{
+                .type = "github_actions_job",
+                .conclusion = value.conclusion,
+                .jobId = value.job_id,
+                .jobName = value.job_name,
+                .repo = wireRepo(value.repo),
+                .url = value.url,
+                .workflowName = value.workflow_name,
+            }),
+            .github_repository => |value| try writer.write(.{
+                .type = "github_repository",
+                .description = value.description,
+                .ref = value.git_ref,
+                .repo = wireRepo(value.repo),
+                .url = value.url,
+            }),
+            .github_file_diff => |value| switch (value.sides) {
+                .added => |head| try writer.write(.{
+                    .type = "github_file_diff",
+                    .head = wireFileDiffSide(head),
+                    .url = value.url,
+                }),
+                .deleted => |base| try writer.write(.{
+                    .type = "github_file_diff",
+                    .base = wireFileDiffSide(base),
+                    .url = value.url,
+                }),
+                .modified => |sides| try writer.write(.{
+                    .type = "github_file_diff",
+                    .base = wireFileDiffSide(sides.base),
+                    .head = wireFileDiffSide(sides.head),
+                    .url = value.url,
+                }),
+            },
+            .github_tree_comparison => |value| try writer.write(.{
+                .type = "github_tree_comparison",
+                .base = wireTreeComparisonSide(value.base),
+                .head = wireTreeComparisonSide(value.head),
+                .url = value.url,
+            }),
+            .github_url => |value| try writer.write(.{
+                .type = "github_url",
+                .url = value.url,
+            }),
+            .github_file => |value| try writer.write(.{
+                .type = "github_file",
+                .path = value.path,
+                .ref = value.git_ref,
+                .repo = wireRepo(value.repo),
+                .url = value.url,
+            }),
+            .github_snippet => |value| try writer.write(.{
+                .type = "github_snippet",
+                .lineRange = value.line_range,
+                .path = value.path,
+                .ref = value.git_ref,
+                .repo = wireRepo(value.repo),
+                .url = value.url,
+            }),
+        }
+    }
+};
+
+fn nonEmptyDisplayName(display_name: ?[]const u8) ?[]const u8 {
+    const value = display_name orelse return null;
+    return if (std.mem.trim(u8, value, " \t\r\n").len == 0) null else value;
+}
+
+fn attachmentDisplayName(display_name: ?[]const u8, path: []const u8) []const u8 {
+    if (nonEmptyDisplayName(display_name)) |value| return value;
+    const base_name = std.fs.path.basename(path);
+    if (base_name.len != 0) return base_name;
+    return if (path.len != 0) path else "attachment";
+}
+
+const WireGitHubRepoPointer = struct {
+    id: ?i64 = null,
+    name: []const u8,
+    owner: []const u8,
+};
+
+const WireGitHubFileDiffSide = struct {
+    path: []const u8,
+    ref: []const u8,
+    repo: WireGitHubRepoPointer,
+};
+
+const WireGitHubTreeComparisonSide = struct {
+    repo: WireGitHubRepoPointer,
+    revision: []const u8,
+};
+
+fn wireRepo(value: session_types.Attachment.GitHubRepoPointer) WireGitHubRepoPointer {
+    return .{
+        .id = value.id,
+        .name = value.name,
+        .owner = value.owner,
+    };
+}
+
+fn wireFileDiffSide(
+    value: session_types.Attachment.GitHubFileDiffSide,
+) WireGitHubFileDiffSide {
+    return .{
+        .path = value.path,
+        .ref = value.git_ref,
+        .repo = wireRepo(value.repo),
+    };
+}
+
+fn wireTreeComparisonSide(
+    value: session_types.Attachment.GitHubTreeComparisonSide,
+) WireGitHubTreeComparisonSide {
+    return .{
+        .repo = wireRepo(value.repo),
+        .revision = value.revision,
+    };
+}
+
 const WireRequestHeaders = struct {
     values: []const session_types.RequestHeader,
 
@@ -1759,6 +1933,7 @@ const WireRequestHeaders = struct {
 fn lowerMessage(
     session_id: []const u8,
     options: session_types.MessageOptions,
+    attachments: ?WireAttachments,
     source: ?[]const u8,
     trace_context: runtime_types.TraceContext,
 ) WireSendRequest {
@@ -1766,10 +1941,7 @@ fn lowerMessage(
         .sessionId = session_id,
         .prompt = options.prompt,
         .source = source,
-        .attachments = if (options.attachments) |values|
-            .{ .values = values }
-        else
-            null,
+        .attachments = attachments,
         .mode = options.mode,
         .agentMode = options.agent_mode,
         .requestHeaders = if (options.request_headers) |values|
@@ -1782,12 +1954,15 @@ fn lowerMessage(
     };
 }
 
-fn validateMessageOptions(options: session_types.MessageOptions) !void {
+fn validateMessageOptions(
+    options: session_types.MessageOptions,
+) !?WireAttachments {
+    const selected = try selectedAttachments(options);
     if (options.source) |source| switch (source) {
         .agent => |name| if (name.len == 0) return error.InvalidMessageSource,
         else => {},
     };
-    if (options.attachments) |attachments| {
+    if (options.message_attachments) |attachments| {
         for (attachments) |attachment| switch (attachment) {
             .file => |file| if (file.display_name == null)
                 return error.MissingAttachmentDisplayName,
@@ -1810,6 +1985,7 @@ fn validateMessageOptions(options: session_types.MessageOptions) !void {
             }
         }
     }
+    return selected;
 }
 
 fn messageValidationField(
@@ -1817,25 +1993,26 @@ fn messageValidationField(
     err: anyerror,
     buffer: []u8,
 ) []const u8 {
-    if (options.attachments) |attachments| {
+    if (err == error.ConflictingAttachmentInputs) return "attachments";
+    if (options.message_attachments) |attachments| {
         for (attachments, 0..) |attachment, index| switch (attachment) {
             .file => |file| if (file.display_name == null and
                 err == error.MissingAttachmentDisplayName)
             {
                 return std.fmt.bufPrint(
                     buffer,
-                    "attachments[{d}].file.display_name",
+                    "message_attachments[{d}].file.display_name",
                     .{index},
-                ) catch "attachments";
+                ) catch "message_attachments";
             },
             .directory => |directory| if (directory.display_name == null and
                 err == error.MissingAttachmentDisplayName)
             {
                 return std.fmt.bufPrint(
                     buffer,
-                    "attachments[{d}].directory.display_name",
+                    "message_attachments[{d}].directory.display_name",
                     .{index},
-                ) catch "attachments";
+                ) catch "message_attachments";
             },
             .selection => |selection| if ((selection.selection == null or
                 selection.text == null) and
@@ -1843,14 +2020,24 @@ fn messageValidationField(
             {
                 return std.fmt.bufPrint(
                     buffer,
-                    "attachments[{d}].selection",
+                    "message_attachments[{d}].selection",
                     .{index},
-                ) catch "attachments";
+                ) catch "message_attachments";
             },
             .blob => {},
         };
     }
     return "message";
+}
+
+fn selectedAttachments(
+    options: session_types.MessageOptions,
+) !?WireAttachments {
+    if (options.attachments != null and options.message_attachments != null)
+        return error.ConflictingAttachmentInputs;
+    if (options.attachments) |values| return .{ .legacy = values };
+    if (options.message_attachments) |values| return .{ .stable = values };
+    return null;
 }
 
 fn isValidHeaderName(name: []const u8) bool {
@@ -6264,6 +6451,7 @@ pub const Client = struct {
         lease: EventLogLease,
         receipt: turn_tracker.ReceiptToken,
         options: session_types.MessageOptions,
+        attachments: ?WireAttachments,
         source: ?[]const u8,
         trace_context: runtime_types.TraceContext,
     ) !*SendOperation {
@@ -6273,7 +6461,13 @@ pub const Client = struct {
             self.allocator,
             request_id,
             "session.send",
-            lowerMessage(lease.log.session_id, options, source, trace_context),
+            lowerMessage(
+                lease.log.session_id,
+                options,
+                attachments,
+                source,
+                trace_context,
+            ),
         );
         errdefer {
             wipeSecret(request);
@@ -10794,7 +10988,7 @@ pub const Session = struct {
         options: session_types.MessageOptions,
     ) errors.DetailedError!PolicyResult(failure_policy, []u8) {
         var validation_field_buffer: [96]u8 = undefined;
-        validateMessageOptions(options) catch |err|
+        const attachments = validateMessageOptions(options) catch |err|
             return .{ .failure = try policyFailure(
                 failure_policy,
                 err,
@@ -10840,7 +11034,13 @@ pub const Session = struct {
             failure_policy,
             struct { messageId: []const u8 },
             "session.send",
-            lowerMessage(session_id, options, source, trace_context),
+            lowerMessage(
+                session_id,
+                options,
+                attachments,
+                source,
+                trace_context,
+            ),
             .{ .session = .{ .session_id = session_id } },
         )) {
             .success => |value| value,
@@ -10984,7 +11184,7 @@ pub const Session = struct {
         wait_options: session_types.WaitOptions,
     ) errors.DetailedError!PolicyResult(failure_policy, ?session_types.AssistantMessage) {
         var validation_field_buffer: [96]u8 = undefined;
-        validateMessageOptions(options) catch |err|
+        const attachments = validateMessageOptions(options) catch |err|
             return .{ .failure = try policyFailure(
                 failure_policy,
                 err,
@@ -11060,6 +11260,7 @@ pub const Session = struct {
             lease,
             receipt,
             options,
+            attachments,
             source,
             self.client.traceContext(),
         ) catch |err| return .{ .failure = try policyFailure(
@@ -20628,6 +20829,16 @@ test "session.send preserves omitted and empty collections" {
     try std.testing.expectEqualStrings(
         \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"empty","attachments":[],"requestHeaders":{}}}
     , empty.request_body);
+
+    const legacy_empty = try runSendRpc(std.testing.allocator, .{
+        .prompt = "legacy-empty",
+        .attachments = &.{},
+    });
+    defer std.testing.allocator.free(legacy_empty.message_id);
+    defer std.testing.allocator.free(legacy_empty.request_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":1,"method":"session.send","params":{"sessionId":"session-1","prompt":"legacy-empty","attachments":[]}}
+    , legacy_empty.request_body);
 }
 
 test "optional public attachments fail closed at the pinned wire boundary" {
@@ -20639,12 +20850,12 @@ test "optional public attachments fail closed at the pinned wire boundary" {
         .{
             .attachment = .{ .file = .{ .path = "a" } },
             .expected_error = error.MissingAttachmentDisplayName,
-            .expected_field = "attachments[0].file.display_name",
+            .expected_field = "message_attachments[0].file.display_name",
         },
         .{
             .attachment = .{ .directory = .{ .path = "dir" } },
             .expected_error = error.MissingAttachmentDisplayName,
-            .expected_field = "attachments[0].directory.display_name",
+            .expected_field = "message_attachments[0].directory.display_name",
         },
         .{
             .attachment = .{ .selection = .{
@@ -20652,7 +20863,7 @@ test "optional public attachments fail closed at the pinned wire boundary" {
                 .display_name = "neither",
             } },
             .expected_error = error.IncompleteSelectionAttachment,
-            .expected_field = "attachments[0].selection",
+            .expected_field = "message_attachments[0].selection",
         },
         .{
             .attachment = .{ .selection = .{
@@ -20664,7 +20875,7 @@ test "optional public attachments fail closed at the pinned wire boundary" {
                 },
             } },
             .expected_error = error.IncompleteSelectionAttachment,
-            .expected_field = "attachments[0].selection",
+            .expected_field = "message_attachments[0].selection",
         },
         .{
             .attachment = .{ .selection = .{
@@ -20673,7 +20884,7 @@ test "optional public attachments fail closed at the pinned wire boundary" {
                 .text = "",
             } },
             .expected_error = error.IncompleteSelectionAttachment,
-            .expected_field = "attachments[0].selection",
+            .expected_field = "message_attachments[0].selection",
         },
     };
     for (cases) |case| {

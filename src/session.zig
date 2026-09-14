@@ -450,7 +450,8 @@ pub const SessionConfig = CreateSessionConfig;
 pub const MessageOptions = struct {
     prompt: []const u8,
     source: ?MessageSource = null,
-    attachments: ?[]const MessageAttachment = null,
+    attachments: ?[]const Attachment = null,
+    message_attachments: ?[]const MessageAttachment = null,
     mode: ?MessageDeliveryMode = null,
     agent_mode: ?AgentMode = null,
     request_headers: ?[]const RequestHeader = null,
@@ -538,8 +539,8 @@ pub const MessageAttachment = union(enum) {
     };
 };
 
-/// Compatibility attachment model retained for inbound/protocol-shaped values.
-/// Outbound messages accept only `MessageAttachment`.
+/// Compatibility attachment model retained for existing outbound callers and
+/// inbound/protocol-shaped values.
 pub const Attachment = union(enum) {
     file: File,
     directory: Directory,
