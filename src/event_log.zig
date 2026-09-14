@@ -55,6 +55,7 @@ pub const EventLog = struct {
     terminal_detail: ?errors.Failure = null,
     turn_failure_details: std.ArrayList(TurnFailureDetail) = .empty,
     next_turn_failure_id: u64 = 1,
+    pending_terminal_turn_failure_id: ?u64 = null,
     accepting_ingress: bool = true,
     ingress_count: usize = 0,
     operation_references: usize = 0,
@@ -125,8 +126,14 @@ pub const EventLog = struct {
         self.mutex.lockUncancelable(self.io);
         std.debug.assert(self.ingress_count > 0);
         self.ingress_count -= 1;
-        const terminal_error = if (self.ingress_count == 0) self.terminal_error else null;
+        var terminal_error: ?anyerror = null;
         if (self.ingress_count == 0) {
+            if (self.pending_terminal_turn_failure_id) |failure_detail_id| {
+                self.publishTurnFailureLocked(failure_detail_id, true);
+                self.pending_terminal_turn_failure_id = null;
+            } else {
+                terminal_error = self.terminal_error;
+            }
             self.ingress_drained.set(self.io);
             for (self.subscribers) |*subscriber| {
                 if (subscriber.active) subscriber.ready.set(self.io);
@@ -377,6 +384,7 @@ pub const EventLog = struct {
         self.terminal_detail = null;
         for (self.turn_failure_details.items) |*detail| detail.failure.deinit();
         self.turn_failure_details.clearRetainingCapacity();
+        self.pending_terminal_turn_failure_id = null;
         const fail_tracker = self.ingress_count == 0;
         if (fail_tracker) for (self.subscribers) |*subscriber| {
             if (subscriber.active) subscriber.ready.set(self.io);
@@ -404,11 +412,18 @@ pub const EventLog = struct {
     }
 
     pub fn failTurnsDetailed(self: *EventLog, failure_value: errors.Failure) !void {
-        var failure = failure_value;
-        errdefer failure.deinit();
-        const native_error = failure.native_error;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        return self.storeTurnFailureLocked(failure_value, false);
+    }
+
+    fn storeTurnFailureLocked(
+        self: *EventLog,
+        failure_value: errors.Failure,
+        terminal: bool,
+    ) !void {
+        var failure = failure_value;
+        errdefer failure.deinit();
         const failure_detail_id = self.next_turn_failure_id;
         self.next_turn_failure_id +%= 1;
         if (self.next_turn_failure_id == 0) self.next_turn_failure_id = 1;
@@ -417,49 +432,76 @@ pub const EventLog = struct {
             .remaining = 0,
             .failure = failure,
         });
-        const detail = &self.turn_failure_details.items[
-            self.turn_failure_details.items.len - 1
-        ];
-        detail.remaining = self.tracker.failActiveDetailed(
-            native_error,
-            failure_detail_id,
-        );
-        if (detail.remaining == 0) {
-            var removed = self.turn_failure_details.pop().?;
-            removed.failure.deinit();
+        if (terminal and self.ingress_count != 0) {
+            std.debug.assert(self.pending_terminal_turn_failure_id == null);
+            self.pending_terminal_turn_failure_id = failure_detail_id;
+        } else {
+            self.publishTurnFailureLocked(failure_detail_id, terminal);
+        }
+    }
+
+    fn publishTurnFailureLocked(
+        self: *EventLog,
+        failure_detail_id: u64,
+        terminal: bool,
+    ) void {
+        for (self.turn_failure_details.items, 0..) |*detail, index| {
+            if (detail.id != failure_detail_id) continue;
+            detail.remaining = if (terminal)
+                self.tracker.failTerminalDetailed(
+                    detail.failure.native_error,
+                    failure_detail_id,
+                )
+            else
+                self.tracker.failActiveDetailed(
+                    detail.failure.native_error,
+                    failure_detail_id,
+                );
+            if (detail.remaining == 0) {
+                var removed = self.turn_failure_details.orderedRemove(index);
+                removed.failure.deinit();
+            }
+            return;
+        }
+        unreachable;
+    }
+
+    pub fn failPumpDetailed(
+        self: *EventLog,
+        terminal_failure_value: errors.Failure,
+        turn_failure_value: errors.Failure,
+    ) !void {
+        var terminal_failure = terminal_failure_value;
+        errdefer terminal_failure.deinit();
+        const turn_failure = turn_failure_value;
+        const native_error = terminal_failure.native_error;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        try self.storeTurnFailureLocked(turn_failure, true);
+
+        if (self.terminal_error == null) self.terminal_error = native_error;
+        if (self.terminal_detail == null) {
+            self.terminal_detail = terminal_failure;
+            terminal_failure = undefined;
+        } else {
+            terminal_failure.deinit();
+            terminal_failure = undefined;
+        }
+        for (self.subscribers) |*subscriber| {
+            if (subscriber.active) subscriber.ready.set(self.io);
         }
     }
 
     pub fn detailedFailure(self: *EventLog) !?errors.Failure {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return self.takeTerminalFailureLocked();
+        return self.cloneTerminalFailureLocked();
     }
 
-    fn takeTerminalFailureLocked(self: *EventLog) !?errors.Failure {
-        const failure = if (self.terminal_detail) |*value|
-            value
-        else
-            return null;
-        return switch (failure.detail) {
-            .session => |session_failure| switch (session_failure) {
-                .agent => |agent| try cloneSessionAgentFailure(
-                    self.allocator,
-                    failure.native_error,
-                    agent,
-                ),
-                else => blk: {
-                    const owned = failure.*;
-                    self.terminal_detail = null;
-                    break :blk owned;
-                },
-            },
-            else => blk: {
-                const owned = failure.*;
-                self.terminal_detail = null;
-                break :blk owned;
-            },
-        };
+    fn cloneTerminalFailureLocked(self: *EventLog) !?errors.Failure {
+        const failure = if (self.terminal_detail) |*value| value else return null;
+        return try failure.clone(self.allocator);
     }
 
     fn takeTurnFailureLocked(
@@ -468,35 +510,15 @@ pub const EventLog = struct {
     ) !?errors.Failure {
         for (self.turn_failure_details.items, 0..) |*detail, index| {
             if (detail.id != failure_detail_id) continue;
-            return switch (detail.failure.detail) {
-                .session => |session_failure| switch (session_failure) {
-                    .agent => |agent| blk: {
-                        const cloned = try cloneSessionAgentFailure(
-                            self.allocator,
-                            detail.failure.native_error,
-                            agent,
-                        );
-                        detail.remaining -= 1;
-                        if (detail.remaining == 0) {
-                            var removed = self.turn_failure_details.orderedRemove(index);
-                            removed.failure.deinit();
-                        }
-                        break :blk cloned;
-                    },
-                    else => self.takeUnclonableTurnFailure(index),
-                },
-                else => self.takeUnclonableTurnFailure(index),
-            };
+            const cloned = try detail.failure.clone(self.allocator);
+            detail.remaining -= 1;
+            if (detail.remaining == 0) {
+                var removed = self.turn_failure_details.orderedRemove(index);
+                removed.failure.deinit();
+            }
+            return cloned;
         }
         return null;
-    }
-
-    fn takeUnclonableTurnFailure(
-        self: *EventLog,
-        index: usize,
-    ) errors.Failure {
-        const removed = self.turn_failure_details.orderedRemove(index);
-        return removed.failure;
     }
 
     fn discardTurnFailureLocked(
@@ -599,59 +621,6 @@ pub const EventLog = struct {
     }
 };
 
-fn cloneSessionAgentFailure(
-    allocator: std.mem.Allocator,
-    native_error: anyerror,
-    agent: errors.SessionAgentFailure,
-) !errors.Failure {
-    var owned: errors.SessionAgentFailure = .{
-        .session_id = try allocator.dupe(u8, agent.session_id),
-        .error_type = undefined,
-        .error_code = null,
-        .message = undefined,
-        .status_code = agent.status_code,
-        .provider_call_id = null,
-        .service_request_id = null,
-        .remediation_json = null,
-        .url = null,
-        .stack = null,
-        .eligible_for_auto_switch = agent.eligible_for_auto_switch,
-    };
-    errdefer allocator.free(owned.session_id);
-    owned.error_type = try allocator.dupe(u8, agent.error_type);
-    errdefer allocator.free(owned.error_type);
-    owned.error_code = if (agent.error_code) |value|
-        try allocator.dupe(u8, value)
-    else
-        null;
-    errdefer if (owned.error_code) |value| allocator.free(value);
-    owned.message = try allocator.dupe(u8, agent.message);
-    errdefer allocator.free(owned.message);
-    owned.provider_call_id = if (agent.provider_call_id) |value|
-        try allocator.dupe(u8, value)
-    else
-        null;
-    errdefer if (owned.provider_call_id) |value| allocator.free(value);
-    owned.service_request_id = if (agent.service_request_id) |value|
-        try allocator.dupe(u8, value)
-    else
-        null;
-    errdefer if (owned.service_request_id) |value| allocator.free(value);
-    owned.remediation_json = if (agent.remediation_json) |value|
-        try allocator.dupe(u8, value)
-    else
-        null;
-    errdefer if (owned.remediation_json) |value| allocator.free(value);
-    owned.url = if (agent.url) |value| try allocator.dupe(u8, value) else null;
-    errdefer if (owned.url) |value| allocator.free(value);
-    owned.stack = if (agent.stack) |value| try allocator.dupe(u8, value) else null;
-    return .{
-        .allocator = allocator,
-        .native_error = native_error,
-        .detail = .{ .session = .{ .agent = owned } },
-    };
-}
-
 fn parsedEvent(allocator: std.mem.Allocator, content: []const u8) !session.SessionEvent {
     const json = try std.fmt.allocPrint(
         allocator,
@@ -659,6 +628,15 @@ fn parsedEvent(allocator: std.mem.Allocator, content: []const u8) !session.Sessi
         .{ content, content },
     );
     defer allocator.free(json);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    return session.parseEvent(allocator, parsed.value);
+}
+
+fn parsedEventJson(
+    allocator: std.mem.Allocator,
+    json: []const u8,
+) !session.SessionEvent {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
     defer parsed.deinit();
     return session.parseEvent(allocator, parsed.value);
@@ -915,7 +893,98 @@ test "failed diagnostic clones release the consumed receipt share" {
     try std.testing.expectEqual(@as(usize, 0), log.turn_failure_details.items.len);
 }
 
-test "unclonable turn diagnostics transfer once without trapping" {
+test "pump diagnostic publication rolls back on allocation failure" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var log = try EventLog.init(failing.allocator(), std.testing.io, "s1", 1, 2, 2);
+    defer log.deinit();
+
+    const receipt = try log.reserveTurn(.waited);
+    const terminal_failure = try testSessionFailure(failing.allocator(), "terminal");
+    const turn_failure = try testSessionFailure(failing.allocator(), "turn");
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        log.failPumpDetailed(terminal_failure, turn_failure),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(log.terminal_detail == null);
+    try std.testing.expectEqual(@as(usize, 0), log.turn_failure_details.items.len);
+    try std.testing.expect((try log.inspectTurn(receipt)) == .pending);
+}
+
+test "pump failure waits for admitted turn completion" {
+    const allocator = std.testing.allocator;
+    var log = try EventLog.init(allocator, std.testing.io, "s1", 1, 2, 2);
+    defer log.deinit();
+
+    const receipt = try log.reserveTurn(.waited);
+    try log.bindTurnMessage(receipt, "message-1");
+    try log.beginIngress();
+    try log.failPumpDetailed(
+        try testSessionFailure(allocator, "terminal"),
+        try testSessionFailure(allocator, "turn"),
+    );
+    try std.testing.expect((try log.inspectTurn(receipt)) == .pending);
+
+    var user = try parsedEventJson(
+        allocator,
+        "{\"type\":\"user.message\",\"data\":{\"content\":\"prompt\",\"messageId\":\"message-1\",\"turnId\":\"turn-1\"}}",
+    );
+    defer user.deinit(allocator);
+    try log.observeTurnEvent(user);
+
+    var assistant = try parsedEventJson(
+        allocator,
+        "{\"type\":\"assistant.message\",\"data\":{\"content\":\"answer\",\"messageId\":\"assistant-1\",\"turnId\":\"turn-1\"}}",
+    );
+    defer assistant.deinit(allocator);
+    try log.observeTurnEvent(assistant);
+
+    var turn_end = try parsedEventJson(
+        allocator,
+        "{\"type\":\"assistant.turn_end\",\"data\":{\"turnId\":\"turn-1\"}}",
+    );
+    defer turn_end.deinit(allocator);
+    try log.observeTurnEvent(turn_end);
+    log.finishIngress();
+
+    var result = try log.inspectTurnDetailed(receipt);
+    defer if (result.failure) |*failure| failure.deinit();
+    try std.testing.expect(result.failure == null);
+    switch (result.read) {
+        .completed => |maybe_message| {
+            var message = maybe_message.?;
+            defer message.deinit(allocator);
+            try std.testing.expectEqualStrings("answer", message.content);
+        },
+        else => return error.TestExpectedCompletedTurn,
+    }
+}
+
+test "admitted failure clears deferred pump diagnostic" {
+    const allocator = std.testing.allocator;
+    var log = try EventLog.init(allocator, std.testing.io, "s1", 1, 2, 2);
+    defer log.deinit();
+
+    const receipt = try log.reserveTurn(.waited);
+    try log.beginIngress();
+    try log.failPumpDetailed(
+        try testSessionFailure(allocator, "terminal"),
+        try testSessionFailure(allocator, "turn"),
+    );
+    log.failAdmitted(error.TestAdmittedFailure);
+    log.finishIngress();
+
+    var result = try log.inspectTurnDetailed(receipt);
+    defer if (result.failure) |*failure| failure.deinit();
+    try std.testing.expect(result.failure == null);
+    switch (result.read) {
+        .failure => |err| try std.testing.expectEqual(error.TestAdmittedFailure, err),
+        else => return error.TestExpectedAdmittedFailure,
+    }
+}
+
+test "turn diagnostics clone for every detailed waiter" {
     const allocator = std.testing.allocator;
     var log = try EventLog.init(allocator, std.testing.io, "s1", 1, 2, 2);
     defer log.deinit();
@@ -933,7 +1002,15 @@ test "unclonable turn diagnostics transfer once without trapping" {
     var second_read = try log.inspectTurnDetailed(second);
     defer if (second_read.failure) |*failure| failure.deinit();
     try std.testing.expect(first_read.failure != null);
-    try std.testing.expect(second_read.failure == null);
+    try std.testing.expect(second_read.failure != null);
     try std.testing.expect(first_read.read == .failure);
     try std.testing.expect(second_read.read == .failure);
+    try std.testing.expectEqual(
+        error.MissingContentLength,
+        first_read.failure.?.native_error,
+    );
+    try std.testing.expectEqual(
+        error.MissingContentLength,
+        second_read.failure.?.native_error,
+    );
 }

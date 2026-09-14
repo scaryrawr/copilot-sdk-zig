@@ -1213,11 +1213,27 @@ const EventDelivery = struct {
     }
 };
 
+const PendingFailureDetail = union(enum) {
+    none,
+    unavailable,
+    failure: errors.Failure,
+
+    fn deinit(self: *PendingFailureDetail) void {
+        switch (self.*) {
+            .failure => |*failure| failure.deinit(),
+            .none, .unavailable => {},
+        }
+        self.* = .none;
+    }
+};
+
 const PendingCall = struct {
     id: u64,
+    wants_detail: bool,
     completed: std.Io.Event = .unset,
     response: ?[]u8 = null,
     failure: ?anyerror = null,
+    failure_detail: PendingFailureDetail = .none,
 };
 
 const PendingCallAdmissionProbe = struct {
@@ -5677,12 +5693,18 @@ pub const Client = struct {
         context: OperationContext,
         dispatched: ?*bool,
     ) errors.DetailedError!PolicyResult(failure_policy, std.json.Parsed(Result)) {
-        var pending = PendingCall{ .id = id };
+        var pending = PendingCall{
+            .id = id,
+            .wants_detail = failure_policy == .detailed,
+        };
         self.pending_mutex.lockUncancelable(self.io);
         if (self.pump_terminal_error) |native_error| {
             if (comptime failure_policy == .detailed) {
-                if (self.pump_failure) |owned| {
-                    self.pump_failure = null;
+                if (self.pump_failure) |*failure| {
+                    const owned = failure.clone(self.allocator) catch |err| {
+                        self.pending_mutex.unlock(self.io);
+                        return err;
+                    };
                     self.pending_mutex.unlock(self.io);
                     return .{ .failure = owned };
                 }
@@ -5695,24 +5717,14 @@ pub const Client = struct {
                 .{ self.allocator, .read, native_error },
             ) };
         }
-        if (self.pump_failure) |owned| {
-            if (comptime failure_policy == .detailed) {
-                self.pump_failure = null;
-                self.pending_mutex.unlock(self.io);
-                return .{ .failure = owned };
-            }
-            self.pending_mutex.unlock(self.io);
-            return .{ .failure = .{ .native_error = owned.native_error } };
-        }
         self.pending_calls.append(self.allocator, &pending) catch |err| {
             self.pending_mutex.unlock(self.io);
             return err;
         };
         if (builtin.is_test) {
             if (self.pending_call_admission_probe) |probe| {
-                if (self.pending_calls.items.len >= probe.target)
-                    probe.ready.set(self.io);
                 if (self.pending_calls.items.len >= probe.target) {
+                    probe.ready.set(self.io);
                     if (probe.release) |release| release.set(self.io);
                 }
             }
@@ -5730,6 +5742,7 @@ pub const Client = struct {
                 wipeSecret(response);
                 self.allocator.free(response);
             }
+            pending.failure_detail.deinit();
         }
 
         self.ensurePump() catch |err| return .{ .failure = try policyFailure(
@@ -5764,16 +5777,18 @@ pub const Client = struct {
         const response = pending.response;
         pending.response = null;
         const native_failure = pending.failure;
+        var detailed_failure = pending.failure_detail;
+        pending.failure_detail = .none;
         self.pending_mutex.unlock(self.io);
         if (native_failure) |err| {
             if (comptime failure_policy == .detailed) {
-                self.pending_mutex.lockUncancelable(self.io);
-                if (self.pump_failure) |failure| {
-                    self.pump_failure = null;
-                    self.pending_mutex.unlock(self.io);
-                    return .{ .failure = failure };
+                switch (detailed_failure) {
+                    .failure => |failure| return .{ .failure = failure },
+                    .unavailable => return error.OutOfMemory,
+                    .none => {},
                 }
-                self.pending_mutex.unlock(self.io);
+            } else {
+                detailed_failure.deinit();
             }
             return .{ .failure = try policyFailure(
                 failure_policy,
@@ -5782,6 +5797,7 @@ pub const Client = struct {
                 .{ self.allocator, .read, err },
             ) };
         }
+        detailed_failure.deinit();
         const body = response orelse
             return .{ .failure = try policyFailure(
                 failure_policy,
@@ -6191,13 +6207,43 @@ pub const Client = struct {
         } else {
             failure.deinit();
         }
+        const retained_failure = &self.pump_failure.?;
+        const terminal_error = retained_failure.native_error;
         for (self.pending_calls.items) |pending| {
-            if (pending.response == null) pending.failure = native_error;
+            if (pending.response == null) {
+                pending.failure = terminal_error;
+                if (pending.wants_detail) {
+                    pending.failure_detail.deinit();
+                    pending.failure_detail = if (retained_failure.clone(self.allocator)) |detail|
+                        .{ .failure = detail }
+                    else |_|
+                        .unavailable;
+                }
+            }
             pending.completed.set(self.io);
         }
         self.pending_mutex.unlock(self.io);
         self.lifecycle_event_ready.set(self.io);
-        self.failEventLogs(native_error);
+        self.failEventLogsDetailed(retained_failure);
+    }
+
+    fn failEventLogsDetailed(self: *Client, failure: *const errors.Failure) void {
+        self.event_logs_mutex.lockUncancelable(self.io);
+        defer self.event_logs_mutex.unlock(self.io);
+        for (self.event_logs.items) |log| {
+            var terminal_failure = failure.clone(self.allocator) catch {
+                log.fail(failure.native_error);
+                continue;
+            };
+            const turn_failure = failure.clone(self.allocator) catch {
+                terminal_failure.deinit();
+                log.fail(failure.native_error);
+                continue;
+            };
+            log.failPumpDetailed(terminal_failure, turn_failure) catch {
+                log.fail(failure.native_error);
+            };
+        }
     }
 
     fn failEventLogs(self: *Client, err: anyerror) void {
@@ -6206,12 +6252,11 @@ pub const Client = struct {
         for (self.event_logs.items) |log| log.fail(err);
     }
 
-    fn takePumpFailure(self: *Client) ?errors.Failure {
+    fn clonePumpFailure(self: *Client) !?errors.Failure {
         self.pending_mutex.lockUncancelable(self.io);
         defer self.pending_mutex.unlock(self.io);
-        const failure = self.pump_failure orelse return null;
-        self.pump_failure = null;
-        return failure;
+        const failure = if (self.pump_failure) |*value| value else return null;
+        return try failure.clone(self.allocator);
     }
 
     fn startSendOperation(
@@ -10270,8 +10315,11 @@ pub const Client = struct {
             self.pending_mutex.lockUncancelable(self.io);
             if (self.pump_terminal_error) |native_error| {
                 if (comptime failure_policy == .detailed) {
-                    if (self.pump_failure) |owned| {
-                        self.pump_failure = null;
+                    if (self.pump_failure) |*failure| {
+                        const owned = failure.clone(self.allocator) catch |err| {
+                            self.pending_mutex.unlock(self.io);
+                            return err;
+                        };
                         self.pending_mutex.unlock(self.io);
                         return .{ .failure = owned };
                     }
@@ -11371,7 +11419,7 @@ pub const Session = struct {
         ) catch |err| {
             if (try lease.log.detailedFailure()) |failure|
                 return .{ .failure = failure };
-            if (self.client.takePumpFailure()) |failure|
+            if (try self.client.clonePumpFailure()) |failure|
                 return .{ .failure = failure };
             if (self.client.transport_closed)
                 return .{ .failure = try self.client.closedTransportFailure(.detailed) };
@@ -27395,7 +27443,7 @@ test "child wait error still closes transport and blocks later writes" {
         .failure => |event_retry_failure| event_retry_failure,
     };
     defer event_retry_failure.deinit();
-    try std.testing.expectEqual(error.EndOfStream, event_retry_failure.native_error);
+    try std.testing.expectEqual(error.AccessDenied, event_retry_failure.native_error);
     try std.testing.expectEqual(size_before_retry, (try request_file.stat(std.testing.io)).size);
     try std.testing.expectEqual(@as(usize, 1), wait_probe.calls);
 }

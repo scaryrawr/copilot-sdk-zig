@@ -283,6 +283,17 @@ pub const TurnTracker = struct {
         return self.failAllLocked(err, failure_detail_id);
     }
 
+    pub fn failTerminalDetailed(
+        self: *TurnTracker,
+        err: anyerror,
+        failure_detail_id: u64,
+    ) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.terminal_error == null) self.terminal_error = err;
+        return self.failAllLocked(err, failure_detail_id);
+    }
+
     fn failAllLocked(
         self: *TurnTracker,
         err: anyerror,
