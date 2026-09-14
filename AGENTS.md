@@ -3,9 +3,14 @@
 ## Upstream schema synchronization
 
 - Treat `vendor/copilot/upstream.json`, `vendor/copilot/schemas/*.json`,
-  `sync/schema-snapshot.json`, `sync/public-rpc-surface.json`, and
-  `sync/extensibility-contract.json` as generated outputs owned by
-  `scripts/sync.mjs`; do not edit them by hand.
+  `src/protocol_version.zig`, `src/session_event_generated.zig`,
+  `sync/schema-snapshot.json`, `sync/public-rpc-surface.json`,
+  `sync/extensibility-contract.json`, and `sync/stable-parity-contract.json`
+  as generated outputs owned by `scripts/sync.mjs`; do not edit them by hand.
+- The weekly sync verifies the latest `github/copilot-sdk` public `main` even
+  when no new CLI schema package is available. A verifier failure opens or
+  refreshes the `Upstream Copilot SDK parity drift detected` issue; do not
+  dismiss it as schema-only drift. Successful verification closes that issue.
 - Generate and verify compatibility ledgers from the same canonical expected
   structure; checking only their upstream commit allows manual drift to pass.
   Run declaration/source assertions from both generation and `--check` paths so
