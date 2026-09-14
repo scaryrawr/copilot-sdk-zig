@@ -667,7 +667,7 @@ function renderObjectParser(model) {
         "allocator",
       )
       : `if (${source}) |field_value| ${parseExpression(
-        field.model,
+        effectiveModel,
         "field_value",
         "allocator",
       )} else null`;
