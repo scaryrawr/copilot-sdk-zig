@@ -8464,6 +8464,11 @@ pub const Client = struct {
     }
 
     fn finishSessionIngress(self: *Client, log: *event_log.EventLog) void {
+        log.retainOperation();
+        defer {
+            log.releaseOperation();
+            self.reclaimClosedEventLogs();
+        }
         log.finishIngress();
         if (!log.ingress_drained.isSet()) return;
         self.completeDeferredSessionRemoval(log);
