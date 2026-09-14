@@ -13,10 +13,11 @@
 ## Architecture
 
 - `src/root.zig` is the public module surface. `src/client.zig` owns the
-  blocking, single-threaded client and child CLI lifecycle; `src/session.zig`
-  owns public session types; `src/runtime.zig` owns transports and callback
-  runtime state; `src/extensibility.zig` owns hooks, MCP, skills, canvases, and
-  environment grants.
+  blocking, single-threaded client, transport implementations, child CLI
+  lifecycle, and per-session extension runtime; `src/session.zig` owns public
+  session types; `src/runtime.zig` owns public connection, callback, and
+  filesystem-provider configuration types; `src/extensibility.zig` owns hooks,
+  MCP, skills, canvases, and environment grants.
 - The client starts Copilot CLI and exchanges JSON-RPC over stdio by default.
   Preserve explicit ownership and `deinit` behavior for allocated results.
 - `scripts/sync.mjs` owns `vendor/copilot/upstream.json`,

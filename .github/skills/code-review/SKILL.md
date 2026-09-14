@@ -80,6 +80,7 @@ For affected changes, expect:
 ```sh
 zig fmt --check build.zig src examples scripts/parity_census_runner.zig
 zig build test
+zig build
 npm test
 ```
 
