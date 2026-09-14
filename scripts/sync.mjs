@@ -37,6 +37,7 @@ import {
   requireCallOutsideNestedFunctions,
   registeredStringCallbacks,
 } from "./typescript-contract.mjs";
+import { parseSyncArgs } from "./sync-args.mjs";
 
 const repository = "github/copilot-sdk";
 const ref = "main";
@@ -56,7 +57,7 @@ const stableParityContractPath = join(root, "sync", "stable-parity-contract.json
 const workDirectory = join(root, ".sync-work");
 const cliReleaseRepository = "github/copilot-cli";
 const cliReleasePlatform = "linux-x64";
-const publicSdkCommit = "f45c46fd1812f8bed5b4cbc250f47177c83068f0";
+let publicSdkCommit;
 
 function parseJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
@@ -2369,8 +2370,11 @@ async function synchronize(explicitCommit, ifPublished = false) {
 }
 
 const args = process.argv.slice(2);
-if (args.includes("--check")) {
-  assert(args.length === 1, "--check does not accept other arguments");
+const checkedInStableParity = parseJson(stableParityContractPath);
+const options = parseSyncArgs(args, checkedInStableParity.publicSdkCommit);
+publicSdkCommit = options.publicSdkCommit;
+
+if (options.check) {
   const metadata = parseJson(metadataPath);
   validateMetadata(metadata);
   const [
@@ -2415,9 +2419,5 @@ if (args.includes("--check")) {
   );
   verify();
 } else {
-  const commitIndex = args.indexOf("--commit");
-  const explicitCommit = commitIndex === -1 ? undefined : args[commitIndex + 1];
-  const ifPublished = args.length === 1 && args[0] === "--if-published";
-  assert(ifPublished || args.length === (explicitCommit ? 2 : 0), "usage: npm run sync -- [--commit <sha> | --if-published]");
-  await synchronize(explicitCommit, ifPublished);
+  await synchronize(options.explicitCommit, options.ifPublished);
 }
