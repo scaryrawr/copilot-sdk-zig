@@ -516,6 +516,7 @@ pub const EventLog = struct {
 
     pub fn close(self: *EventLog) void {
         self.mutex.lockUncancelable(self.io);
+        self.operation_references += 1;
         self.is_closed = true;
         self.accepting_ingress = false;
         for (self.subscribers) |*subscriber| {
@@ -523,6 +524,7 @@ pub const EventLog = struct {
         }
         self.mutex.unlock(self.io);
         self.tracker.failAll(error.SessionDisconnected);
+        self.releaseOperation();
     }
 
     pub fn drainAndClose(self: *EventLog) void {
