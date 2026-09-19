@@ -6631,7 +6631,7 @@ pub const Client = struct {
                                     else
                                         "failed to start factory",
                                 ) catch |write_err| {
-                                    self.finishPumpNative(write_err);
+                                    self.finishPumpWrite(write_err);
                                     return;
                                 };
                             };
@@ -6648,7 +6648,7 @@ pub const Client = struct {
                                 );
                                 self.writer_mutex.unlock(self.io);
                                 write_result catch |write_err| {
-                                    self.finishPumpNative(write_err);
+                                    self.finishPumpWrite(write_err);
                                     return;
                                 };
                                 continue;
@@ -6678,7 +6678,7 @@ pub const Client = struct {
                             );
                             self.writer_mutex.unlock(self.io);
                             write_result catch |err| {
-                                self.finishPumpNative(err);
+                                self.finishPumpWrite(err);
                                 return;
                             };
                             continue;
