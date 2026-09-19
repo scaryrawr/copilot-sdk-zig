@@ -17,7 +17,9 @@
   lifecycle, and per-session extension runtime; `src/session.zig` owns public
   session types; `src/runtime.zig` owns public connection, callback, and
   filesystem-provider configuration types; `src/extensibility.zig` owns hooks,
-  MCP, skills, canvases, and environment grants.
+  MCP, skills, canvases, and environment grants; `src/factory.zig` owns Agent
+  Factory definitions, execution contexts, orchestration helpers, and run
+  result types.
 - The client starts Copilot CLI and exchanges JSON-RPC over stdio by default.
   Preserve explicit ownership and `deinit` behavior for allocated results.
 - `scripts/sync.mjs` owns `vendor/copilot/upstream.json`,
@@ -61,7 +63,9 @@
   owned or encoded representation, including failure cleanup and transport
   buffers.
 - Inbound server requests must always receive a correlated JSON-RPC response.
-  Use `-32602` for malformed input and `-32603` for invalid handler output.
+  Use `-32602` for malformed input and `-32603` for invalid handler output. If
+  writing that response fails, record a terminal client write failure rather
+  than swallowing it.
 - Derive wire names and required/null semantics from the pinned schemas and
   upstream wire normalization, not from public TypeScript names.
 - Treat optional inbound session-event fields as nullable at the decode
