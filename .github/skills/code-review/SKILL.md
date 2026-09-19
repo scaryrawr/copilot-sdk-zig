@@ -56,6 +56,10 @@ For changes in `src/client.zig`, `src/runtime.zig`, `src/event_log.zig`, or
 - On clean child EOF, mark the logical transport closed before waiting. Do not
   clear `Child.id` after a failed wait because Windows process and pipe handles
   may still require shutdown cleanup.
+- Cancelable RPC waits must not race `Event.wait` futures with
+  `Select.cancelDiscard`; the Linux I/O backend can block while canceling the
+  losing waiter. Preserve the portable cancellation-aware wait path and cover
+  reverse RPC completion on Linux CI.
 
 ## Wire validation and secrets
 
