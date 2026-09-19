@@ -6726,6 +6726,7 @@ pub const Client = struct {
     }
 
     fn routePumpedResponse(self: *Client, id: u64, body: []u8) !void {
+        std.debug.print("factory diagnostic: route response {d}\n", .{id});
         self.pending_mutex.lockUncancelable(self.io);
         defer self.pending_mutex.unlock(self.io);
         for (self.abandoned_response_ids.items, 0..) |abandoned_id, index| {

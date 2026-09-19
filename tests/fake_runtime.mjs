@@ -314,6 +314,9 @@ function attach(input, output) {
                 });
                 return;
         }
+        if (args.includes("--exercise-factory")) {
+            console.error(`factory diagnostic: respond ${message.method} ${message.id}`);
+        }
         send({ jsonrpc: "2.0", id: message.id, result });
         if (
             (args.includes("--exercise-factory") ||
