@@ -62,19 +62,11 @@ function attach(input, output) {
 
     function request(method, params) {
         const id = nextRequestId++;
-        if (args.includes("--exercise-factory")) {
-            console.error(`factory diagnostic: send ${method} ${id}`);
-        }
         send({ jsonrpc: "2.0", id, method, params });
         return new Promise((resolve) => pending.set(id, { resolve }));
     }
 
     async function handle(message) {
-        if (args.includes("--exercise-factory")) {
-            console.error(
-                `factory diagnostic: receive ${message.method ?? `response ${message.id}`}`
-            );
-        }
         if (message.method === undefined) {
             const waiter = pending.get(message.id);
             if (!waiter) return;
@@ -313,9 +305,6 @@ function attach(input, output) {
                     error: { code: -32601, message: `Unhandled method ${message.method}` },
                 });
                 return;
-        }
-        if (args.includes("--exercise-factory")) {
-            console.error(`factory diagnostic: respond ${message.method} ${message.id}`);
         }
         send({ jsonrpc: "2.0", id: message.id, result });
         if (

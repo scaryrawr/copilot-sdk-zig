@@ -6216,62 +6216,45 @@ pub const Client = struct {
         ) };
 
         if (cancellation) |cancel| {
-            const WaitResult = union(enum) {
-                completed: anyerror!void,
-                canceled: anyerror!void,
-            };
-            var results: [2]WaitResult = undefined;
-            var select = std.Io.Select(WaitResult).init(self.io, &results);
-            defer select.cancelDiscard();
-            select.async(.completed, waitForEvent, .{ &pending.completed, self.io });
-            select.async(.canceled, waitForEvent, .{ cancel, self.io });
-            const selected = select.await() catch |err| return .{ .failure = try policyFailure(
-                failure_policy,
-                err,
-                recordClientIo,
-                .{ self.allocator, .read, err },
-            ) };
-            if (!pending.completed.isSet()) switch (selected) {
-                .completed => |result| result catch |err|
-                    return .{ .failure = try policyFailure(
-                        failure_policy,
-                        err,
-                        recordClientIo,
-                        .{ self.allocator, .read, err },
-                    ) },
-                .canceled => |result| {
-                    result catch |err| return .{ .failure = try policyFailure(
-                        failure_policy,
-                        err,
-                        recordClientIo,
-                        .{ self.allocator, .read, err },
-                    ) };
-                    self.pending_mutex.lockUncancelable(self.io);
-                    for (self.pending_calls.items, 0..) |candidate, index| {
-                        if (candidate != &pending) continue;
-                        _ = self.pending_calls.orderedRemove(index);
-                        if (pending.response == null)
-                            self.abandoned_response_ids.append(
-                                self.allocator,
-                                id,
-                            ) catch {};
-                        break;
-                    }
-                    const abandoned_response = pending.response;
-                    pending.response = null;
-                    self.pending_mutex.unlock(self.io);
-                    if (abandoned_response) |response| {
-                        wipeSecret(response);
-                        self.allocator.free(response);
-                    }
-                    return .{ .failure = try policyFailure(
-                        failure_policy,
-                        error.FactoryCancelled,
-                        recordClientIo,
-                        .{ self.allocator, .read, error.FactoryCancelled },
-                    ) };
-                },
-            };
+            // Some I/O backends cannot cancel a losing Event.wait future reliably.
+            while (!pending.completed.isSet() and !cancel.isSet()) {
+                std.Io.sleep(
+                    self.io,
+                    .fromMilliseconds(1),
+                    .awake,
+                ) catch |err| return .{ .failure = try policyFailure(
+                    failure_policy,
+                    err,
+                    recordClientIo,
+                    .{ self.allocator, .read, err },
+                ) };
+            }
+            if (!pending.completed.isSet()) {
+                self.pending_mutex.lockUncancelable(self.io);
+                for (self.pending_calls.items, 0..) |candidate, index| {
+                    if (candidate != &pending) continue;
+                    _ = self.pending_calls.orderedRemove(index);
+                    if (pending.response == null)
+                        self.abandoned_response_ids.append(
+                            self.allocator,
+                            id,
+                        ) catch {};
+                    break;
+                }
+                const abandoned_response = pending.response;
+                pending.response = null;
+                self.pending_mutex.unlock(self.io);
+                if (abandoned_response) |response| {
+                    wipeSecret(response);
+                    self.allocator.free(response);
+                }
+                return .{ .failure = try policyFailure(
+                    failure_policy,
+                    error.FactoryCancelled,
+                    recordClientIo,
+                    .{ self.allocator, .read, error.FactoryCancelled },
+                ) };
+            }
         } else {
             pending.completed.wait(self.io) catch |err| return .{ .failure = try policyFailure(
                 failure_policy,
@@ -6726,7 +6709,6 @@ pub const Client = struct {
     }
 
     fn routePumpedResponse(self: *Client, id: u64, body: []u8) !void {
-        std.debug.print("factory diagnostic: route response {d}\n", .{id});
         self.pending_mutex.lockUncancelable(self.io);
         defer self.pending_mutex.unlock(self.io);
         for (self.abandoned_response_ids.items, 0..) |abandoned_id, index| {
@@ -30327,22 +30309,17 @@ test "factory execute supports nested agent RPC without blocking the pump" {
             context: *factory_types.FactoryContext,
             _: ?*anyopaque,
         ) !?factory_types.Json {
-            std.debug.print("factory diagnostic: callback start\n", .{});
             const args = try context.args.parse(
                 struct { prompt: []const u8 },
                 allocator,
             );
             defer args.deinit();
-            std.debug.print("factory diagnostic: phase\n", .{});
             try context.phase("Work");
-            std.debug.print("factory diagnostic: log\n", .{});
             try context.log("starting nested work");
-            std.debug.print("factory diagnostic: step\n", .{});
             var cached = try context.step(allocator, "prepared", .{
                 .produce = produce,
             }, .{});
             cached.deinit();
-            std.debug.print("factory diagnostic: agent\n", .{});
             return try context.agent(allocator, args.value.prompt, .{
                 .label = "worker",
             });
