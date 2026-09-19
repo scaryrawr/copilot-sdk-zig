@@ -6759,6 +6759,14 @@ pub const Client = struct {
         self.finishPumpFailure(failure);
     }
 
+    fn finishPumpWrite(self: *Client, err: anyerror) void {
+        const failure = recordClientIo(self.allocator, .write, err) catch {
+            self.finishPumpWithoutDetail(err);
+            return;
+        };
+        self.finishPumpFailure(failure);
+    }
+
     fn finishPumpWithoutDetail(self: *Client, err: anyerror) void {
         self.pending_mutex.lockUncancelable(self.io);
         if (self.pump_terminal_error == null) self.pump_terminal_error = err;
@@ -7426,7 +7434,9 @@ pub const Client = struct {
             },
         };
         var result = job.run(job.client.allocator, &context, job.context) catch |err| {
-            job.client.writeFactoryError(job.id_json, -32000, @errorName(err)) catch {};
+            job.client.writeFactoryError(job.id_json, -32000, @errorName(err)) catch |write_err| {
+                job.client.finishPumpWrite(write_err);
+            };
             return;
         };
         defer if (result) |*value| value.deinit();
@@ -7441,14 +7451,20 @@ pub const Client = struct {
                     job.id_json,
                     -32603,
                     "invalid factory callback result",
-                ) catch {};
+                ) catch |write_err| {
+                    job.client.finishPumpWrite(write_err);
+                };
                 return;
             };
             defer parsed.deinit();
-            job.client.writeFactorySuccess(job.id_json, .{ .result = parsed.value }) catch {};
+            job.client.writeFactorySuccess(job.id_json, .{ .result = parsed.value }) catch |err| {
+                job.client.finishPumpWrite(err);
+            };
             return;
         }
-        job.client.writeFactorySuccess(job.id_json, struct {}{}) catch {};
+        job.client.writeFactorySuccess(job.id_json, struct {}{}) catch |err| {
+            job.client.finishPumpWrite(err);
+        };
     }
 
     fn findCommittedExtensionRuntimeIndex(
@@ -15823,8 +15839,12 @@ fn decodeFactoryRun(
     const run_id = try owned.dupe(u8, try jsonRequiredString(object, "runId"));
     const status = try parseFactoryStatus(try jsonRequiredString(object, "status"));
     const attempt = if (object.get("attempt")) |attempt_value| switch (attempt_value) {
-        .integer => |number| std.math.cast(u64, number) orelse
-            return error.InvalidFactoryRun,
+        .integer => |number| blk: {
+            const parsed = std.math.cast(u32, number) orelse
+                return error.InvalidFactoryRun;
+            if (parsed == 0) return error.InvalidFactoryRun;
+            break :blk parsed;
+        },
         .null => null,
         else => return error.InvalidFactoryRun,
     } else null;
@@ -30081,7 +30101,7 @@ test "factory API preserves wire options and decodes run envelopes" {
     });
     defer run.deinit();
     try std.testing.expectEqualStrings("run-1", run.run_id);
-    try std.testing.expectEqual(@as(?u64, 1), run.attempt);
+    try std.testing.expectEqual(@as(?u32, 1), run.attempt);
     switch (run.outcome) {
         .completed => |result| switch (result) {
             .value => |value| try std.testing.expectEqualStrings("null", value.bytes),
@@ -30171,6 +30191,35 @@ test "factory API preserves wire options and decodes run envelopes" {
         resume_params.get("limits").?.object.get("timeoutSeconds").?.integer,
     );
     try std.testing.expect(!resume_params.get("limits").?.object.contains("maxAiCredits"));
+}
+
+test "factory run attempts are nonzero uint32 values" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{
+        \\{"runId":"run-1","attempt":0,"status":"running"}
+        ,
+        \\{"runId":"run-1","attempt":4294967296,"status":"running"}
+        ,
+    }) |source| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, source, .{});
+        defer parsed.deinit();
+        try std.testing.expectError(
+            error.InvalidFactoryRun,
+            decodeFactoryRun(allocator, parsed.value),
+        );
+    }
+
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"runId":"run-1","attempt":4294967295,"status":"running"}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    var run = try decodeFactoryRun(allocator, parsed.value);
+    defer run.deinit();
+    try std.testing.expectEqual(@as(?u32, std.math.maxInt(u32)), run.attempt);
 }
 
 test "factory run and resume wait for terminal envelopes" {

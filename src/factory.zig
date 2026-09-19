@@ -499,7 +499,7 @@ pub const FactoryOutcome = union(enum) {
 pub const FactoryRun = struct {
     arena: std.heap.ArenaAllocator,
     run_id: []const u8,
-    attempt: ?u64,
+    attempt: ?u32,
     snapshot: ?JsonView,
     outcome: FactoryOutcome,
 
@@ -672,7 +672,10 @@ pub fn validateFactories(factories: []const AgentFactory) !void {
                 .{},
             ) catch return error.InvalidFactoryArgsSchema;
             defer parsed.deinit();
-            if (parsed.value != .object) return error.InvalidFactoryArgsSchema;
+            switch (parsed.value) {
+                .object, .bool => {},
+                else => return error.InvalidFactoryArgsSchema,
+            }
         }
         if (definition.meta.limits) |limits| try validateDeclaredLimits(limits);
     }
@@ -746,6 +749,27 @@ test "factory registration rejects duplicate names and phase titles" {
                 .name = "phases",
                 .description = "duplicate",
                 .phases = &.{ .{ .title = "Review" }, .{ .title = "Review" } },
+            },
+            .run = run,
+        },
+    }));
+
+    try validateFactories(&.{
+        .{
+            .meta = .{
+                .name = "boolean-schema",
+                .description = "Accepts every JSON value.",
+                .args_schema = try JsonView.init("true"),
+            },
+            .run = run,
+        },
+    });
+    try std.testing.expectError(error.InvalidFactoryArgsSchema, validateFactories(&.{
+        .{
+            .meta = .{
+                .name = "invalid-schema",
+                .description = "Uses a non-schema JSON value.",
+                .args_schema = try JsonView.init("42"),
             },
             .run = run,
         },

@@ -41,6 +41,10 @@ let lastRequest = null;
 let factoryExercise = null;
 let factoryResult = null;
 let hungFactoryAgentId = null;
+let markHungFactoryAgentReady;
+const hungFactoryAgentReady = new Promise((resolve) => {
+    markHungFactoryAgentReady = resolve;
+});
 let factoryAbortSent = false;
 let nextRequestId = 10_000;
 let activeConnections = 0;
@@ -257,6 +261,7 @@ function attach(input, output) {
                         break;
                     }
                     hungFactoryAgentId = message.id;
+                    markHungFactoryAgentReady();
                     return;
                 }
                 if (args.includes("--exercise-factory-agent-failure")) {
@@ -303,18 +308,6 @@ function attach(input, output) {
         }
         send({ jsonrpc: "2.0", id: message.id, result });
         if (
-            args.includes("--exercise-factory-abort") &&
-            message.method === "factory.abort" &&
-            hungFactoryAgentId !== null
-        ) {
-            send({
-                jsonrpc: "2.0",
-                id: hungFactoryAgentId,
-                result: { result: "too late" },
-            });
-            hungFactoryAgentId = null;
-        }
-        if (
             (args.includes("--exercise-factory") ||
                 args.includes("--exercise-factory-abort") ||
                 args.includes("--exercise-factory-agent-failure")) &&
@@ -332,13 +325,19 @@ function attach(input, output) {
             });
             if (args.includes("--exercise-factory-abort")) {
                 factoryExercise = (async () => {
-                    await new Promise((resolve) => setImmediate(resolve));
+                    await hungFactoryAgentReady;
                     factoryAbortSent = true;
                     const abort = await request("factory.abort", {
                         sessionId: message.params.sessionId,
                         runId: "reverse-run",
                         executionToken: "attempt-1",
                     });
+                    send({
+                        jsonrpc: "2.0",
+                        id: hungFactoryAgentId,
+                        result: { result: "too late" },
+                    });
+                    hungFactoryAgentId = null;
                     factoryResult = { execute: await execute, abort };
                 })();
             } else {
