@@ -346,6 +346,27 @@ function attach(input, output) {
                 });
             }
         }
+        if (
+            args.includes("--exercise-factory-generic") &&
+            message.method === "session.resume" &&
+            factoryExercise === null
+        ) {
+            factoryExercise = (async () => {
+                const execute = await request("factory.execute", {
+                    sessionId: message.params.sessionId,
+                    name: "generic",
+                    runId: "generic-run",
+                    executionToken: "generic-attempt",
+                    args: null,
+                });
+                const abort = await request("factory.abort", {
+                    sessionId: message.params.sessionId,
+                    runId: "generic-run",
+                    executionToken: "generic-attempt",
+                });
+                factoryResult = { execute, abort };
+            })();
+        }
     }
 
     input.on("data", (chunk) => {

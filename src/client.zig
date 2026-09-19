@@ -4953,18 +4953,13 @@ pub const Client = struct {
         }
     }
 
-    fn acquireTransferredRuntimeCallback(self: *Client) void {
-        while (true) {
-            self.extension_runtimes_mutex.lockUncancelable(self.io);
-            if (!self.runtime_callbacks_blocked) {
-                self.runtime_callback_count += 1;
-                self.runtime_callbacks_drained.reset();
-                self.extension_runtimes_mutex.unlock(self.io);
-                return;
-            }
-            self.extension_runtimes_mutex.unlock(self.io);
-            self.runtime_callbacks_ready.waitUncancelable(self.io);
-        }
+    fn tryAcquireTransferredRuntimeCallback(self: *Client) bool {
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
+        defer self.extension_runtimes_mutex.unlock(self.io);
+        if (self.runtime_callbacks_blocked) return false;
+        self.runtime_callback_count += 1;
+        self.runtime_callbacks_drained.reset();
+        return true;
     }
 
     fn enterTransferredRuntimeCallback(
@@ -6597,6 +6592,25 @@ pub const Client = struct {
                     .request => |request| {
                         if (std.mem.eql(u8, request.method, "factory.execute")) {
                             self.startFactoryExecuteJob(request.id, request.params) catch |err| {
+                                if (err == error.FactoryNotFound or
+                                    err == error.FactoryCallbacksBlocked)
+                                {
+                                    self.writer_mutex.lockUncancelable(self.io);
+                                    var operation: errors.ClientOperation = .callback;
+                                    const result = self.dispatchServerRequestTracked(
+                                        self.transportWriter(),
+                                        request.id,
+                                        request.method,
+                                        request.params,
+                                        &operation,
+                                    );
+                                    self.writer_mutex.unlock(self.io);
+                                    result catch |dispatch_err| {
+                                        self.finishPumpNative(dispatch_err);
+                                        return;
+                                    };
+                                    continue;
+                                }
                                 const id_json = std.json.Stringify.valueAlloc(
                                     self.allocator,
                                     request.id,
@@ -6608,14 +6622,11 @@ pub const Client = struct {
                                 defer self.allocator.free(id_json);
                                 self.writeFactoryError(
                                     id_json,
-                                    if (err == error.FactoryNotFound or
-                                        err == error.InvalidFactoryRequest)
+                                    if (err == error.InvalidFactoryRequest)
                                         -32602
                                     else
                                         -32603,
-                                    if (err == error.FactoryNotFound)
-                                        "factory not found"
-                                    else if (err == error.InvalidFactoryRequest)
+                                    if (err == error.InvalidFactoryRequest)
                                         "invalid factory request"
                                     else
                                         "failed to start factory",
@@ -6627,7 +6638,7 @@ pub const Client = struct {
                             continue;
                         }
                         if (std.mem.eql(u8, request.method, "factory.abort")) {
-                            self.abortFactoryExecution(request.params) catch {
+                            const aborted = self.abortFactoryExecution(request.params) catch {
                                 self.writer_mutex.lockUncancelable(self.io);
                                 const write_result = self.writeServerRequestError(
                                     self.transportWriter(),
@@ -6642,6 +6653,23 @@ pub const Client = struct {
                                 };
                                 continue;
                             };
+                            if (!aborted) {
+                                self.writer_mutex.lockUncancelable(self.io);
+                                var operation: errors.ClientOperation = .callback;
+                                const result = self.dispatchServerRequestTracked(
+                                    self.transportWriter(),
+                                    request.id,
+                                    request.method,
+                                    request.params,
+                                    &operation,
+                                );
+                                self.writer_mutex.unlock(self.io);
+                                result catch |err| {
+                                    self.finishPumpNative(err);
+                                    return;
+                                };
+                                continue;
+                            }
                             self.writer_mutex.lockUncancelable(self.io);
                             const write_result = self.writeRpcSuccess(
                                 self.transportWriter(),
@@ -7106,7 +7134,8 @@ pub const Client = struct {
             return error.InvalidFactoryRequest;
         const args = try jsonRequiredValue(object, "args");
 
-        self.acquireTransferredRuntimeCallback();
+        if (!self.tryAcquireTransferredRuntimeCallback())
+            return error.FactoryCallbacksBlocked;
         errdefer {
             var scope: RuntimeCallbackScope = undefined;
             self.enterTransferredRuntimeCallback(&scope);
@@ -7156,7 +7185,7 @@ pub const Client = struct {
         };
     }
 
-    fn abortFactoryExecution(self: *Client, params: ?std.json.Value) !void {
+    fn abortFactoryExecution(self: *Client, params: ?std.json.Value) !bool {
         const object = switch (params orelse return error.InvalidFactoryRequest) {
             .object => |object| object,
             else => return error.InvalidFactoryRequest,
@@ -7175,9 +7204,10 @@ pub const Client = struct {
                 job.dispatch_mutex.lockUncancelable(self.io);
                 job.cancelled.set(self.io);
                 job.dispatch_mutex.unlock(self.io);
-                return;
+                return true;
             }
         }
+        return false;
     }
 
     fn reapFactoryJobs(self: *Client) void {
@@ -30296,6 +30326,51 @@ test "factory run decoding accepts explicit null optional failure fields" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "unmatched factory requests use registered generic handlers" {
+    const handler = struct {
+        fn handle(
+            allocator: std.mem.Allocator,
+            _: ?[]const u8,
+            _: ?*anyopaque,
+        ) ![]u8 {
+            return allocator.dupe(u8, "{\"handled\":true}");
+        }
+    }.handle;
+
+    const allocator = std.testing.allocator;
+    const fake_runtime = try fakeRuntimePath(allocator);
+    defer allocator.free(fake_runtime);
+    var client = try Client.init(allocator, std.testing.io, .{
+        .connection = .{ .stdio = .{
+            .path = "node",
+            .args = &.{ fake_runtime, "--exercise-factory-generic" },
+        } },
+    });
+    defer client.deinit();
+    try client.registerRpcHandler("factory.execute", handler, null);
+    try client.registerRpcHandler("factory.abort", handler, null);
+    var joined = try client.joinParentSession("factory-session", .{});
+    defer joined.deinit();
+
+    const inspection = try client.callRpc(std.json.Value, "test.inspect", .{});
+    defer inspection.deinit();
+    const result = inspection.value.object.get("factoryResult").?.object;
+    try std.testing.expect(result.get("execute").?.object.get("result").?.object
+        .get("handled").?.bool);
+    try std.testing.expect(result.get("abort").?.object.get("result").?.object
+        .get("handled").?.bool);
+}
+
+test "factory execute callback lease does not wait while callbacks are blocked" {
+    var client = Client{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .runtime_callbacks_blocked = true,
+    };
+    try std.testing.expect(!client.tryAcquireTransferredRuntimeCallback());
+    try std.testing.expectEqual(@as(usize, 0), client.runtime_callback_count);
 }
 
 test "factory execute supports nested agent RPC without blocking the pump" {
