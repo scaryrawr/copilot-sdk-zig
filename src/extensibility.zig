@@ -1,4 +1,5 @@
 const std = @import("std");
+const factory = @import("factory.zig");
 
 pub const CapabilityState = enum {
     unknown,
@@ -486,6 +487,7 @@ pub const JoinExtensions = struct {
     canvas_provider: ?CanvasProviderIdentity = null,
     open_canvases: ?[]const OpenCanvas = null,
     requested_environment_variables: []const []const u8 = &.{},
+    factories: ?[]const factory.AgentFactory = null,
 };
 
 pub fn validate(features: SessionFeatures) !void {

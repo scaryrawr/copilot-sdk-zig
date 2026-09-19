@@ -11,6 +11,7 @@ const session_types = @import("session.zig");
 const event_log = @import("event_log.zig");
 const turn_tracker = @import("turn_tracker.zig");
 const ext = @import("extensibility.zig");
+const factory_types = @import("factory.zig");
 
 const max_queued_events: usize = 1024;
 const retained_event_limit: usize = 64;
@@ -1338,6 +1339,31 @@ const SendOperation = struct {
     failure: ?errors.Failure = null,
 };
 
+const FactoryExecuteJob = struct {
+    client: *Client,
+    session_id: []u8,
+    run_id: []u8,
+    execution_token: []u8,
+    args_json: []u8,
+    id_json: []u8,
+    run: *const fn (
+        std.mem.Allocator,
+        *factory_types.FactoryContext,
+        ?*anyopaque,
+    ) anyerror!?factory_types.Json,
+    context: ?*anyopaque,
+    cancelled: std.Io.Event = .unset,
+    dispatch_mutex: std.Io.Mutex = .init,
+    progress_mutex: std.Io.Mutex = .init,
+    next_progress_seq: u64 = 0,
+    completed: std.Io.Event = .unset,
+    future: ?std.Io.Future(void) = null,
+};
+
+const FactoryExecutionState = struct {
+    job: *FactoryExecuteJob,
+};
+
 const EventDeliveryClass = enum {
     observation,
     automatic,
@@ -1406,6 +1432,73 @@ const OwnedCanvas = struct {
         allocator.free(self.id);
         for (self.actions) |action| allocator.free(action.name);
         allocator.free(self.actions);
+    }
+};
+
+const OwnedFactoryPhase = struct {
+    title: []u8,
+    detail: ?[]u8,
+
+    fn deinit(self: *OwnedFactoryPhase, allocator: std.mem.Allocator) void {
+        allocator.free(self.title);
+        if (self.detail) |detail| allocator.free(detail);
+    }
+};
+
+const OwnedFactory = struct {
+    name: []u8,
+    description: []u8,
+    phases: []OwnedFactoryPhase,
+    args_schema: ?[]u8,
+    limits: ?factory_types.FactoryDeclaredLimits,
+    run: *const fn (
+        std.mem.Allocator,
+        *factory_types.FactoryContext,
+        ?*anyopaque,
+    ) anyerror!?factory_types.Json,
+    context: ?*anyopaque,
+
+    fn init(allocator: std.mem.Allocator, definition: factory_types.AgentFactory) !OwnedFactory {
+        const phases = try allocator.alloc(OwnedFactoryPhase, definition.meta.phases.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (phases[0..initialized]) |*phase| phase.deinit(allocator);
+            allocator.free(phases);
+        }
+        for (definition.meta.phases, 0..) |phase, index| {
+            const title = try allocator.dupe(u8, phase.title);
+            errdefer allocator.free(title);
+            phases[index] = .{
+                .title = title,
+                .detail = if (phase.detail) |detail| try allocator.dupe(u8, detail) else null,
+            };
+            initialized += 1;
+        }
+        const name = try allocator.dupe(u8, definition.meta.name);
+        errdefer allocator.free(name);
+        const description = try allocator.dupe(u8, definition.meta.description);
+        errdefer allocator.free(description);
+        const args_schema = if (definition.meta.args_schema) |schema|
+            try allocator.dupe(u8, schema.bytes)
+        else
+            null;
+        return .{
+            .name = name,
+            .description = description,
+            .phases = phases,
+            .args_schema = args_schema,
+            .limits = definition.meta.limits,
+            .run = definition.run,
+            .context = definition.context,
+        };
+    }
+
+    fn deinit(self: *OwnedFactory, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.description);
+        for (self.phases) |*phase| phase.deinit(allocator);
+        allocator.free(self.phases);
+        if (self.args_schema) |schema| allocator.free(schema);
     }
 };
 
@@ -1483,6 +1576,7 @@ const SessionExtensionRuntime = struct {
     mcp_auth_handler: ?ext.McpAuthHandler,
     mcp_auth_context: ?*anyopaque,
     canvases: []OwnedCanvas,
+    factories: []OwnedFactory,
     open_canvases: std.ArrayList(ext.OpenCanvas) = .empty,
     capabilities: ext.CapabilitySet = .{},
     mcp_apps_requested: bool,
@@ -1513,6 +1607,16 @@ const SessionExtensionRuntime = struct {
         config: anytype,
         initial_open_canvases: []const ext.OpenCanvas,
     ) !SessionExtensionRuntime {
+        return initWithFactories(allocator, session_id, config, initial_open_canvases, &.{});
+    }
+
+    fn initWithFactories(
+        allocator: std.mem.Allocator,
+        session_id: ?[]const u8,
+        config: anytype,
+        initial_open_canvases: []const ext.OpenCanvas,
+        factory_definitions: []const factory_types.AgentFactory,
+    ) !SessionExtensionRuntime {
         const features = config.extensions.common;
         var tool_count: usize = 0;
         for (config.tools) |tool| if (tool.handler != null) {
@@ -1528,11 +1632,18 @@ const SessionExtensionRuntime = struct {
             allocator.free(tools);
             return err;
         };
+        const factories = allocator.alloc(OwnedFactory, factory_definitions.len) catch |err| {
+            allocator.free(canvases);
+            allocator.free(commands);
+            allocator.free(tools);
+            return err;
+        };
         var result = SessionExtensionRuntime{
             .hooks = features.hooks,
             .mcp_auth_handler = features.mcp.on_auth_request,
             .mcp_auth_context = features.mcp.auth_context,
             .canvases = canvases,
+            .factories = factories,
             .mcp_apps_requested = features.experimental.mcp_apps,
             .tools = tools,
             .commands = commands,
@@ -1552,7 +1663,10 @@ const SessionExtensionRuntime = struct {
         var initialized_tools: usize = 0;
         var initialized_commands: usize = 0;
         var initialized_canvases: usize = 0;
+        var initialized_factories: usize = 0;
         errdefer {
+            for (result.factories[0..initialized_factories]) |*owned| owned.deinit(allocator);
+            allocator.free(result.factories);
             for (result.canvases[0..initialized_canvases]) |*canvas| canvas.deinit(allocator);
             allocator.free(result.canvases);
             for (result.tools[0..initialized_tools]) |tool| allocator.free(tool.name);
@@ -1562,6 +1676,10 @@ const SessionExtensionRuntime = struct {
             if (result.session_id) |id| allocator.free(id);
             for (result.open_canvases.items) |canvas| ext.freeOpenCanvas(allocator, canvas);
             result.open_canvases.deinit(allocator);
+        }
+        for (factory_definitions, 0..) |definition, index| {
+            result.factories[index] = try OwnedFactory.init(allocator, definition);
+            initialized_factories += 1;
         }
         if (session_id) |id| result.session_id = try allocator.dupe(u8, id);
         for (config.tools) |tool| {
@@ -1616,6 +1734,8 @@ const SessionExtensionRuntime = struct {
         if (self.session_id) |id| allocator.free(id);
         for (self.canvases) |*canvas| canvas.deinit(allocator);
         allocator.free(self.canvases);
+        for (self.factories) |*owned| owned.deinit(allocator);
+        allocator.free(self.factories);
         for (self.tools) |tool| allocator.free(tool.name);
         allocator.free(self.tools);
         for (self.commands) |command| allocator.free(command.name);
@@ -3305,6 +3425,7 @@ pub const Client = struct {
     pending_calls: std.ArrayList(*PendingCall) = .empty,
     pending_call_admission_probe: ?*PendingCallAdmissionProbe = null,
     retained_responses: std.ArrayList(RetainedResponse) = .empty,
+    abandoned_response_ids: std.ArrayList(u64) = .empty,
     pending_mutex: std.Io.Mutex = .init,
     direct_call_active: bool = false,
     direct_call_owner: ?std.Thread.Id = null,
@@ -3318,6 +3439,8 @@ pub const Client = struct {
     pump_terminal_error: ?anyerror = null,
     send_operations: std.ArrayList(*SendOperation) = .empty,
     send_operations_mutex: std.Io.Mutex = .init,
+    factory_jobs: std.ArrayList(*FactoryExecuteJob) = .empty,
+    factory_jobs_mutex: std.Io.Mutex = .init,
     event_queue: std.ArrayList(QueuedLogEvent) = .empty,
     event_queue_mutex: std.Io.Mutex = .init,
     event_queue_ready: std.Io.Event = .unset,
@@ -3545,6 +3668,7 @@ pub const Client = struct {
         self.releaseInterestsAndDetachSessionsBounded();
         self.stopEventWorker();
         self.shutdownOwnedRuntimeBounded();
+        self.finishFactoryJobs();
         self.stopPump();
         self.finishSendOperations();
         if (self.transport == .none and !self.transport_closed) {
@@ -3574,9 +3698,11 @@ pub const Client = struct {
             self.allocator.free(response.body);
         }
         self.retained_responses.deinit(self.allocator);
+        self.abandoned_response_ids.deinit(self.allocator);
         self.pending_calls.deinit(self.allocator);
         if (self.pump_failure) |*failure| failure.deinit();
         self.send_operations.deinit(self.allocator);
+        self.factory_jobs.deinit(self.allocator);
         self.event_queue.deinit(self.allocator);
         self.lifecycle_events.deinit();
         for (self.tools.items) |tool| tool.deinit(self.allocator);
@@ -4182,6 +4308,8 @@ pub const Client = struct {
             else
                 .generic,
             &lifecycle_rpc_dispatched,
+            null,
+            null,
         )) {
             .success => |value| value,
             .failure => |failure| {
@@ -4339,6 +4467,23 @@ pub const Client = struct {
         config: session_types.ResumeSessionConfig,
         requested_environment_variables: []const []const u8,
     ) errors.DetailedError!PolicyResult(failure_policy, Session) {
+        return self.resumeSessionWithEnvironmentAndFactories(
+            failure_policy,
+            session_id,
+            config,
+            requested_environment_variables,
+            null,
+        );
+    }
+
+    fn resumeSessionWithEnvironmentAndFactories(
+        self: *Client,
+        comptime failure_policy: FailurePolicy,
+        session_id: []const u8,
+        config: session_types.ResumeSessionConfig,
+        requested_environment_variables: []const []const u8,
+        factories: ?[]const factory_types.AgentFactory,
+    ) errors.DetailedError!PolicyResult(failure_policy, Session) {
         validateLifecycleConfig(config) catch |err|
             return .{ .failure = try policyFailure(
                 failure_policy,
@@ -4376,6 +4521,15 @@ pub const Client = struct {
                 recordInvalidConfig,
                 .{ self.allocator, "extensions", err },
             ) };
+        if (factories) |definitions| {
+            factory_types.validateFactories(definitions) catch |err|
+                return .{ .failure = try policyFailure(
+                    failure_policy,
+                    err,
+                    recordInvalidConfig,
+                    .{ self.allocator, "extensions.factories", err },
+                ) };
+        }
         validateCustomAgentMcpServers(config.custom_agents) catch |err|
             return .{ .failure = try policyFailure(
                 failure_policy,
@@ -4468,6 +4622,13 @@ pub const Client = struct {
                 recordInvalidConfig,
                 .{ self.allocator, "extensions", err },
             ) };
+        extension_values.lowerFactories(factories) catch |err|
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordInvalidConfig,
+                .{ self.allocator, "extensions.factories", err },
+            ) };
         extension_values.lowerHostInjection(
             config.feature_flags,
             config.exp_assignments,
@@ -4485,10 +4646,11 @@ pub const Client = struct {
                 recordInvalidConfig,
                 .{ self.allocator, "providers", err },
             ) };
-        self.beginExtensionRuntime(
+        self.beginExtensionRuntimeWithFactories(
             runtime_session_id,
             config,
             config.extensions.open_canvases orelse &.{},
+            factories orelse &.{},
         ) catch |err| return .{ .failure = try policyFailure(
             failure_policy,
             err,
@@ -4539,6 +4701,8 @@ pub const Client = struct {
             request,
             .{ .session = .{ .session_id = session_id } },
             &lifecycle_rpc_dispatched,
+            null,
+            null,
         )) {
             .success => |value| value,
             .failure => |failure| {
@@ -4684,13 +4848,29 @@ pub const Client = struct {
         config: anytype,
         open_canvases: []const ext.OpenCanvas,
     ) !void {
+        return self.beginExtensionRuntimeWithFactories(
+            session_id,
+            config,
+            open_canvases,
+            &.{},
+        );
+    }
+
+    fn beginExtensionRuntimeWithFactories(
+        self: *Client,
+        session_id: ?[]const u8,
+        config: anytype,
+        open_canvases: []const ext.OpenCanvas,
+        factories: []const factory_types.AgentFactory,
+    ) !void {
         if (self.pending_extension_runtime != null)
             return error.SessionLifecycleAlreadyInProgress;
-        self.pending_extension_runtime = try SessionExtensionRuntime.init(
+        self.pending_extension_runtime = try SessionExtensionRuntime.initWithFactories(
             self.allocator,
             session_id,
             config,
             open_canvases,
+            factories,
         );
     }
 
@@ -4771,6 +4951,28 @@ pub const Client = struct {
             self.extension_runtimes_mutex.unlock(self.io);
             self.runtime_callbacks_ready.waitUncancelable(self.io);
         }
+    }
+
+    fn acquireTransferredRuntimeCallback(self: *Client) void {
+        while (true) {
+            self.extension_runtimes_mutex.lockUncancelable(self.io);
+            if (!self.runtime_callbacks_blocked) {
+                self.runtime_callback_count += 1;
+                self.runtime_callbacks_drained.reset();
+                self.extension_runtimes_mutex.unlock(self.io);
+                return;
+            }
+            self.extension_runtimes_mutex.unlock(self.io);
+            self.runtime_callbacks_ready.waitUncancelable(self.io);
+        }
+    }
+
+    fn enterTransferredRuntimeCallback(
+        self: *Client,
+        scope: *RuntimeCallbackScope,
+    ) void {
+        scope.* = .{ .client = self, .previous = active_runtime_callback };
+        active_runtime_callback = scope;
     }
 
     fn endRuntimeCallback(
@@ -5196,11 +5398,12 @@ pub const Client = struct {
         const resume_config = resumeConfigFromJoin(config);
         const session = try legacyResult(
             Session,
-            self.resumeSessionWithEnvironment(
+            self.resumeSessionWithEnvironmentAndFactories(
                 .legacy,
                 owned_session_id,
                 resume_config,
                 config.extensions.requested_environment_variables,
+                config.extensions.factories,
             ),
         );
         const grants = session.snapshotEnvironmentGrants(self.allocator) catch |err| {
@@ -5221,6 +5424,9 @@ pub const Client = struct {
             };
             return err;
         };
+        if (config.extensions.factories) |factories| {
+            if (factories.len != 0) try self.ensurePump();
+        }
         return .{
             .session = session,
             .grants = grants,
@@ -5631,6 +5837,31 @@ pub const Client = struct {
         );
     }
 
+    fn callCancelable(
+        self: *Client,
+        comptime Result: type,
+        method: []const u8,
+        params: anytype,
+        cancellation: *std.Io.Event,
+        dispatch_mutex: ?*std.Io.Mutex,
+    ) !std.json.Parsed(Result) {
+        if (cancellation.isSet()) return error.FactoryCancelled;
+        try self.ensurePump();
+        return legacyResult(
+            std.json.Parsed(Result),
+            self.callImplTrackingDispatch(
+                .legacy,
+                Result,
+                method,
+                params,
+                .generic,
+                null,
+                cancellation,
+                dispatch_mutex,
+            ),
+        );
+    }
+
     fn callImpl(
         self: *Client,
         comptime failure_policy: FailurePolicy,
@@ -5646,6 +5877,8 @@ pub const Client = struct {
             params,
             context,
             null,
+            null,
+            null,
         );
     }
 
@@ -5657,6 +5890,8 @@ pub const Client = struct {
         params: anytype,
         context: OperationContext,
         dispatched: ?*bool,
+        cancellation: ?*std.Io.Event,
+        dispatch_mutex: ?*std.Io.Mutex,
     ) errors.DetailedError!PolicyResult(failure_policy, std.json.Parsed(Result)) {
         if (self.isRpcHandlerThread())
             return .{ .failure = try policyFailure(
@@ -5691,6 +5926,8 @@ pub const Client = struct {
                 request,
                 context,
                 dispatched,
+                cancellation,
+                dispatch_mutex,
             );
         }
         defer self.endDirectRpcCall();
@@ -5879,7 +6116,12 @@ pub const Client = struct {
         request: []const u8,
         context: OperationContext,
         dispatched: ?*bool,
+        cancellation: ?*std.Io.Event,
+        dispatch_mutex: ?*std.Io.Mutex,
     ) errors.DetailedError!PolicyResult(failure_policy, std.json.Parsed(Result)) {
+        if (dispatch_mutex) |mutex| mutex.lockUncancelable(self.io);
+        var dispatch_locked = dispatch_mutex != null;
+        defer if (dispatch_locked) dispatch_mutex.?.unlock(self.io);
         var pending = PendingCall{
             .id = id,
             .wants_detail = failure_policy == .detailed,
@@ -5923,6 +6165,21 @@ pub const Client = struct {
             pending.completed.set(self.io);
             break;
         }
+        if (cancellation != null and cancellation.?.isSet()) {
+            for (self.pending_calls.items, 0..) |candidate, index| {
+                if (candidate == &pending) {
+                    _ = self.pending_calls.orderedRemove(index);
+                    break;
+                }
+            }
+            self.pending_mutex.unlock(self.io);
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                error.FactoryCancelled,
+                recordClientIo,
+                .{ self.allocator, .read, error.FactoryCancelled },
+            ) };
+        }
         self.pending_mutex.unlock(self.io);
         defer {
             if (self.removePendingCallAndTakeResponse(&pending)) |response| {
@@ -5947,6 +6204,10 @@ pub const Client = struct {
             request,
         );
         self.writer_mutex.unlock(self.io);
+        if (dispatch_locked) {
+            dispatch_mutex.?.unlock(self.io);
+            dispatch_locked = false;
+        }
         write_result catch |err| return .{ .failure = try policyFailure(
             failure_policy,
             err,
@@ -5954,12 +6215,71 @@ pub const Client = struct {
             .{ self.allocator, .write, err },
         ) };
 
-        pending.completed.wait(self.io) catch |err| return .{ .failure = try policyFailure(
-            failure_policy,
-            err,
-            recordClientIo,
-            .{ self.allocator, .read, err },
-        ) };
+        if (cancellation) |cancel| {
+            const WaitResult = union(enum) {
+                completed: anyerror!void,
+                canceled: anyerror!void,
+            };
+            var results: [2]WaitResult = undefined;
+            var select = std.Io.Select(WaitResult).init(self.io, &results);
+            defer select.cancelDiscard();
+            select.async(.completed, waitForEvent, .{ &pending.completed, self.io });
+            select.async(.canceled, waitForEvent, .{ cancel, self.io });
+            const selected = select.await() catch |err| return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordClientIo,
+                .{ self.allocator, .read, err },
+            ) };
+            if (!pending.completed.isSet()) switch (selected) {
+                .completed => |result| result catch |err|
+                    return .{ .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordClientIo,
+                        .{ self.allocator, .read, err },
+                    ) },
+                .canceled => |result| {
+                    result catch |err| return .{ .failure = try policyFailure(
+                        failure_policy,
+                        err,
+                        recordClientIo,
+                        .{ self.allocator, .read, err },
+                    ) };
+                    self.pending_mutex.lockUncancelable(self.io);
+                    for (self.pending_calls.items, 0..) |candidate, index| {
+                        if (candidate != &pending) continue;
+                        _ = self.pending_calls.orderedRemove(index);
+                        if (pending.response == null)
+                            self.abandoned_response_ids.append(
+                                self.allocator,
+                                id,
+                            ) catch {};
+                        break;
+                    }
+                    const abandoned_response = pending.response;
+                    pending.response = null;
+                    self.pending_mutex.unlock(self.io);
+                    if (abandoned_response) |response| {
+                        wipeSecret(response);
+                        self.allocator.free(response);
+                    }
+                    return .{ .failure = try policyFailure(
+                        failure_policy,
+                        error.FactoryCancelled,
+                        recordClientIo,
+                        .{ self.allocator, .read, error.FactoryCancelled },
+                    ) };
+                },
+            };
+        } else {
+            pending.completed.wait(self.io) catch |err| return .{ .failure = try policyFailure(
+                failure_policy,
+                err,
+                recordClientIo,
+                .{ self.allocator, .read, err },
+            ) };
+        }
         self.pending_mutex.lockUncancelable(self.io);
         const response = pending.response;
         pending.response = null;
@@ -6292,6 +6612,66 @@ pub const Client = struct {
                 },
                 .success => |message| switch (message) {
                     .request => |request| {
+                        if (std.mem.eql(u8, request.method, "factory.execute")) {
+                            self.startFactoryExecuteJob(request.id, request.params) catch |err| {
+                                const id_json = std.json.Stringify.valueAlloc(
+                                    self.allocator,
+                                    request.id,
+                                    .{},
+                                ) catch {
+                                    self.finishPumpNative(err);
+                                    return;
+                                };
+                                defer self.allocator.free(id_json);
+                                self.writeFactoryError(
+                                    id_json,
+                                    if (err == error.FactoryNotFound or
+                                        err == error.InvalidFactoryRequest)
+                                        -32602
+                                    else
+                                        -32603,
+                                    if (err == error.FactoryNotFound)
+                                        "factory not found"
+                                    else if (err == error.InvalidFactoryRequest)
+                                        "invalid factory request"
+                                    else
+                                        "failed to start factory",
+                                ) catch |write_err| {
+                                    self.finishPumpNative(write_err);
+                                    return;
+                                };
+                            };
+                            continue;
+                        }
+                        if (std.mem.eql(u8, request.method, "factory.abort")) {
+                            self.abortFactoryExecution(request.params) catch {
+                                self.writer_mutex.lockUncancelable(self.io);
+                                const write_result = self.writeServerRequestError(
+                                    self.transportWriter(),
+                                    request.id,
+                                    -32602,
+                                    "invalid factory abort request",
+                                );
+                                self.writer_mutex.unlock(self.io);
+                                write_result catch |write_err| {
+                                    self.finishPumpNative(write_err);
+                                    return;
+                                };
+                                continue;
+                            };
+                            self.writer_mutex.lockUncancelable(self.io);
+                            const write_result = self.writeRpcSuccess(
+                                self.transportWriter(),
+                                request.id,
+                                struct {}{},
+                            );
+                            self.writer_mutex.unlock(self.io);
+                            write_result catch |err| {
+                                self.finishPumpNative(err);
+                                return;
+                            };
+                            continue;
+                        }
                         self.writer_mutex.lockUncancelable(self.io);
                         var operation: errors.ClientOperation = .callback;
                         const result = self.dispatchServerRequestTracked(
@@ -6348,6 +6728,13 @@ pub const Client = struct {
     fn routePumpedResponse(self: *Client, id: u64, body: []u8) !void {
         self.pending_mutex.lockUncancelable(self.io);
         defer self.pending_mutex.unlock(self.io);
+        for (self.abandoned_response_ids.items, 0..) |abandoned_id, index| {
+            if (abandoned_id != id) continue;
+            _ = self.abandoned_response_ids.orderedRemove(index);
+            wipeSecret(body);
+            self.allocator.free(body);
+            return;
+        }
         for (self.pending_calls.items) |pending| {
             if (pending.id != id) continue;
             if (pending.response != null or pending.failure != null) {
@@ -6529,6 +6916,8 @@ pub const Client = struct {
             operation.request,
             .{ .session = .{ .session_id = operation.log_lease.log.session_id } },
             null,
+            null,
+            null,
         ) catch |err| {
             operation.log_lease.log.failTurn(operation.receipt, err);
             return;
@@ -6646,6 +7035,420 @@ pub const Client = struct {
             const value = operation orelse return;
             self.destroySendOperation(value);
         }
+    }
+
+    fn writeFactorySuccess(
+        self: *Client,
+        id_json: []const u8,
+        result: anytype,
+    ) !void {
+        const id = try std.json.parseFromSlice(
+            std.json.Value,
+            self.allocator,
+            id_json,
+            .{},
+        );
+        defer id.deinit();
+        self.writer_mutex.lockUncancelable(self.io);
+        defer self.writer_mutex.unlock(self.io);
+        try self.writeRpcSuccess(self.transportWriter(), id.value, result);
+    }
+
+    fn writeFactoryError(
+        self: *Client,
+        id_json: []const u8,
+        code: i64,
+        message: []const u8,
+    ) !void {
+        const id = try std.json.parseFromSlice(
+            std.json.Value,
+            self.allocator,
+            id_json,
+            .{},
+        );
+        defer id.deinit();
+        self.writer_mutex.lockUncancelable(self.io);
+        defer self.writer_mutex.unlock(self.io);
+        try self.writeServerRequestError(self.transportWriter(), id.value, code, message);
+    }
+
+    fn findFactoryCallback(
+        self: *Client,
+        session_id: []const u8,
+        name: []const u8,
+    ) ?struct {
+        run: *const fn (
+            std.mem.Allocator,
+            *factory_types.FactoryContext,
+            ?*anyopaque,
+        ) anyerror!?factory_types.Json,
+        context: ?*anyopaque,
+    } {
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
+        defer self.extension_runtimes_mutex.unlock(self.io);
+        const runtime = self.findExtensionRuntime(session_id) orelse return null;
+        for (runtime.factories) |definition| {
+            if (std.mem.eql(u8, definition.name, name))
+                return .{ .run = definition.run, .context = definition.context };
+        }
+        return null;
+    }
+
+    fn startFactoryExecuteJob(
+        self: *Client,
+        id: std.json.Value,
+        params: ?std.json.Value,
+    ) !void {
+        const object = switch (params orelse return error.InvalidFactoryRequest) {
+            .object => |object| object,
+            else => return error.InvalidFactoryRequest,
+        };
+        try validateObjectFields(
+            object,
+            &.{ "sessionId", "name", "runId", "executionToken", "args" },
+        );
+        const session_id = try jsonRequiredString(object, "sessionId");
+        const name = try jsonRequiredString(object, "name");
+        const run_id = try jsonRequiredString(object, "runId");
+        const execution_token = try jsonRequiredString(object, "executionToken");
+        if (session_id.len == 0 or name.len == 0 or run_id.len == 0 or execution_token.len == 0)
+            return error.InvalidFactoryRequest;
+        const args = try jsonRequiredValue(object, "args");
+
+        self.acquireTransferredRuntimeCallback();
+        errdefer {
+            var scope: RuntimeCallbackScope = undefined;
+            self.enterTransferredRuntimeCallback(&scope);
+            self.endRuntimeCallback(&scope);
+        }
+        const callback = self.findFactoryCallback(session_id, name) orelse
+            return error.FactoryNotFound;
+        self.reapFactoryJobs();
+        const owned_session_id = try self.allocator.dupe(u8, session_id);
+        errdefer self.allocator.free(owned_session_id);
+        const owned_run_id = try self.allocator.dupe(u8, run_id);
+        errdefer self.allocator.free(owned_run_id);
+        const owned_execution_token = try self.allocator.dupe(u8, execution_token);
+        errdefer self.allocator.free(owned_execution_token);
+        const args_json = try std.json.Stringify.valueAlloc(self.allocator, args, .{});
+        errdefer self.allocator.free(args_json);
+        const id_json = try std.json.Stringify.valueAlloc(self.allocator, id, .{});
+        errdefer self.allocator.free(id_json);
+        const job = try self.allocator.create(FactoryExecuteJob);
+        errdefer self.allocator.destroy(job);
+        job.* = .{
+            .client = self,
+            .session_id = owned_session_id,
+            .run_id = owned_run_id,
+            .execution_token = owned_execution_token,
+            .args_json = args_json,
+            .id_json = id_json,
+            .run = callback.run,
+            .context = callback.context,
+        };
+        self.factory_jobs_mutex.lockUncancelable(self.io);
+        self.factory_jobs.append(self.allocator, job) catch |err| {
+            self.factory_jobs_mutex.unlock(self.io);
+            return err;
+        };
+        self.factory_jobs_mutex.unlock(self.io);
+        job.future = self.io.concurrent(factoryExecuteJobMain, .{job}) catch |err| {
+            self.factory_jobs_mutex.lockUncancelable(self.io);
+            for (self.factory_jobs.items, 0..) |candidate, index| {
+                if (candidate == job) {
+                    _ = self.factory_jobs.orderedRemove(index);
+                    break;
+                }
+            }
+            self.factory_jobs_mutex.unlock(self.io);
+            return err;
+        };
+    }
+
+    fn abortFactoryExecution(self: *Client, params: ?std.json.Value) !void {
+        const object = switch (params orelse return error.InvalidFactoryRequest) {
+            .object => |object| object,
+            else => return error.InvalidFactoryRequest,
+        };
+        try validateObjectFields(object, &.{ "sessionId", "runId", "executionToken" });
+        const session_id = try jsonRequiredString(object, "sessionId");
+        const run_id = try jsonRequiredString(object, "runId");
+        const execution_token = try jsonRequiredString(object, "executionToken");
+        self.factory_jobs_mutex.lockUncancelable(self.io);
+        defer self.factory_jobs_mutex.unlock(self.io);
+        for (self.factory_jobs.items) |job| {
+            if (std.mem.eql(u8, job.session_id, session_id) and
+                std.mem.eql(u8, job.run_id, run_id) and
+                std.mem.eql(u8, job.execution_token, execution_token))
+            {
+                job.dispatch_mutex.lockUncancelable(self.io);
+                job.cancelled.set(self.io);
+                job.dispatch_mutex.unlock(self.io);
+                return;
+            }
+        }
+    }
+
+    fn reapFactoryJobs(self: *Client) void {
+        while (true) {
+            self.factory_jobs_mutex.lockUncancelable(self.io);
+            var finished: ?*FactoryExecuteJob = null;
+            for (self.factory_jobs.items, 0..) |job, index| {
+                if (!job.completed.isSet()) continue;
+                finished = self.factory_jobs.orderedRemove(index);
+                break;
+            }
+            self.factory_jobs_mutex.unlock(self.io);
+            const job = finished orelse return;
+            self.destroyFactoryJob(job);
+        }
+    }
+
+    fn cancelFactoryJobsForSession(self: *Client, session_id: []const u8) void {
+        self.factory_jobs_mutex.lockUncancelable(self.io);
+        defer self.factory_jobs_mutex.unlock(self.io);
+        for (self.factory_jobs.items) |job|
+            if (std.mem.eql(u8, job.session_id, session_id)) job.cancelled.set(self.io);
+    }
+
+    fn finishFactoryJobs(self: *Client) void {
+        self.factory_jobs_mutex.lockUncancelable(self.io);
+        for (self.factory_jobs.items) |job| job.cancelled.set(self.io);
+        self.factory_jobs_mutex.unlock(self.io);
+        while (true) {
+            self.factory_jobs_mutex.lockUncancelable(self.io);
+            const job = if (self.factory_jobs.items.len == 0)
+                null
+            else
+                self.factory_jobs.orderedRemove(0);
+            self.factory_jobs_mutex.unlock(self.io);
+            const value = job orelse return;
+            self.destroyFactoryJob(value);
+        }
+    }
+
+    fn destroyFactoryJob(self: *Client, job: *FactoryExecuteJob) void {
+        if (job.future) |*future| future.await(self.io);
+        self.allocator.free(job.session_id);
+        self.allocator.free(job.run_id);
+        self.allocator.free(job.execution_token);
+        wipeSecret(job.args_json);
+        self.allocator.free(job.args_json);
+        self.allocator.free(job.id_json);
+        self.allocator.destroy(job);
+    }
+
+    fn factoryAgent(
+        state_pointer: *anyopaque,
+        allocator: std.mem.Allocator,
+        prompt: []const u8,
+        options: factory_types.FactoryAgentOptions,
+    ) !?factory_types.Json {
+        const state: *FactoryExecutionState = @ptrCast(@alignCast(state_pointer));
+        const job = state.job;
+        if (job.cancelled.isSet()) return error.FactoryCancelled;
+        const schema = if (options.schema) |schema|
+            try std.json.parseFromSlice(
+                std.json.Value,
+                job.client.allocator,
+                schema.bytes,
+                .{ .allocate = .alloc_always },
+            )
+        else
+            null;
+        defer if (schema) |parsed| parsed.deinit();
+        const parsed = job.client.callCancelable(std.json.Value, "session.factory.agent", .{
+            .sessionId = job.session_id,
+            .factoryRunId = job.run_id,
+            .executionToken = job.execution_token,
+            .prompt = prompt,
+            .opts = WireFactoryAgentOptions{
+                .label = options.label,
+                .schema = if (schema) |value| value.value else null,
+                .model = options.model,
+                .reasoningEffort = options.reasoning_effort,
+                .contextTier = if (options.context_tier) |value| @tagName(value) else null,
+                .agent = options.agent,
+            },
+        }, &job.cancelled, &job.dispatch_mutex) catch |err|
+            return mapFactoryRpcError(err, false);
+        defer parsed.deinit();
+        if (job.cancelled.isSet()) return error.FactoryCancelled;
+        const object = switch (parsed.value) {
+            .object => |object| object,
+            else => return error.FactoryTransportFailure,
+        };
+        const result = object.get("result") orelse return null;
+        return try factory_types.Json.initValue(allocator, result);
+    }
+
+    fn factoryJournalGet(
+        state_pointer: *anyopaque,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+    ) !factory_types.JournalLookup {
+        const state: *FactoryExecutionState = @ptrCast(@alignCast(state_pointer));
+        const job = state.job;
+        if (job.cancelled.isSet()) return error.FactoryCancelled;
+        const parsed = job.client.callCancelable(std.json.Value, "session.factory.journal.get", .{
+            .sessionId = job.session_id,
+            .runId = job.run_id,
+            .executionToken = job.execution_token,
+            .key = key,
+        }, &job.cancelled, &job.dispatch_mutex) catch |err|
+            return mapFactoryRpcError(err, true);
+        defer parsed.deinit();
+        if (job.cancelled.isSet()) return error.FactoryCancelled;
+        const object = switch (parsed.value) {
+            .object => |object| object,
+            else => return error.FactoryDurableFailure,
+        };
+        if (!(jsonRequiredBool(object, "hit") catch return error.FactoryDurableFailure))
+            return .miss;
+        const result = object.get("resultJson") orelse
+            return error.FactoryDurableFailure;
+        return .{ .value = try factory_types.Json.initValue(allocator, result) };
+    }
+
+    fn factoryJournalPut(
+        state_pointer: *anyopaque,
+        key: []const u8,
+        value: factory_types.JsonView,
+    ) !void {
+        const state: *FactoryExecutionState = @ptrCast(@alignCast(state_pointer));
+        const job = state.job;
+        if (job.cancelled.isSet()) return error.FactoryCancelled;
+        const result = try std.json.parseFromSlice(
+            std.json.Value,
+            job.client.allocator,
+            value.bytes,
+            .{ .allocate = .alloc_always },
+        );
+        defer result.deinit();
+        const parsed = job.client.callCancelable(std.json.Value, "session.factory.journal.put", .{
+            .sessionId = job.session_id,
+            .runId = job.run_id,
+            .executionToken = job.execution_token,
+            .key = key,
+            .resultJson = result.value,
+        }, &job.cancelled, &job.dispatch_mutex) catch |err|
+            return mapFactoryRpcError(err, true);
+        if (job.cancelled.isSet()) {
+            parsed.deinit();
+            return error.FactoryCancelled;
+        }
+        parsed.deinit();
+    }
+
+    fn factoryPauseAtCheckpoint(
+        state_pointer: *anyopaque,
+        key: []const u8,
+    ) !void {
+        const state: *FactoryExecutionState = @ptrCast(@alignCast(state_pointer));
+        const job = state.job;
+        if (job.cancelled.isSet()) return error.FactoryCancelled;
+        const parsed = job.client.callCancelable(struct {
+            action: []const u8,
+        }, "session.factory.pauseAtCheckpoint", .{
+            .sessionId = job.session_id,
+            .runId = job.run_id,
+            .executionToken = job.execution_token,
+            .key = key,
+        }, &job.cancelled, &job.dispatch_mutex) catch |err|
+            return mapFactoryRpcError(err, true);
+        defer parsed.deinit();
+        if (job.cancelled.isSet()) return error.FactoryCancelled;
+        if (std.mem.eql(u8, parsed.value.action, "continue")) return;
+        if (!std.mem.eql(u8, parsed.value.action, "pause"))
+            return error.FactoryDurableFailure;
+        job.cancelled.set(job.client.io);
+        return error.FactoryCancelled;
+    }
+
+    fn factoryProgress(
+        state_pointer: *anyopaque,
+        kind: factory_types.FactoryLogKind,
+        message: []const u8,
+    ) !void {
+        const state: *FactoryExecutionState = @ptrCast(@alignCast(state_pointer));
+        const job = state.job;
+        if (job.cancelled.isSet()) return error.FactoryCancelled;
+        job.progress_mutex.lockUncancelable(job.client.io);
+        defer job.progress_mutex.unlock(job.client.io);
+        const sequence = job.next_progress_seq;
+        job.next_progress_seq += 1;
+        const parsed = job.client.callCancelable(std.json.Value, "session.factory.log", .{
+            .sessionId = job.session_id,
+            .runId = job.run_id,
+            .executionToken = job.execution_token,
+            .lines = &.{WireFactoryLogLine{
+                .seq = sequence,
+                .kind = @tagName(kind),
+                .text = message,
+            }},
+        }, &job.cancelled, &job.dispatch_mutex) catch |err|
+            return mapFactoryRpcError(err, true);
+        if (job.cancelled.isSet()) {
+            parsed.deinit();
+            return error.FactoryCancelled;
+        }
+        parsed.deinit();
+    }
+
+    fn mapFactoryRpcError(err: anyerror, durable: bool) anyerror {
+        return switch (err) {
+            error.OutOfMemory, error.FactoryCancelled => err,
+            else => if (durable)
+                error.FactoryDurableFailure
+            else
+                error.FactoryTransportFailure,
+        };
+    }
+
+    fn factoryExecuteJobMain(job: *FactoryExecuteJob) void {
+        defer job.completed.set(job.client.io);
+        var scope: RuntimeCallbackScope = undefined;
+        job.client.enterTransferredRuntimeCallback(&scope);
+        defer job.client.endRuntimeCallback(&scope);
+        var state = FactoryExecutionState{ .job = job };
+        var context = factory_types.FactoryContext{
+            .run_id = job.run_id,
+            .args = .{ .bytes = job.args_json },
+            .cancel = .{ .event = &job.cancelled, .io = job.client.io },
+            .execution = .{
+                .state = &state,
+                .io = job.client.io,
+                .agent_fn = factoryAgent,
+                .journal_get_fn = factoryJournalGet,
+                .journal_put_fn = factoryJournalPut,
+                .pause_fn = factoryPauseAtCheckpoint,
+                .progress_fn = factoryProgress,
+            },
+        };
+        var result = job.run(job.client.allocator, &context, job.context) catch |err| {
+            job.client.writeFactoryError(job.id_json, -32000, @errorName(err)) catch {};
+            return;
+        };
+        defer if (result) |*value| value.deinit();
+        if (result) |value| {
+            const parsed = std.json.parseFromSlice(
+                std.json.Value,
+                job.client.allocator,
+                value.bytes,
+                .{},
+            ) catch {
+                job.client.writeFactoryError(
+                    job.id_json,
+                    -32603,
+                    "invalid factory callback result",
+                ) catch {};
+                return;
+            };
+            defer parsed.deinit();
+            job.client.writeFactorySuccess(job.id_json, .{ .result = parsed.value }) catch {};
+            return;
+        }
+        job.client.writeFactorySuccess(job.id_json, struct {}{}) catch {};
     }
 
     fn findCommittedExtensionRuntimeIndex(
@@ -9821,6 +10624,11 @@ pub const Client = struct {
         commit: SessionRecordCommit,
     ) !usize {
         if (commit.prior_log) |log| log.drainAndClose();
+        if (commit.replacing) {
+            self.cancelFactoryJobsForSession(commit.pending.id.?);
+            self.blockRuntimeCallbacks();
+        }
+        defer if (commit.replacing) self.unblockRuntimeCallbacks();
 
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
@@ -9990,6 +10798,9 @@ pub const Client = struct {
         session_id: []const u8,
         generation: u64,
     ) void {
+        self.cancelFactoryJobsForSession(session_id);
+        self.blockRuntimeCallbacks();
+        defer self.unblockRuntimeCallbacks();
         self.extension_runtimes_mutex.lockUncancelable(self.io);
         for (self.extension_runtimes.items, 0..) |runtime, runtime_index| {
             if (runtime.session_id != null and
@@ -10887,6 +11698,277 @@ pub const Session = struct {
     id: []const u8,
     record_index: usize = std.math.maxInt(usize),
     generation: u64 = 0,
+
+    pub fn factory(self: Session) FactoryApi {
+        return .{ .session = self };
+    }
+
+    pub fn factoryRun(
+        self: Session,
+        allocator: std.mem.Allocator,
+        name: []const u8,
+        options: factory_types.FactoryRunOptions,
+    ) !factory_types.FactoryRun {
+        if (options.limits) |limits| try factory_types.validateLimitOverrides(limits);
+        const resolved = try self.resolve();
+        try self.client.ensurePump();
+        const args = try std.json.parseFromSlice(
+            std.json.Value,
+            self.client.allocator,
+            if (options.args) |value| value.bytes else "{}",
+            .{ .allocate = .alloc_always },
+        );
+        defer args.deinit();
+        const parsed = try self.client.call(std.json.Value, "session.factory.run", .{
+            .sessionId = resolved.id,
+            .name = name,
+            .args = args.value,
+            .options = WireFactoryRunOptions{
+                .limits = lowerFactoryLimits(options.limits),
+                .notifyOnComplete = options.notify_on_complete,
+                .logPhaseNames = options.log_phase_names,
+                .resumeFromRunId = options.resume_from_run_id,
+            },
+        });
+        defer parsed.deinit();
+        return self.settleFactoryRun(
+            allocator,
+            try decodeFactoryRun(allocator, parsed.value),
+        );
+    }
+
+    pub fn factoryResume(
+        self: Session,
+        allocator: std.mem.Allocator,
+        run_id: []const u8,
+        options: factory_types.FactoryResumeOptions,
+    ) !factory_types.FactoryRun {
+        if (options.limits) |limits| try factory_types.validateLimitOverrides(limits);
+        const resolved = try self.resolve();
+        try self.client.ensurePump();
+        const parsed = try self.client.call(std.json.Value, "session.factory.resume", .{
+            .sessionId = resolved.id,
+            .runId = run_id,
+            .limits = lowerFactoryLimits(options.limits),
+            .notifyOnComplete = options.notify_on_complete,
+            .logPhaseNames = options.log_phase_names,
+        });
+        defer parsed.deinit();
+        const object = switch (parsed.value) {
+            .object => |object| object,
+            else => return error.InvalidFactoryRun,
+        };
+        return self.settleFactoryRun(
+            allocator,
+            try decodeFactoryRun(
+                allocator,
+                object.get("run") orelse return error.InvalidFactoryRun,
+            ),
+        );
+    }
+
+    fn settleFactoryRun(
+        self: Session,
+        allocator: std.mem.Allocator,
+        initial: factory_types.FactoryRun,
+    ) !factory_types.FactoryRun {
+        if (initial.isTerminal()) return initial;
+        var pending = initial;
+        const run_id = allocator.dupe(u8, pending.run_id) catch |err| {
+            pending.deinit();
+            return err;
+        };
+        defer allocator.free(run_id);
+        pending.deinit();
+        return self.factoryWaitForRun(allocator, run_id, .{});
+    }
+
+    pub fn factoryGetRun(
+        self: Session,
+        allocator: std.mem.Allocator,
+        run_id: []const u8,
+    ) !factory_types.FactoryRun {
+        return self.factoryGetRunCancelable(allocator, run_id, null);
+    }
+
+    fn factoryGetRunCancelable(
+        self: Session,
+        allocator: std.mem.Allocator,
+        run_id: []const u8,
+        cancellation: ?*std.Io.Event,
+    ) !factory_types.FactoryRun {
+        const resolved = try self.resolve();
+        try self.client.ensurePump();
+        const parsed = if (cancellation) |event|
+            try self.client.callCancelable(std.json.Value, "session.factory.getRun", .{
+                .sessionId = resolved.id,
+                .runId = run_id,
+            }, event, null)
+        else
+            try self.client.call(std.json.Value, "session.factory.getRun", .{
+                .sessionId = resolved.id,
+                .runId = run_id,
+            });
+        defer parsed.deinit();
+        return decodeFactoryRun(allocator, parsed.value);
+    }
+
+    pub fn factoryWaitForRun(
+        self: Session,
+        allocator: std.mem.Allocator,
+        run_id: []const u8,
+        options: factory_types.FactoryWaitOptions,
+    ) !factory_types.FactoryRun {
+        if (options.poll_interval_ns == 0) return error.InvalidFactoryWaitOptions;
+        if (options.cancellation) |cancellation|
+            if (cancellation.isCancelled()) return error.Canceled;
+        const started = std.Io.Clock.Timestamp.now(self.client.io, .awake);
+        while (true) {
+            var run = self.factoryGetRunCancelable(
+                allocator,
+                run_id,
+                if (options.cancellation) |cancellation| &cancellation.event else null,
+            ) catch |err| {
+                if (err == error.FactoryCancelled) return error.Canceled;
+                return err;
+            };
+            if (run.isTerminal()) return run;
+            run.deinit();
+            if (options.cancellation) |cancellation|
+                if (cancellation.isCancelled()) return error.Canceled;
+            const elapsed_ns = started.durationTo(
+                std.Io.Clock.Timestamp.now(self.client.io, .awake),
+            ).raw.toNanoseconds();
+            if (options.timeout_ns) |timeout_ns| {
+                if (elapsed_ns >= timeout_ns) return error.Timeout;
+            }
+            const sleep_ns = if (options.timeout_ns) |timeout_ns|
+                @min(options.poll_interval_ns, timeout_ns - @as(u64, @intCast(elapsed_ns)))
+            else
+                options.poll_interval_ns;
+            if (options.cancellation) |cancellation| {
+                const WaitResult = union(enum) {
+                    elapsed: anyerror!void,
+                    canceled: anyerror!void,
+                };
+                var results: [2]WaitResult = undefined;
+                var select = std.Io.Select(WaitResult).init(self.client.io, &results);
+                defer select.cancelDiscard();
+                select.async(.elapsed, std.Io.sleep, .{
+                    self.client.io,
+                    std.Io.Duration.fromNanoseconds(@intCast(sleep_ns)),
+                    std.Io.Clock.awake,
+                });
+                select.async(.canceled, waitForEvent, .{
+                    &cancellation.event,
+                    self.client.io,
+                });
+                switch (try select.await()) {
+                    .elapsed => |result| try result,
+                    .canceled => |result| {
+                        try result;
+                        return error.Canceled;
+                    },
+                }
+            } else {
+                try std.Io.sleep(
+                    self.client.io,
+                    std.Io.Duration.fromNanoseconds(@intCast(sleep_ns)),
+                    .awake,
+                );
+            }
+        }
+    }
+
+    pub fn factoryListRuns(
+        self: Session,
+        allocator: std.mem.Allocator,
+        options: factory_types.FactoryListRunsOptions,
+    ) !factory_types.FactoryRunsPage {
+        if (options.after_seq != null and options.before_seq != null)
+            return error.InvalidFactoryCursor;
+        if (options.limit) |limit| if (limit == 0 or limit > 500)
+            return error.InvalidFactoryLimit;
+        const resolved = try self.resolve();
+        try self.client.ensurePump();
+        const parsed = try self.client.call(std.json.Value, "session.factory.listRuns", .{
+            .sessionId = resolved.id,
+            .afterSeq = options.after_seq,
+            .beforeSeq = options.before_seq,
+            .limit = options.limit,
+        });
+        defer parsed.deinit();
+        return .{ .value = try factory_types.Json.initValue(allocator, parsed.value) };
+    }
+
+    pub fn factoryGetRunDetail(
+        self: Session,
+        allocator: std.mem.Allocator,
+        run_id: []const u8,
+    ) !factory_types.FactoryRunDetail {
+        const resolved = try self.resolve();
+        try self.client.ensurePump();
+        const parsed = try self.client.call(std.json.Value, "session.factory.getRunDetail", .{
+            .sessionId = resolved.id,
+            .runId = run_id,
+        });
+        defer parsed.deinit();
+        return .{ .value = try factory_types.Json.initValue(allocator, parsed.value) };
+    }
+
+    pub fn factoryGetRunProgress(
+        self: Session,
+        allocator: std.mem.Allocator,
+        run_id: []const u8,
+        options: factory_types.FactoryProgressOptions,
+    ) !factory_types.FactoryProgressPage {
+        if (options.after_seq != null and options.before_seq != null)
+            return error.InvalidFactoryCursor;
+        if (options.limit) |limit| if (limit == 0 or limit > 500)
+            return error.InvalidFactoryLimit;
+        const resolved = try self.resolve();
+        try self.client.ensurePump();
+        const parsed = try self.client.call(std.json.Value, "session.factory.getRunProgress", .{
+            .sessionId = resolved.id,
+            .runId = run_id,
+            .phaseId = options.phase_id,
+            .afterSeq = options.after_seq,
+            .beforeSeq = options.before_seq,
+            .limit = options.limit,
+        });
+        defer parsed.deinit();
+        return .{ .value = try factory_types.Json.initValue(allocator, parsed.value) };
+    }
+
+    pub fn factoryPause(
+        self: Session,
+        allocator: std.mem.Allocator,
+        run_id: []const u8,
+    ) !factory_types.FactoryRun {
+        const resolved = try self.resolve();
+        try self.client.ensurePump();
+        const parsed = try self.client.call(std.json.Value, "session.factory.pause", .{
+            .sessionId = resolved.id,
+            .runId = run_id,
+        });
+        defer parsed.deinit();
+        return decodeFactoryRun(allocator, parsed.value);
+    }
+
+    pub fn factoryCancel(
+        self: Session,
+        allocator: std.mem.Allocator,
+        run_id: []const u8,
+    ) !factory_types.FactoryRun {
+        const resolved = try self.resolve();
+        try self.client.ensurePump();
+        const parsed = try self.client.call(std.json.Value, "session.factory.cancel", .{
+            .sessionId = resolved.id,
+            .runId = run_id,
+        });
+        defer parsed.deinit();
+        return decodeFactoryRun(allocator, parsed.value);
+    }
 
     fn resolve(self: Session) !ResolvedSession {
         if (self.record_index >= self.client.sessions.items.len)
@@ -12138,6 +13220,13 @@ pub const Session = struct {
         self: Session,
         comptime failure_policy: FailurePolicy,
     ) errors.DetailedError!PolicyResult(failure_policy, void) {
+        if (self.client.isCurrentRuntimeCallback())
+            return .{ .failure = try policyFailure(
+                failure_policy,
+                error.ReentrantRpcCall,
+                recordClientIo,
+                .{ self.client.allocator, .callback, error.ReentrantRpcCall },
+            ) };
         const resolved = switch (try self.resolveForPolicy(failure_policy)) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
@@ -12936,6 +14025,8 @@ pub const Session = struct {
         return .{ .success = {} };
     }
 };
+
+pub const FactoryApi = factory_types.FactoryApi(Session);
 
 pub const JoinedSession = struct {
     session: Session,
@@ -14511,6 +15602,276 @@ const WireOpenCanvas = struct {
     input: ?std.json.Value = null,
 };
 
+const WireFactoryPhase = struct {
+    title: []const u8,
+    detail: ?[]const u8 = null,
+};
+
+const WireFactoryDeclaredLimits = struct {
+    maxConcurrentSubagents: ?u32 = null,
+    maxTotalSubagents: ?u64 = null,
+    timeoutSeconds: ?f64 = null,
+    maxAiCredits: ?f64 = null,
+};
+
+const WireFactoryRunLimits = struct {
+    maxConcurrentSubagents: ?std.json.Value = null,
+    maxTotalSubagents: ?std.json.Value = null,
+    timeoutSeconds: ?std.json.Value = null,
+    maxAiCredits: ?std.json.Value = null,
+};
+
+const WireFactoryRunOptions = struct {
+    limits: ?WireFactoryRunLimits = null,
+    notifyOnComplete: ?bool = null,
+    logPhaseNames: ?bool = null,
+    resumeFromRunId: ?[]const u8 = null,
+};
+
+const WireFactoryAgentOptions = struct {
+    label: ?[]const u8 = null,
+    schema: ?std.json.Value = null,
+    model: ?[]const u8 = null,
+    reasoningEffort: ?[]const u8 = null,
+    contextTier: ?[]const u8 = null,
+    agent: ?[]const u8 = null,
+};
+
+const WireFactoryLogLine = struct {
+    seq: u64,
+    kind: []const u8,
+    text: []const u8,
+};
+
+const WireFactoryMeta = struct {
+    name: []const u8,
+    description: []const u8,
+    phases: []const WireFactoryPhase,
+    argsSchema: ?std.json.Value = null,
+    limits: ?WireFactoryDeclaredLimits = null,
+};
+
+fn lowerFactoryLimit(comptime T: type, value: factory_types.LimitOverride(T)) ?std.json.Value {
+    return switch (value) {
+        .inherit => null,
+        .unlimited => .null,
+        .value => |number| switch (@typeInfo(T)) {
+            .int => .{ .integer = @intCast(number) },
+            .float => .{ .float = @floatCast(number) },
+            else => @compileError("factory limits must be integers or floats"),
+        },
+    };
+}
+
+fn lowerFactoryLimits(
+    limits: ?factory_types.FactoryLimitOverrides,
+) ?WireFactoryRunLimits {
+    const value = limits orelse return null;
+    return .{
+        .maxConcurrentSubagents = lowerFactoryLimit(
+            u32,
+            value.max_concurrent_subagents,
+        ),
+        .maxTotalSubagents = lowerFactoryLimit(u64, value.max_total_subagents),
+        .timeoutSeconds = lowerFactoryLimit(f64, value.timeout_seconds),
+        .maxAiCredits = lowerFactoryLimit(f64, value.max_ai_credits),
+    };
+}
+
+fn parseFactoryStatus(value: []const u8) !factory_types.FactoryRunStatus {
+    if (std.mem.eql(u8, value, "pending")) return .pending;
+    if (std.mem.eql(u8, value, "running")) return .running;
+    if (std.mem.eql(u8, value, "completed")) return .completed;
+    if (std.mem.eql(u8, value, "halted")) return .halted;
+    if (std.mem.eql(u8, value, "paused")) return .paused;
+    if (std.mem.eql(u8, value, "cancelled")) return .cancelled;
+    if (std.mem.eql(u8, value, "error")) return .@"error";
+    return error.InvalidFactoryRun;
+}
+
+fn cloneOptionalFactoryString(
+    allocator: std.mem.Allocator,
+    object: std.json.ObjectMap,
+    name: []const u8,
+) !?[]const u8 {
+    const value = object.get(name) orelse return null;
+    if (value == .null) return null;
+    if (value != .string) return error.InvalidFactoryRun;
+    return try allocator.dupe(u8, value.string);
+}
+
+fn cloneFactoryJson(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) !factory_types.JsonView {
+    return .{ .bytes = try std.json.Stringify.valueAlloc(allocator, value, .{
+        .emit_null_optional_fields = false,
+    }) };
+}
+
+fn decodeFactoryPauseInfo(
+    allocator: std.mem.Allocator,
+    value: ?std.json.Value,
+) !factory_types.FactoryPauseInfo {
+    const object = switch (value orelse return error.InvalidFactoryRun) {
+        .object => |object| object,
+        else => return error.InvalidFactoryRun,
+    };
+    const kind = try jsonRequiredString(object, "type");
+    if (std.mem.eql(u8, kind, "user")) return .user;
+    if (std.mem.eql(u8, kind, "checkpoint"))
+        return .{ .checkpoint = try allocator.dupe(
+            u8,
+            try jsonRequiredString(object, "key"),
+        ) };
+    return error.InvalidFactoryRun;
+}
+
+fn parseFactoryFailureKind(value: []const u8) !factory_types.FactoryFailureKind {
+    if (std.mem.eql(u8, value, "maxTotalSubagents")) return .max_total_subagents;
+    if (std.mem.eql(u8, value, "timeoutSeconds")) return .timeout_seconds;
+    if (std.mem.eql(u8, value, "maxAiCredits")) return .max_ai_credits;
+    return error.InvalidFactoryRun;
+}
+
+fn parseFactoryDurableOperation(
+    value: []const u8,
+) !factory_types.FactoryDurableOperation {
+    if (std.mem.eql(u8, value, "createRun")) return .create_run;
+    if (std.mem.eql(u8, value, "markRunStarted")) return .mark_run_started;
+    if (std.mem.eql(u8, value, "finishRun")) return .finish_run;
+    if (std.mem.eql(u8, value, "reserveAgent")) return .reserve_agent;
+    if (std.mem.eql(u8, value, "releaseAgent")) return .release_agent;
+    if (std.mem.eql(u8, value, "chargeCredit")) return .charge_credit;
+    if (std.mem.eql(u8, value, "addElapsed")) return .add_elapsed;
+    if (std.mem.eql(u8, value, "reconcileCreditTotal")) return .reconcile_credit_total;
+    if (std.mem.eql(u8, value, "journalGet")) return .journal_get;
+    if (std.mem.eql(u8, value, "journalPut")) return .journal_put;
+    if (std.mem.eql(u8, value, "refreshLease")) return .refresh_lease;
+    return error.InvalidFactoryRun;
+}
+
+fn jsonRequiredNumber(object: std.json.ObjectMap, name: []const u8) !f64 {
+    return switch (object.get(name) orelse return error.InvalidFactoryRun) {
+        .integer => |value| @floatFromInt(value),
+        .float => |value| value,
+        else => error.InvalidFactoryRun,
+    };
+}
+
+fn decodeFactoryFailure(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) !factory_types.FactoryFailure {
+    const object = switch (value) {
+        .object => |object| object,
+        else => return error.InvalidFactoryRun,
+    };
+    const failure_type = try jsonRequiredString(object, "type");
+    const run_id = try allocator.dupe(u8, try jsonRequiredString(object, "runId"));
+    if (std.mem.eql(u8, failure_type, "factory_limit_reached")) {
+        const suggested_value = if (object.get("suggestedValue")) |suggested| switch (suggested) {
+            .integer => |number| @as(f64, @floatFromInt(number)),
+            .float => |number| number,
+            .null => null,
+            else => return error.InvalidFactoryRun,
+        } else null;
+        return .{ .limit_reached = .{
+            .kind = try parseFactoryFailureKind(try jsonRequiredString(object, "kind")),
+            .value = try jsonRequiredNumber(object, "value"),
+            .suggested_value = suggested_value,
+            .run_id = run_id,
+        } };
+    }
+    if (std.mem.eql(u8, failure_type, "factory_resume_declined"))
+        return .{ .resume_declined = .{
+            .run_id = run_id,
+            .reason = try allocator.dupe(u8, try jsonRequiredString(object, "reason")),
+        } };
+    if (std.mem.eql(u8, failure_type, "factory_durable_failure"))
+        return .{ .durable_failure = .{
+            .code = try allocator.dupe(u8, try jsonRequiredString(object, "code")),
+            .operation = try parseFactoryDurableOperation(
+                try jsonRequiredString(object, "operation"),
+            ),
+            .run_id = run_id,
+        } };
+    if (std.mem.eql(u8, failure_type, "factory_accounting_incomplete"))
+        return .{ .accounting_incomplete = .{
+            .run_id = run_id,
+            .drained_nano_aiu = switch (object.get("drainedNanoAiu") orelse return error.InvalidFactoryRun) {
+                .integer => |number| number,
+                else => return error.InvalidFactoryRun,
+            },
+        } };
+    if (std.mem.eql(u8, failure_type, "factory_provider_disconnected"))
+        return .{ .provider_disconnected = .{ .run_id = run_id } };
+    return error.InvalidFactoryRun;
+}
+
+fn decodeFactoryRun(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) !factory_types.FactoryRun {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const owned = arena.allocator();
+    const object = switch (value) {
+        .object => |object| object,
+        else => return error.InvalidFactoryRun,
+    };
+    const run_id = try owned.dupe(u8, try jsonRequiredString(object, "runId"));
+    const status = try parseFactoryStatus(try jsonRequiredString(object, "status"));
+    const attempt = if (object.get("attempt")) |attempt_value| switch (attempt_value) {
+        .integer => |number| std.math.cast(u64, number) orelse
+            return error.InvalidFactoryRun,
+        .null => null,
+        else => return error.InvalidFactoryRun,
+    } else null;
+    const snapshot = if (object.get("snapshot")) |snapshot|
+        try cloneFactoryJson(owned, snapshot)
+    else
+        null;
+    const outcome: factory_types.FactoryOutcome = switch (status) {
+        .pending => .pending,
+        .running => .running,
+        .completed => if (object.get("result")) |result|
+            .{ .completed = .{ .value = try cloneFactoryJson(owned, result) } }
+        else
+            .{ .completed = .absent },
+        .halted => .{ .halted = .{
+            .reason = try cloneOptionalFactoryString(owned, object, "reason"),
+            .failure = if (object.get("failure")) |failure| switch (failure) {
+                .null => null,
+                else => try decodeFactoryFailure(owned, failure),
+            } else null,
+        } },
+        .paused => .{ .paused = try decodeFactoryPauseInfo(
+            owned,
+            object.get("pauseInfo"),
+        ) },
+        .cancelled => .{ .cancelled = try cloneOptionalFactoryString(
+            owned,
+            object,
+            "reason",
+        ) },
+        .@"error" => .{ .@"error" = .{
+            .message = try cloneOptionalFactoryString(owned, object, "error"),
+            .failure = if (object.get("failure")) |failure| switch (failure) {
+                .null => null,
+                else => try decodeFactoryFailure(owned, failure),
+            } else null,
+        } },
+    };
+    return .{
+        .arena = arena,
+        .run_id = run_id,
+        .attempt = attempt,
+        .snapshot = snapshot,
+        .outcome = outcome,
+    };
+}
+
 const WireCapabilitiesUi = struct {
     canvases: ?bool = null,
     mcpApps: ?bool = null,
@@ -14822,6 +16183,9 @@ const ExtensionWireValues = struct {
     canvas_actions: std.ArrayList(WireCanvasAction) = .empty,
     canvases: std.ArrayList(WireCanvas) = .empty,
     open_canvases: std.ArrayList(WireOpenCanvas) = .empty,
+    factory_phases: std.ArrayList(WireFactoryPhase) = .empty,
+    factories: std.ArrayList(WireFactoryMeta) = .empty,
+    factories_present: bool = false,
     mcp_object: std.json.ObjectMap = .empty,
     mcp_servers: ?std.json.Value = null,
     custom_agents_present: bool = false,
@@ -14850,6 +16214,8 @@ const ExtensionWireValues = struct {
         self.canvas_actions.deinit(self.allocator);
         self.canvases.deinit(self.allocator);
         self.open_canvases.deinit(self.allocator);
+        self.factory_phases.deinit(self.allocator);
+        self.factories.deinit(self.allocator);
     }
 
     fn lowerHostInjection(
@@ -14980,6 +16346,47 @@ const ExtensionWireValues = struct {
             try self.mcp_object.put(self.allocator, server.name, try self.parseJson(json));
         }
         self.mcp_servers = .{ .object = self.mcp_object };
+    }
+
+    fn lowerFactories(
+        self: *ExtensionWireValues,
+        definitions: ?[]const factory_types.AgentFactory,
+    ) !void {
+        const values = definitions orelse return;
+        self.factories_present = true;
+        var phase_count: usize = 0;
+        for (values) |definition| phase_count += definition.meta.phases.len;
+        try self.factory_phases.ensureTotalCapacity(self.allocator, phase_count);
+        try self.factories.ensureTotalCapacity(self.allocator, values.len);
+        for (values) |definition| {
+            const phase_start = self.factory_phases.items.len;
+            for (definition.meta.phases) |phase| {
+                try self.factory_phases.append(self.allocator, .{
+                    .title = phase.title,
+                    .detail = phase.detail,
+                });
+            }
+            const limits: ?WireFactoryDeclaredLimits = if (definition.meta.limits) |value| .{
+                .maxConcurrentSubagents = value.max_concurrent_subagents,
+                .maxTotalSubagents = value.max_total_subagents,
+                .timeoutSeconds = value.timeout_seconds,
+                .maxAiCredits = value.max_ai_credits,
+            } else null;
+            try self.factories.append(self.allocator, .{
+                .name = definition.meta.name,
+                .description = definition.meta.description,
+                .phases = self.factory_phases.items[phase_start..],
+                .argsSchema = if (definition.meta.args_schema) |schema|
+                    try self.parseJson(schema.bytes)
+                else
+                    null,
+                .limits = limits,
+            });
+        }
+    }
+
+    fn wireFactories(self: *const ExtensionWireValues) ?[]const WireFactoryMeta {
+        return if (self.factories_present) self.factories.items else null;
     }
 };
 
@@ -15163,6 +16570,7 @@ const ResumeSessionRequest = struct {
     disableResume: ?bool,
     continuePendingWork: ?bool,
     canvases: ?[]const WireCanvas,
+    factories: ?[]const WireFactoryMeta,
     requestCanvasRenderer: ?bool,
     requestExtensions: ?bool,
     extensionSdkPath: ?[]const u8,
@@ -15868,6 +17276,7 @@ fn buildPreparedResumeSessionRequest(
         .disableResume = if (config.suppress_resume_event) true else null,
         .continuePendingWork = if (config.continue_pending_work) true else null,
         .canvases = if (values.canvases.items.len > 0) values.canvases.items else null,
+        .factories = values.wireFactories(),
         .requestCanvasRenderer = if (features.request_canvas_renderer) true else null,
         .requestExtensions = if (features.request_extensions) true else null,
         .extensionSdkPath = config.extensions.extension_sdk_path,
@@ -18009,6 +19418,25 @@ fn findObservedRequestAt(
         }
     }
     return null;
+}
+
+fn countObservedRequests(
+    requests: []const std.json.Value,
+    method: []const u8,
+) usize {
+    var count: usize = 0;
+    for (requests) |request| {
+        const object = switch (request) {
+            .object => |value| value,
+            else => continue,
+        };
+        const request_method = switch (object.get("method") orelse continue) {
+            .string => |value| value,
+            else => continue,
+        };
+        if (std.mem.eql(u8, request_method, method)) count += 1;
+    }
+    return count;
 }
 
 test "empty mode lowers restrictive create and resume requests" {
@@ -28626,6 +30054,438 @@ test "custom agent optional slices preserve omitted and empty values" {
     );
 }
 
+test "factory API preserves wire options and decodes run envelopes" {
+    const allocator = std.testing.allocator;
+    const fake_runtime = try fakeRuntimePath(allocator);
+    defer allocator.free(fake_runtime);
+    var client = try Client.init(allocator, std.testing.io, .{
+        .connection = .{ .stdio = .{
+            .path = "node",
+            .args = &.{fake_runtime},
+        } },
+    });
+    defer client.deinit();
+    const session = try client.createSession(.{ .session_id = "session-1" });
+    const api = session.factory();
+    const args = try factory_types.JsonView.init("{\"topic\":\"factories\"}");
+
+    var run = try api.run(allocator, "demo", .{
+        .args = args,
+        .limits = .{
+            .max_concurrent_subagents = .{ .value = 3 },
+            .max_total_subagents = .unlimited,
+            .max_ai_credits = .{ .value = 2.5 },
+        },
+        .notify_on_complete = true,
+        .resume_from_run_id = "prior-run",
+    });
+    defer run.deinit();
+    try std.testing.expectEqualStrings("run-1", run.run_id);
+    try std.testing.expectEqual(@as(?u64, 1), run.attempt);
+    switch (run.outcome) {
+        .completed => |result| switch (result) {
+            .value => |value| try std.testing.expectEqualStrings("null", value.bytes),
+            .absent => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    var resumed = try api.@"resume"(allocator, "run-1", .{
+        .limits = .{ .timeout_seconds = .{ .value = 30 } },
+        .log_phase_names = false,
+    });
+    defer resumed.deinit();
+    switch (resumed.outcome) {
+        .@"error" => |failure| {
+            try std.testing.expectEqualStrings("limit reached", failure.message.?);
+            switch (failure.failure.?) {
+                .limit_reached => |limit| {
+                    try std.testing.expect(limit.kind == .max_ai_credits);
+                    try std.testing.expectEqual(@as(f64, 2.5), limit.value);
+                    try std.testing.expectEqual(@as(?f64, 4), limit.suggested_value);
+                },
+                else => return error.TestUnexpectedResult,
+            }
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    var paused = try api.getRun(allocator, "run-1");
+    defer paused.deinit();
+    switch (paused.outcome) {
+        .paused => |info| switch (info) {
+            .checkpoint => |key| try std.testing.expectEqualStrings("review", key),
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    var runs = try api.listRuns(allocator, .{ .after_seq = 9, .limit = 25 });
+    defer runs.deinit();
+    try std.testing.expectEqualStrings("{\"runs\":[]}", runs.value.bytes);
+    var detail = try api.getRunDetail(allocator, "run-1");
+    defer detail.deinit();
+    var progress = try api.getRunProgress(allocator, "run-1", .{
+        .phase_id = "phase-1",
+        .before_seq = 20,
+    });
+    defer progress.deinit();
+    var cancelled = try api.pause(allocator, "run-1");
+    defer cancelled.deinit();
+    try std.testing.expect(cancelled.outcome == .cancelled);
+    var completed = try api.cancel(allocator, "run-1");
+    defer completed.deinit();
+    switch (completed.outcome) {
+        .completed => |result| try std.testing.expect(result == .absent),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const inspection = try client.callRpc(std.json.Value, "test.inspect", .{});
+    defer inspection.deinit();
+    const requests = inspection.value.object.get("requests").?.array.items;
+    const run_params = findObservedRequest(
+        requests,
+        "session.factory.run",
+    ).?.object.get("params").?.object;
+    try std.testing.expectEqualStrings(
+        "factories",
+        run_params.get("args").?.object.get("topic").?.string,
+    );
+    const run_limits =
+        run_params.get("options").?.object.get("limits").?.object;
+    try std.testing.expectEqual(@as(i64, 3), run_limits.get("maxConcurrentSubagents").?.integer);
+    try std.testing.expect(run_limits.get("maxTotalSubagents").? == .null);
+    try std.testing.expect(!run_limits.contains("timeoutSeconds"));
+    try std.testing.expectEqual(@as(f64, 2.5), run_limits.get("maxAiCredits").?.float);
+    try std.testing.expectEqualStrings(
+        "prior-run",
+        run_params.get("options").?.object.get("resumeFromRunId").?.string,
+    );
+
+    const resume_params = findObservedRequest(
+        requests,
+        "session.factory.resume",
+    ).?.object.get("params").?.object;
+    try std.testing.expectEqual(
+        @as(i64, 30),
+        resume_params.get("limits").?.object.get("timeoutSeconds").?.integer,
+    );
+    try std.testing.expect(!resume_params.get("limits").?.object.contains("maxAiCredits"));
+}
+
+test "factory run and resume wait for terminal envelopes" {
+    const allocator = std.testing.allocator;
+    const fake_runtime = try fakeRuntimePath(allocator);
+    defer allocator.free(fake_runtime);
+    var client = try Client.init(allocator, std.testing.io, .{
+        .connection = .{ .stdio = .{
+            .path = "node",
+            .args = &.{ fake_runtime, "--factory-pending" },
+        } },
+    });
+    defer client.deinit();
+    const session = try client.createSession(.{ .session_id = "session-1" });
+
+    var run = try session.factory().run(allocator, "demo", .{});
+    defer run.deinit();
+    try std.testing.expect(run.outcome == .completed);
+
+    var resumed = try session.factory().@"resume"(allocator, "run-1", .{});
+    defer resumed.deinit();
+    try std.testing.expect(resumed.outcome == .completed);
+
+    var cancellation: session_types.Cancellation = .{};
+    cancellation.cancel(std.testing.io);
+    try std.testing.expectError(
+        error.Canceled,
+        session.factory().waitForRun(allocator, "run-1", .{
+            .cancellation = &cancellation,
+        }),
+    );
+
+    const inspection = try client.callRpc(std.json.Value, "test.inspect", .{});
+    defer inspection.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        countObservedRequests(
+            inspection.value.object.get("requests").?.array.items,
+            "session.factory.getRun",
+        ),
+    );
+}
+
+test "factory registration preserves omitted and explicitly empty values" {
+    const allocator = std.testing.allocator;
+    var values = ExtensionWireValues.init(allocator);
+    defer values.deinit();
+
+    try values.lowerFactories(null);
+    try std.testing.expect(values.wireFactories() == null);
+
+    try values.lowerFactories(&.{});
+    const factories = values.wireFactories().?;
+    try std.testing.expectEqual(@as(usize, 0), factories.len);
+}
+
+test "factory run decoding accepts explicit null optional failure fields" {
+    const allocator = std.testing.allocator;
+    const without_failure = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"runId":"run-1","status":"error","error":null,"failure":null}
+    ,
+        .{},
+    );
+    defer without_failure.deinit();
+    var decoded = try decodeFactoryRun(allocator, without_failure.value);
+    defer decoded.deinit();
+    switch (decoded.outcome) {
+        .@"error" => |failure| {
+            try std.testing.expect(failure.message == null);
+            try std.testing.expect(failure.failure == null);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    const null_suggestion = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"runId":"run-2","status":"error","failure":{"type":"factory_limit_reached","kind":"timeoutSeconds","value":10,"suggestedValue":null,"runId":"run-2"}}
+    ,
+        .{},
+    );
+    defer null_suggestion.deinit();
+    var limited = try decodeFactoryRun(allocator, null_suggestion.value);
+    defer limited.deinit();
+    switch (limited.outcome) {
+        .@"error" => |failure| switch (failure.failure.?) {
+            .limit_reached => |limit| try std.testing.expect(limit.suggested_value == null),
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "factory execute supports nested agent RPC without blocking the pump" {
+    const callbacks = struct {
+        fn produce(allocator: std.mem.Allocator, _: ?*anyopaque) !factory_types.Json {
+            return factory_types.Json.init(allocator, "{\"cached\":true}");
+        }
+
+        fn run(
+            allocator: std.mem.Allocator,
+            context: *factory_types.FactoryContext,
+            _: ?*anyopaque,
+        ) !?factory_types.Json {
+            const args = try context.args.parse(
+                struct { prompt: []const u8 },
+                allocator,
+            );
+            defer args.deinit();
+            try context.phase("Work");
+            try context.log("starting nested work");
+            var cached = try context.step(allocator, "prepared", .{
+                .produce = produce,
+            }, .{});
+            cached.deinit();
+            return try context.agent(allocator, args.value.prompt, .{
+                .label = "worker",
+            });
+        }
+    };
+
+    const allocator = std.testing.allocator;
+    const fake_runtime = try fakeRuntimePath(allocator);
+    defer allocator.free(fake_runtime);
+    var client = try Client.init(allocator, std.testing.io, .{
+        .connection = .{ .stdio = .{
+            .path = "node",
+            .args = &.{ fake_runtime, "--exercise-factory" },
+        } },
+    });
+    defer client.deinit();
+    var joined = try client.joinParentSession("factory-session", .{
+        .extensions = .{
+            .factories = &.{.{
+                .meta = .{
+                    .name = "demo",
+                    .description = "Runs one nested agent.",
+                    .phases = &.{.{ .title = "Work" }},
+                    .args_schema = try factory_types.JsonView.init(
+                        \\{"type":"object","properties":{"prompt":{"type":"string"}},"required":["prompt"]}
+                    ),
+                    .limits = .{
+                        .max_concurrent_subagents = 1,
+                        .max_total_subagents = 2,
+                    },
+                },
+                .run = callbacks.run,
+            }},
+        },
+    });
+    defer joined.deinit();
+
+    const inspection = try client.callRpc(std.json.Value, "test.inspect", .{});
+    defer inspection.deinit();
+    const factory_result = inspection.value.object.get("factoryResult").?;
+    try std.testing.expect(factory_result == .object);
+    try std.testing.expect(!factory_result.object.contains("error"));
+    try std.testing.expectEqualStrings(
+        "nested work",
+        factory_result.object.get("result").?.object
+            .get("result").?.object.get("answer").?.string,
+    );
+
+    const requests = inspection.value.object.get("requests").?.array.items;
+    const join_request = findObservedRequest(requests, "session.resume").?;
+    const definitions =
+        join_request.object.get("params").?.object.get("factories").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), definitions.len);
+    try std.testing.expectEqualStrings(
+        "demo",
+        definitions[0].object.get("name").?.string,
+    );
+    const agent_request = findObservedRequest(requests, "session.factory.agent").?;
+    const agent_params = agent_request.object.get("params").?.object;
+    try std.testing.expectEqualStrings(
+        "reverse-run",
+        agent_params.get("factoryRunId").?.string,
+    );
+    try std.testing.expectEqualStrings(
+        "attempt-1",
+        agent_params.get("executionToken").?.string,
+    );
+    try std.testing.expectEqualStrings(
+        "worker",
+        agent_params.get("opts").?.object.get("label").?.string,
+    );
+    try std.testing.expect(findObservedRequest(
+        requests,
+        "session.factory.journal.get",
+    ) != null);
+    try std.testing.expect(findObservedRequest(
+        requests,
+        "session.factory.journal.put",
+    ) != null);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        countObservedRequests(requests, "session.factory.log"),
+    );
+}
+
+test "factory abort cancels only the matching execution attempt" {
+    const callback = struct {
+        fn run(
+            allocator: std.mem.Allocator,
+            context: *factory_types.FactoryContext,
+            _: ?*anyopaque,
+        ) !?factory_types.Json {
+            return context.agent(allocator, "wait forever", .{});
+        }
+    }.run;
+
+    const allocator = std.testing.allocator;
+    const fake_runtime = try fakeRuntimePath(allocator);
+    defer allocator.free(fake_runtime);
+    var client = try Client.init(allocator, std.testing.io, .{
+        .connection = .{ .stdio = .{
+            .path = "node",
+            .args = &.{ fake_runtime, "--exercise-factory-abort" },
+        } },
+    });
+    defer client.deinit();
+    var joined = try client.joinParentSession("factory-session", .{
+        .extensions = .{
+            .factories = &.{.{
+                .meta = .{
+                    .name = "cancel-me",
+                    .description = "Waits for cancellation.",
+                },
+                .run = callback,
+            }},
+        },
+    });
+    defer joined.deinit();
+
+    const inspection = try client.callRpc(std.json.Value, "test.inspect", .{});
+    defer inspection.deinit();
+    const result = inspection.value.object.get("factoryResult").?.object;
+    try std.testing.expectEqual(
+        @as(i64, -32000),
+        result.get("execute").?.object.get("error").?.object.get("code").?.integer,
+    );
+    try std.testing.expectEqualStrings(
+        "FactoryCancelled",
+        result.get("execute").?.object.get("error").?.object.get("message").?.string,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        result.get("abort").?.object.get("result").?.object.count(),
+    );
+    const drained = try client.callRpc(std.json.Value, "test.inspect", .{});
+    defer drained.deinit();
+    try std.testing.expectEqual(@as(usize, 0), client.abandoned_response_ids.items.len);
+}
+
+test "factory combinators propagate nested RPC failures" {
+    const callbacks = struct {
+        fn task(
+            allocator: std.mem.Allocator,
+            branch: *factory_types.FactoryBranch,
+            _: ?*anyopaque,
+        ) !?factory_types.Json {
+            return branch.agent(allocator, "fail", .{});
+        }
+
+        fn run(
+            allocator: std.mem.Allocator,
+            context: *factory_types.FactoryContext,
+            _: ?*anyopaque,
+        ) !?factory_types.Json {
+            const results = try context.parallel(allocator, &.{
+                .{ .run = task },
+            });
+            defer factory_types.deinitOptionalJsonSlice(allocator, results);
+            return null;
+        }
+    };
+
+    const allocator = std.testing.allocator;
+    const fake_runtime = try fakeRuntimePath(allocator);
+    defer allocator.free(fake_runtime);
+    var client = try Client.init(allocator, std.testing.io, .{
+        .connection = .{ .stdio = .{
+            .path = "node",
+            .args = &.{ fake_runtime, "--exercise-factory-agent-failure" },
+        } },
+    });
+    defer client.deinit();
+    var joined = try client.joinParentSession("factory-session", .{
+        .extensions = .{
+            .factories = &.{.{
+                .meta = .{
+                    .name = "fail-agent",
+                    .description = "Propagates agent RPC failure.",
+                },
+                .run = callbacks.run,
+            }},
+        },
+    });
+    defer joined.deinit();
+
+    const inspection = try client.callRpc(std.json.Value, "test.inspect", .{});
+    defer inspection.deinit();
+    const response = inspection.value.object.get("factoryResult").?.object;
+    try std.testing.expectEqual(
+        @as(i64, -32000),
+        response.get("error").?.object.get("code").?.integer,
+    );
+    try std.testing.expectEqualStrings(
+        "FactoryTransportFailure",
+        response.get("error").?.object.get("message").?.string,
+    );
+}
+
 test "custom agent validation precedes lifecycle state and RPC writes" {
     const allocator = std.testing.allocator;
     var client = Client{
@@ -29309,6 +31169,8 @@ test "lifecycle dispatch tracking treats write failure as possibly dispatched" {
         .{ .sessionId = "resident" },
         .{ .session = .{ .session_id = "resident" } },
         &dispatched,
+        null,
+        null,
     );
     switch (result) {
         .success => |value| {
