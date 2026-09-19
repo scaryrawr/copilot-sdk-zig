@@ -30326,17 +30326,22 @@ test "factory execute supports nested agent RPC without blocking the pump" {
             context: *factory_types.FactoryContext,
             _: ?*anyopaque,
         ) !?factory_types.Json {
+            std.debug.print("factory diagnostic: callback start\n", .{});
             const args = try context.args.parse(
                 struct { prompt: []const u8 },
                 allocator,
             );
             defer args.deinit();
+            std.debug.print("factory diagnostic: phase\n", .{});
             try context.phase("Work");
+            std.debug.print("factory diagnostic: log\n", .{});
             try context.log("starting nested work");
+            std.debug.print("factory diagnostic: step\n", .{});
             var cached = try context.step(allocator, "prepared", .{
                 .produce = produce,
             }, .{});
             cached.deinit();
+            std.debug.print("factory diagnostic: agent\n", .{});
             return try context.agent(allocator, args.value.prompt, .{
                 .label = "worker",
             });

@@ -62,11 +62,19 @@ function attach(input, output) {
 
     function request(method, params) {
         const id = nextRequestId++;
+        if (args.includes("--exercise-factory")) {
+            console.error(`factory diagnostic: send ${method} ${id}`);
+        }
         send({ jsonrpc: "2.0", id, method, params });
         return new Promise((resolve) => pending.set(id, { resolve }));
     }
 
     async function handle(message) {
+        if (args.includes("--exercise-factory")) {
+            console.error(
+                `factory diagnostic: receive ${message.method ?? `response ${message.id}`}`
+            );
+        }
         if (message.method === undefined) {
             const waiter = pending.get(message.id);
             if (!waiter) return;
