@@ -564,6 +564,74 @@ host-owned OAuth token-store callbacks are not present in the pinned contract;
 see `sync/extensibility-contract.json` for the reproducible compatibility
 classification.
 
+### Agent factories
+
+Register Agent Factories when joining a parent session, then start and inspect
+durable runs through `session.factory()`:
+
+```zig
+const factory = copilot.AgentFactory{
+    .meta = .{
+        .name = "research",
+        .description = "Research a topic with one focused subagent.",
+        .phases = &.{.{ .title = "Research" }},
+        .args_schema = try copilot.JsonView.init(
+            \\{"type":"object","properties":{"topic":{"type":"string"}},"required":["topic"]}
+        ),
+        .limits = .{
+            .max_concurrent_subagents = 2,
+            .max_total_subagents = 4,
+        },
+    },
+    .run = struct {
+        fn run(
+            allocator: std.mem.Allocator,
+            context: *copilot.FactoryContext,
+            _: ?*anyopaque,
+        ) !?copilot.Json {
+            const input = try context.args.parse(
+                struct { topic: []const u8 },
+                allocator,
+            );
+            defer input.deinit();
+
+            try context.phase("Research");
+            return context.agent(allocator, input.value.topic, .{
+                .label = "researcher",
+            });
+        }
+    }.run,
+};
+
+var joined = try client.joinParentSession("parent-session-id", .{
+    .extensions = .{ .factories = &.{factory} },
+});
+defer joined.deinit();
+
+const args = try copilot.JsonView.init(
+    \\{"topic":"Compare the supported transport modes"}
+);
+var run = try joined.session.factory().run(allocator, "research", .{
+    .args = args,
+});
+defer run.deinit();
+```
+
+Factory callbacks may call `agent`, `step`, `phase`, `log`, and `pause`.
+`parallel` runs independent `FactoryTask` values behind a barrier; `pipeline`
+runs each input through its stages sequentially while processing inputs
+concurrently. Give independent agents stable, unique labels. Use `step` for
+idempotent work whose owned JSON result should survive retries; set
+`.is_volatile = true` only when replay is intended.
+
+`factory().run`, `resume`, `getRun`, `waitForRun`, `listRuns`, `getRunDetail`,
+`getRunProgress`, `pause`, and `cancel` implement the pinned experimental
+factory protocol. `FactoryRun`, list/detail/progress results, agent results, and
+step results own their JSON storage and must be deinitialized. A returned
+`null` JSON value is distinct from no factory result. Cancellation is
+cooperative: callbacks and pattern helpers observe `context.cancel`, and nested
+factory registration is intentionally unsupported by the protocol.
+
 Use `CreateSessionConfig.available_tools` and
 `ResumeSessionConfig.available_tools`, with their matching `excluded_tools`
 fields, to constrain the model-visible tool set. Tool filters use

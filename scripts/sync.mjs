@@ -49,6 +49,7 @@ const metadataPath = join(vendorDirectory, "upstream.json");
 const generatedPath = join(root, "src", "protocol_version.zig");
 const zigSessionSource = readFileSync(join(root, "src", "session.zig"), "utf8");
 const zigClientSource = readFileSync(join(root, "src", "client.zig"), "utf8");
+const zigFactorySource = readFileSync(join(root, "src", "factory.zig"), "utf8");
 const zigRuntimeSource = readFileSync(join(root, "src", "runtime.zig"), "utf8");
 const compatibilityPath = join(root, "sync", "compatibility.json");
 const publicRpcSurfacePath = join(root, "sync", "public-rpc-surface.json");
@@ -296,6 +297,21 @@ const extensibilityMethods = [
   "session.mcp.apps.listTools",
   "session.mcp.apps.callTool",
   "session.mcp.apps.readResource",
+  "session.factory.run",
+  "session.factory.resume",
+  "session.factory.getRun",
+  "session.factory.listRuns",
+  "session.factory.getRunDetail",
+  "session.factory.getRunProgress",
+  "session.factory.pause",
+  "session.factory.cancel",
+  "session.factory.agent",
+  "session.factory.journal.get",
+  "session.factory.journal.put",
+  "session.factory.pauseAtCheckpoint",
+  "session.factory.log",
+  "factory.execute",
+  "factory.abort",
 ];
 
 function expectedExtensibilityContract(upstreamCommit) {
@@ -328,7 +344,7 @@ function expectedExtensibilityContract(upstreamCommit) {
       },
       extensionJoin: {
         wireMethod: "session.resume",
-        fields: ["requestedEnvironmentVariables"],
+        fields: ["factories", "requestedEnvironmentVariables"],
         responseFields: ["grantedEnvironmentVariables"],
         ownership: "owned-result",
         redeclared: ["onPermissionRequest"],
@@ -377,6 +393,11 @@ function expectedExtensibilityContract(upstreamCommit) {
         "session.mcp.apps.callTool",
         "session.mcp.apps.readResource",
       ],
+    },
+    agentFactories: {
+      status: "typed",
+      registrationField: "factories",
+      methods: extensibilityMethods.filter((method) => method.includes("factory")),
     },
     deferred: {
       extensionsCapability: "The pinned lifecycle response has no extension-management acknowledgement bit.",
@@ -765,7 +786,10 @@ function verifyLifecycleContract(contract, clientSource, typesSource, extensionS
 
   assertFieldsOwnedBy(
     contract.lifecycle.extensionJoin.fields,
-    { requestedEnvironmentVariables: ["requestedEnvironmentVariables", "optional:string[]"] },
+    {
+      factories: ["factories", "optional:FactoryHandle[]"],
+      requestedEnvironmentVariables: ["requestedEnvironmentVariables", "optional:string[]"],
+    },
     join.properties,
     "JoinSessionConfig",
   );
@@ -1899,6 +1923,20 @@ function verifyCompatibility(apiSchema, eventSchema) {
   }
   for (const [name, expected] of Object.entries(compatibility.modelEnums)) {
     requireExactStrings(stringEnum(apiSchema, name), expected, `${name} model enum`);
+  }
+  for (const contract of [
+    ["FactoryLogLineKind", "FactoryLogKind"],
+    ["FactoryRunStatus", "FactoryRunStatus"],
+    ["FactoryRunFailureKind", "FactoryFailureKind"],
+    ["FactoryDurableOperation", "FactoryDurableOperation"],
+  ]) {
+    requireExactStrings(
+      zigEnumValues(zigFactorySource, contract[1]),
+      stringEnum(apiSchema, contract[0]).map((value) =>
+        value.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)
+      ),
+      `Zig ${contract[1]} values`,
+    );
   }
   const autoTiers = ["balance", "efficiency", "fast", "intelligence"];
   requireExactStrings(stringEnum(apiSchema, "AutoTier"), autoTiers, "API AutoTier enum");

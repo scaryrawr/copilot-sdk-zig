@@ -38,6 +38,14 @@ const observedEnvironment = Object.fromEntries(
         .map((key) => [key, process.env[key]])
 );
 let lastRequest = null;
+let factoryExercise = null;
+let factoryResult = null;
+let hungFactoryAgentId = null;
+let markHungFactoryAgentReady;
+const hungFactoryAgentReady = new Promise((resolve) => {
+    markHungFactoryAgentReady = resolve;
+});
+let factoryAbortSent = false;
 let nextRequestId = 10_000;
 let activeConnections = 0;
 const requests = [];
@@ -184,7 +192,99 @@ function attach(input, output) {
                 }
                 result = { success: true };
                 break;
+            case "session.factory.run":
+                result = args.includes("--factory-pending")
+                    ? { runId: "run-1", status: "pending" }
+                    : {
+                          runId: "run-1",
+                          attempt: 1,
+                          status: "completed",
+                          result: null,
+                      };
+                break;
+            case "session.factory.resume":
+                result = args.includes("--factory-pending")
+                    ? {
+                          factoryName: "demo",
+                          run: { runId: "run-1", status: "running" },
+                      }
+                    : {
+                          factoryName: "demo",
+                          run: {
+                              runId: "run-1",
+                              attempt: 2,
+                              status: "error",
+                              error: "limit reached",
+                              failure: {
+                                  type: "factory_limit_reached",
+                                  kind: "maxAiCredits",
+                                  value: 2.5,
+                                  suggestedValue: 4,
+                                  runId: "run-1",
+                              },
+                          },
+                      };
+                break;
+            case "session.factory.getRun":
+                result = args.includes("--factory-pending")
+                    ? { runId: "run-1", status: "completed", result: 42 }
+                    : {
+                          runId: "run-1",
+                          status: "paused",
+                          pauseInfo: { type: "checkpoint", key: "review" },
+                      };
+                break;
+            case "session.factory.listRuns":
+                result = { runs: [] };
+                break;
+            case "session.factory.getRunDetail":
+                result = {
+                    run: { runId: "run-1" },
+                    phases: [],
+                    agents: [],
+                    progress: [],
+                };
+                break;
+            case "session.factory.getRunProgress":
+                result = { records: [] };
+                break;
+            case "session.factory.pause":
+                result = { runId: "run-1", status: "cancelled", reason: null };
+                break;
+            case "session.factory.cancel":
+                result = { runId: "run-1", status: "completed" };
+                break;
+            case "session.factory.agent":
+                if (args.includes("--exercise-factory-abort")) {
+                    if (factoryAbortSent) {
+                        result = { result: "too late" };
+                        break;
+                    }
+                    hungFactoryAgentId = message.id;
+                    markHungFactoryAgentReady();
+                    return;
+                }
+                if (args.includes("--exercise-factory-agent-failure")) {
+                    send({
+                        jsonrpc: "2.0",
+                        id: message.id,
+                        error: { code: -32000, message: "agent failed" },
+                    });
+                    return;
+                }
+                result = { result: { answer: message.params.prompt } };
+                break;
+            case "session.factory.journal.get":
+                result = { hit: false };
+                break;
+            case "session.factory.journal.put":
+            case "session.factory.log":
+                result = { success: true };
+                break;
             case "test.inspect":
+                if (factoryExercise !== null) {
+                    await factoryExercise;
+                }
                 await new Promise((resolve) => setImmediate(resolve));
                 result = {
                     args,
@@ -192,6 +292,7 @@ function attach(input, output) {
                     lastRequest: previousRequest,
                     requests,
                     activeConnections,
+                    factoryResult,
                 };
                 break;
             case "test.fs":
@@ -206,6 +307,66 @@ function attach(input, output) {
                 return;
         }
         send({ jsonrpc: "2.0", id: message.id, result });
+        if (
+            (args.includes("--exercise-factory") ||
+                args.includes("--exercise-factory-abort") ||
+                args.includes("--exercise-factory-agent-failure")) &&
+            message.method === "session.resume" &&
+            Array.isArray(message.params.factories) &&
+            message.params.factories.length > 0 &&
+            factoryExercise === null
+        ) {
+            const execute = request("factory.execute", {
+                sessionId: message.params.sessionId,
+                name: message.params.factories[0].name,
+                runId: "reverse-run",
+                executionToken: "attempt-1",
+                args: { prompt: "nested work" },
+            });
+            if (args.includes("--exercise-factory-abort")) {
+                factoryExercise = (async () => {
+                    await hungFactoryAgentReady;
+                    factoryAbortSent = true;
+                    const abort = await request("factory.abort", {
+                        sessionId: message.params.sessionId,
+                        runId: "reverse-run",
+                        executionToken: "attempt-1",
+                    });
+                    send({
+                        jsonrpc: "2.0",
+                        id: hungFactoryAgentId,
+                        result: { result: "too late" },
+                    });
+                    hungFactoryAgentId = null;
+                    factoryResult = { execute: await execute, abort };
+                })();
+            } else {
+                factoryExercise = execute.then((response) => {
+                    factoryResult = response;
+                });
+            }
+        }
+        if (
+            args.includes("--exercise-factory-generic") &&
+            message.method === "session.resume" &&
+            factoryExercise === null
+        ) {
+            factoryExercise = (async () => {
+                const execute = await request("factory.execute", {
+                    sessionId: message.params.sessionId,
+                    name: "generic",
+                    runId: "generic-run",
+                    executionToken: "generic-attempt",
+                    args: null,
+                });
+                const abort = await request("factory.abort", {
+                    sessionId: message.params.sessionId,
+                    runId: "generic-run",
+                    executionToken: "generic-attempt",
+                });
+                factoryResult = { execute, abort };
+            })();
+        }
     }
 
     input.on("data", (chunk) => {

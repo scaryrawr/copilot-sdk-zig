@@ -57,6 +57,7 @@
     "extensionJoin": {
       "wireMethod": "session.resume",
       "fields": [
+        "factories",
         "requestedEnvironmentVariables"
       ],
       "responseFields": [
@@ -119,6 +120,27 @@
       "session.mcp.apps.listTools",
       "session.mcp.apps.callTool",
       "session.mcp.apps.readResource"
+    ]
+  },
+  "agentFactories": {
+    "status": "typed",
+    "registrationField": "factories",
+    "methods": [
+      "session.factory.run",
+      "session.factory.resume",
+      "session.factory.getRun",
+      "session.factory.listRuns",
+      "session.factory.getRunDetail",
+      "session.factory.getRunProgress",
+      "session.factory.pause",
+      "session.factory.cancel",
+      "session.factory.agent",
+      "session.factory.journal.get",
+      "session.factory.journal.put",
+      "session.factory.pauseAtCheckpoint",
+      "session.factory.log",
+      "factory.execute",
+      "factory.abort"
     ]
   },
   "deferred": {
