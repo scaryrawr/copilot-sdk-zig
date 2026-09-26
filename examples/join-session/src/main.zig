@@ -27,7 +27,7 @@ pub fn main(init: std.process.Init) !void {
     var client = try copilot.Client.initParent(init.gpa, init.io);
     defer client.deinit();
     var joined = try client.joinParentSession(args[2], .{
-        .model = "gpt-5.6-luna",
+        .model = "gpt-6-luna",
         .tools = &.{extension_tool},
         .extensions = .{
             .common = .{
