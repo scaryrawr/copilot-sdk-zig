@@ -30,7 +30,7 @@ pub fn main(init: std.process.Init) !void {
     var client = try copilot.Client.init(init.gpa, init.io, .{});
     defer client.deinit();
     const session = try client.createSession(.{
-        .model = "gpt-5.6-luna",
+        .model = "gpt-6-luna",
         .tools = &.{weather_tool},
     });
     defer session.disconnect() catch |err| {

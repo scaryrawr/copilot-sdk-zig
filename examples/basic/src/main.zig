@@ -23,7 +23,7 @@ pub fn main(init: std.process.Init) !void {
     defer client.deinit();
 
     var session = try client.createSession(.{
-        .model = "gpt-5.6-luna",
+        .model = "gpt-6-luna",
         .streaming = true,
         .on_permission_request = copilot.approveAll,
     });
