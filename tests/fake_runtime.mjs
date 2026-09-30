@@ -38,22 +38,59 @@ const observedEnvironment = Object.fromEntries(
         .map((key) => [key, process.env[key]])
 );
 let lastRequest = null;
-let factoryExercise = null;
-let factoryResult = null;
-let hungFactoryAgentId = null;
-let markHungFactoryAgentReady;
-const hungFactoryAgentReady = new Promise((resolve) => {
-    markHungFactoryAgentReady = resolve;
+let workflowExercise = null;
+let workflowResult = null;
+let hungWorkflowAgentId = null;
+let markHungWorkflowAgentReady;
+const hungWorkflowAgentReady = new Promise((resolve) => {
+    markHungWorkflowAgentReady = resolve;
 });
-let factoryAbortSent = false;
+let workflowAbortSent = false;
 let nextRequestId = 10_000;
 let activeConnections = 0;
 const requests = [];
 let failNextOptionsUpdate = false;
 
+function workflowSummary() {
+    return {
+        runId: "run-1",
+        workflowName: "demo",
+        description: "Demo workflow",
+        status: "paused",
+        revision: 2,
+        createdAt: 1,
+        startedAt: 1,
+        updatedAt: 2,
+        completedAt: null,
+        currentPhase: null,
+        declaredPhaseCount: 0,
+        liveAgentCount: 0,
+        totalSpawnedAgentCount: 0,
+        consumed: { activeMs: 1, subagents: 0, nanoAiu: 0 },
+        declaredLimits: {},
+        approved: null,
+        observedAt: 2,
+        activeSegmentStartedAt: null,
+        terminal: { pauseInfo: { type: "user" } },
+        canResume: true,
+    };
+}
+
+function workflowProgress() {
+    return {
+        records: [],
+        oldestSeq: null,
+        newestSeq: null,
+        hasMoreOlder: false,
+        hasMoreNewer: false,
+        revision: 2,
+    };
+}
+
 function attach(input, output) {
     let buffer = Buffer.alloc(0);
     const pending = new Map();
+    const journal = new Map();
 
     function send(message) {
         const body = JSON.stringify(message);
@@ -192,8 +229,8 @@ function attach(input, output) {
                 }
                 result = { success: true };
                 break;
-            case "session.factory.run":
-                result = args.includes("--factory-pending")
+            case "session.workflow.run":
+                result = args.includes("--workflow-pending")
                     ? { runId: "run-1", status: "pending" }
                     : {
                           runId: "run-1",
@@ -202,21 +239,21 @@ function attach(input, output) {
                           result: null,
                       };
                 break;
-            case "session.factory.resume":
-                result = args.includes("--factory-pending")
+            case "session.workflow.resume":
+                result = args.includes("--workflow-pending")
                     ? {
-                          factoryName: "demo",
+                          workflowName: "demo",
                           run: { runId: "run-1", status: "running" },
                       }
                     : {
-                          factoryName: "demo",
+                          workflowName: "demo",
                           run: {
                               runId: "run-1",
                               attempt: 2,
                               status: "error",
                               error: "limit reached",
                               failure: {
-                                  type: "factory_limit_reached",
+                                  type: "workflow_limit_reached",
                                   kind: "maxAiCredits",
                                   value: 2.5,
                                   suggestedValue: 4,
@@ -225,8 +262,8 @@ function attach(input, output) {
                           },
                       };
                 break;
-            case "session.factory.getRun":
-                result = args.includes("--factory-pending")
+            case "session.workflow.getRun":
+                result = args.includes("--workflow-pending")
                     ? { runId: "run-1", status: "completed", result: 42 }
                     : {
                           runId: "run-1",
@@ -234,37 +271,43 @@ function attach(input, output) {
                           pauseInfo: { type: "checkpoint", key: "review" },
                       };
                 break;
-            case "session.factory.listRuns":
-                result = { runs: [] };
-                break;
-            case "session.factory.getRunDetail":
+            case "session.workflow.listRuns":
                 result = {
-                    run: { runId: "run-1" },
-                    phases: [],
-                    agents: [],
-                    progress: [],
+                    runs: [workflowSummary()],
+                    oldestSeq: null,
+                    newestSeq: null,
+                    hasMoreNewer: false,
+                    omittedOlder: 0,
                 };
                 break;
-            case "session.factory.getRunProgress":
-                result = { records: [] };
+            case "session.workflow.getRunDetail":
+                result = {
+                    ...workflowSummary(),
+                    phases: [],
+                    agents: [],
+                    progress: workflowProgress(),
+                };
                 break;
-            case "session.factory.pause":
+            case "session.workflow.getRunProgress":
+                result = workflowProgress();
+                break;
+            case "session.workflow.pause":
                 result = { runId: "run-1", status: "cancelled", reason: null };
                 break;
-            case "session.factory.cancel":
+            case "session.workflow.cancel":
                 result = { runId: "run-1", status: "completed" };
                 break;
-            case "session.factory.agent":
-                if (args.includes("--exercise-factory-abort")) {
-                    if (factoryAbortSent) {
+            case "session.workflow.agent":
+                if (args.includes("--exercise-workflow-abort")) {
+                    if (workflowAbortSent) {
                         result = { result: "too late" };
                         break;
                     }
-                    hungFactoryAgentId = message.id;
-                    markHungFactoryAgentReady();
+                    hungWorkflowAgentId = message.id;
+                    markHungWorkflowAgentReady();
                     return;
                 }
-                if (args.includes("--exercise-factory-agent-failure")) {
+                if (args.includes("--exercise-workflow-agent-failure")) {
                     send({
                         jsonrpc: "2.0",
                         id: message.id,
@@ -274,16 +317,24 @@ function attach(input, output) {
                 }
                 result = { result: { answer: message.params.prompt } };
                 break;
-            case "session.factory.journal.get":
-                result = { hit: false };
+            case "session.workflow.journal.get":
+                result = journal.has(message.params.key)
+                    ? { hit: true, resultJson: journal.get(message.params.key) }
+                    : { hit: false };
                 break;
-            case "session.factory.journal.put":
-            case "session.factory.log":
-                result = { success: true };
+            case "session.workflow.journal.put":
+                journal.set(message.params.key, message.params.resultJson);
+                result = {};
+                break;
+            case "session.workflow.pauseAtCheckpoint":
+                result = { action: "continue" };
+                break;
+            case "session.workflow.log":
+                result = {};
                 break;
             case "test.inspect":
-                if (factoryExercise !== null) {
-                    await factoryExercise;
+                if (workflowExercise !== null) {
+                    await workflowExercise;
                 }
                 await new Promise((resolve) => setImmediate(resolve));
                 result = {
@@ -292,7 +343,7 @@ function attach(input, output) {
                     lastRequest: previousRequest,
                     requests,
                     activeConnections,
-                    factoryResult,
+                    workflowResult,
                 };
                 break;
             case "test.fs":
@@ -308,63 +359,99 @@ function attach(input, output) {
         }
         send({ jsonrpc: "2.0", id: message.id, result });
         if (
-            (args.includes("--exercise-factory") ||
-                args.includes("--exercise-factory-abort") ||
-                args.includes("--exercise-factory-agent-failure")) &&
+            (args.includes("--exercise-workflow") ||
+                args.includes("--exercise-workflow-abort") ||
+                args.includes("--exercise-workflow-agent-failure")) &&
             message.method === "session.resume" &&
-            Array.isArray(message.params.factories) &&
-            message.params.factories.length > 0 &&
-            factoryExercise === null
+            Array.isArray(message.params.workflows) &&
+            message.params.workflows.length > 0 &&
+            workflowExercise === null
         ) {
-            const execute = request("factory.execute", {
+            const execute = request("workflow.execute", {
                 sessionId: message.params.sessionId,
-                name: message.params.factories[0].name,
+                name: message.params.workflows[0].name,
                 runId: "reverse-run",
                 executionToken: "attempt-1",
                 args: { prompt: "nested work" },
             });
-            if (args.includes("--exercise-factory-abort")) {
-                factoryExercise = (async () => {
-                    await hungFactoryAgentReady;
-                    factoryAbortSent = true;
-                    const abort = await request("factory.abort", {
+            if (args.includes("--exercise-workflow-abort")) {
+                workflowExercise = (async () => {
+                    await hungWorkflowAgentReady;
+                    const staleAbort = await request("workflow.abort", {
+                        sessionId: message.params.sessionId,
+                        runId: "reverse-run",
+                        executionToken: "stale-attempt",
+                    });
+                    workflowAbortSent = true;
+                    const abort = await request("workflow.abort", {
                         sessionId: message.params.sessionId,
                         runId: "reverse-run",
                         executionToken: "attempt-1",
                     });
                     send({
                         jsonrpc: "2.0",
-                        id: hungFactoryAgentId,
+                        id: hungWorkflowAgentId,
                         result: { result: "too late" },
                     });
-                    hungFactoryAgentId = null;
-                    factoryResult = { execute: await execute, abort };
+                    hungWorkflowAgentId = null;
+                    workflowResult = { execute: await execute, staleAbort, abort };
                 })();
             } else {
-                factoryExercise = execute.then((response) => {
-                    factoryResult = response;
+                workflowExercise = execute.then((response) => {
+                    workflowResult = response;
                 });
             }
         }
         if (
-            args.includes("--exercise-factory-generic") &&
+            args.includes("--exercise-workflow-invalid") &&
             message.method === "session.resume" &&
-            factoryExercise === null
+            workflowExercise === null
         ) {
-            factoryExercise = (async () => {
-                const execute = await request("factory.execute", {
+            workflowExercise = (async () => {
+                const valid = {
+                    sessionId: message.params.sessionId,
+                    name: message.params.workflows[0].name,
+                    runId: "invalid-run",
+                    executionToken: "attempt-1",
+                    args: null,
+                };
+                const missingArgs = { ...valid };
+                delete missingArgs.args;
+                const malformed = [];
+                for (const params of [
+                    null,
+                    missingArgs,
+                    { ...valid, name: 42 },
+                    { ...valid, executionToken: "" },
+                    { ...valid, extra: true },
+                ]) malformed.push(await request("workflow.execute", params));
+                const invalidResult = await request("workflow.execute", valid);
+                const invalidAbort = await request("workflow.abort", {
+                    ...valid,
+                    executionToken: null,
+                });
+                workflowResult = { malformed, invalidResult, invalidAbort };
+            })();
+        }
+        if (
+            args.includes("--exercise-workflow-generic") &&
+            message.method === "session.resume" &&
+            workflowExercise === null
+        ) {
+            workflowExercise = (async () => {
+                const execute = await request("workflow.execute", {
                     sessionId: message.params.sessionId,
                     name: "generic",
                     runId: "generic-run",
                     executionToken: "generic-attempt",
                     args: null,
                 });
-                const abort = await request("factory.abort", {
+                const abort = await request("workflow.abort", {
                     sessionId: message.params.sessionId,
                     runId: "generic-run",
                     executionToken: "generic-attempt",
                 });
-                factoryResult = { execute, abort };
+                workflowResult = { execute, abort };
             })();
         }
     }

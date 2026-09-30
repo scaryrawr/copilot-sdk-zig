@@ -466,7 +466,7 @@ export type JoinSessionConfig = Omit<
 > & {
   onPermissionRequest?: PermissionHandler;
   requestedEnvironmentVariables?: string[];
-  factories?: FactoryHandle[];
+  workflows?: WorkflowHandle[];
 };
 `;
 
@@ -476,7 +476,7 @@ export type JoinSessionConfig = Omit<
     properties: {
       onPermissionRequest: "optional:PermissionHandler",
       requestedEnvironmentVariables: "optional:string[]",
-      factories: "optional:FactoryHandle[]",
+      workflows: "optional:WorkflowHandle[]",
     },
   });
 });

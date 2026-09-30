@@ -1,5 +1,5 @@
 {
-  "upstreamCommit": "39c777fe7bf893ba5a4f8b710feeb2172d1d40f9",
+  "upstreamCommit": "4dc774c91aff609c338563aadc699d5c2dc596f7",
   "directMethods": [
     "auth.getStatus",
     "llmInference.setProvider",

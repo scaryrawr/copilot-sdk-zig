@@ -11,7 +11,7 @@ const session_types = @import("session.zig");
 const event_log = @import("event_log.zig");
 const turn_tracker = @import("turn_tracker.zig");
 const ext = @import("extensibility.zig");
-const factory_types = @import("factory.zig");
+const workflow_types = @import("workflow.zig");
 
 const max_queued_events: usize = 1024;
 const retained_event_limit: usize = 64;
@@ -1339,7 +1339,7 @@ const SendOperation = struct {
     failure: ?errors.Failure = null,
 };
 
-const FactoryExecuteJob = struct {
+const WorkflowExecuteJob = struct {
     client: *Client,
     session_id: []u8,
     run_id: []u8,
@@ -1348,9 +1348,9 @@ const FactoryExecuteJob = struct {
     id_json: []u8,
     run: *const fn (
         std.mem.Allocator,
-        *factory_types.FactoryContext,
+        *workflow_types.WorkflowContext,
         ?*anyopaque,
-    ) anyerror!?factory_types.Json,
+    ) anyerror!?workflow_types.Json,
     context: ?*anyopaque,
     cancelled: std.Io.Event = .unset,
     dispatch_mutex: std.Io.Mutex = .init,
@@ -1360,8 +1360,8 @@ const FactoryExecuteJob = struct {
     future: ?std.Io.Future(void) = null,
 };
 
-const FactoryExecutionState = struct {
-    job: *FactoryExecuteJob,
+const WorkflowExecutionState = struct {
+    job: *WorkflowExecuteJob,
 };
 
 const EventDeliveryClass = enum {
@@ -1435,31 +1435,31 @@ const OwnedCanvas = struct {
     }
 };
 
-const OwnedFactoryPhase = struct {
+const OwnedWorkflowPhase = struct {
     title: []u8,
     detail: ?[]u8,
 
-    fn deinit(self: *OwnedFactoryPhase, allocator: std.mem.Allocator) void {
+    fn deinit(self: *OwnedWorkflowPhase, allocator: std.mem.Allocator) void {
         allocator.free(self.title);
         if (self.detail) |detail| allocator.free(detail);
     }
 };
 
-const OwnedFactory = struct {
+const OwnedWorkflow = struct {
     name: []u8,
     description: []u8,
-    phases: []OwnedFactoryPhase,
+    phases: []OwnedWorkflowPhase,
     args_schema: ?[]u8,
-    limits: ?factory_types.FactoryDeclaredLimits,
+    limits: ?workflow_types.WorkflowDeclaredLimits,
     run: *const fn (
         std.mem.Allocator,
-        *factory_types.FactoryContext,
+        *workflow_types.WorkflowContext,
         ?*anyopaque,
-    ) anyerror!?factory_types.Json,
+    ) anyerror!?workflow_types.Json,
     context: ?*anyopaque,
 
-    fn init(allocator: std.mem.Allocator, definition: factory_types.AgentFactory) !OwnedFactory {
-        const phases = try allocator.alloc(OwnedFactoryPhase, definition.meta.phases.len);
+    fn init(allocator: std.mem.Allocator, definition: workflow_types.WorkflowDefinition) !OwnedWorkflow {
+        const phases = try allocator.alloc(OwnedWorkflowPhase, definition.meta.phases.len);
         var initialized: usize = 0;
         errdefer {
             for (phases[0..initialized]) |*phase| phase.deinit(allocator);
@@ -1493,7 +1493,7 @@ const OwnedFactory = struct {
         };
     }
 
-    fn deinit(self: *OwnedFactory, allocator: std.mem.Allocator) void {
+    fn deinit(self: *OwnedWorkflow, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
         allocator.free(self.description);
         for (self.phases) |*phase| phase.deinit(allocator);
@@ -1576,7 +1576,7 @@ const SessionExtensionRuntime = struct {
     mcp_auth_handler: ?ext.McpAuthHandler,
     mcp_auth_context: ?*anyopaque,
     canvases: []OwnedCanvas,
-    factories: []OwnedFactory,
+    workflows: []OwnedWorkflow,
     open_canvases: std.ArrayList(ext.OpenCanvas) = .empty,
     capabilities: ext.CapabilitySet = .{},
     mcp_apps_requested: bool,
@@ -1607,15 +1607,15 @@ const SessionExtensionRuntime = struct {
         config: anytype,
         initial_open_canvases: []const ext.OpenCanvas,
     ) !SessionExtensionRuntime {
-        return initWithFactories(allocator, session_id, config, initial_open_canvases, &.{});
+        return initWithWorkflows(allocator, session_id, config, initial_open_canvases, &.{});
     }
 
-    fn initWithFactories(
+    fn initWithWorkflows(
         allocator: std.mem.Allocator,
         session_id: ?[]const u8,
         config: anytype,
         initial_open_canvases: []const ext.OpenCanvas,
-        factory_definitions: []const factory_types.AgentFactory,
+        workflow_definitions: []const workflow_types.WorkflowDefinition,
     ) !SessionExtensionRuntime {
         const features = config.extensions.common;
         var tool_count: usize = 0;
@@ -1632,7 +1632,7 @@ const SessionExtensionRuntime = struct {
             allocator.free(tools);
             return err;
         };
-        const factories = allocator.alloc(OwnedFactory, factory_definitions.len) catch |err| {
+        const workflows = allocator.alloc(OwnedWorkflow, workflow_definitions.len) catch |err| {
             allocator.free(canvases);
             allocator.free(commands);
             allocator.free(tools);
@@ -1643,7 +1643,7 @@ const SessionExtensionRuntime = struct {
             .mcp_auth_handler = features.mcp.on_auth_request,
             .mcp_auth_context = features.mcp.auth_context,
             .canvases = canvases,
-            .factories = factories,
+            .workflows = workflows,
             .mcp_apps_requested = features.experimental.mcp_apps,
             .tools = tools,
             .commands = commands,
@@ -1663,10 +1663,10 @@ const SessionExtensionRuntime = struct {
         var initialized_tools: usize = 0;
         var initialized_commands: usize = 0;
         var initialized_canvases: usize = 0;
-        var initialized_factories: usize = 0;
+        var initialized_workflows: usize = 0;
         errdefer {
-            for (result.factories[0..initialized_factories]) |*owned| owned.deinit(allocator);
-            allocator.free(result.factories);
+            for (result.workflows[0..initialized_workflows]) |*owned| owned.deinit(allocator);
+            allocator.free(result.workflows);
             for (result.canvases[0..initialized_canvases]) |*canvas| canvas.deinit(allocator);
             allocator.free(result.canvases);
             for (result.tools[0..initialized_tools]) |tool| allocator.free(tool.name);
@@ -1677,9 +1677,9 @@ const SessionExtensionRuntime = struct {
             for (result.open_canvases.items) |canvas| ext.freeOpenCanvas(allocator, canvas);
             result.open_canvases.deinit(allocator);
         }
-        for (factory_definitions, 0..) |definition, index| {
-            result.factories[index] = try OwnedFactory.init(allocator, definition);
-            initialized_factories += 1;
+        for (workflow_definitions, 0..) |definition, index| {
+            result.workflows[index] = try OwnedWorkflow.init(allocator, definition);
+            initialized_workflows += 1;
         }
         if (session_id) |id| result.session_id = try allocator.dupe(u8, id);
         for (config.tools) |tool| {
@@ -1734,8 +1734,8 @@ const SessionExtensionRuntime = struct {
         if (self.session_id) |id| allocator.free(id);
         for (self.canvases) |*canvas| canvas.deinit(allocator);
         allocator.free(self.canvases);
-        for (self.factories) |*owned| owned.deinit(allocator);
-        allocator.free(self.factories);
+        for (self.workflows) |*owned| owned.deinit(allocator);
+        allocator.free(self.workflows);
         for (self.tools) |tool| allocator.free(tool.name);
         allocator.free(self.tools);
         for (self.commands) |command| allocator.free(command.name);
@@ -3439,8 +3439,8 @@ pub const Client = struct {
     pump_terminal_error: ?anyerror = null,
     send_operations: std.ArrayList(*SendOperation) = .empty,
     send_operations_mutex: std.Io.Mutex = .init,
-    factory_jobs: std.ArrayList(*FactoryExecuteJob) = .empty,
-    factory_jobs_mutex: std.Io.Mutex = .init,
+    workflow_jobs: std.ArrayList(*WorkflowExecuteJob) = .empty,
+    workflow_jobs_mutex: std.Io.Mutex = .init,
     event_queue: std.ArrayList(QueuedLogEvent) = .empty,
     event_queue_mutex: std.Io.Mutex = .init,
     event_queue_ready: std.Io.Event = .unset,
@@ -3668,7 +3668,7 @@ pub const Client = struct {
         self.releaseInterestsAndDetachSessionsBounded();
         self.stopEventWorker();
         self.shutdownOwnedRuntimeBounded();
-        self.finishFactoryJobs();
+        self.finishWorkflowJobs();
         self.stopPump();
         self.finishSendOperations();
         if (self.transport == .none and !self.transport_closed) {
@@ -3702,7 +3702,7 @@ pub const Client = struct {
         self.pending_calls.deinit(self.allocator);
         if (self.pump_failure) |*failure| failure.deinit();
         self.send_operations.deinit(self.allocator);
-        self.factory_jobs.deinit(self.allocator);
+        self.workflow_jobs.deinit(self.allocator);
         self.event_queue.deinit(self.allocator);
         self.lifecycle_events.deinit();
         for (self.tools.items) |tool| tool.deinit(self.allocator);
@@ -4467,7 +4467,7 @@ pub const Client = struct {
         config: session_types.ResumeSessionConfig,
         requested_environment_variables: []const []const u8,
     ) errors.DetailedError!PolicyResult(failure_policy, Session) {
-        return self.resumeSessionWithEnvironmentAndFactories(
+        return self.resumeSessionWithEnvironmentAndWorkflows(
             failure_policy,
             session_id,
             config,
@@ -4476,13 +4476,13 @@ pub const Client = struct {
         );
     }
 
-    fn resumeSessionWithEnvironmentAndFactories(
+    fn resumeSessionWithEnvironmentAndWorkflows(
         self: *Client,
         comptime failure_policy: FailurePolicy,
         session_id: []const u8,
         config: session_types.ResumeSessionConfig,
         requested_environment_variables: []const []const u8,
-        factories: ?[]const factory_types.AgentFactory,
+        workflows: ?[]const workflow_types.WorkflowDefinition,
     ) errors.DetailedError!PolicyResult(failure_policy, Session) {
         validateLifecycleConfig(config) catch |err|
             return .{ .failure = try policyFailure(
@@ -4521,13 +4521,13 @@ pub const Client = struct {
                 recordInvalidConfig,
                 .{ self.allocator, "extensions", err },
             ) };
-        if (factories) |definitions| {
-            factory_types.validateFactories(definitions) catch |err|
+        if (workflows) |definitions| {
+            workflow_types.validateWorkflows(definitions) catch |err|
                 return .{ .failure = try policyFailure(
                     failure_policy,
                     err,
                     recordInvalidConfig,
-                    .{ self.allocator, "extensions.factories", err },
+                    .{ self.allocator, "extensions.workflows", err },
                 ) };
         }
         validateCustomAgentMcpServers(config.custom_agents) catch |err|
@@ -4622,12 +4622,12 @@ pub const Client = struct {
                 recordInvalidConfig,
                 .{ self.allocator, "extensions", err },
             ) };
-        extension_values.lowerFactories(factories) catch |err|
+        extension_values.lowerWorkflows(workflows) catch |err|
             return .{ .failure = try policyFailure(
                 failure_policy,
                 err,
                 recordInvalidConfig,
-                .{ self.allocator, "extensions.factories", err },
+                .{ self.allocator, "extensions.workflows", err },
             ) };
         extension_values.lowerHostInjection(
             config.feature_flags,
@@ -4646,11 +4646,11 @@ pub const Client = struct {
                 recordInvalidConfig,
                 .{ self.allocator, "providers", err },
             ) };
-        self.beginExtensionRuntimeWithFactories(
+        self.beginExtensionRuntimeWithWorkflows(
             runtime_session_id,
             config,
             config.extensions.open_canvases orelse &.{},
-            factories orelse &.{},
+            workflows orelse &.{},
         ) catch |err| return .{ .failure = try policyFailure(
             failure_policy,
             err,
@@ -4848,7 +4848,7 @@ pub const Client = struct {
         config: anytype,
         open_canvases: []const ext.OpenCanvas,
     ) !void {
-        return self.beginExtensionRuntimeWithFactories(
+        return self.beginExtensionRuntimeWithWorkflows(
             session_id,
             config,
             open_canvases,
@@ -4856,21 +4856,21 @@ pub const Client = struct {
         );
     }
 
-    fn beginExtensionRuntimeWithFactories(
+    fn beginExtensionRuntimeWithWorkflows(
         self: *Client,
         session_id: ?[]const u8,
         config: anytype,
         open_canvases: []const ext.OpenCanvas,
-        factories: []const factory_types.AgentFactory,
+        workflows: []const workflow_types.WorkflowDefinition,
     ) !void {
         if (self.pending_extension_runtime != null)
             return error.SessionLifecycleAlreadyInProgress;
-        self.pending_extension_runtime = try SessionExtensionRuntime.initWithFactories(
+        self.pending_extension_runtime = try SessionExtensionRuntime.initWithWorkflows(
             self.allocator,
             session_id,
             config,
             open_canvases,
-            factories,
+            workflows,
         );
     }
 
@@ -5393,12 +5393,12 @@ pub const Client = struct {
         const resume_config = resumeConfigFromJoin(config);
         const session = try legacyResult(
             Session,
-            self.resumeSessionWithEnvironmentAndFactories(
+            self.resumeSessionWithEnvironmentAndWorkflows(
                 .legacy,
                 owned_session_id,
                 resume_config,
                 config.extensions.requested_environment_variables,
-                config.extensions.factories,
+                config.extensions.workflows,
             ),
         );
         const grants = session.snapshotEnvironmentGrants(self.allocator) catch |err| {
@@ -5419,8 +5419,8 @@ pub const Client = struct {
             };
             return err;
         };
-        if (config.extensions.factories) |factories| {
-            if (factories.len != 0) try self.ensurePump();
+        if (config.extensions.workflows) |workflows| {
+            if (workflows.len != 0) try self.ensurePump();
         }
         return .{
             .session = session,
@@ -5840,7 +5840,7 @@ pub const Client = struct {
         cancellation: *std.Io.Event,
         dispatch_mutex: ?*std.Io.Mutex,
     ) !std.json.Parsed(Result) {
-        if (cancellation.isSet()) return error.FactoryCancelled;
+        if (cancellation.isSet()) return error.WorkflowCancelled;
         try self.ensurePump();
         return legacyResult(
             std.json.Parsed(Result),
@@ -6170,9 +6170,9 @@ pub const Client = struct {
             self.pending_mutex.unlock(self.io);
             return .{ .failure = try policyFailure(
                 failure_policy,
-                error.FactoryCancelled,
+                error.WorkflowCancelled,
                 recordClientIo,
-                .{ self.allocator, .read, error.FactoryCancelled },
+                .{ self.allocator, .read, error.WorkflowCancelled },
             ) };
         }
         self.pending_mutex.unlock(self.io);
@@ -6245,9 +6245,9 @@ pub const Client = struct {
                 }
                 return .{ .failure = try policyFailure(
                     failure_policy,
-                    error.FactoryCancelled,
+                    error.WorkflowCancelled,
                     recordClientIo,
-                    .{ self.allocator, .read, error.FactoryCancelled },
+                    .{ self.allocator, .read, error.WorkflowCancelled },
                 ) };
             }
         } else {
@@ -6590,10 +6590,10 @@ pub const Client = struct {
                 },
                 .success => |message| switch (message) {
                     .request => |request| {
-                        if (std.mem.eql(u8, request.method, "factory.execute")) {
-                            self.startFactoryExecuteJob(request.id, request.params) catch |err| {
-                                if (err == error.FactoryNotFound or
-                                    err == error.FactoryCallbacksBlocked)
+                        if (std.mem.eql(u8, request.method, "workflow.execute")) {
+                            self.startWorkflowExecuteJob(request.id, request.params) catch |err| {
+                                if (err == error.WorkflowNotFound or
+                                    err == error.WorkflowCallbacksBlocked)
                                 {
                                     self.writer_mutex.lockUncancelable(self.io);
                                     var operation: errors.ClientOperation = .callback;
@@ -6620,16 +6620,16 @@ pub const Client = struct {
                                     return;
                                 };
                                 defer self.allocator.free(id_json);
-                                self.writeFactoryError(
+                                self.writeWorkflowError(
                                     id_json,
-                                    if (err == error.InvalidFactoryRequest)
+                                    if (err == error.InvalidWorkflowRequest)
                                         -32602
                                     else
                                         -32603,
-                                    if (err == error.InvalidFactoryRequest)
-                                        "invalid factory request"
+                                    if (err == error.InvalidWorkflowRequest)
+                                        "invalid workflow request"
                                     else
-                                        "failed to start factory",
+                                        "failed to start workflow",
                                 ) catch |write_err| {
                                     self.finishPumpWrite(write_err);
                                     return;
@@ -6637,14 +6637,14 @@ pub const Client = struct {
                             };
                             continue;
                         }
-                        if (std.mem.eql(u8, request.method, "factory.abort")) {
-                            const aborted = self.abortFactoryExecution(request.params) catch {
+                        if (std.mem.eql(u8, request.method, "workflow.abort")) {
+                            const aborted = self.abortWorkflowExecution(request.params) catch {
                                 self.writer_mutex.lockUncancelable(self.io);
                                 const write_result = self.writeServerRequestError(
                                     self.transportWriter(),
                                     request.id,
                                     -32602,
-                                    "invalid factory abort request",
+                                    "invalid workflow abort request",
                                 );
                                 self.writer_mutex.unlock(self.io);
                                 write_result catch |write_err| {
@@ -7056,7 +7056,7 @@ pub const Client = struct {
         }
     }
 
-    fn writeFactorySuccess(
+    fn writeWorkflowSuccess(
         self: *Client,
         id_json: []const u8,
         result: anytype,
@@ -7073,7 +7073,7 @@ pub const Client = struct {
         try self.writeRpcSuccess(self.transportWriter(), id.value, result);
     }
 
-    fn writeFactoryError(
+    fn writeWorkflowError(
         self: *Client,
         id_json: []const u8,
         code: i64,
@@ -7091,59 +7091,64 @@ pub const Client = struct {
         try self.writeServerRequestError(self.transportWriter(), id.value, code, message);
     }
 
-    fn findFactoryCallback(
+    fn findWorkflowCallback(
         self: *Client,
         session_id: []const u8,
         name: []const u8,
     ) ?struct {
         run: *const fn (
             std.mem.Allocator,
-            *factory_types.FactoryContext,
+            *workflow_types.WorkflowContext,
             ?*anyopaque,
-        ) anyerror!?factory_types.Json,
+        ) anyerror!?workflow_types.Json,
         context: ?*anyopaque,
     } {
         self.extension_runtimes_mutex.lockUncancelable(self.io);
         defer self.extension_runtimes_mutex.unlock(self.io);
         const runtime = self.findExtensionRuntime(session_id) orelse return null;
-        for (runtime.factories) |definition| {
+        for (runtime.workflows) |definition| {
             if (std.mem.eql(u8, definition.name, name))
                 return .{ .run = definition.run, .context = definition.context };
         }
         return null;
     }
 
-    fn startFactoryExecuteJob(
+    fn startWorkflowExecuteJob(
         self: *Client,
         id: std.json.Value,
         params: ?std.json.Value,
     ) !void {
-        const object = switch (params orelse return error.InvalidFactoryRequest) {
+        const object = switch (params orelse return error.InvalidWorkflowRequest) {
             .object => |object| object,
-            else => return error.InvalidFactoryRequest,
+            else => return error.InvalidWorkflowRequest,
         };
-        try validateObjectFields(
+        validateObjectFields(
             object,
             &.{ "sessionId", "name", "runId", "executionToken", "args" },
-        );
-        const session_id = try jsonRequiredString(object, "sessionId");
-        const name = try jsonRequiredString(object, "name");
-        const run_id = try jsonRequiredString(object, "runId");
-        const execution_token = try jsonRequiredString(object, "executionToken");
+        ) catch return error.InvalidWorkflowRequest;
+        const session_id = jsonRequiredString(object, "sessionId") catch
+            return error.InvalidWorkflowRequest;
+        const name = jsonRequiredString(object, "name") catch
+            return error.InvalidWorkflowRequest;
+        const run_id = jsonRequiredString(object, "runId") catch
+            return error.InvalidWorkflowRequest;
+        const execution_token = jsonRequiredString(object, "executionToken") catch
+            return error.InvalidWorkflowRequest;
         if (session_id.len == 0 or name.len == 0 or run_id.len == 0 or execution_token.len == 0)
-            return error.InvalidFactoryRequest;
-        const args = try jsonRequiredValue(object, "args");
+            return error.InvalidWorkflowRequest;
+        const args = jsonRequiredValue(object, "args") catch
+            return error.InvalidWorkflowRequest;
 
         if (!self.tryAcquireTransferredRuntimeCallback())
-            return error.FactoryCallbacksBlocked;
+            return error.WorkflowCallbacksBlocked;
         errdefer {
             var scope: RuntimeCallbackScope = undefined;
             self.enterTransferredRuntimeCallback(&scope);
             self.endRuntimeCallback(&scope);
         }
-        const callback = self.findFactoryCallback(session_id, name) orelse
-            return error.FactoryNotFound;
-        self.reapFactoryJobs();
+        const callback = self.findWorkflowCallback(session_id, name) orelse
+            return error.WorkflowNotFound;
+        self.reapWorkflowJobs();
         const owned_session_id = try self.allocator.dupe(u8, session_id);
         errdefer self.allocator.free(owned_session_id);
         const owned_run_id = try self.allocator.dupe(u8, run_id);
@@ -7154,7 +7159,7 @@ pub const Client = struct {
         errdefer self.allocator.free(args_json);
         const id_json = try std.json.Stringify.valueAlloc(self.allocator, id, .{});
         errdefer self.allocator.free(id_json);
-        const job = try self.allocator.create(FactoryExecuteJob);
+        const job = try self.allocator.create(WorkflowExecuteJob);
         errdefer self.allocator.destroy(job);
         job.* = .{
             .client = self,
@@ -7166,37 +7171,43 @@ pub const Client = struct {
             .run = callback.run,
             .context = callback.context,
         };
-        self.factory_jobs_mutex.lockUncancelable(self.io);
-        self.factory_jobs.append(self.allocator, job) catch |err| {
-            self.factory_jobs_mutex.unlock(self.io);
+        self.workflow_jobs_mutex.lockUncancelable(self.io);
+        self.workflow_jobs.append(self.allocator, job) catch |err| {
+            self.workflow_jobs_mutex.unlock(self.io);
             return err;
         };
-        self.factory_jobs_mutex.unlock(self.io);
-        job.future = self.io.concurrent(factoryExecuteJobMain, .{job}) catch |err| {
-            self.factory_jobs_mutex.lockUncancelable(self.io);
-            for (self.factory_jobs.items, 0..) |candidate, index| {
+        self.workflow_jobs_mutex.unlock(self.io);
+        job.future = self.io.concurrent(workflowExecuteJobMain, .{job}) catch |err| {
+            self.workflow_jobs_mutex.lockUncancelable(self.io);
+            for (self.workflow_jobs.items, 0..) |candidate, index| {
                 if (candidate == job) {
-                    _ = self.factory_jobs.orderedRemove(index);
+                    _ = self.workflow_jobs.orderedRemove(index);
                     break;
                 }
             }
-            self.factory_jobs_mutex.unlock(self.io);
+            self.workflow_jobs_mutex.unlock(self.io);
             return err;
         };
     }
 
-    fn abortFactoryExecution(self: *Client, params: ?std.json.Value) !bool {
-        const object = switch (params orelse return error.InvalidFactoryRequest) {
+    fn abortWorkflowExecution(self: *Client, params: ?std.json.Value) !bool {
+        const object = switch (params orelse return error.InvalidWorkflowRequest) {
             .object => |object| object,
-            else => return error.InvalidFactoryRequest,
+            else => return error.InvalidWorkflowRequest,
         };
         try validateObjectFields(object, &.{ "sessionId", "runId", "executionToken" });
         const session_id = try jsonRequiredString(object, "sessionId");
         const run_id = try jsonRequiredString(object, "runId");
         const execution_token = try jsonRequiredString(object, "executionToken");
-        self.factory_jobs_mutex.lockUncancelable(self.io);
-        defer self.factory_jobs_mutex.unlock(self.io);
-        for (self.factory_jobs.items) |job| {
+        self.extension_runtimes_mutex.lockUncancelable(self.io);
+        const registered = if (self.findExtensionRuntime(session_id)) |runtime|
+            runtime.workflows.len != 0
+        else
+            false;
+        self.extension_runtimes_mutex.unlock(self.io);
+        self.workflow_jobs_mutex.lockUncancelable(self.io);
+        defer self.workflow_jobs_mutex.unlock(self.io);
+        for (self.workflow_jobs.items) |job| {
             if (std.mem.eql(u8, job.session_id, session_id) and
                 std.mem.eql(u8, job.run_id, run_id) and
                 std.mem.eql(u8, job.execution_token, execution_token))
@@ -7207,48 +7218,48 @@ pub const Client = struct {
                 return true;
             }
         }
-        return false;
+        return registered;
     }
 
-    fn reapFactoryJobs(self: *Client) void {
+    fn reapWorkflowJobs(self: *Client) void {
         while (true) {
-            self.factory_jobs_mutex.lockUncancelable(self.io);
-            var finished: ?*FactoryExecuteJob = null;
-            for (self.factory_jobs.items, 0..) |job, index| {
+            self.workflow_jobs_mutex.lockUncancelable(self.io);
+            var finished: ?*WorkflowExecuteJob = null;
+            for (self.workflow_jobs.items, 0..) |job, index| {
                 if (!job.completed.isSet()) continue;
-                finished = self.factory_jobs.orderedRemove(index);
+                finished = self.workflow_jobs.orderedRemove(index);
                 break;
             }
-            self.factory_jobs_mutex.unlock(self.io);
+            self.workflow_jobs_mutex.unlock(self.io);
             const job = finished orelse return;
-            self.destroyFactoryJob(job);
+            self.destroyWorkflowJob(job);
         }
     }
 
-    fn cancelFactoryJobsForSession(self: *Client, session_id: []const u8) void {
-        self.factory_jobs_mutex.lockUncancelable(self.io);
-        defer self.factory_jobs_mutex.unlock(self.io);
-        for (self.factory_jobs.items) |job|
+    fn cancelWorkflowJobsForSession(self: *Client, session_id: []const u8) void {
+        self.workflow_jobs_mutex.lockUncancelable(self.io);
+        defer self.workflow_jobs_mutex.unlock(self.io);
+        for (self.workflow_jobs.items) |job|
             if (std.mem.eql(u8, job.session_id, session_id)) job.cancelled.set(self.io);
     }
 
-    fn finishFactoryJobs(self: *Client) void {
-        self.factory_jobs_mutex.lockUncancelable(self.io);
-        for (self.factory_jobs.items) |job| job.cancelled.set(self.io);
-        self.factory_jobs_mutex.unlock(self.io);
+    fn finishWorkflowJobs(self: *Client) void {
+        self.workflow_jobs_mutex.lockUncancelable(self.io);
+        for (self.workflow_jobs.items) |job| job.cancelled.set(self.io);
+        self.workflow_jobs_mutex.unlock(self.io);
         while (true) {
-            self.factory_jobs_mutex.lockUncancelable(self.io);
-            const job = if (self.factory_jobs.items.len == 0)
+            self.workflow_jobs_mutex.lockUncancelable(self.io);
+            const job = if (self.workflow_jobs.items.len == 0)
                 null
             else
-                self.factory_jobs.orderedRemove(0);
-            self.factory_jobs_mutex.unlock(self.io);
+                self.workflow_jobs.orderedRemove(0);
+            self.workflow_jobs_mutex.unlock(self.io);
             const value = job orelse return;
-            self.destroyFactoryJob(value);
+            self.destroyWorkflowJob(value);
         }
     }
 
-    fn destroyFactoryJob(self: *Client, job: *FactoryExecuteJob) void {
+    fn destroyWorkflowJob(self: *Client, job: *WorkflowExecuteJob) void {
         if (job.future) |*future| future.await(self.io);
         self.allocator.free(job.session_id);
         self.allocator.free(job.run_id);
@@ -7259,15 +7270,15 @@ pub const Client = struct {
         self.allocator.destroy(job);
     }
 
-    fn factoryAgent(
+    fn workflowAgent(
         state_pointer: *anyopaque,
         allocator: std.mem.Allocator,
         prompt: []const u8,
-        options: factory_types.FactoryAgentOptions,
-    ) !?factory_types.Json {
-        const state: *FactoryExecutionState = @ptrCast(@alignCast(state_pointer));
+        options: workflow_types.WorkflowAgentOptions,
+    ) !?workflow_types.Json {
+        const state: *WorkflowExecutionState = @ptrCast(@alignCast(state_pointer));
         const job = state.job;
-        if (job.cancelled.isSet()) return error.FactoryCancelled;
+        if (job.cancelled.isSet()) return error.WorkflowCancelled;
         const schema = if (options.schema) |schema|
             try std.json.parseFromSlice(
                 std.json.Value,
@@ -7278,12 +7289,12 @@ pub const Client = struct {
         else
             null;
         defer if (schema) |parsed| parsed.deinit();
-        const parsed = job.client.callCancelable(std.json.Value, "session.factory.agent", .{
+        const parsed = job.client.callCancelable(std.json.Value, "session.workflow.agent", .{
             .sessionId = job.session_id,
-            .factoryRunId = job.run_id,
+            .workflowRunId = job.run_id,
             .executionToken = job.execution_token,
             .prompt = prompt,
-            .opts = WireFactoryAgentOptions{
+            .opts = WireWorkflowAgentOptions{
                 .label = options.label,
                 .schema = if (schema) |value| value.value else null,
                 .model = options.model,
@@ -7292,53 +7303,53 @@ pub const Client = struct {
                 .agent = options.agent,
             },
         }, &job.cancelled, &job.dispatch_mutex) catch |err|
-            return mapFactoryRpcError(err, false);
+            return mapWorkflowRpcError(err, false);
         defer parsed.deinit();
-        if (job.cancelled.isSet()) return error.FactoryCancelled;
+        if (job.cancelled.isSet()) return error.WorkflowCancelled;
         const object = switch (parsed.value) {
             .object => |object| object,
-            else => return error.FactoryTransportFailure,
+            else => return error.WorkflowTransportFailure,
         };
         const result = object.get("result") orelse return null;
-        return try factory_types.Json.initValue(allocator, result);
+        return try workflow_types.Json.initValue(allocator, result);
     }
 
-    fn factoryJournalGet(
+    fn workflowJournalGet(
         state_pointer: *anyopaque,
         allocator: std.mem.Allocator,
         key: []const u8,
-    ) !factory_types.JournalLookup {
-        const state: *FactoryExecutionState = @ptrCast(@alignCast(state_pointer));
+    ) !workflow_types.JournalLookup {
+        const state: *WorkflowExecutionState = @ptrCast(@alignCast(state_pointer));
         const job = state.job;
-        if (job.cancelled.isSet()) return error.FactoryCancelled;
-        const parsed = job.client.callCancelable(std.json.Value, "session.factory.journal.get", .{
+        if (job.cancelled.isSet()) return error.WorkflowCancelled;
+        const parsed = job.client.callCancelable(std.json.Value, "session.workflow.journal.get", .{
             .sessionId = job.session_id,
             .runId = job.run_id,
             .executionToken = job.execution_token,
             .key = key,
         }, &job.cancelled, &job.dispatch_mutex) catch |err|
-            return mapFactoryRpcError(err, true);
+            return mapWorkflowRpcError(err, true);
         defer parsed.deinit();
-        if (job.cancelled.isSet()) return error.FactoryCancelled;
+        if (job.cancelled.isSet()) return error.WorkflowCancelled;
         const object = switch (parsed.value) {
             .object => |object| object,
-            else => return error.FactoryDurableFailure,
+            else => return error.WorkflowDurableFailure,
         };
-        if (!(jsonRequiredBool(object, "hit") catch return error.FactoryDurableFailure))
+        if (!(jsonRequiredBool(object, "hit") catch return error.WorkflowDurableFailure))
             return .miss;
         const result = object.get("resultJson") orelse
-            return error.FactoryDurableFailure;
-        return .{ .value = try factory_types.Json.initValue(allocator, result) };
+            return error.WorkflowDurableFailure;
+        return .{ .value = try workflow_types.Json.initValue(allocator, result) };
     }
 
-    fn factoryJournalPut(
+    fn workflowJournalPut(
         state_pointer: *anyopaque,
         key: []const u8,
-        value: factory_types.JsonView,
+        value: workflow_types.JsonView,
     ) !void {
-        const state: *FactoryExecutionState = @ptrCast(@alignCast(state_pointer));
+        const state: *WorkflowExecutionState = @ptrCast(@alignCast(state_pointer));
         const job = state.job;
-        if (job.cancelled.isSet()) return error.FactoryCancelled;
+        if (job.cancelled.isSet()) return error.WorkflowCancelled;
         const result = try std.json.parseFromSlice(
             std.json.Value,
             job.client.allocator,
@@ -7346,108 +7357,108 @@ pub const Client = struct {
             .{ .allocate = .alloc_always },
         );
         defer result.deinit();
-        const parsed = job.client.callCancelable(std.json.Value, "session.factory.journal.put", .{
+        const parsed = job.client.callCancelable(std.json.Value, "session.workflow.journal.put", .{
             .sessionId = job.session_id,
             .runId = job.run_id,
             .executionToken = job.execution_token,
             .key = key,
             .resultJson = result.value,
         }, &job.cancelled, &job.dispatch_mutex) catch |err|
-            return mapFactoryRpcError(err, true);
+            return mapWorkflowRpcError(err, true);
         if (job.cancelled.isSet()) {
             parsed.deinit();
-            return error.FactoryCancelled;
+            return error.WorkflowCancelled;
         }
         parsed.deinit();
     }
 
-    fn factoryPauseAtCheckpoint(
+    fn workflowPauseAtCheckpoint(
         state_pointer: *anyopaque,
         key: []const u8,
     ) !void {
-        const state: *FactoryExecutionState = @ptrCast(@alignCast(state_pointer));
+        const state: *WorkflowExecutionState = @ptrCast(@alignCast(state_pointer));
         const job = state.job;
-        if (job.cancelled.isSet()) return error.FactoryCancelled;
+        if (job.cancelled.isSet()) return error.WorkflowCancelled;
         const parsed = job.client.callCancelable(struct {
             action: []const u8,
-        }, "session.factory.pauseAtCheckpoint", .{
+        }, "session.workflow.pauseAtCheckpoint", .{
             .sessionId = job.session_id,
             .runId = job.run_id,
             .executionToken = job.execution_token,
             .key = key,
         }, &job.cancelled, &job.dispatch_mutex) catch |err|
-            return mapFactoryRpcError(err, true);
+            return mapWorkflowRpcError(err, true);
         defer parsed.deinit();
-        if (job.cancelled.isSet()) return error.FactoryCancelled;
+        if (job.cancelled.isSet()) return error.WorkflowCancelled;
         if (std.mem.eql(u8, parsed.value.action, "continue")) return;
         if (!std.mem.eql(u8, parsed.value.action, "pause"))
-            return error.FactoryDurableFailure;
+            return error.WorkflowDurableFailure;
         job.cancelled.set(job.client.io);
-        return error.FactoryCancelled;
+        return error.WorkflowCancelled;
     }
 
-    fn factoryProgress(
+    fn workflowProgress(
         state_pointer: *anyopaque,
-        kind: factory_types.FactoryLogKind,
+        kind: workflow_types.WorkflowLogKind,
         message: []const u8,
     ) !void {
-        const state: *FactoryExecutionState = @ptrCast(@alignCast(state_pointer));
+        const state: *WorkflowExecutionState = @ptrCast(@alignCast(state_pointer));
         const job = state.job;
-        if (job.cancelled.isSet()) return error.FactoryCancelled;
+        if (job.cancelled.isSet()) return error.WorkflowCancelled;
         job.progress_mutex.lockUncancelable(job.client.io);
         defer job.progress_mutex.unlock(job.client.io);
         const sequence = job.next_progress_seq;
         job.next_progress_seq += 1;
-        const parsed = job.client.callCancelable(std.json.Value, "session.factory.log", .{
+        const parsed = job.client.callCancelable(std.json.Value, "session.workflow.log", .{
             .sessionId = job.session_id,
             .runId = job.run_id,
             .executionToken = job.execution_token,
-            .lines = &.{WireFactoryLogLine{
+            .lines = &.{WireWorkflowLogLine{
                 .seq = sequence,
                 .kind = @tagName(kind),
                 .text = message,
             }},
         }, &job.cancelled, &job.dispatch_mutex) catch |err|
-            return mapFactoryRpcError(err, true);
+            return mapWorkflowRpcError(err, true);
         if (job.cancelled.isSet()) {
             parsed.deinit();
-            return error.FactoryCancelled;
+            return error.WorkflowCancelled;
         }
         parsed.deinit();
     }
 
-    fn mapFactoryRpcError(err: anyerror, durable: bool) anyerror {
+    fn mapWorkflowRpcError(err: anyerror, durable: bool) anyerror {
         return switch (err) {
-            error.OutOfMemory, error.FactoryCancelled => err,
+            error.OutOfMemory, error.WorkflowCancelled => err,
             else => if (durable)
-                error.FactoryDurableFailure
+                error.WorkflowDurableFailure
             else
-                error.FactoryTransportFailure,
+                error.WorkflowTransportFailure,
         };
     }
 
-    fn factoryExecuteJobMain(job: *FactoryExecuteJob) void {
+    fn workflowExecuteJobMain(job: *WorkflowExecuteJob) void {
         defer job.completed.set(job.client.io);
         var scope: RuntimeCallbackScope = undefined;
         job.client.enterTransferredRuntimeCallback(&scope);
         defer job.client.endRuntimeCallback(&scope);
-        var state = FactoryExecutionState{ .job = job };
-        var context = factory_types.FactoryContext{
+        var state = WorkflowExecutionState{ .job = job };
+        var context = workflow_types.WorkflowContext{
             .run_id = job.run_id,
             .args = .{ .bytes = job.args_json },
             .cancel = .{ .event = &job.cancelled, .io = job.client.io },
             .execution = .{
                 .state = &state,
                 .io = job.client.io,
-                .agent_fn = factoryAgent,
-                .journal_get_fn = factoryJournalGet,
-                .journal_put_fn = factoryJournalPut,
-                .pause_fn = factoryPauseAtCheckpoint,
-                .progress_fn = factoryProgress,
+                .agent_fn = workflowAgent,
+                .journal_get_fn = workflowJournalGet,
+                .journal_put_fn = workflowJournalPut,
+                .pause_fn = workflowPauseAtCheckpoint,
+                .progress_fn = workflowProgress,
             },
         };
         var result = job.run(job.client.allocator, &context, job.context) catch |err| {
-            job.client.writeFactoryError(job.id_json, -32000, @errorName(err)) catch |write_err| {
+            job.client.writeWorkflowError(job.id_json, -32000, @errorName(err)) catch |write_err| {
                 job.client.finishPumpWrite(write_err);
             };
             return;
@@ -7460,22 +7471,22 @@ pub const Client = struct {
                 value.bytes,
                 .{},
             ) catch {
-                job.client.writeFactoryError(
+                job.client.writeWorkflowError(
                     job.id_json,
                     -32603,
-                    "invalid factory callback result",
+                    "invalid workflow callback result",
                 ) catch |write_err| {
                     job.client.finishPumpWrite(write_err);
                 };
                 return;
             };
             defer parsed.deinit();
-            job.client.writeFactorySuccess(job.id_json, .{ .result = parsed.value }) catch |err| {
+            job.client.writeWorkflowSuccess(job.id_json, .{ .result = parsed.value }) catch |err| {
                 job.client.finishPumpWrite(err);
             };
             return;
         }
-        job.client.writeFactorySuccess(job.id_json, struct {}{}) catch |err| {
+        job.client.writeWorkflowSuccess(job.id_json, struct {}{}) catch |err| {
             job.client.finishPumpWrite(err);
         };
     }
@@ -10654,7 +10665,7 @@ pub const Client = struct {
     ) !usize {
         if (commit.prior_log) |log| log.drainAndClose();
         if (commit.replacing) {
-            self.cancelFactoryJobsForSession(commit.pending.id.?);
+            self.cancelWorkflowJobsForSession(commit.pending.id.?);
             self.blockRuntimeCallbacks();
         }
         defer if (commit.replacing) self.unblockRuntimeCallbacks();
@@ -10827,7 +10838,7 @@ pub const Client = struct {
         session_id: []const u8,
         generation: u64,
     ) void {
-        self.cancelFactoryJobsForSession(session_id);
+        self.cancelWorkflowJobsForSession(session_id);
         self.blockRuntimeCallbacks();
         defer self.unblockRuntimeCallbacks();
         self.extension_runtimes_mutex.lockUncancelable(self.io);
@@ -11728,17 +11739,17 @@ pub const Session = struct {
     record_index: usize = std.math.maxInt(usize),
     generation: u64 = 0,
 
-    pub fn factory(self: Session) FactoryApi {
+    pub fn workflow(self: Session) WorkflowApi {
         return .{ .session = self };
     }
 
-    pub fn factoryRun(
+    pub fn workflowRun(
         self: Session,
         allocator: std.mem.Allocator,
         name: []const u8,
-        options: factory_types.FactoryRunOptions,
-    ) !factory_types.FactoryRun {
-        if (options.limits) |limits| try factory_types.validateLimitOverrides(limits);
+        options: workflow_types.WorkflowRunOptions,
+    ) !workflow_types.WorkflowRun {
+        if (options.limits) |limits| try workflow_types.validateLimitOverrides(limits);
         const resolved = try self.resolve();
         try self.client.ensurePump();
         const args = try std.json.parseFromSlice(
@@ -11748,59 +11759,59 @@ pub const Session = struct {
             .{ .allocate = .alloc_always },
         );
         defer args.deinit();
-        const parsed = try self.client.call(std.json.Value, "session.factory.run", .{
+        const parsed = try self.client.call(std.json.Value, "session.workflow.run", .{
             .sessionId = resolved.id,
             .name = name,
             .args = args.value,
-            .options = WireFactoryRunOptions{
-                .limits = lowerFactoryLimits(options.limits),
+            .options = WireWorkflowRunOptions{
+                .limits = lowerWorkflowLimits(options.limits),
                 .notifyOnComplete = options.notify_on_complete,
                 .logPhaseNames = options.log_phase_names,
-                .resumeFromRunId = options.resume_from_run_id,
             },
         });
         defer parsed.deinit();
-        return self.settleFactoryRun(
+        return self.settleWorkflowRun(
             allocator,
-            try decodeFactoryRun(allocator, parsed.value),
+            try decodeWorkflowRun(allocator, parsed.value),
         );
     }
 
-    pub fn factoryResume(
+    pub fn workflowResume(
         self: Session,
         allocator: std.mem.Allocator,
         run_id: []const u8,
-        options: factory_types.FactoryResumeOptions,
-    ) !factory_types.FactoryRun {
-        if (options.limits) |limits| try factory_types.validateLimitOverrides(limits);
+        options: workflow_types.WorkflowResumeOptions,
+    ) !workflow_types.WorkflowRun {
+        if (options.limits) |limits| try workflow_types.validateLimitOverrides(limits);
         const resolved = try self.resolve();
         try self.client.ensurePump();
-        const parsed = try self.client.call(std.json.Value, "session.factory.resume", .{
+        const parsed = try self.client.call(std.json.Value, "session.workflow.resume", .{
             .sessionId = resolved.id,
             .runId = run_id,
-            .limits = lowerFactoryLimits(options.limits),
+            .limits = lowerWorkflowLimits(options.limits),
             .notifyOnComplete = options.notify_on_complete,
             .logPhaseNames = options.log_phase_names,
         });
         defer parsed.deinit();
         const object = switch (parsed.value) {
             .object => |object| object,
-            else => return error.InvalidFactoryRun,
+            else => return error.InvalidWorkflowRun,
         };
-        return self.settleFactoryRun(
+        _ = jsonRequiredString(object, "workflowName") catch return error.InvalidWorkflowRun;
+        return self.settleWorkflowRun(
             allocator,
-            try decodeFactoryRun(
+            try decodeWorkflowRun(
                 allocator,
-                object.get("run") orelse return error.InvalidFactoryRun,
+                object.get("run") orelse return error.InvalidWorkflowRun,
             ),
         );
     }
 
-    fn settleFactoryRun(
+    fn settleWorkflowRun(
         self: Session,
         allocator: std.mem.Allocator,
-        initial: factory_types.FactoryRun,
-    ) !factory_types.FactoryRun {
+        initial: workflow_types.WorkflowRun,
+    ) !workflow_types.WorkflowRun {
         if (initial.isTerminal()) return initial;
         var pending = initial;
         const run_id = allocator.dupe(u8, pending.run_id) catch |err| {
@@ -11809,56 +11820,56 @@ pub const Session = struct {
         };
         defer allocator.free(run_id);
         pending.deinit();
-        return self.factoryWaitForRun(allocator, run_id, .{});
+        return self.workflowWaitForRun(allocator, run_id, .{});
     }
 
-    pub fn factoryGetRun(
+    pub fn workflowGetRun(
         self: Session,
         allocator: std.mem.Allocator,
         run_id: []const u8,
-    ) !factory_types.FactoryRun {
-        return self.factoryGetRunCancelable(allocator, run_id, null);
+    ) !workflow_types.WorkflowRun {
+        return self.workflowGetRunCancelable(allocator, run_id, null);
     }
 
-    fn factoryGetRunCancelable(
+    fn workflowGetRunCancelable(
         self: Session,
         allocator: std.mem.Allocator,
         run_id: []const u8,
         cancellation: ?*std.Io.Event,
-    ) !factory_types.FactoryRun {
+    ) !workflow_types.WorkflowRun {
         const resolved = try self.resolve();
         try self.client.ensurePump();
         const parsed = if (cancellation) |event|
-            try self.client.callCancelable(std.json.Value, "session.factory.getRun", .{
+            try self.client.callCancelable(std.json.Value, "session.workflow.getRun", .{
                 .sessionId = resolved.id,
                 .runId = run_id,
             }, event, null)
         else
-            try self.client.call(std.json.Value, "session.factory.getRun", .{
+            try self.client.call(std.json.Value, "session.workflow.getRun", .{
                 .sessionId = resolved.id,
                 .runId = run_id,
             });
         defer parsed.deinit();
-        return decodeFactoryRun(allocator, parsed.value);
+        return decodeWorkflowRun(allocator, parsed.value);
     }
 
-    pub fn factoryWaitForRun(
+    pub fn workflowWaitForRun(
         self: Session,
         allocator: std.mem.Allocator,
         run_id: []const u8,
-        options: factory_types.FactoryWaitOptions,
-    ) !factory_types.FactoryRun {
-        if (options.poll_interval_ns == 0) return error.InvalidFactoryWaitOptions;
+        options: workflow_types.WorkflowWaitOptions,
+    ) !workflow_types.WorkflowRun {
+        if (options.poll_interval_ns == 0) return error.InvalidWorkflowWaitOptions;
         if (options.cancellation) |cancellation|
             if (cancellation.isCancelled()) return error.Canceled;
         const started = std.Io.Clock.Timestamp.now(self.client.io, .awake);
         while (true) {
-            var run = self.factoryGetRunCancelable(
+            var run = self.workflowGetRunCancelable(
                 allocator,
                 run_id,
                 if (options.cancellation) |cancellation| &cancellation.event else null,
             ) catch |err| {
-                if (err == error.FactoryCancelled) return error.Canceled;
+                if (err == error.WorkflowCancelled) return error.Canceled;
                 return err;
             };
             if (run.isTerminal()) return run;
@@ -11909,55 +11920,55 @@ pub const Session = struct {
         }
     }
 
-    pub fn factoryListRuns(
+    pub fn workflowListRuns(
         self: Session,
         allocator: std.mem.Allocator,
-        options: factory_types.FactoryListRunsOptions,
-    ) !factory_types.FactoryRunsPage {
+        options: workflow_types.WorkflowListRunsOptions,
+    ) !workflow_types.WorkflowRunsPage {
         if (options.after_seq != null and options.before_seq != null)
-            return error.InvalidFactoryCursor;
+            return error.InvalidWorkflowCursor;
         if (options.limit) |limit| if (limit == 0 or limit > 500)
-            return error.InvalidFactoryLimit;
+            return error.InvalidWorkflowLimit;
         const resolved = try self.resolve();
         try self.client.ensurePump();
-        const parsed = try self.client.call(std.json.Value, "session.factory.listRuns", .{
+        const parsed = try self.client.call(std.json.Value, "session.workflow.listRuns", .{
             .sessionId = resolved.id,
             .afterSeq = options.after_seq,
             .beforeSeq = options.before_seq,
             .limit = options.limit,
         });
         defer parsed.deinit();
-        return .{ .value = try factory_types.Json.initValue(allocator, parsed.value) };
+        return .{ .value = try workflow_types.Json.initValue(allocator, parsed.value) };
     }
 
-    pub fn factoryGetRunDetail(
+    pub fn workflowGetRunDetail(
         self: Session,
         allocator: std.mem.Allocator,
         run_id: []const u8,
-    ) !factory_types.FactoryRunDetail {
+    ) !workflow_types.WorkflowRunDetail {
         const resolved = try self.resolve();
         try self.client.ensurePump();
-        const parsed = try self.client.call(std.json.Value, "session.factory.getRunDetail", .{
+        const parsed = try self.client.call(std.json.Value, "session.workflow.getRunDetail", .{
             .sessionId = resolved.id,
             .runId = run_id,
         });
         defer parsed.deinit();
-        return .{ .value = try factory_types.Json.initValue(allocator, parsed.value) };
+        return .{ .value = try workflow_types.Json.initValue(allocator, parsed.value) };
     }
 
-    pub fn factoryGetRunProgress(
+    pub fn workflowGetRunProgress(
         self: Session,
         allocator: std.mem.Allocator,
         run_id: []const u8,
-        options: factory_types.FactoryProgressOptions,
-    ) !factory_types.FactoryProgressPage {
+        options: workflow_types.WorkflowProgressOptions,
+    ) !workflow_types.WorkflowProgressPage {
         if (options.after_seq != null and options.before_seq != null)
-            return error.InvalidFactoryCursor;
+            return error.InvalidWorkflowCursor;
         if (options.limit) |limit| if (limit == 0 or limit > 500)
-            return error.InvalidFactoryLimit;
+            return error.InvalidWorkflowLimit;
         const resolved = try self.resolve();
         try self.client.ensurePump();
-        const parsed = try self.client.call(std.json.Value, "session.factory.getRunProgress", .{
+        const parsed = try self.client.call(std.json.Value, "session.workflow.getRunProgress", .{
             .sessionId = resolved.id,
             .runId = run_id,
             .phaseId = options.phase_id,
@@ -11966,37 +11977,37 @@ pub const Session = struct {
             .limit = options.limit,
         });
         defer parsed.deinit();
-        return .{ .value = try factory_types.Json.initValue(allocator, parsed.value) };
+        return .{ .value = try workflow_types.Json.initValue(allocator, parsed.value) };
     }
 
-    pub fn factoryPause(
+    pub fn workflowPause(
         self: Session,
         allocator: std.mem.Allocator,
         run_id: []const u8,
-    ) !factory_types.FactoryRun {
+    ) !workflow_types.WorkflowRun {
         const resolved = try self.resolve();
         try self.client.ensurePump();
-        const parsed = try self.client.call(std.json.Value, "session.factory.pause", .{
+        const parsed = try self.client.call(std.json.Value, "session.workflow.pause", .{
             .sessionId = resolved.id,
             .runId = run_id,
         });
         defer parsed.deinit();
-        return decodeFactoryRun(allocator, parsed.value);
+        return decodeWorkflowRun(allocator, parsed.value);
     }
 
-    pub fn factoryCancel(
+    pub fn workflowCancel(
         self: Session,
         allocator: std.mem.Allocator,
         run_id: []const u8,
-    ) !factory_types.FactoryRun {
+    ) !workflow_types.WorkflowRun {
         const resolved = try self.resolve();
         try self.client.ensurePump();
-        const parsed = try self.client.call(std.json.Value, "session.factory.cancel", .{
+        const parsed = try self.client.call(std.json.Value, "session.workflow.cancel", .{
             .sessionId = resolved.id,
             .runId = run_id,
         });
         defer parsed.deinit();
-        return decodeFactoryRun(allocator, parsed.value);
+        return decodeWorkflowRun(allocator, parsed.value);
     }
 
     fn resolve(self: Session) !ResolvedSession {
@@ -14055,7 +14066,7 @@ pub const Session = struct {
     }
 };
 
-pub const FactoryApi = factory_types.FactoryApi(Session);
+pub const WorkflowApi = workflow_types.WorkflowApi(Session);
 
 pub const JoinedSession = struct {
     session: Session,
@@ -15631,33 +15642,32 @@ const WireOpenCanvas = struct {
     input: ?std.json.Value = null,
 };
 
-const WireFactoryPhase = struct {
+const WireWorkflowPhase = struct {
     title: []const u8,
     detail: ?[]const u8 = null,
 };
 
-const WireFactoryDeclaredLimits = struct {
+const WireWorkflowDeclaredLimits = struct {
     maxConcurrentSubagents: ?u32 = null,
     maxTotalSubagents: ?u64 = null,
     timeoutSeconds: ?f64 = null,
     maxAiCredits: ?f64 = null,
 };
 
-const WireFactoryRunLimits = struct {
+const WireWorkflowRunLimits = struct {
     maxConcurrentSubagents: ?std.json.Value = null,
     maxTotalSubagents: ?std.json.Value = null,
     timeoutSeconds: ?std.json.Value = null,
     maxAiCredits: ?std.json.Value = null,
 };
 
-const WireFactoryRunOptions = struct {
-    limits: ?WireFactoryRunLimits = null,
+const WireWorkflowRunOptions = struct {
+    limits: ?WireWorkflowRunLimits = null,
     notifyOnComplete: ?bool = null,
     logPhaseNames: ?bool = null,
-    resumeFromRunId: ?[]const u8 = null,
 };
 
-const WireFactoryAgentOptions = struct {
+const WireWorkflowAgentOptions = struct {
     label: ?[]const u8 = null,
     schema: ?std.json.Value = null,
     model: ?[]const u8 = null,
@@ -15666,48 +15676,48 @@ const WireFactoryAgentOptions = struct {
     agent: ?[]const u8 = null,
 };
 
-const WireFactoryLogLine = struct {
+const WireWorkflowLogLine = struct {
     seq: u64,
     kind: []const u8,
     text: []const u8,
 };
 
-const WireFactoryMeta = struct {
+const WireWorkflowMeta = struct {
     name: []const u8,
     description: []const u8,
-    phases: []const WireFactoryPhase,
+    phases: []const WireWorkflowPhase,
     argsSchema: ?std.json.Value = null,
-    limits: ?WireFactoryDeclaredLimits = null,
+    limits: ?WireWorkflowDeclaredLimits = null,
 };
 
-fn lowerFactoryLimit(comptime T: type, value: factory_types.LimitOverride(T)) ?std.json.Value {
+fn lowerWorkflowLimit(comptime T: type, value: workflow_types.LimitOverride(T)) ?std.json.Value {
     return switch (value) {
         .inherit => null,
         .unlimited => .null,
         .value => |number| switch (@typeInfo(T)) {
             .int => .{ .integer = @intCast(number) },
             .float => .{ .float = @floatCast(number) },
-            else => @compileError("factory limits must be integers or floats"),
+            else => @compileError("workflow limits must be integers or floats"),
         },
     };
 }
 
-fn lowerFactoryLimits(
-    limits: ?factory_types.FactoryLimitOverrides,
-) ?WireFactoryRunLimits {
+fn lowerWorkflowLimits(
+    limits: ?workflow_types.WorkflowLimitOverrides,
+) ?WireWorkflowRunLimits {
     const value = limits orelse return null;
     return .{
-        .maxConcurrentSubagents = lowerFactoryLimit(
+        .maxConcurrentSubagents = lowerWorkflowLimit(
             u32,
             value.max_concurrent_subagents,
         ),
-        .maxTotalSubagents = lowerFactoryLimit(u64, value.max_total_subagents),
-        .timeoutSeconds = lowerFactoryLimit(f64, value.timeout_seconds),
-        .maxAiCredits = lowerFactoryLimit(f64, value.max_ai_credits),
+        .maxTotalSubagents = lowerWorkflowLimit(u64, value.max_total_subagents),
+        .timeoutSeconds = lowerWorkflowLimit(f64, value.timeout_seconds),
+        .maxAiCredits = lowerWorkflowLimit(f64, value.max_ai_credits),
     };
 }
 
-fn parseFactoryStatus(value: []const u8) !factory_types.FactoryRunStatus {
+fn parseWorkflowStatus(value: []const u8) !workflow_types.WorkflowRunStatus {
     if (std.mem.eql(u8, value, "pending")) return .pending;
     if (std.mem.eql(u8, value, "running")) return .running;
     if (std.mem.eql(u8, value, "completed")) return .completed;
@@ -15715,36 +15725,36 @@ fn parseFactoryStatus(value: []const u8) !factory_types.FactoryRunStatus {
     if (std.mem.eql(u8, value, "paused")) return .paused;
     if (std.mem.eql(u8, value, "cancelled")) return .cancelled;
     if (std.mem.eql(u8, value, "error")) return .@"error";
-    return error.InvalidFactoryRun;
+    return error.InvalidWorkflowRun;
 }
 
-fn cloneOptionalFactoryString(
+fn cloneOptionalWorkflowString(
     allocator: std.mem.Allocator,
     object: std.json.ObjectMap,
     name: []const u8,
 ) !?[]const u8 {
     const value = object.get(name) orelse return null;
     if (value == .null) return null;
-    if (value != .string) return error.InvalidFactoryRun;
+    if (value != .string) return error.InvalidWorkflowRun;
     return try allocator.dupe(u8, value.string);
 }
 
-fn cloneFactoryJson(
+fn cloneWorkflowJson(
     allocator: std.mem.Allocator,
     value: std.json.Value,
-) !factory_types.JsonView {
+) !workflow_types.JsonView {
     return .{ .bytes = try std.json.Stringify.valueAlloc(allocator, value, .{
         .emit_null_optional_fields = false,
     }) };
 }
 
-fn decodeFactoryPauseInfo(
+fn decodeWorkflowPauseInfo(
     allocator: std.mem.Allocator,
     value: ?std.json.Value,
-) !factory_types.FactoryPauseInfo {
-    const object = switch (value orelse return error.InvalidFactoryRun) {
+) !workflow_types.WorkflowPauseInfo {
+    const object = switch (value orelse return error.InvalidWorkflowRun) {
         .object => |object| object,
-        else => return error.InvalidFactoryRun,
+        else => return error.InvalidWorkflowRun,
     };
     const kind = try jsonRequiredString(object, "type");
     if (std.mem.eql(u8, kind, "user")) return .user;
@@ -15753,19 +15763,19 @@ fn decodeFactoryPauseInfo(
             u8,
             try jsonRequiredString(object, "key"),
         ) };
-    return error.InvalidFactoryRun;
+    return error.InvalidWorkflowRun;
 }
 
-fn parseFactoryFailureKind(value: []const u8) !factory_types.FactoryFailureKind {
+fn parseWorkflowFailureKind(value: []const u8) !workflow_types.WorkflowFailureKind {
     if (std.mem.eql(u8, value, "maxTotalSubagents")) return .max_total_subagents;
     if (std.mem.eql(u8, value, "timeoutSeconds")) return .timeout_seconds;
     if (std.mem.eql(u8, value, "maxAiCredits")) return .max_ai_credits;
-    return error.InvalidFactoryRun;
+    return error.InvalidWorkflowRun;
 }
 
-fn parseFactoryDurableOperation(
+fn parseWorkflowDurableOperation(
     value: []const u8,
-) !factory_types.FactoryDurableOperation {
+) !workflow_types.WorkflowDurableOperation {
     if (std.mem.eql(u8, value, "createRun")) return .create_run;
     if (std.mem.eql(u8, value, "markRunStarted")) return .mark_run_started;
     if (std.mem.eql(u8, value, "finishRun")) return .finish_run;
@@ -15777,122 +15787,122 @@ fn parseFactoryDurableOperation(
     if (std.mem.eql(u8, value, "journalGet")) return .journal_get;
     if (std.mem.eql(u8, value, "journalPut")) return .journal_put;
     if (std.mem.eql(u8, value, "refreshLease")) return .refresh_lease;
-    return error.InvalidFactoryRun;
+    return error.InvalidWorkflowRun;
 }
 
 fn jsonRequiredNumber(object: std.json.ObjectMap, name: []const u8) !f64 {
-    return switch (object.get(name) orelse return error.InvalidFactoryRun) {
+    return switch (object.get(name) orelse return error.InvalidWorkflowRun) {
         .integer => |value| @floatFromInt(value),
         .float => |value| value,
-        else => error.InvalidFactoryRun,
+        else => error.InvalidWorkflowRun,
     };
 }
 
-fn decodeFactoryFailure(
+fn decodeWorkflowFailure(
     allocator: std.mem.Allocator,
     value: std.json.Value,
-) !factory_types.FactoryFailure {
+) !workflow_types.WorkflowFailure {
     const object = switch (value) {
         .object => |object| object,
-        else => return error.InvalidFactoryRun,
+        else => return error.InvalidWorkflowRun,
     };
     const failure_type = try jsonRequiredString(object, "type");
     const run_id = try allocator.dupe(u8, try jsonRequiredString(object, "runId"));
-    if (std.mem.eql(u8, failure_type, "factory_limit_reached")) {
+    if (std.mem.eql(u8, failure_type, "workflow_limit_reached")) {
         const suggested_value = if (object.get("suggestedValue")) |suggested| switch (suggested) {
             .integer => |number| @as(f64, @floatFromInt(number)),
             .float => |number| number,
             .null => null,
-            else => return error.InvalidFactoryRun,
+            else => return error.InvalidWorkflowRun,
         } else null;
         return .{ .limit_reached = .{
-            .kind = try parseFactoryFailureKind(try jsonRequiredString(object, "kind")),
+            .kind = try parseWorkflowFailureKind(try jsonRequiredString(object, "kind")),
             .value = try jsonRequiredNumber(object, "value"),
             .suggested_value = suggested_value,
             .run_id = run_id,
         } };
     }
-    if (std.mem.eql(u8, failure_type, "factory_resume_declined"))
+    if (std.mem.eql(u8, failure_type, "workflow_resume_declined"))
         return .{ .resume_declined = .{
             .run_id = run_id,
             .reason = try allocator.dupe(u8, try jsonRequiredString(object, "reason")),
         } };
-    if (std.mem.eql(u8, failure_type, "factory_durable_failure"))
+    if (std.mem.eql(u8, failure_type, "workflow_durable_failure"))
         return .{ .durable_failure = .{
             .code = try allocator.dupe(u8, try jsonRequiredString(object, "code")),
-            .operation = try parseFactoryDurableOperation(
+            .operation = try parseWorkflowDurableOperation(
                 try jsonRequiredString(object, "operation"),
             ),
             .run_id = run_id,
         } };
-    if (std.mem.eql(u8, failure_type, "factory_accounting_incomplete"))
+    if (std.mem.eql(u8, failure_type, "workflow_accounting_incomplete"))
         return .{ .accounting_incomplete = .{
             .run_id = run_id,
-            .drained_nano_aiu = switch (object.get("drainedNanoAiu") orelse return error.InvalidFactoryRun) {
+            .drained_nano_aiu = switch (object.get("drainedNanoAiu") orelse return error.InvalidWorkflowRun) {
                 .integer => |number| number,
-                else => return error.InvalidFactoryRun,
+                else => return error.InvalidWorkflowRun,
             },
         } };
-    if (std.mem.eql(u8, failure_type, "factory_provider_disconnected"))
+    if (std.mem.eql(u8, failure_type, "workflow_provider_disconnected"))
         return .{ .provider_disconnected = .{ .run_id = run_id } };
-    return error.InvalidFactoryRun;
+    return error.InvalidWorkflowRun;
 }
 
-fn decodeFactoryRun(
+fn decodeWorkflowRun(
     allocator: std.mem.Allocator,
     value: std.json.Value,
-) !factory_types.FactoryRun {
+) !workflow_types.WorkflowRun {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const owned = arena.allocator();
     const object = switch (value) {
         .object => |object| object,
-        else => return error.InvalidFactoryRun,
+        else => return error.InvalidWorkflowRun,
     };
     const run_id = try owned.dupe(u8, try jsonRequiredString(object, "runId"));
-    const status = try parseFactoryStatus(try jsonRequiredString(object, "status"));
+    const status = try parseWorkflowStatus(try jsonRequiredString(object, "status"));
     const attempt = if (object.get("attempt")) |attempt_value| switch (attempt_value) {
         .integer => |number| blk: {
             const parsed = std.math.cast(u32, number) orelse
-                return error.InvalidFactoryRun;
-            if (parsed == 0) return error.InvalidFactoryRun;
+                return error.InvalidWorkflowRun;
+            if (parsed == 0) return error.InvalidWorkflowRun;
             break :blk parsed;
         },
         .null => null,
-        else => return error.InvalidFactoryRun,
+        else => return error.InvalidWorkflowRun,
     } else null;
     const snapshot = if (object.get("snapshot")) |snapshot|
-        try cloneFactoryJson(owned, snapshot)
+        try cloneWorkflowJson(owned, snapshot)
     else
         null;
-    const outcome: factory_types.FactoryOutcome = switch (status) {
+    const outcome: workflow_types.WorkflowOutcome = switch (status) {
         .pending => .pending,
         .running => .running,
         .completed => if (object.get("result")) |result|
-            .{ .completed = .{ .value = try cloneFactoryJson(owned, result) } }
+            .{ .completed = .{ .value = try cloneWorkflowJson(owned, result) } }
         else
             .{ .completed = .absent },
         .halted => .{ .halted = .{
-            .reason = try cloneOptionalFactoryString(owned, object, "reason"),
+            .reason = try cloneOptionalWorkflowString(owned, object, "reason"),
             .failure = if (object.get("failure")) |failure| switch (failure) {
                 .null => null,
-                else => try decodeFactoryFailure(owned, failure),
+                else => try decodeWorkflowFailure(owned, failure),
             } else null,
         } },
-        .paused => .{ .paused = try decodeFactoryPauseInfo(
+        .paused => .{ .paused = try decodeWorkflowPauseInfo(
             owned,
             object.get("pauseInfo"),
         ) },
-        .cancelled => .{ .cancelled = try cloneOptionalFactoryString(
+        .cancelled => .{ .cancelled = try cloneOptionalWorkflowString(
             owned,
             object,
             "reason",
         ) },
         .@"error" => .{ .@"error" = .{
-            .message = try cloneOptionalFactoryString(owned, object, "error"),
+            .message = try cloneOptionalWorkflowString(owned, object, "error"),
             .failure = if (object.get("failure")) |failure| switch (failure) {
                 .null => null,
-                else => try decodeFactoryFailure(owned, failure),
+                else => try decodeWorkflowFailure(owned, failure),
             } else null,
         } },
     };
@@ -16216,9 +16226,9 @@ const ExtensionWireValues = struct {
     canvas_actions: std.ArrayList(WireCanvasAction) = .empty,
     canvases: std.ArrayList(WireCanvas) = .empty,
     open_canvases: std.ArrayList(WireOpenCanvas) = .empty,
-    factory_phases: std.ArrayList(WireFactoryPhase) = .empty,
-    factories: std.ArrayList(WireFactoryMeta) = .empty,
-    factories_present: bool = false,
+    workflow_phases: std.ArrayList(WireWorkflowPhase) = .empty,
+    workflows: std.ArrayList(WireWorkflowMeta) = .empty,
+    workflows_present: bool = false,
     mcp_object: std.json.ObjectMap = .empty,
     mcp_servers: ?std.json.Value = null,
     custom_agents_present: bool = false,
@@ -16247,8 +16257,8 @@ const ExtensionWireValues = struct {
         self.canvas_actions.deinit(self.allocator);
         self.canvases.deinit(self.allocator);
         self.open_canvases.deinit(self.allocator);
-        self.factory_phases.deinit(self.allocator);
-        self.factories.deinit(self.allocator);
+        self.workflow_phases.deinit(self.allocator);
+        self.workflows.deinit(self.allocator);
     }
 
     fn lowerHostInjection(
@@ -16381,34 +16391,34 @@ const ExtensionWireValues = struct {
         self.mcp_servers = .{ .object = self.mcp_object };
     }
 
-    fn lowerFactories(
+    fn lowerWorkflows(
         self: *ExtensionWireValues,
-        definitions: ?[]const factory_types.AgentFactory,
+        definitions: ?[]const workflow_types.WorkflowDefinition,
     ) !void {
         const values = definitions orelse return;
-        self.factories_present = true;
+        self.workflows_present = true;
         var phase_count: usize = 0;
         for (values) |definition| phase_count += definition.meta.phases.len;
-        try self.factory_phases.ensureTotalCapacity(self.allocator, phase_count);
-        try self.factories.ensureTotalCapacity(self.allocator, values.len);
+        try self.workflow_phases.ensureTotalCapacity(self.allocator, phase_count);
+        try self.workflows.ensureTotalCapacity(self.allocator, values.len);
         for (values) |definition| {
-            const phase_start = self.factory_phases.items.len;
+            const phase_start = self.workflow_phases.items.len;
             for (definition.meta.phases) |phase| {
-                try self.factory_phases.append(self.allocator, .{
+                try self.workflow_phases.append(self.allocator, .{
                     .title = phase.title,
                     .detail = phase.detail,
                 });
             }
-            const limits: ?WireFactoryDeclaredLimits = if (definition.meta.limits) |value| .{
+            const limits: ?WireWorkflowDeclaredLimits = if (definition.meta.limits) |value| .{
                 .maxConcurrentSubagents = value.max_concurrent_subagents,
                 .maxTotalSubagents = value.max_total_subagents,
                 .timeoutSeconds = value.timeout_seconds,
                 .maxAiCredits = value.max_ai_credits,
             } else null;
-            try self.factories.append(self.allocator, .{
+            try self.workflows.append(self.allocator, .{
                 .name = definition.meta.name,
                 .description = definition.meta.description,
-                .phases = self.factory_phases.items[phase_start..],
+                .phases = self.workflow_phases.items[phase_start..],
                 .argsSchema = if (definition.meta.args_schema) |schema|
                     try self.parseJson(schema.bytes)
                 else
@@ -16418,8 +16428,8 @@ const ExtensionWireValues = struct {
         }
     }
 
-    fn wireFactories(self: *const ExtensionWireValues) ?[]const WireFactoryMeta {
-        return if (self.factories_present) self.factories.items else null;
+    fn wireWorkflows(self: *const ExtensionWireValues) ?[]const WireWorkflowMeta {
+        return if (self.workflows_present) self.workflows.items else null;
     }
 };
 
@@ -16603,7 +16613,7 @@ const ResumeSessionRequest = struct {
     disableResume: ?bool,
     continuePendingWork: ?bool,
     canvases: ?[]const WireCanvas,
-    factories: ?[]const WireFactoryMeta,
+    workflows: ?[]const WireWorkflowMeta,
     requestCanvasRenderer: ?bool,
     requestExtensions: ?bool,
     extensionSdkPath: ?[]const u8,
@@ -17309,7 +17319,7 @@ fn buildPreparedResumeSessionRequest(
         .disableResume = if (config.suppress_resume_event) true else null,
         .continuePendingWork = if (config.continue_pending_work) true else null,
         .canvases = if (values.canvases.items.len > 0) values.canvases.items else null,
-        .factories = values.wireFactories(),
+        .workflows = values.wireWorkflows(),
         .requestCanvasRenderer = if (features.request_canvas_renderer) true else null,
         .requestExtensions = if (features.request_extensions) true else null,
         .extensionSdkPath = config.extensions.extension_sdk_path,
@@ -30087,7 +30097,7 @@ test "custom agent optional slices preserve omitted and empty values" {
     );
 }
 
-test "factory API preserves wire options and decodes run envelopes" {
+test "workflow API preserves wire options and decodes run envelopes" {
     const allocator = std.testing.allocator;
     const fake_runtime = try fakeRuntimePath(allocator);
     defer allocator.free(fake_runtime);
@@ -30099,8 +30109,8 @@ test "factory API preserves wire options and decodes run envelopes" {
     });
     defer client.deinit();
     const session = try client.createSession(.{ .session_id = "session-1" });
-    const api = session.factory();
-    const args = try factory_types.JsonView.init("{\"topic\":\"factories\"}");
+    const api = session.workflow();
+    const args = try workflow_types.JsonView.init("{\"topic\":\"workflows\"}");
 
     var run = try api.run(allocator, "demo", .{
         .args = args,
@@ -30110,7 +30120,6 @@ test "factory API preserves wire options and decodes run envelopes" {
             .max_ai_credits = .{ .value = 2.5 },
         },
         .notify_on_complete = true,
-        .resume_from_run_id = "prior-run",
     });
     defer run.deinit();
     try std.testing.expectEqualStrings("run-1", run.run_id);
@@ -30155,9 +30164,22 @@ test "factory API preserves wire options and decodes run envelopes" {
 
     var runs = try api.listRuns(allocator, .{ .after_seq = 9, .limit = 25 });
     defer runs.deinit();
-    try std.testing.expectEqualStrings("{\"runs\":[]}", runs.value.bytes);
+    const listed = try runs.value.view().parse(std.json.Value, allocator);
+    defer listed.deinit();
+    try std.testing.expectEqualStrings(
+        "demo",
+        listed.value.object.get("runs").?.array.items[0].object.get("workflowName").?.string,
+    );
+    try std.testing.expect(listed.value.object.get("oldestSeq").? == .null);
     var detail = try api.getRunDetail(allocator, "run-1");
     defer detail.deinit();
+    const detailed = try detail.value.view().parse(std.json.Value, allocator);
+    defer detailed.deinit();
+    try std.testing.expectEqualStrings(
+        "demo",
+        detailed.value.object.get("workflowName").?.string,
+    );
+    try std.testing.expect(!detailed.value.object.contains("run"));
     var progress = try api.getRunProgress(allocator, "run-1", .{
         .phase_id = "phase-1",
         .before_seq = 20,
@@ -30178,10 +30200,10 @@ test "factory API preserves wire options and decodes run envelopes" {
     const requests = inspection.value.object.get("requests").?.array.items;
     const run_params = findObservedRequest(
         requests,
-        "session.factory.run",
+        "session.workflow.run",
     ).?.object.get("params").?.object;
     try std.testing.expectEqualStrings(
-        "factories",
+        "workflows",
         run_params.get("args").?.object.get("topic").?.string,
     );
     const run_limits =
@@ -30190,14 +30212,11 @@ test "factory API preserves wire options and decodes run envelopes" {
     try std.testing.expect(run_limits.get("maxTotalSubagents").? == .null);
     try std.testing.expect(!run_limits.contains("timeoutSeconds"));
     try std.testing.expectEqual(@as(f64, 2.5), run_limits.get("maxAiCredits").?.float);
-    try std.testing.expectEqualStrings(
-        "prior-run",
-        run_params.get("options").?.object.get("resumeFromRunId").?.string,
-    );
+    try std.testing.expect(!run_params.get("options").?.object.contains("resumeFromRunId"));
 
     const resume_params = findObservedRequest(
         requests,
-        "session.factory.resume",
+        "session.workflow.resume",
     ).?.object.get("params").?.object;
     try std.testing.expectEqual(
         @as(i64, 30),
@@ -30206,7 +30225,7 @@ test "factory API preserves wire options and decodes run envelopes" {
     try std.testing.expect(!resume_params.get("limits").?.object.contains("maxAiCredits"));
 }
 
-test "factory run attempts are nonzero uint32 values" {
+test "workflow run attempts are nonzero uint32 values" {
     const allocator = std.testing.allocator;
     for ([_][]const u8{
         \\{"runId":"run-1","attempt":0,"status":"running"}
@@ -30217,8 +30236,8 @@ test "factory run attempts are nonzero uint32 values" {
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, source, .{});
         defer parsed.deinit();
         try std.testing.expectError(
-            error.InvalidFactoryRun,
-            decodeFactoryRun(allocator, parsed.value),
+            error.InvalidWorkflowRun,
+            decodeWorkflowRun(allocator, parsed.value),
         );
     }
 
@@ -30230,29 +30249,29 @@ test "factory run attempts are nonzero uint32 values" {
         .{},
     );
     defer parsed.deinit();
-    var run = try decodeFactoryRun(allocator, parsed.value);
+    var run = try decodeWorkflowRun(allocator, parsed.value);
     defer run.deinit();
     try std.testing.expectEqual(@as(?u32, std.math.maxInt(u32)), run.attempt);
 }
 
-test "factory run and resume wait for terminal envelopes" {
+test "workflow run and resume wait for terminal envelopes" {
     const allocator = std.testing.allocator;
     const fake_runtime = try fakeRuntimePath(allocator);
     defer allocator.free(fake_runtime);
     var client = try Client.init(allocator, std.testing.io, .{
         .connection = .{ .stdio = .{
             .path = "node",
-            .args = &.{ fake_runtime, "--factory-pending" },
+            .args = &.{ fake_runtime, "--workflow-pending" },
         } },
     });
     defer client.deinit();
     const session = try client.createSession(.{ .session_id = "session-1" });
 
-    var run = try session.factory().run(allocator, "demo", .{});
+    var run = try session.workflow().run(allocator, "demo", .{});
     defer run.deinit();
     try std.testing.expect(run.outcome == .completed);
 
-    var resumed = try session.factory().@"resume"(allocator, "run-1", .{});
+    var resumed = try session.workflow().@"resume"(allocator, "run-1", .{});
     defer resumed.deinit();
     try std.testing.expect(resumed.outcome == .completed);
 
@@ -30260,7 +30279,7 @@ test "factory run and resume wait for terminal envelopes" {
     cancellation.cancel(std.testing.io);
     try std.testing.expectError(
         error.Canceled,
-        session.factory().waitForRun(allocator, "run-1", .{
+        session.workflow().waitForRun(allocator, "run-1", .{
             .cancellation = &cancellation,
         }),
     );
@@ -30271,25 +30290,25 @@ test "factory run and resume wait for terminal envelopes" {
         @as(usize, 2),
         countObservedRequests(
             inspection.value.object.get("requests").?.array.items,
-            "session.factory.getRun",
+            "session.workflow.getRun",
         ),
     );
 }
 
-test "factory registration preserves omitted and explicitly empty values" {
+test "workflow registration preserves omitted and explicitly empty values" {
     const allocator = std.testing.allocator;
     var values = ExtensionWireValues.init(allocator);
     defer values.deinit();
 
-    try values.lowerFactories(null);
-    try std.testing.expect(values.wireFactories() == null);
+    try values.lowerWorkflows(null);
+    try std.testing.expect(values.wireWorkflows() == null);
 
-    try values.lowerFactories(&.{});
-    const factories = values.wireFactories().?;
-    try std.testing.expectEqual(@as(usize, 0), factories.len);
+    try values.lowerWorkflows(&.{});
+    const workflows = values.wireWorkflows().?;
+    try std.testing.expectEqual(@as(usize, 0), workflows.len);
 }
 
-test "factory run decoding accepts explicit null optional failure fields" {
+test "workflow run decoding accepts explicit null optional failure fields" {
     const allocator = std.testing.allocator;
     const without_failure = try std.json.parseFromSlice(
         std.json.Value,
@@ -30299,7 +30318,7 @@ test "factory run decoding accepts explicit null optional failure fields" {
         .{},
     );
     defer without_failure.deinit();
-    var decoded = try decodeFactoryRun(allocator, without_failure.value);
+    var decoded = try decodeWorkflowRun(allocator, without_failure.value);
     defer decoded.deinit();
     switch (decoded.outcome) {
         .@"error" => |failure| {
@@ -30312,12 +30331,12 @@ test "factory run decoding accepts explicit null optional failure fields" {
     const null_suggestion = try std.json.parseFromSlice(
         std.json.Value,
         allocator,
-        \\{"runId":"run-2","status":"error","failure":{"type":"factory_limit_reached","kind":"timeoutSeconds","value":10,"suggestedValue":null,"runId":"run-2"}}
+        \\{"runId":"run-2","status":"error","failure":{"type":"workflow_limit_reached","kind":"timeoutSeconds","value":10,"suggestedValue":null,"runId":"run-2"}}
     ,
         .{},
     );
     defer null_suggestion.deinit();
-    var limited = try decodeFactoryRun(allocator, null_suggestion.value);
+    var limited = try decodeWorkflowRun(allocator, null_suggestion.value);
     defer limited.deinit();
     switch (limited.outcome) {
         .@"error" => |failure| switch (failure.failure.?) {
@@ -30328,7 +30347,7 @@ test "factory run decoding accepts explicit null optional failure fields" {
     }
 }
 
-test "unmatched factory requests use registered generic handlers" {
+test "unmatched workflow requests use registered generic handlers" {
     const handler = struct {
         fn handle(
             allocator: std.mem.Allocator,
@@ -30345,25 +30364,25 @@ test "unmatched factory requests use registered generic handlers" {
     var client = try Client.init(allocator, std.testing.io, .{
         .connection = .{ .stdio = .{
             .path = "node",
-            .args = &.{ fake_runtime, "--exercise-factory-generic" },
+            .args = &.{ fake_runtime, "--exercise-workflow-generic" },
         } },
     });
     defer client.deinit();
-    try client.registerRpcHandler("factory.execute", handler, null);
-    try client.registerRpcHandler("factory.abort", handler, null);
-    var joined = try client.joinParentSession("factory-session", .{});
+    try client.registerRpcHandler("workflow.execute", handler, null);
+    try client.registerRpcHandler("workflow.abort", handler, null);
+    var joined = try client.joinParentSession("workflow-session", .{});
     defer joined.deinit();
 
     const inspection = try client.callRpc(std.json.Value, "test.inspect", .{});
     defer inspection.deinit();
-    const result = inspection.value.object.get("factoryResult").?.object;
+    const result = inspection.value.object.get("workflowResult").?.object;
     try std.testing.expect(result.get("execute").?.object.get("result").?.object
         .get("handled").?.bool);
     try std.testing.expect(result.get("abort").?.object.get("result").?.object
         .get("handled").?.bool);
 }
 
-test "factory execute callback lease does not wait while callbacks are blocked" {
+test "workflow execute callback lease does not wait while callbacks are blocked" {
     var client = Client{
         .allocator = std.testing.allocator,
         .io = std.testing.io,
@@ -30373,17 +30392,25 @@ test "factory execute callback lease does not wait while callbacks are blocked" 
     try std.testing.expectEqual(@as(usize, 0), client.runtime_callback_count);
 }
 
-test "factory execute supports nested agent RPC without blocking the pump" {
+test "workflow execute supports nested agent RPC without blocking the pump" {
     const callbacks = struct {
-        fn produce(allocator: std.mem.Allocator, _: ?*anyopaque) !factory_types.Json {
-            return factory_types.Json.init(allocator, "{\"cached\":true}");
+        fn produce(allocator: std.mem.Allocator, _: ?*anyopaque) !workflow_types.Json {
+            return workflow_types.Json.init(allocator, "{\"cached\":true}");
+        }
+
+        fn nullValue(allocator: std.mem.Allocator, _: ?*anyopaque) !workflow_types.Json {
+            return workflow_types.Json.init(allocator, "null");
+        }
+
+        fn replayed(_: std.mem.Allocator, _: ?*anyopaque) !workflow_types.Json {
+            return error.WorkflowStepReplayed;
         }
 
         fn run(
             allocator: std.mem.Allocator,
-            context: *factory_types.FactoryContext,
+            context: *workflow_types.WorkflowContext,
             _: ?*anyopaque,
-        ) !?factory_types.Json {
+        ) !?workflow_types.Json {
             const args = try context.args.parse(
                 struct { prompt: []const u8 },
                 allocator,
@@ -30395,6 +30422,21 @@ test "factory execute supports nested agent RPC without blocking the pump" {
                 .produce = produce,
             }, .{});
             cached.deinit();
+            var replay = try context.step(allocator, "prepared", .{
+                .produce = replayed,
+            }, .{});
+            defer replay.deinit();
+            try std.testing.expectEqualStrings("{\"cached\":true}", replay.bytes);
+            var cached_null = try context.step(allocator, "cached-null", .{
+                .produce = nullValue,
+            }, .{});
+            defer cached_null.deinit();
+            var replayed_null = try context.step(allocator, "cached-null", .{
+                .produce = replayed,
+            }, .{});
+            defer replayed_null.deinit();
+            try std.testing.expectEqualStrings("null", replayed_null.bytes);
+            try context.pause("review");
             return try context.agent(allocator, args.value.prompt, .{
                 .label = "worker",
             });
@@ -30407,18 +30449,18 @@ test "factory execute supports nested agent RPC without blocking the pump" {
     var client = try Client.init(allocator, std.testing.io, .{
         .connection = .{ .stdio = .{
             .path = "node",
-            .args = &.{ fake_runtime, "--exercise-factory" },
+            .args = &.{ fake_runtime, "--exercise-workflow" },
         } },
     });
     defer client.deinit();
-    var joined = try client.joinParentSession("factory-session", .{
+    var joined = try client.joinParentSession("workflow-session", .{
         .extensions = .{
-            .factories = &.{.{
+            .workflows = &.{.{
                 .meta = .{
                     .name = "demo",
                     .description = "Runs one nested agent.",
                     .phases = &.{.{ .title = "Work" }},
-                    .args_schema = try factory_types.JsonView.init(
+                    .args_schema = try workflow_types.JsonView.init(
                         \\{"type":"object","properties":{"prompt":{"type":"string"}},"required":["prompt"]}
                     ),
                     .limits = .{
@@ -30434,29 +30476,29 @@ test "factory execute supports nested agent RPC without blocking the pump" {
 
     const inspection = try client.callRpc(std.json.Value, "test.inspect", .{});
     defer inspection.deinit();
-    const factory_result = inspection.value.object.get("factoryResult").?;
-    try std.testing.expect(factory_result == .object);
-    try std.testing.expect(!factory_result.object.contains("error"));
+    const workflow_result = inspection.value.object.get("workflowResult").?;
+    try std.testing.expect(workflow_result == .object);
+    try std.testing.expect(!workflow_result.object.contains("error"));
     try std.testing.expectEqualStrings(
         "nested work",
-        factory_result.object.get("result").?.object
+        workflow_result.object.get("result").?.object
             .get("result").?.object.get("answer").?.string,
     );
 
     const requests = inspection.value.object.get("requests").?.array.items;
     const join_request = findObservedRequest(requests, "session.resume").?;
     const definitions =
-        join_request.object.get("params").?.object.get("factories").?.array.items;
+        join_request.object.get("params").?.object.get("workflows").?.array.items;
     try std.testing.expectEqual(@as(usize, 1), definitions.len);
     try std.testing.expectEqualStrings(
         "demo",
         definitions[0].object.get("name").?.string,
     );
-    const agent_request = findObservedRequest(requests, "session.factory.agent").?;
+    const agent_request = findObservedRequest(requests, "session.workflow.agent").?;
     const agent_params = agent_request.object.get("params").?.object;
     try std.testing.expectEqualStrings(
         "reverse-run",
-        agent_params.get("factoryRunId").?.string,
+        agent_params.get("workflowRunId").?.string,
     );
     try std.testing.expectEqualStrings(
         "attempt-1",
@@ -30466,27 +30508,34 @@ test "factory execute supports nested agent RPC without blocking the pump" {
         "worker",
         agent_params.get("opts").?.object.get("label").?.string,
     );
+    try std.testing.expect(!agent_params.contains("factoryRunId"));
     try std.testing.expect(findObservedRequest(
         requests,
-        "session.factory.journal.get",
+        "session.workflow.journal.get",
     ) != null);
     try std.testing.expect(findObservedRequest(
         requests,
-        "session.factory.journal.put",
+        "session.workflow.journal.put",
     ) != null);
+    const checkpoint = findObservedRequest(
+        requests,
+        "session.workflow.pauseAtCheckpoint",
+    ).?.object.get("params").?.object;
+    try std.testing.expectEqualStrings("review", checkpoint.get("key").?.string);
+    try std.testing.expectEqualStrings("attempt-1", checkpoint.get("executionToken").?.string);
     try std.testing.expectEqual(
         @as(usize, 2),
-        countObservedRequests(requests, "session.factory.log"),
+        countObservedRequests(requests, "session.workflow.log"),
     );
 }
 
-test "factory abort cancels only the matching execution attempt" {
+test "workflow abort cancels only the matching execution attempt" {
     const callback = struct {
         fn run(
             allocator: std.mem.Allocator,
-            context: *factory_types.FactoryContext,
+            context: *workflow_types.WorkflowContext,
             _: ?*anyopaque,
-        ) !?factory_types.Json {
+        ) !?workflow_types.Json {
             return context.agent(allocator, "wait forever", .{});
         }
     }.run;
@@ -30497,13 +30546,13 @@ test "factory abort cancels only the matching execution attempt" {
     var client = try Client.init(allocator, std.testing.io, .{
         .connection = .{ .stdio = .{
             .path = "node",
-            .args = &.{ fake_runtime, "--exercise-factory-abort" },
+            .args = &.{ fake_runtime, "--exercise-workflow-abort" },
         } },
     });
     defer client.deinit();
-    var joined = try client.joinParentSession("factory-session", .{
+    var joined = try client.joinParentSession("workflow-session", .{
         .extensions = .{
-            .factories = &.{.{
+            .workflows = &.{.{
                 .meta = .{
                     .name = "cancel-me",
                     .description = "Waits for cancellation.",
@@ -30516,43 +30565,138 @@ test "factory abort cancels only the matching execution attempt" {
 
     const inspection = try client.callRpc(std.json.Value, "test.inspect", .{});
     defer inspection.deinit();
-    const result = inspection.value.object.get("factoryResult").?.object;
+    const result = inspection.value.object.get("workflowResult").?.object;
     try std.testing.expectEqual(
         @as(i64, -32000),
         result.get("execute").?.object.get("error").?.object.get("code").?.integer,
     );
     try std.testing.expectEqualStrings(
-        "FactoryCancelled",
+        "WorkflowCancelled",
         result.get("execute").?.object.get("error").?.object.get("message").?.string,
     );
     try std.testing.expectEqual(
         @as(usize, 0),
         result.get("abort").?.object.get("result").?.object.count(),
     );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        result.get("staleAbort").?.object.get("result").?.object.count(),
+    );
     const drained = try client.callRpc(std.json.Value, "test.inspect", .{});
     defer drained.deinit();
     try std.testing.expectEqual(@as(usize, 0), client.abandoned_response_ids.items.len);
 }
 
-test "factory combinators propagate nested RPC failures" {
+test "workflow abort isolates overlapping attempts and is repeatable" {
+    const allocator = std.testing.allocator;
+    var client = Client{ .allocator = allocator, .io = std.testing.io };
+    defer client.workflow_jobs.deinit(allocator);
+    var first = WorkflowExecuteJob{
+        .client = &client,
+        .session_id = @constCast("s"),
+        .run_id = @constCast("run"),
+        .execution_token = @constCast("first"),
+        .args_json = @constCast("null"),
+        .id_json = @constCast("1"),
+        .run = undefined,
+        .context = null,
+    };
+    var second = first;
+    second.execution_token = @constCast("second");
+    try client.workflow_jobs.append(allocator, &first);
+    try client.workflow_jobs.append(allocator, &second);
+
+    const stale = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"s","runId":"run","executionToken":"stale"}
+    ,
+        .{},
+    );
+    defer stale.deinit();
+    try std.testing.expect(!try client.abortWorkflowExecution(stale.value));
+    try std.testing.expect(!first.cancelled.isSet());
+    try std.testing.expect(!second.cancelled.isSet());
+    const matching = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"sessionId":"s","runId":"run","executionToken":"first"}
+    ,
+        .{},
+    );
+    defer matching.deinit();
+    try std.testing.expect(try client.abortWorkflowExecution(matching.value));
+    try std.testing.expect(try client.abortWorkflowExecution(matching.value));
+    try std.testing.expect(first.cancelled.isSet());
+    try std.testing.expect(!second.cancelled.isSet());
+}
+
+test "workflow callback input and output failures receive correlated responses" {
+    const callback = struct {
+        fn run(
+            allocator: std.mem.Allocator,
+            _: *workflow_types.WorkflowContext,
+            _: ?*anyopaque,
+        ) !?workflow_types.Json {
+            return .{ .allocator = allocator, .bytes = try allocator.dupe(u8, "{invalid") };
+        }
+    }.run;
+    const allocator = std.testing.allocator;
+    const fake_runtime = try fakeRuntimePath(allocator);
+    defer allocator.free(fake_runtime);
+    var client = try Client.init(allocator, std.testing.io, .{
+        .connection = .{ .stdio = .{
+            .path = "node",
+            .args = &.{ fake_runtime, "--exercise-workflow-invalid" },
+        } },
+    });
+    defer client.deinit();
+    var joined = try client.joinParentSession("workflow-session", .{
+        .extensions = .{ .workflows = &.{.{
+            .meta = .{ .name = "invalid", .description = "Returns invalid JSON." },
+            .run = callback,
+        }} },
+    });
+    defer joined.deinit();
+    const inspection = try client.callRpc(std.json.Value, "test.inspect", .{});
+    defer inspection.deinit();
+    const result = inspection.value.object.get("workflowResult").?.object;
+    for (result.get("malformed").?.array.items) |response| {
+        try std.testing.expect(response.object.get("id").? == .integer);
+        try std.testing.expectEqual(
+            @as(i64, -32602),
+            response.object.get("error").?.object.get("code").?.integer,
+        );
+    }
+    try std.testing.expectEqual(
+        @as(i64, -32603),
+        result.get("invalidResult").?.object.get("error").?.object.get("code").?.integer,
+    );
+    try std.testing.expectEqual(
+        @as(i64, -32602),
+        result.get("invalidAbort").?.object.get("error").?.object.get("code").?.integer,
+    );
+}
+
+test "workflow combinators propagate nested RPC failures" {
     const callbacks = struct {
         fn task(
             allocator: std.mem.Allocator,
-            branch: *factory_types.FactoryBranch,
+            branch: *workflow_types.WorkflowBranch,
             _: ?*anyopaque,
-        ) !?factory_types.Json {
+        ) !?workflow_types.Json {
             return branch.agent(allocator, "fail", .{});
         }
 
         fn run(
             allocator: std.mem.Allocator,
-            context: *factory_types.FactoryContext,
+            context: *workflow_types.WorkflowContext,
             _: ?*anyopaque,
-        ) !?factory_types.Json {
+        ) !?workflow_types.Json {
             const results = try context.parallel(allocator, &.{
                 .{ .run = task },
             });
-            defer factory_types.deinitOptionalJsonSlice(allocator, results);
+            defer workflow_types.deinitOptionalJsonSlice(allocator, results);
             return null;
         }
     };
@@ -30563,13 +30707,13 @@ test "factory combinators propagate nested RPC failures" {
     var client = try Client.init(allocator, std.testing.io, .{
         .connection = .{ .stdio = .{
             .path = "node",
-            .args = &.{ fake_runtime, "--exercise-factory-agent-failure" },
+            .args = &.{ fake_runtime, "--exercise-workflow-agent-failure" },
         } },
     });
     defer client.deinit();
-    var joined = try client.joinParentSession("factory-session", .{
+    var joined = try client.joinParentSession("workflow-session", .{
         .extensions = .{
-            .factories = &.{.{
+            .workflows = &.{.{
                 .meta = .{
                     .name = "fail-agent",
                     .description = "Propagates agent RPC failure.",
@@ -30582,13 +30726,13 @@ test "factory combinators propagate nested RPC failures" {
 
     const inspection = try client.callRpc(std.json.Value, "test.inspect", .{});
     defer inspection.deinit();
-    const response = inspection.value.object.get("factoryResult").?.object;
+    const response = inspection.value.object.get("workflowResult").?.object;
     try std.testing.expectEqual(
         @as(i64, -32000),
         response.get("error").?.object.get("code").?.integer,
     );
     try std.testing.expectEqualStrings(
-        "FactoryTransportFailure",
+        "WorkflowTransportFailure",
         response.get("error").?.object.get("message").?.string,
     );
 }

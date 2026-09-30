@@ -120,6 +120,7 @@ pub const FusionPhaseCompletedData = struct {
     role: []const u8,
     conversation_scope: FusionConversationScope,
     model: []const u8,
+    reasoning_effort: ?[]const u8 = null,
     status: FusionPhaseStatus,
     content: []const u8,
     verdict: ?[]const u8,
@@ -137,6 +138,7 @@ pub const FusionPhaseFailedData = struct {
     role: []const u8,
     conversation_scope: FusionConversationScope,
     model: []const u8,
+    reasoning_effort: ?[]const u8 = null,
     status: FusionPhaseStatus,
     reason: []const u8,
     duration_ms: f64,
@@ -153,6 +155,7 @@ pub const FusionPhaseStartedData = struct {
     role: []const u8,
     conversation_scope: FusionConversationScope,
     model: []const u8,
+    reasoning_effort: ?[]const u8 = null,
 };
 
 pub const AssistantIdleData = struct {
@@ -259,6 +262,7 @@ pub const Citations = struct {
 };
 
 pub const FusionAttribution = struct {
+    has_user_steering: ?bool = null,
     fusion_id: []const u8,
     commit_id: ?[]const u8 = null,
     synthetic_model: []const u8,
@@ -274,6 +278,7 @@ pub const FusionAttribution = struct {
 
 pub const AssistantMessageData = struct {
     message_id: []const u8,
+    originating_message_id: ?[]const u8 = null,
     model: ?[]const u8 = null,
     content: []const u8,
     tool_requests: ?[]const AssistantMessageToolRequest = null,
@@ -341,6 +346,7 @@ pub const AssistantToolCallDeltaData = struct {
 pub const AssistantTurnEndData = struct {
     turn_id: []const u8,
     model: ?[]const u8 = null,
+    parent_tool_call_id: ?[]const u8 = null,
 };
 
 pub const AssistantTurnRetryData = struct {
@@ -353,6 +359,7 @@ pub const AssistantTurnStartData = struct {
     turn_id: []const u8,
     model: ?[]const u8 = null,
     interaction_id: ?[]const u8 = null,
+    parent_tool_call_id: ?[]const u8 = null,
 };
 
 pub const AssistantUsageTransport = enum {
@@ -409,6 +416,8 @@ pub const AssistantUsageData = struct {
     cache_write_tokens: ?u64 = null,
     cache_expires_at: ?[]const u8 = null,
     reasoning_tokens: ?u64 = null,
+    thinking_dropped_blocks: ?u64 = null,
+    thinking_dropped_reasons: ?[]const []const u8 = null,
     cost: ?f64 = null,
     duration: ?u64 = null,
     time_to_first_token_ms: ?f64 = null,
@@ -572,34 +581,6 @@ pub const ExternalToolRequestedData = struct {
     tracestate: ?[]const u8 = null,
 };
 
-pub const FactoryRunSettledStatus = enum {
-    completed,
-    halted,
-    paused,
-    cancelled,
-    error_,
-};
-
-pub const FactoryRunSettledData = struct {
-    run_id: []const u8,
-    status: FactoryRunSettledStatus,
-    consumed_subagents: u64,
-    consumed_nano_aiu: u64,
-    elapsed_ms: u64,
-    failure_type: ?[]const u8 = null,
-};
-
-pub const FactoryRunStartedData = struct {
-    run_id: []const u8,
-    factory_name: []const u8,
-    attempt: u64,
-};
-
-pub const FactoryRunUpdatedData = struct {
-    run_id: []const u8,
-    revision: u64,
-};
-
 pub const HookEndError = struct {
     message: []const u8,
     stack: ?[]const u8 = null,
@@ -630,6 +611,7 @@ pub const HookStartData = struct {
 pub const McpHeadersRefreshCompletedOutcome = enum {
     headers,
     none,
+    error_,
     timeout,
 };
 
@@ -666,6 +648,7 @@ pub const McpOauthRequiredStaticClientConfig = struct {
     client_secret: ?[]const u8 = null,
     public_client: ?bool = null,
     grant_type: ?[]const u8 = null,
+    scope: ?[]const u8 = null,
 };
 
 pub const McpOauthWWWAuthenticateParams = struct {
@@ -759,6 +742,7 @@ pub const ModelCallFailureRequestFingerprint = struct {
 
 pub const ModelCallFailureData = struct {
     model: ?[]const u8 = null,
+    parent_tool_call_id: ?[]const u8 = null,
     initiator: ?[]const u8 = null,
     api_call_id: ?[]const u8 = null,
     provider_call_id: ?[]const u8 = null,
@@ -785,6 +769,23 @@ pub const ModelCallFailureData = struct {
     fusion: ?FusionAttribution = null,
 };
 
+pub const ModelCallFinalResult = enum {
+    success,
+    http_400,
+    http_413,
+    http_429,
+    http_4xx,
+    http_5xx,
+    transport_error,
+    other_error,
+};
+
+pub const ModelCallFinalResultData = struct {
+    model: []const u8,
+    is_byok: ?bool = null,
+    result: ModelCallFinalResult,
+};
+
 pub const ModelCallFinishedOutcome = enum {
     success,
     error_,
@@ -806,13 +807,117 @@ pub const ModelCallStartData = struct {
     model: ?[]const u8 = null,
     previous_response_id: ?[]const u8 = null,
     fusion: ?FusionAttribution = null,
+    parent_tool_call_id: ?[]const u8 = null,
 };
 
 pub const PendingMessagesModifiedData = struct {};
 
+pub const PermissionAssentDetectedData = struct {
+    request_id: []const u8,
+    turn_index: u64,
+};
+
+pub const PermissionDecisionSource = enum {
+    assisted_approval,
+    human_response,
+    host_policy,
+    unattended_fallback,
+    authorization_carry_forward,
+};
+
+pub const PermissionCarriedForwardData = struct {
+    request_id: []const u8,
+    tool_call_id: []const u8,
+    record_id: []const u8,
+    decision_source: PermissionDecisionSource,
+};
+
+pub const TaskBlockerKind = enum {
+    permission_recovery,
+};
+
+pub const PermissionRecoveryReason = enum {
+    permission_required,
+    repeated_attempt,
+    attempts_exhausted,
+    permission_approved,
+    permission_denied,
+    responder_unavailable,
+    equivalent_alternative_succeeded,
+};
+
+pub const PermissionRecoveryStatus = enum {
+    recovering,
+    awaiting_approval,
+    resolved,
+    blocked,
+};
+
+pub const PermissionRecoveryOnBlocked = enum {
+    ask,
+    fail,
+};
+
+pub const PermissionRecoveryAttemptRelation = enum {
+    initial,
+    retry,
+    alternative,
+};
+
+pub const PermissionRecoveryAttemptDisposition = enum {
+    deferred,
+    prompted,
+    approved,
+    denied,
+    blocked,
+    succeeded,
+};
+
+pub const PermissionRecoveryAttemptReason = enum {
+    permission_required,
+    repeated_attempt,
+    attempts_exhausted,
+    permission_approved,
+    permission_denied,
+    responder_unavailable,
+    equivalent_alternative_succeeded,
+};
+
+pub const PermissionRecoveryAttempt = struct {
+    attempt_id: []const u8,
+    tool_call_id: ?[]const u8 = null,
+    permission_kind: []const u8,
+    request_fingerprint: []const u8,
+    relation: PermissionRecoveryAttemptRelation,
+    disposition: PermissionRecoveryAttemptDisposition,
+    reason: PermissionRecoveryAttemptReason,
+    ordinal: u64,
+};
+
+pub const PermissionRecoveryData = struct {
+    episode_id: []const u8,
+    status: PermissionRecoveryStatus,
+    on_blocked: PermissionRecoveryOnBlocked,
+    reason: PermissionRecoveryReason,
+    max_attempts: u64,
+    attempts: []const PermissionRecoveryAttempt,
+};
+
+pub const TaskBlocker = struct {
+    kind: TaskBlockerKind,
+    reason: PermissionRecoveryReason,
+    resumable: bool,
+    permission_recovery: PermissionRecoveryData,
+};
+
 pub const PermissionApproved = struct {
     kind: []const u8,
     managed_approval_handled: ?bool = null,
+};
+
+pub const PermissionApprovedReadOnlyForSession = struct {
+    kind: []const u8,
+    directories: []const []const u8,
 };
 
 pub const UserToolSessionApprovalCommands = struct {
@@ -848,7 +953,7 @@ pub const UserToolSessionApprovalExtensionManagement = struct {
     operation: ?[]const u8 = null,
 };
 
-pub const UserToolSessionApprovalFactory = struct {
+pub const UserToolSessionApprovalWorkflow = struct {
     kind: []const u8,
     approval_key: ?[]const u8 = null,
 };
@@ -872,7 +977,7 @@ pub const UserToolSessionApproval = union(enum) {
     memory: UserToolSessionApprovalMemory,
     custom_tool: UserToolSessionApprovalCustomTool,
     extension_management: UserToolSessionApprovalExtensionManagement,
-    factory: UserToolSessionApprovalFactory,
+    workflow: UserToolSessionApprovalWorkflow,
     extension_permission_access: UserToolSessionApprovalExtensionPermissionAccess,
     extension_env_access: UserToolSessionApprovalExtensionEnvAccess,
 };
@@ -929,6 +1034,7 @@ pub const PermissionDeniedByPermissionRequestHook = struct {
 
 pub const PermissionResult = union(enum) {
     approved: PermissionApproved,
+    approved_read_only_for_session: PermissionApprovedReadOnlyForSession,
     approved_for_session: PermissionApprovedForSession,
     approved_for_location: PermissionApprovedForLocation,
     cancelled: PermissionCancelled,
@@ -942,7 +1048,45 @@ pub const PermissionResult = union(enum) {
 pub const PermissionCompletedData = struct {
     request_id: []const u8,
     tool_call_id: ?[]const u8 = null,
+    recovery_episode_id: ?[]const u8 = null,
+    blocker: ?TaskBlocker = null,
     result: PermissionResult,
+    decision_source: ?PermissionDecisionSource = null,
+};
+
+pub const PermissionMessageAuthorizationPolarity = enum {
+    grant,
+    denial,
+};
+
+pub const PermissionContextualAuthorizationData = struct {
+    record_id: []const u8,
+    request_id: []const u8,
+    turn_index: u64,
+    polarity: PermissionMessageAuthorizationPolarity,
+    span_start: u64,
+    span_end: u64,
+};
+
+pub const PermissionMessageAuthorizationData = struct {
+    record_id: []const u8,
+    turn_index: u64,
+    polarity: PermissionMessageAuthorizationPolarity,
+    action_class: []const u8,
+    span_start: u64,
+    span_end: u64,
+    target_members: ?[]const []const u8 = null,
+    task: ?[]const u8 = null,
+    world: ?std.json.Value = null,
+};
+
+pub const PermissionMessageAuthorizationDegradedData = struct {
+    turn_index: u64,
+};
+
+pub const PermissionMessageAuthorizationReadData = struct {
+    turn_index: u64,
+    activates_extraction: ?bool = null,
 };
 
 pub const PermissionRequestShellCommand = struct {
@@ -959,6 +1103,18 @@ pub const PermissionRequestShellPossibleUrl = struct {
     url: []const u8,
 };
 
+pub const PermissionSandboxPathGrantAccess = enum {
+    read,
+    read_write,
+};
+
+pub const PermissionSandboxPathGrant = struct {
+    path: []const u8,
+    denied_path: ?[]const u8 = null,
+    access: PermissionSandboxPathGrantAccess,
+    removed_readonly_paths: ?[]const []const u8 = null,
+};
+
 pub const PermissionRequestShell = struct {
     kind: []const u8,
     tool_call_id: ?[]const u8 = null,
@@ -968,6 +1124,8 @@ pub const PermissionRequestShell = struct {
     commands: []const PermissionRequestShellCommand,
     command_segments: ?[]const PermissionRequestShellCommandSegment = null,
     possible_paths: []const []const u8,
+    resolved_working_directory: ?[]const u8 = null,
+    resolved_paths: ?std.json.ArrayHashMap([]const u8) = null,
     possible_urls: []const PermissionRequestShellPossibleUrl,
     has_write_file_redirection: bool,
     can_offer_session_approval: bool,
@@ -975,6 +1133,7 @@ pub const PermissionRequestShell = struct {
     request_sandbox_bypass: ?bool = null,
     request_sandbox_permissive: ?bool = null,
     request_sandbox_bypass_reason: ?[]const u8 = null,
+    sandbox_path_grant: ?PermissionSandboxPathGrant = null,
 };
 
 pub const PermissionRequestWrite = struct {
@@ -983,11 +1142,13 @@ pub const PermissionRequestWrite = struct {
     managed_approval_required: ?bool = null,
     intention: []const u8,
     file_name: []const u8,
+    resolved_path: ?[]const u8 = null,
     diff: []const u8,
     new_file_contents: ?[]const u8 = null,
     can_offer_session_approval: bool,
     request_sandbox_bypass: ?bool = null,
     request_sandbox_bypass_reason: ?[]const u8 = null,
+    sandbox_path_grant: ?PermissionSandboxPathGrant = null,
 };
 
 pub const PermissionRequestRead = struct {
@@ -996,8 +1157,10 @@ pub const PermissionRequestRead = struct {
     managed_approval_required: ?bool = null,
     intention: []const u8,
     path: []const u8,
+    resolved_path: ?[]const u8 = null,
     request_sandbox_bypass: ?bool = null,
     request_sandbox_bypass_reason: ?[]const u8 = null,
+    sandbox_path_grant: ?PermissionSandboxPathGrant = null,
 };
 
 pub const PermissionRecommendation = enum {
@@ -1041,6 +1204,59 @@ pub const PermissionRequestMemoryScope = enum {
     user,
 };
 
+pub const PermissionApprovalEvaluationReasonCode = enum {
+    unknown,
+    not_reached,
+    inactive,
+    authorization_history_incomplete,
+    managed_approval_required,
+    sandbox_bypass,
+    action_too_long,
+    path_not_authorized,
+    invalid_working_directory,
+    unreadable,
+    not_regular_file,
+    too_large,
+    non_utf8,
+    interpreter_unavailable,
+    interpreter_too_large,
+    shell_environment_unreviewable,
+    unrepresentable_path,
+    interpreter_wrapped_script,
+    unreviewable_script_invocation,
+    argument_binding_unreviewable,
+    malformed_script_action_review,
+    malformed_script_action_manifest,
+    unavailable,
+    judge_verdict,
+    judge_error,
+    inherited,
+};
+
+pub const PermissionApprovalEvaluationJudgeStatus = enum {
+    unknown,
+    not_called,
+    completed,
+    failed,
+    cached,
+    inherited,
+};
+
+pub const PermissionApprovalEvaluationEvaluationStage = enum {
+    unknown,
+    not_reached,
+    pre_judge,
+    judge,
+    reuse,
+};
+
+pub const PermissionApprovalEvaluation = struct {
+    reason_code: PermissionApprovalEvaluationReasonCode,
+    judge_status: PermissionApprovalEvaluationJudgeStatus,
+    evaluation_stage: PermissionApprovalEvaluationEvaluationStage,
+    judge_attempted: ?bool = null,
+};
+
 pub const AssistedApprovalRecommendation = enum {
     approve,
     require_approval,
@@ -1057,6 +1273,7 @@ pub const AssistedApprovalJudgeFailureReason = enum {
 };
 
 pub const PermissionAssistedApproval = struct {
+    evaluation: ?PermissionApprovalEvaluation = null,
     recommendation: AssistedApprovalRecommendation,
     reason: ?[]const u8 = null,
     model: ?[]const u8 = null,
@@ -1101,23 +1318,23 @@ pub const PermissionRequestExtensionManagement = struct {
     extension_name: ?[]const u8 = null,
 };
 
-pub const FactoryPermissionOperation = enum {
+pub const WorkflowPermissionOperation = enum {
     run,
     author,
 };
 
-pub const FactoryPermissionPhase = struct {
+pub const WorkflowPermissionPhase = struct {
     title: []const u8,
     detail: ?[]const u8 = null,
 };
 
-pub const PermissionRequestFactory = struct {
+pub const PermissionRequestWorkflow = struct {
     kind: []const u8,
     tool_call_id: ?[]const u8 = null,
-    operation: FactoryPermissionOperation,
+    operation: WorkflowPermissionOperation,
     name: []const u8,
     description: []const u8,
-    phases: []const FactoryPermissionPhase,
+    phases: []const WorkflowPermissionPhase,
     max_concurrent_subagents: ?u64 = null,
     max_total_subagents: ?u64 = null,
     timeout_seconds: ?f64 = null,
@@ -1128,6 +1345,7 @@ pub const PermissionRequestFactory = struct {
     declared_max_ai_credits: ?f64 = null,
     approval_key: []const u8,
     can_persist_approval: bool,
+    managed_approval_required: ?bool = null,
 };
 
 pub const PermissionRequestExtensionPermissionAccess = struct {
@@ -1154,7 +1372,7 @@ pub const PermissionRequest = union(enum) {
     custom_tool: PermissionRequestCustomTool,
     hook: PermissionRequestHook,
     extension_management: PermissionRequestExtensionManagement,
-    factory: PermissionRequestFactory,
+    workflow: PermissionRequestWorkflow,
     extension_permission_access: PermissionRequestExtensionPermissionAccess,
     extension_env_access: PermissionRequestExtensionEnvAccess,
 };
@@ -1172,6 +1390,7 @@ pub const PermissionPromptRequestCommands = struct {
     request_sandbox_bypass: ?bool = null,
     request_sandbox_permissive: ?bool = null,
     request_sandbox_bypass_reason: ?[]const u8 = null,
+    sandbox_path_grant: ?PermissionSandboxPathGrant = null,
 };
 
 pub const PermissionPromptRequestWrite = struct {
@@ -1179,6 +1398,7 @@ pub const PermissionPromptRequestWrite = struct {
     tool_call_id: ?[]const u8 = null,
     intention: []const u8,
     file_name: []const u8,
+    resolved_path: ?[]const u8 = null,
     diff: []const u8,
     new_file_contents: ?[]const u8 = null,
     can_offer_session_approval: bool,
@@ -1191,6 +1411,7 @@ pub const PermissionPromptRequestRead = struct {
     tool_call_id: ?[]const u8 = null,
     intention: []const u8,
     path: []const u8,
+    resolved_path: ?[]const u8 = null,
     assisted_approval: ?PermissionAssistedApproval = null,
     managed_approval_required: ?bool = null,
 };
@@ -1251,6 +1472,7 @@ pub const PermissionPromptRequestPath = struct {
     tool_call_id: ?[]const u8 = null,
     access_kind: PermissionPromptRequestPathAccessKind,
     paths: []const []const u8,
+    read_only_directories: ?[]const []const u8 = null,
     assisted_approval: ?PermissionAssistedApproval = null,
 };
 
@@ -1271,13 +1493,13 @@ pub const PermissionPromptRequestExtensionManagement = struct {
     assisted_approval: ?PermissionAssistedApproval = null,
 };
 
-pub const PermissionPromptRequestFactory = struct {
+pub const PermissionPromptRequestWorkflow = struct {
     kind: []const u8,
     tool_call_id: ?[]const u8 = null,
-    operation: FactoryPermissionOperation,
+    operation: WorkflowPermissionOperation,
     name: []const u8,
     description: []const u8,
-    phases: []const FactoryPermissionPhase,
+    phases: []const WorkflowPermissionPhase,
     max_concurrent_subagents: ?u64 = null,
     max_total_subagents: ?u64 = null,
     timeout_seconds: ?f64 = null,
@@ -1319,9 +1541,15 @@ pub const PermissionPromptRequest = union(enum) {
     path: PermissionPromptRequestPath,
     hook: PermissionPromptRequestHook,
     extension_management: PermissionPromptRequestExtensionManagement,
-    factory: PermissionPromptRequestFactory,
+    workflow: PermissionPromptRequestWorkflow,
     extension_permission_access: PermissionPromptRequestExtensionPermissionAccess,
     extension_env_access: PermissionPromptRequestExtensionEnvAccess,
+};
+
+pub const PermissionMode = enum {
+    manual,
+    assisted,
+    allow_all,
 };
 
 pub const SessionMode = enum {
@@ -1334,9 +1562,11 @@ pub const PermissionRequestedData = struct {
     request_id: []const u8,
     permission_request: PermissionRequest,
     prompt_request: ?PermissionPromptRequest = null,
+    permission_mode: ?PermissionMode = null,
     agent_mode: ?SessionMode = null,
     risk_assessment: ?std.json.Value = null,
     resolved_by_hook: ?bool = null,
+    recovery_episode_id: ?[]const u8 = null,
 };
 
 pub const PromptCacheBreakData = struct {
@@ -1395,6 +1625,7 @@ pub const SandboxOutcome = enum {
     denied,
     approved,
     declined,
+    allowed,
 };
 
 pub const SandboxPlatform = enum {
@@ -1508,6 +1739,7 @@ pub const SandboxDenialClass = enum {
     service_access,
     network_outbound,
     network_local,
+    network_host,
     other_access,
 };
 
@@ -1533,10 +1765,9 @@ pub const SandboxDecisionDataVariant4 = struct {
     kind: []const u8,
 };
 
-pub const SandboxBypassSource = enum {
-    model_requested,
-    user_prompted,
-    prompt_unavailable,
+pub const SandboxPermissiveSource = enum {
+    approved_retry,
+    policy,
 };
 
 pub const SandboxDecisionDataVariant5 = struct {
@@ -1545,13 +1776,17 @@ pub const SandboxDecisionDataVariant5 = struct {
     tool_call_id: ?[]const u8,
     platform: SandboxPlatform,
     enforcement_point: SandboxEnforcementPoint,
-    source: SandboxBypassSource,
-    denial_class: ?SandboxDenialClass,
-    confidence: ?SandboxDenialConfidence,
+    denial_class: SandboxDenialClass,
+    permissive_source: SandboxPermissiveSource,
     denied_resource: ?[]const u8,
     command: ?[]const u8,
-    process_name: ?[]const u8,
     kind: []const u8,
+};
+
+pub const SandboxBypassSource = enum {
+    model_requested,
+    user_prompted,
+    prompt_unavailable,
 };
 
 pub const SandboxDecisionDataVariant6 = struct {
@@ -1575,6 +1810,21 @@ pub const SandboxDecisionDataVariant7 = struct {
     tool_call_id: ?[]const u8,
     platform: SandboxPlatform,
     enforcement_point: SandboxEnforcementPoint,
+    source: SandboxBypassSource,
+    denial_class: ?SandboxDenialClass,
+    confidence: ?SandboxDenialConfidence,
+    denied_resource: ?[]const u8,
+    command: ?[]const u8,
+    process_name: ?[]const u8,
+    kind: []const u8,
+};
+
+pub const SandboxDecisionDataVariant8 = struct {
+    control: SandboxControl,
+    outcome: SandboxOutcome,
+    tool_call_id: ?[]const u8,
+    platform: SandboxPlatform,
+    enforcement_point: SandboxEnforcementPoint,
     denial_class: ?SandboxDenialClass,
     confidence: ?SandboxDenialConfidence,
     denied_resource: ?[]const u8,
@@ -1588,9 +1838,10 @@ pub const SandboxDecisionData = union(enum) {
     spawn_completed: SandboxDecisionDataVariant2,
     enforcement_state: SandboxDecisionDataVariant3,
     access_denied: SandboxDecisionDataVariant4,
-    bypass_decided: SandboxDecisionDataVariant5,
-    permissive_retry_decided: SandboxDecisionDataVariant6,
-    permissive_retry_completed: SandboxDecisionDataVariant7,
+    access_recorded: SandboxDecisionDataVariant5,
+    bypass_decided: SandboxDecisionDataVariant6,
+    permissive_retry_decided: SandboxDecisionDataVariant7,
+    permissive_retry_completed: SandboxDecisionDataVariant8,
 };
 
 pub const AutoModeResolvedReasoningBucket = enum {
@@ -1742,6 +1993,12 @@ pub const CanvasUnavailableData = struct {
     canvas_id: []const u8,
 };
 
+pub const ResponsesReasoning = struct {
+    model: []const u8,
+    initial_effort: []const u8,
+    effort: []const u8,
+};
+
 pub const CompactionCompleteCompactionTokensUsedCopilotUsageTokenDetail = struct {
     batch_size: u64,
     cost_per_batch: u64,
@@ -1784,6 +2041,8 @@ pub const CompactionCompleteData = struct {
     tokens_removed: ?u64 = null,
     custom_instructions: ?[]const u8 = null,
     summary_content: ?[]const u8 = null,
+    responses_reasoning: ?ResponsesReasoning = null,
+    active_workflow_summary: ?[]const u8 = null,
     active_factory_summary: ?[]const u8 = null,
     behavior_model_id: ?[]const u8 = null,
     checkpoint_number: ?u64 = null,
@@ -2147,6 +2406,16 @@ pub const ExtensionsLoadedData = struct {
     extensions: []const ExtensionsLoadedExtension,
 };
 
+pub const ShutdownCodeChanges = struct {
+    lines_added: u64,
+    lines_removed: u64,
+    files_modified: []const []const u8,
+};
+
+pub const FusionChangeCheckpointData = struct {
+    code_changes: ShutdownCodeChanges,
+};
+
 pub const FusionCommitKind = enum {
     text,
     terminal_tool,
@@ -2204,6 +2473,12 @@ pub const FusionPhasePlanStep = struct {
     conditional: bool,
 };
 
+pub const FusionCritic = struct {
+    phase_id: []const u8,
+    model: []const u8,
+    reasoning_effort: ?[]const u8 = null,
+};
+
 pub const FusionFollowUpAction = enum {
     reuse_primary,
     reroute,
@@ -2229,9 +2504,13 @@ pub const FusionResolvedData = struct {
     rule_name: ?[]const u8 = null,
     scores: ?FusionScores = null,
     pattern: FusionPattern,
+    hint: ?[]const u8 = null,
     phase_plan: ?[]const FusionPhasePlanStep = null,
     primary_model: []const u8,
     secondary_model: ?[]const u8,
+    judge_model: ?[]const u8 = null,
+    repair_model: ?[]const u8 = null,
+    critics: ?[]const FusionCritic = null,
     fallback_model: []const u8,
     follow_up_model: []const u8,
     follow_up: ?FusionFollowUpRecommendation = null,
@@ -2284,6 +2563,89 @@ pub const HandoffData = struct {
 pub const IdleData = struct {
     aborted: ?bool = null,
     mode: ?SessionMode = null,
+};
+
+pub const IndexedSearchState = enum {
+    disabled,
+    starting,
+    enabled,
+    ready,
+    failed,
+};
+
+pub const IndexedSearchDataVariant1 = struct {
+    state: IndexedSearchState,
+    kind: []const u8,
+};
+
+pub const IndexedSearchOutcome = enum {
+    started,
+    skipped_below_threshold,
+    skipped_no_gitroot,
+    skipped_disabled,
+    reused_existing,
+    failed,
+};
+
+pub const IndexedSearchDisabledReason = enum {
+    use_tgrep_false,
+    use_builtin_ripgrep_false,
+    organization,
+    organization_policy_auth_pending,
+    organization_policy_unknown,
+    virtual_filesystem,
+    cloud_sync_root,
+    cloud_sync_detection_failed,
+    workspace_not_local,
+};
+
+pub const IndexedSearchDataVariant2 = struct {
+    outcome: IndexedSearchOutcome,
+    file_count: ?f64 = null,
+    startup_duration_ms: f64,
+    forced_by_env: bool,
+    warm_start: bool,
+    disabled_reason: ?IndexedSearchDisabledReason = null,
+    error_message: ?[]const u8 = null,
+    eligible: ?bool = null,
+    kind: []const u8,
+};
+
+pub const IndexedSearchErrorType = enum {
+    spawn_error,
+    unexpected_exit,
+    killed_by_signal,
+};
+
+pub const IndexedSearchDataVariant3 = struct {
+    error_type: IndexedSearchErrorType,
+    exit_code: ?f64 = null,
+    error_message: ?[]const u8 = null,
+    kind: []const u8,
+};
+
+pub const IndexedSearchIncrementalPhase = enum {
+    changes_detected,
+    updated,
+};
+
+pub const IndexedSearchDataVariant4 = struct {
+    phase: IndexedSearchIncrementalPhase,
+    changed_file_count: ?f64 = null,
+    added_file_count: ?f64 = null,
+    deleted_file_count: ?f64 = null,
+    total_change_count: ?f64 = null,
+    walk_duration_ms: ?f64 = null,
+    update_duration_ms: ?f64 = null,
+    total_duration_ms: ?f64 = null,
+    kind: []const u8,
+};
+
+pub const IndexedSearchData = union(enum) {
+    status: IndexedSearchDataVariant1,
+    startup: IndexedSearchDataVariant2,
+    server_error: IndexedSearchDataVariant3,
+    incremental: IndexedSearchDataVariant4,
 };
 
 pub const InfoData = struct {
@@ -2359,6 +2721,8 @@ pub const McpServerStatusChangedData = struct {
     server_name: []const u8,
     status: McpServerStatus,
     error_: ?[]const u8 = null,
+    error_classification: ?[]const u8 = null,
+    config_source: ?[]const u8 = null,
 };
 
 pub const McpServerSource = enum {
@@ -2366,6 +2730,7 @@ pub const McpServerSource = enum {
     workspace,
     plugin,
     builtin,
+    managed,
 };
 
 pub const McpServerMetadata = struct {
@@ -2383,6 +2748,7 @@ pub const McpServersLoadedServer = struct {
     name: []const u8,
     status: McpServerStatus,
     source: ?McpServerSource = null,
+    display_name: ?[]const u8 = null,
     error_: ?[]const u8 = null,
     server_metadata: ?McpServerMetadata = null,
     transport: ?McpServerTransport = null,
@@ -2428,7 +2794,9 @@ pub const ModelChangeSource = enum {
     agent,
     plan_mode,
     automatic,
+    changeboarding_shortcut,
     sdk,
+    auto_tier_recommendation,
 };
 
 pub const ModelChangeData = struct {
@@ -2447,10 +2815,13 @@ pub const ModelChangeData = struct {
     auto_tier: ?AutoTier,
 };
 
-pub const PermissionMode = enum {
-    manual,
-    assisted,
-    allow_all,
+pub const ModelDeselectedReason = enum {
+    provider_withdrawn,
+};
+
+pub const ModelDeselectedData = struct {
+    previous_model: []const u8,
+    reason: ModelDeselectedReason,
 };
 
 pub const PermissionsChangedData = struct {
@@ -2535,12 +2906,6 @@ pub const ShutdownTokenDetail = struct {
     token_count: u64,
 };
 
-pub const ShutdownCodeChanges = struct {
-    lines_added: u64,
-    lines_removed: u64,
-    files_modified: []const []const u8,
-};
-
 pub const ShutdownModelMetricRequests = struct {
     count: ?u64 = null,
     cost: ?f64 = null,
@@ -2621,6 +2986,7 @@ pub const SkillsLoadedData = struct {
 pub const SnapshotRewindData = struct {
     up_to_event_id: []const u8,
     events_removed: u64,
+    event_ids: ?[]const []const u8 = null,
 };
 
 pub const GitHubMcpToolConfig = struct {
@@ -2662,6 +3028,7 @@ pub const TaskCompleteData = struct {
     outcome: ?TaskCompletionOutcome = null,
     reason: ?[]const u8 = null,
     objective_id: ?i64 = null,
+    blocker: ?TaskBlocker = null,
 };
 
 pub const TitleChangedData = struct {
@@ -2749,6 +3116,20 @@ pub const SessionLimitsExhaustedRequestedData = struct {
     max_ai_credits: f64,
 };
 
+pub const SkillContextDeliveredData = struct {
+    content: []const u8,
+    source: []const u8,
+    interaction_id: ?[]const u8 = null,
+};
+
+pub const SkillContextDeliveredRefData = struct {
+    content_id: []const u8,
+    prefix: ?[]const u8 = null,
+    suffix: ?[]const u8 = null,
+    source: []const u8,
+    interaction_id: ?[]const u8 = null,
+};
+
 pub const SkillInvokedTrigger = enum {
     user_invoked,
     agent_invoked,
@@ -2757,9 +3138,26 @@ pub const SkillInvokedTrigger = enum {
 
 pub const SkillInvokedData = struct {
     name: []const u8,
+    invoked_at_turn: ?u64 = null,
     model: ?[]const u8 = null,
     path: []const u8,
     content: []const u8,
+    allowed_tools: ?[]const []const u8 = null,
+    disable_model_invocation: ?bool = null,
+    source: ?[]const u8 = null,
+    plugin_name: ?[]const u8 = null,
+    plugin_version: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+    trigger: ?SkillInvokedTrigger = null,
+};
+
+pub const SkillInvokedRefData = struct {
+    name: []const u8,
+    invoked_at_turn: ?u64 = null,
+    model: ?[]const u8 = null,
+    path: []const u8,
+    content_id: []const u8,
+    content_length: u64,
     allowed_tools: ?[]const []const u8 = null,
     disable_model_invocation: ?bool = null,
     source: ?[]const u8 = null,
@@ -2844,11 +3242,19 @@ pub const SubagentStartedData = struct {
     agent_description: []const u8,
     model: ?[]const u8 = null,
     task_model_source: ?SubagentTaskModelSource = null,
+    model_selection_source: ?SubagentModelSelectionSource = null,
     factory_run_id: ?[]const u8 = null,
+    workflow_run_id: ?[]const u8 = null,
     parent_id: ?[]const u8 = null,
     resumable: ?bool = null,
     agent_type: ?[]const u8 = null,
     execution_mode: ?[]const u8 = null,
+};
+
+pub const SystemMessageContentBlock = struct {
+    content: []const u8,
+    is_static: ?bool = null,
+    cache_breakpoint: ?bool = null,
 };
 
 pub const SystemMessageRole = enum {
@@ -2863,6 +3269,7 @@ pub const SystemMessageMetadata = struct {
 
 pub const SystemMessageData = struct {
     content: []const u8,
+    content_blocks: ?[]const SystemMessageContentBlock = null,
     interaction_id: ?[]const u8 = null,
     role: SystemMessageRole,
     name: ?[]const u8 = null,
@@ -2921,7 +3328,7 @@ pub const SystemNotificationInstructionDiscovered = struct {
     description: ?[]const u8 = null,
 };
 
-pub const SystemNotificationFactoryCompletedStatus = enum {
+pub const SystemNotificationWorkflowCompletedStatus = enum {
     completed,
     halted,
     paused,
@@ -2929,25 +3336,25 @@ pub const SystemNotificationFactoryCompletedStatus = enum {
     error_,
 };
 
-pub const SystemNotificationFactoryPauseInfoVariant1 = struct {
+pub const SystemNotificationWorkflowPauseInfoVariant1 = struct {
     type: []const u8,
 };
 
-pub const SystemNotificationFactoryPauseInfoVariant2 = struct {
+pub const SystemNotificationWorkflowPauseInfoVariant2 = struct {
     key: []const u8,
     type: []const u8,
 };
 
-pub const SystemNotificationFactoryPauseInfo = union(enum) {
-    user: SystemNotificationFactoryPauseInfoVariant1,
-    checkpoint: SystemNotificationFactoryPauseInfoVariant2,
+pub const SystemNotificationWorkflowPauseInfo = union(enum) {
+    user: SystemNotificationWorkflowPauseInfoVariant1,
+    checkpoint: SystemNotificationWorkflowPauseInfoVariant2,
 };
 
-pub const SystemNotificationFactoryCompleted = struct {
+pub const SystemNotificationWorkflowCompleted = struct {
     type: []const u8,
     run_id: []const u8,
-    factory_name: []const u8,
-    status: SystemNotificationFactoryCompletedStatus,
+    workflow_name: []const u8,
+    status: SystemNotificationWorkflowCompletedStatus,
     consumed_subagents: u64,
     elapsed_ms: u64,
     consumed_nano_aiu: u64,
@@ -2955,7 +3362,7 @@ pub const SystemNotificationFactoryCompleted = struct {
     result_preview: ?[]const u8 = null,
     failure: ?std.json.Value = null,
     retry_guidance: ?[]const u8 = null,
-    pause_info: ?SystemNotificationFactoryPauseInfo = null,
+    pause_info: ?SystemNotificationWorkflowPauseInfo = null,
 };
 
 pub const SystemNotificationUnclassified = struct {
@@ -2970,13 +3377,14 @@ pub const SystemNotification = union(enum) {
     shell_completed: SystemNotificationShellCompleted,
     shell_detached_completed: SystemNotificationShellDetachedCompleted,
     instruction_discovered: SystemNotificationInstructionDiscovered,
-    factory_completed: SystemNotificationFactoryCompleted,
+    workflow_completed: SystemNotificationWorkflowCompleted,
     unclassified: SystemNotificationUnclassified,
 };
 
 pub const SystemNotificationData = struct {
     content: []const u8,
     kind: SystemNotification,
+    responses_reasoning: ?ResponsesReasoning = null,
 };
 
 pub const ToolExecutionCompleteContentText = struct {
@@ -3201,6 +3609,10 @@ pub const ToolExecutionCompleteToolDescription = struct {
     meta: ?ToolExecutionCompleteToolDescriptionMeta = null,
 };
 
+pub const ToolExecutionCompleteShellExecution = struct {
+    exit_code: i64,
+};
+
 pub const ToolExecutionCompleteData = struct {
     tool_call_id: []const u8,
     success: bool,
@@ -3215,6 +3627,7 @@ pub const ToolExecutionCompleteData = struct {
     turn_id: ?[]const u8 = null,
     tool_description: ?ToolExecutionCompleteToolDescription = null,
     sandboxed: ?bool = null,
+    shell_execution: ?ToolExecutionCompleteShellExecution = null,
     parent_tool_call_id: ?[]const u8 = null,
     fusion: ?FusionAttribution = null,
 };
@@ -3258,12 +3671,16 @@ pub const ToolExecutionStartToolDescription = struct {
 pub const ToolExecutionStartData = struct {
     tool_call_id: []const u8,
     tool_name: []const u8,
+    tool_title: ?[]const u8 = null,
     arguments: ?std.json.Value = null,
     shell_tool_info: ?ToolExecutionStartShellToolInfo = null,
     model: ?[]const u8 = null,
     rte: ?bool = null,
     mcp_server_name: ?[]const u8 = null,
+    mcp_config_server_name: ?[]const u8 = null,
     mcp_tool_name: ?[]const u8 = null,
+    mcp_transport: ?McpServerTransport = null,
+    mcp_config_source: ?McpServerSource = null,
     turn_id: ?[]const u8 = null,
     display_verbatim: ?bool = null,
     tool_description: ?ToolExecutionStartToolDescription = null,
@@ -3313,6 +3730,7 @@ pub const UserMessageAgentMode = enum {
 
 pub const UserMessageData = struct {
     content: []const u8,
+    responses_reasoning: ?ResponsesReasoning = null,
     message_id: ?[]const u8 = null,
     transformed_content: ?[]const u8 = null,
     attachments: ?[]const Attachment = null,
@@ -3339,6 +3757,34 @@ pub const UserInputRequestedData = struct {
     choices: ?[]const []const u8 = null,
     allow_freeform: ?bool = null,
     tool_call_id: ?[]const u8 = null,
+};
+
+pub const WorkflowRunSettledStatus = enum {
+    completed,
+    halted,
+    paused,
+    cancelled,
+    error_,
+};
+
+pub const WorkflowRunSettledData = struct {
+    run_id: []const u8,
+    status: WorkflowRunSettledStatus,
+    consumed_subagents: u64,
+    consumed_nano_aiu: u64,
+    elapsed_ms: u64,
+    failure_type: ?[]const u8 = null,
+};
+
+pub const WorkflowRunStartedData = struct {
+    run_id: []const u8,
+    workflow_name: []const u8,
+    attempt: u64,
+};
+
+pub const WorkflowRunUpdatedData = struct {
+    run_id: []const u8,
+    revision: u64,
 };
 
 fn OwnedPayload(comptime T: type, comptime wipe: fn (*T) void) type {
@@ -3382,9 +3828,6 @@ pub const ElicitationCompletedEventPayload = OwnedPayload(ElicitationCompletedDa
 pub const ExitPlanModeCompletedEventPayload = OwnedPayload(ExitPlanModeCompletedData, wipeExitPlanModeCompletedData);
 pub const ExitPlanModeRequestedEventPayload = OwnedPayload(ExitPlanModeRequestedData, wipeExitPlanModeRequestedData);
 pub const ExternalToolCompletedEventPayload = OwnedPayload(ExternalToolCompletedData, wipeExternalToolCompletedData);
-pub const FactoryRunSettledEventPayload = OwnedPayload(FactoryRunSettledData, wipeFactoryRunSettledData);
-pub const FactoryRunStartedEventPayload = OwnedPayload(FactoryRunStartedData, wipeFactoryRunStartedData);
-pub const FactoryRunUpdatedEventPayload = OwnedPayload(FactoryRunUpdatedData, wipeFactoryRunUpdatedData);
 pub const HookEndEventPayload = OwnedPayload(HookEndData, wipeHookEndData);
 pub const HookProgressEventPayload = OwnedPayload(HookProgressData, wipeHookProgressData);
 pub const HookStartEventPayload = OwnedPayload(HookStartData, wipeHookStartData);
@@ -3396,10 +3839,17 @@ pub const McpResourcesListChangedEventPayload = OwnedPayload(McpListChangedData,
 pub const McpToolsListChangedEventPayload = OwnedPayload(McpListChangedData, wipeMcpListChangedData);
 pub const McpAppToolCallCompleteEventPayload = OwnedPayload(McpAppToolCallCompleteData, wipeMcpAppToolCallCompleteData);
 pub const ModelCallFailureEventPayload = OwnedPayload(ModelCallFailureData, wipeModelCallFailureData);
+pub const ModelCallFinalResultEventPayload = OwnedPayload(ModelCallFinalResultData, wipeModelCallFinalResultData);
 pub const ModelCallFinishedEventPayload = OwnedPayload(ModelCallFinishedData, wipeModelCallFinishedData);
 pub const ModelCallStartEventPayload = OwnedPayload(ModelCallStartData, wipeModelCallStartData);
 pub const PendingMessagesModifiedEventPayload = OwnedPayload(PendingMessagesModifiedData, wipePendingMessagesModifiedData);
+pub const PermissionAssentDetectedEventPayload = OwnedPayload(PermissionAssentDetectedData, wipePermissionAssentDetectedData);
+pub const PermissionCarriedForwardEventPayload = OwnedPayload(PermissionCarriedForwardData, wipePermissionCarriedForwardData);
 pub const PermissionCompletedEventPayload = OwnedPayload(PermissionCompletedData, wipePermissionCompletedData);
+pub const PermissionContextualAuthorizationEventPayload = OwnedPayload(PermissionContextualAuthorizationData, wipePermissionContextualAuthorizationData);
+pub const PermissionMessageAuthorizationEventPayload = OwnedPayload(PermissionMessageAuthorizationData, wipePermissionMessageAuthorizationData);
+pub const PermissionMessageAuthorizationDegradedEventPayload = OwnedPayload(PermissionMessageAuthorizationDegradedData, wipePermissionMessageAuthorizationDegradedData);
+pub const PermissionMessageAuthorizationReadEventPayload = OwnedPayload(PermissionMessageAuthorizationReadData, wipePermissionMessageAuthorizationReadData);
 pub const PromptCacheBreakEventPayload = OwnedPayload(PromptCacheBreakData, wipePromptCacheBreakData);
 pub const SamplingCompletedEventPayload = OwnedPayload(SamplingCompletedData, wipeSamplingCompletedData);
 pub const SamplingRequestedEventPayload = OwnedPayload(SamplingRequestedData, wipeSamplingRequestedData);
@@ -3425,6 +3875,7 @@ pub const CustomAgentsUpdatedEventPayload = OwnedPayload(CustomAgentsUpdatedData
 pub const CustomNotificationEventPayload = OwnedPayload(CustomNotificationData, wipeCustomNotificationData);
 pub const ExtensionsAttachmentsPushedEventPayload = OwnedPayload(ExtensionsAttachmentsPushedData, wipeExtensionsAttachmentsPushedData);
 pub const ExtensionsLoadedEventPayload = OwnedPayload(ExtensionsLoadedData, wipeExtensionsLoadedData);
+pub const FusionChangeCheckpointEventPayload = OwnedPayload(FusionChangeCheckpointData, wipeFusionChangeCheckpointData);
 pub const FusionCommitStartedEventPayload = OwnedPayload(FusionCommitStartedData, wipeFusionCommitStartedData);
 pub const FusionCompletedEventPayload = OwnedPayload(FusionCompletedData, wipeFusionCompletedData);
 pub const FusionHandoffEventPayload = OwnedPayload(FusionHandoffData, wipeFusionHandoffData);
@@ -3432,6 +3883,7 @@ pub const FusionResolvedEventPayload = OwnedPayload(FusionResolvedData, wipeFusi
 pub const FusionRouteFailedEventPayload = OwnedPayload(FusionRouteFailedData, wipeFusionRouteFailedData);
 pub const FusionRouteStartedEventPayload = OwnedPayload(FusionRouteStartedData, wipeFusionRouteStartedData);
 pub const HandoffEventPayload = OwnedPayload(HandoffData, wipeHandoffData);
+pub const IndexedSearchEventPayload = OwnedPayload(IndexedSearchData, wipeIndexedSearchData);
 pub const InfoEventPayload = OwnedPayload(InfoData, wipeInfoData);
 pub const ManagedSettingsEnforcedEventPayload = OwnedPayload(ManagedSettingsEnforcedData, wipeManagedSettingsEnforcedData);
 pub const ManagedSettingsResolvedEventPayload = OwnedPayload(ManagedSettingsResolvedData, wipeManagedSettingsResolvedData);
@@ -3443,6 +3895,8 @@ pub const MemoryChangedEventPayload = OwnedPayload(MemoryChangedData, wipeMemory
 pub const ModeChangedEventPayload = OwnedPayload(ModeChangedData, wipeModeChangedData);
 pub const ModeNoticeDeliveredEventPayload = OwnedPayload(ModeNoticeDeliveredData, wipeModeNoticeDeliveredData);
 pub const ModelChangeEventPayload = OwnedPayload(ModelChangeData, wipeModelChangeData);
+pub const ModelDeselectedEventPayload = OwnedPayload(ModelDeselectedData, wipeModelDeselectedData);
+pub const PermissionRecoveryEventPayload = OwnedPayload(PermissionRecoveryData, wipePermissionRecoveryData);
 pub const PermissionsChangedEventPayload = OwnedPayload(PermissionsChangedData, wipePermissionsChangedData);
 pub const PlanChangedEventPayload = OwnedPayload(PlanChangedData, wipePlanChangedData);
 pub const RemoteSteerableChangedEventPayload = OwnedPayload(RemoteSteerableChangedData, wipeRemoteSteerableChangedData);
@@ -3466,7 +3920,10 @@ pub const WarningEventPayload = OwnedPayload(WarningData, wipeWarningData);
 pub const WorkspaceFileChangedEventPayload = OwnedPayload(WorkspaceFileChangedData, wipeWorkspaceFileChangedData);
 pub const SessionLimitsExhaustedCompletedEventPayload = OwnedPayload(SessionLimitsExhaustedCompletedData, wipeSessionLimitsExhaustedCompletedData);
 pub const SessionLimitsExhaustedRequestedEventPayload = OwnedPayload(SessionLimitsExhaustedRequestedData, wipeSessionLimitsExhaustedRequestedData);
+pub const SkillContextDeliveredEventPayload = OwnedPayload(SkillContextDeliveredData, wipeSkillContextDeliveredData);
+pub const SkillContextDeliveredRefEventPayload = OwnedPayload(SkillContextDeliveredRefData, wipeSkillContextDeliveredRefData);
 pub const SkillInvokedEventPayload = OwnedPayload(SkillInvokedData, wipeSkillInvokedData);
+pub const SkillInvokedRefEventPayload = OwnedPayload(SkillInvokedRefData, wipeSkillInvokedRefData);
 pub const SubagentCompletedEventPayload = OwnedPayload(SubagentCompletedData, wipeSubagentCompletedData);
 pub const SubagentConfiguredEventPayload = OwnedPayload(SubagentConfiguredData, wipeSubagentConfiguredData);
 pub const SubagentDeselectedEventPayload = OwnedPayload(SubagentDeselectedData, wipeSubagentDeselectedData);
@@ -3485,9 +3942,13 @@ pub const UIEphemeralQueryEventPayload = OwnedPayload(UIEphemeralQueryData, wipe
 pub const UserMessageEventPayload = OwnedPayload(UserMessageData, wipeUserMessageData);
 pub const UserInputCompletedEventPayload = OwnedPayload(UserInputCompletedData, wipeUserInputCompletedData);
 pub const UserInputRequestedEventPayload = OwnedPayload(UserInputRequestedData, wipeUserInputRequestedData);
+pub const WorkflowRunSettledEventPayload = OwnedPayload(WorkflowRunSettledData, wipeWorkflowRunSettledData);
+pub const WorkflowRunStartedEventPayload = OwnedPayload(WorkflowRunStartedData, wipeWorkflowRunStartedData);
+pub const WorkflowRunUpdatedEventPayload = OwnedPayload(WorkflowRunUpdatedData, wipeWorkflowRunUpdatedData);
 
 pub const AssistantMessage = struct {
     message_id: ?[]const u8 = null,
+    originating_message_id: ?[]const u8 = null,
     model: ?[]const u8 = null,
     content: []const u8,
     tool_requests: ?[]const AssistantMessageToolRequest = null,
@@ -3702,9 +4163,11 @@ pub const PermissionRequested = struct {
     request_id: []const u8,
     permission_request: ?PermissionRequest = null,
     prompt_request: ?PermissionPromptRequest = null,
+    permission_mode: ?PermissionMode = null,
     agent_mode: ?SessionMode = null,
     risk_assessment: ?std.json.Value = null,
     resolved_by_hook: ?bool = null,
+    recovery_episode_id: ?[]const u8 = null,
     permission_request_json: []u8,
     managed_approval_required: bool = false,
     automatic_handling: payloads.AutomaticPermissionHandling = .not_configured,
@@ -3827,9 +4290,6 @@ pub const SessionEvent = union(enum) {
     exit_plan_mode_requested: ExitPlanModeRequestedEventPayload,
     external_tool_completed: ExternalToolCompletedEventPayload,
     external_tool_requested: ExternalToolRequested,
-    factory_run_settled: FactoryRunSettledEventPayload,
-    factory_run_started: FactoryRunStartedEventPayload,
-    factory_run_updated: FactoryRunUpdatedEventPayload,
     hook_end: HookEndEventPayload,
     hook_progress: HookProgressEventPayload,
     hook_start: HookStartEventPayload,
@@ -3842,10 +4302,17 @@ pub const SessionEvent = union(enum) {
     mcp_tools_list_changed: McpToolsListChangedEventPayload,
     mcp_app_tool_call_complete: McpAppToolCallCompleteEventPayload,
     model_call_failure: ModelCallFailureEventPayload,
+    model_call_final_result: ModelCallFinalResultEventPayload,
     model_call_finished: ModelCallFinishedEventPayload,
     model_call_start: ModelCallStartEventPayload,
     pending_messages_modified: PendingMessagesModifiedEventPayload,
+    permission_assent_detected: PermissionAssentDetectedEventPayload,
+    permission_carried_forward: PermissionCarriedForwardEventPayload,
     permission_completed: PermissionCompletedEventPayload,
+    permission_contextual_authorization: PermissionContextualAuthorizationEventPayload,
+    permission_message_authorization: PermissionMessageAuthorizationEventPayload,
+    permission_message_authorization_degraded: PermissionMessageAuthorizationDegradedEventPayload,
+    permission_message_authorization_read: PermissionMessageAuthorizationReadEventPayload,
     permission_requested: PermissionRequested,
     prompt_cache_break: PromptCacheBreakEventPayload,
     sampling_completed: SamplingCompletedEventPayload,
@@ -3873,6 +4340,7 @@ pub const SessionEvent = union(enum) {
     session_error: SessionError,
     session_extensions_attachments_pushed: ExtensionsAttachmentsPushedEventPayload,
     session_extensions_loaded: ExtensionsLoadedEventPayload,
+    session_fusion_change_checkpoint: FusionChangeCheckpointEventPayload,
     session_fusion_commit_started: FusionCommitStartedEventPayload,
     session_fusion_completed: FusionCompletedEventPayload,
     session_fusion_handoff: FusionHandoffEventPayload,
@@ -3881,6 +4349,7 @@ pub const SessionEvent = union(enum) {
     session_fusion_route_started: FusionRouteStartedEventPayload,
     session_handoff: HandoffEventPayload,
     session_idle: SessionIdle,
+    session_indexed_search: IndexedSearchEventPayload,
     session_info: InfoEventPayload,
     session_managed_settings_enforced: ManagedSettingsEnforcedEventPayload,
     session_managed_settings_resolved: ManagedSettingsResolvedEventPayload,
@@ -3892,6 +4361,8 @@ pub const SessionEvent = union(enum) {
     session_mode_changed: ModeChangedEventPayload,
     session_mode_notice_delivered: ModeNoticeDeliveredEventPayload,
     session_model_change: ModelChangeEventPayload,
+    session_model_deselected: ModelDeselectedEventPayload,
+    session_permission_recovery: PermissionRecoveryEventPayload,
     session_permissions_changed: PermissionsChangedEventPayload,
     session_plan_changed: PlanChangedEventPayload,
     session_remote_steerable_changed: RemoteSteerableChangedEventPayload,
@@ -3915,7 +4386,10 @@ pub const SessionEvent = union(enum) {
     session_workspace_file_changed: WorkspaceFileChangedEventPayload,
     session_limits_exhausted_completed: SessionLimitsExhaustedCompletedEventPayload,
     session_limits_exhausted_requested: SessionLimitsExhaustedRequestedEventPayload,
+    skill_context_delivered: SkillContextDeliveredEventPayload,
+    skill_context_delivered_ref: SkillContextDeliveredRefEventPayload,
     skill_invoked: SkillInvokedEventPayload,
+    skill_invoked_ref: SkillInvokedRefEventPayload,
     subagent_completed: SubagentCompletedEventPayload,
     subagent_configured: SubagentConfiguredEventPayload,
     subagent_deselected: SubagentDeselectedEventPayload,
@@ -3934,6 +4408,9 @@ pub const SessionEvent = union(enum) {
     user_message: UserMessageEventPayload,
     user_input_completed: UserInputCompletedEventPayload,
     user_input_requested: UserInputRequestedEventPayload,
+    workflow_run_settled: WorkflowRunSettledEventPayload,
+    workflow_run_started: WorkflowRunStartedEventPayload,
+    workflow_run_updated: WorkflowRunUpdatedEventPayload,
     unknown: payloads.UnknownEvent,
 
     pub fn eventType(self: SessionEvent) []const u8 {
@@ -3971,9 +4448,6 @@ pub const SessionEvent = union(enum) {
             .exit_plan_mode_requested => "exit_plan_mode.requested",
             .external_tool_completed => "external_tool.completed",
             .external_tool_requested => "external_tool.requested",
-            .factory_run_settled => "factory.run_settled",
-            .factory_run_started => "factory.run_started",
-            .factory_run_updated => "factory.run_updated",
             .hook_end => "hook.end",
             .hook_progress => "hook.progress",
             .hook_start => "hook.start",
@@ -3986,10 +4460,17 @@ pub const SessionEvent = union(enum) {
             .mcp_tools_list_changed => "mcp.tools.list_changed",
             .mcp_app_tool_call_complete => "mcp_app.tool_call_complete",
             .model_call_failure => "model.call_failure",
+            .model_call_final_result => "model.call_final_result",
             .model_call_finished => "model.call_finished",
             .model_call_start => "model.call_start",
             .pending_messages_modified => "pending_messages.modified",
+            .permission_assent_detected => "permission.assentDetected",
+            .permission_carried_forward => "permission.carriedForward",
             .permission_completed => "permission.completed",
+            .permission_contextual_authorization => "permission.contextualAuthorization",
+            .permission_message_authorization => "permission.messageAuthorization",
+            .permission_message_authorization_degraded => "permission.messageAuthorizationDegraded",
+            .permission_message_authorization_read => "permission.messageAuthorizationRead",
             .permission_requested => "permission.requested",
             .prompt_cache_break => "prompt_cache_break",
             .sampling_completed => "sampling.completed",
@@ -4017,6 +4498,7 @@ pub const SessionEvent = union(enum) {
             .session_error => "session.error",
             .session_extensions_attachments_pushed => "session.extensions.attachments_pushed",
             .session_extensions_loaded => "session.extensions_loaded",
+            .session_fusion_change_checkpoint => "session.fusion_change_checkpoint",
             .session_fusion_commit_started => "session.fusion_commit_started",
             .session_fusion_completed => "session.fusion_completed",
             .session_fusion_handoff => "session.fusion_handoff",
@@ -4025,6 +4507,7 @@ pub const SessionEvent = union(enum) {
             .session_fusion_route_started => "session.fusion_route_started",
             .session_handoff => "session.handoff",
             .session_idle => "session.idle",
+            .session_indexed_search => "session.indexed_search",
             .session_info => "session.info",
             .session_managed_settings_enforced => "session.managed_settings_enforced",
             .session_managed_settings_resolved => "session.managed_settings_resolved",
@@ -4036,6 +4519,8 @@ pub const SessionEvent = union(enum) {
             .session_mode_changed => "session.mode_changed",
             .session_mode_notice_delivered => "session.mode_notice_delivered",
             .session_model_change => "session.model_change",
+            .session_model_deselected => "session.model_deselected",
+            .session_permission_recovery => "session.permission_recovery",
             .session_permissions_changed => "session.permissions_changed",
             .session_plan_changed => "session.plan_changed",
             .session_remote_steerable_changed => "session.remote_steerable_changed",
@@ -4059,7 +4544,10 @@ pub const SessionEvent = union(enum) {
             .session_workspace_file_changed => "session.workspace_file_changed",
             .session_limits_exhausted_completed => "session_limits_exhausted.completed",
             .session_limits_exhausted_requested => "session_limits_exhausted.requested",
+            .skill_context_delivered => "skill.context_delivered",
+            .skill_context_delivered_ref => "skill.context_delivered_ref",
             .skill_invoked => "skill.invoked",
+            .skill_invoked_ref => "skill.invoked_ref",
             .subagent_completed => "subagent.completed",
             .subagent_configured => "subagent.configured",
             .subagent_deselected => "subagent.deselected",
@@ -4078,6 +4566,9 @@ pub const SessionEvent = union(enum) {
             .user_message => "user.message",
             .user_input_completed => "user_input.completed",
             .user_input_requested => "user_input.requested",
+            .workflow_run_settled => "workflow.run_settled",
+            .workflow_run_started => "workflow.run_started",
+            .workflow_run_updated => "workflow.run_updated",
             .unknown => |value| value.event_type,
         };
     }
@@ -4117,9 +4608,6 @@ pub const SessionEvent = union(enum) {
             .exit_plan_mode_requested => |value| value.data_json,
             .external_tool_completed => |value| value.data_json,
             .external_tool_requested => |value| value.raw.data_json,
-            .factory_run_settled => |value| value.data_json,
-            .factory_run_started => |value| value.data_json,
-            .factory_run_updated => |value| value.data_json,
             .hook_end => |value| value.data_json,
             .hook_progress => |value| value.data_json,
             .hook_start => |value| value.data_json,
@@ -4132,10 +4620,17 @@ pub const SessionEvent = union(enum) {
             .mcp_tools_list_changed => |value| value.data_json,
             .mcp_app_tool_call_complete => |value| value.data_json,
             .model_call_failure => |value| value.data_json,
+            .model_call_final_result => |value| value.data_json,
             .model_call_finished => |value| value.data_json,
             .model_call_start => |value| value.data_json,
             .pending_messages_modified => |value| value.data_json,
+            .permission_assent_detected => |value| value.data_json,
+            .permission_carried_forward => |value| value.data_json,
             .permission_completed => |value| value.data_json,
+            .permission_contextual_authorization => |value| value.data_json,
+            .permission_message_authorization => |value| value.data_json,
+            .permission_message_authorization_degraded => |value| value.data_json,
+            .permission_message_authorization_read => |value| value.data_json,
             .permission_requested => |value| value.raw.data_json,
             .prompt_cache_break => |value| value.data_json,
             .sampling_completed => |value| value.data_json,
@@ -4163,6 +4658,7 @@ pub const SessionEvent = union(enum) {
             .session_error => |value| value.raw.data_json,
             .session_extensions_attachments_pushed => |value| value.data_json,
             .session_extensions_loaded => |value| value.data_json,
+            .session_fusion_change_checkpoint => |value| value.data_json,
             .session_fusion_commit_started => |value| value.data_json,
             .session_fusion_completed => |value| value.data_json,
             .session_fusion_handoff => |value| value.data_json,
@@ -4171,6 +4667,7 @@ pub const SessionEvent = union(enum) {
             .session_fusion_route_started => |value| value.data_json,
             .session_handoff => |value| value.data_json,
             .session_idle => |value| value.raw.data_json,
+            .session_indexed_search => |value| value.data_json,
             .session_info => |value| value.data_json,
             .session_managed_settings_enforced => |value| value.data_json,
             .session_managed_settings_resolved => |value| value.data_json,
@@ -4182,6 +4679,8 @@ pub const SessionEvent = union(enum) {
             .session_mode_changed => |value| value.data_json,
             .session_mode_notice_delivered => |value| value.data_json,
             .session_model_change => |value| value.data_json,
+            .session_model_deselected => |value| value.data_json,
+            .session_permission_recovery => |value| value.data_json,
             .session_permissions_changed => |value| value.data_json,
             .session_plan_changed => |value| value.data_json,
             .session_remote_steerable_changed => |value| value.data_json,
@@ -4205,7 +4704,10 @@ pub const SessionEvent = union(enum) {
             .session_workspace_file_changed => |value| value.data_json,
             .session_limits_exhausted_completed => |value| value.data_json,
             .session_limits_exhausted_requested => |value| value.data_json,
+            .skill_context_delivered => |value| value.data_json,
+            .skill_context_delivered_ref => |value| value.data_json,
             .skill_invoked => |value| value.data_json,
+            .skill_invoked_ref => |value| value.data_json,
             .subagent_completed => |value| value.data_json,
             .subagent_configured => |value| value.data_json,
             .subagent_deselected => |value| value.data_json,
@@ -4224,6 +4726,9 @@ pub const SessionEvent = union(enum) {
             .user_message => |value| value.data_json,
             .user_input_completed => |value| value.data_json,
             .user_input_requested => |value| value.data_json,
+            .workflow_run_settled => |value| value.data_json,
+            .workflow_run_started => |value| value.data_json,
+            .workflow_run_updated => |value| value.data_json,
             .unknown => |value| value.data_json,
         };
     }
@@ -4263,9 +4768,6 @@ pub const SessionEvent = union(enum) {
             .exit_plan_mode_requested => |*value| value.deinit(allocator),
             .external_tool_completed => |*value| value.deinit(allocator),
             .external_tool_requested => |*value| value.deinit(allocator),
-            .factory_run_settled => |*value| value.deinit(allocator),
-            .factory_run_started => |*value| value.deinit(allocator),
-            .factory_run_updated => |*value| value.deinit(allocator),
             .hook_end => |*value| value.deinit(allocator),
             .hook_progress => |*value| value.deinit(allocator),
             .hook_start => |*value| value.deinit(allocator),
@@ -4278,10 +4780,17 @@ pub const SessionEvent = union(enum) {
             .mcp_tools_list_changed => |*value| value.deinit(allocator),
             .mcp_app_tool_call_complete => |*value| value.deinit(allocator),
             .model_call_failure => |*value| value.deinit(allocator),
+            .model_call_final_result => |*value| value.deinit(allocator),
             .model_call_finished => |*value| value.deinit(allocator),
             .model_call_start => |*value| value.deinit(allocator),
             .pending_messages_modified => |*value| value.deinit(allocator),
+            .permission_assent_detected => |*value| value.deinit(allocator),
+            .permission_carried_forward => |*value| value.deinit(allocator),
             .permission_completed => |*value| value.deinit(allocator),
+            .permission_contextual_authorization => |*value| value.deinit(allocator),
+            .permission_message_authorization => |*value| value.deinit(allocator),
+            .permission_message_authorization_degraded => |*value| value.deinit(allocator),
+            .permission_message_authorization_read => |*value| value.deinit(allocator),
             .permission_requested => |*value| value.deinit(allocator),
             .prompt_cache_break => |*value| value.deinit(allocator),
             .sampling_completed => |*value| value.deinit(allocator),
@@ -4309,6 +4818,7 @@ pub const SessionEvent = union(enum) {
             .session_error => |*value| value.deinit(allocator),
             .session_extensions_attachments_pushed => |*value| value.deinit(allocator),
             .session_extensions_loaded => |*value| value.deinit(allocator),
+            .session_fusion_change_checkpoint => |*value| value.deinit(allocator),
             .session_fusion_commit_started => |*value| value.deinit(allocator),
             .session_fusion_completed => |*value| value.deinit(allocator),
             .session_fusion_handoff => |*value| value.deinit(allocator),
@@ -4317,6 +4827,7 @@ pub const SessionEvent = union(enum) {
             .session_fusion_route_started => |*value| value.deinit(allocator),
             .session_handoff => |*value| value.deinit(allocator),
             .session_idle => |*value| value.deinit(allocator),
+            .session_indexed_search => |*value| value.deinit(allocator),
             .session_info => |*value| value.deinit(allocator),
             .session_managed_settings_enforced => |*value| value.deinit(allocator),
             .session_managed_settings_resolved => |*value| value.deinit(allocator),
@@ -4328,6 +4839,8 @@ pub const SessionEvent = union(enum) {
             .session_mode_changed => |*value| value.deinit(allocator),
             .session_mode_notice_delivered => |*value| value.deinit(allocator),
             .session_model_change => |*value| value.deinit(allocator),
+            .session_model_deselected => |*value| value.deinit(allocator),
+            .session_permission_recovery => |*value| value.deinit(allocator),
             .session_permissions_changed => |*value| value.deinit(allocator),
             .session_plan_changed => |*value| value.deinit(allocator),
             .session_remote_steerable_changed => |*value| value.deinit(allocator),
@@ -4351,7 +4864,10 @@ pub const SessionEvent = union(enum) {
             .session_workspace_file_changed => |*value| value.deinit(allocator),
             .session_limits_exhausted_completed => |*value| value.deinit(allocator),
             .session_limits_exhausted_requested => |*value| value.deinit(allocator),
+            .skill_context_delivered => |*value| value.deinit(allocator),
+            .skill_context_delivered_ref => |*value| value.deinit(allocator),
             .skill_invoked => |*value| value.deinit(allocator),
+            .skill_invoked_ref => |*value| value.deinit(allocator),
             .subagent_completed => |*value| value.deinit(allocator),
             .subagent_configured => |*value| value.deinit(allocator),
             .subagent_deselected => |*value| value.deinit(allocator),
@@ -4370,6 +4886,9 @@ pub const SessionEvent = union(enum) {
             .user_message => |*value| value.deinit(allocator),
             .user_input_completed => |*value| value.deinit(allocator),
             .user_input_requested => |*value| value.deinit(allocator),
+            .workflow_run_settled => |*value| value.deinit(allocator),
+            .workflow_run_started => |*value| value.deinit(allocator),
+            .workflow_run_updated => |*value| value.deinit(allocator),
             .unknown => |*value| value.deinit(allocator),
         }
     }
@@ -4416,9 +4935,6 @@ pub const pinned_discriminators = [_]RegistryEntry{
     .{ .wire = "exit_plan_mode.requested", .tag = .exit_plan_mode_requested },
     .{ .wire = "external_tool.completed", .tag = .external_tool_completed },
     .{ .wire = "external_tool.requested", .tag = .external_tool_requested },
-    .{ .wire = "factory.run_settled", .tag = .factory_run_settled },
-    .{ .wire = "factory.run_started", .tag = .factory_run_started },
-    .{ .wire = "factory.run_updated", .tag = .factory_run_updated },
     .{ .wire = "hook.end", .tag = .hook_end },
     .{ .wire = "hook.progress", .tag = .hook_progress },
     .{ .wire = "hook.start", .tag = .hook_start },
@@ -4431,10 +4947,17 @@ pub const pinned_discriminators = [_]RegistryEntry{
     .{ .wire = "mcp.tools.list_changed", .tag = .mcp_tools_list_changed },
     .{ .wire = "mcp_app.tool_call_complete", .tag = .mcp_app_tool_call_complete },
     .{ .wire = "model.call_failure", .tag = .model_call_failure },
+    .{ .wire = "model.call_final_result", .tag = .model_call_final_result },
     .{ .wire = "model.call_finished", .tag = .model_call_finished },
     .{ .wire = "model.call_start", .tag = .model_call_start },
     .{ .wire = "pending_messages.modified", .tag = .pending_messages_modified },
+    .{ .wire = "permission.assentDetected", .tag = .permission_assent_detected },
+    .{ .wire = "permission.carriedForward", .tag = .permission_carried_forward },
     .{ .wire = "permission.completed", .tag = .permission_completed },
+    .{ .wire = "permission.contextualAuthorization", .tag = .permission_contextual_authorization },
+    .{ .wire = "permission.messageAuthorization", .tag = .permission_message_authorization },
+    .{ .wire = "permission.messageAuthorizationDegraded", .tag = .permission_message_authorization_degraded },
+    .{ .wire = "permission.messageAuthorizationRead", .tag = .permission_message_authorization_read },
     .{ .wire = "permission.requested", .tag = .permission_requested },
     .{ .wire = "prompt_cache_break", .tag = .prompt_cache_break },
     .{ .wire = "sampling.completed", .tag = .sampling_completed },
@@ -4462,6 +4985,7 @@ pub const pinned_discriminators = [_]RegistryEntry{
     .{ .wire = "session.error", .tag = .session_error },
     .{ .wire = "session.extensions.attachments_pushed", .tag = .session_extensions_attachments_pushed },
     .{ .wire = "session.extensions_loaded", .tag = .session_extensions_loaded },
+    .{ .wire = "session.fusion_change_checkpoint", .tag = .session_fusion_change_checkpoint },
     .{ .wire = "session.fusion_commit_started", .tag = .session_fusion_commit_started },
     .{ .wire = "session.fusion_completed", .tag = .session_fusion_completed },
     .{ .wire = "session.fusion_handoff", .tag = .session_fusion_handoff },
@@ -4470,6 +4994,7 @@ pub const pinned_discriminators = [_]RegistryEntry{
     .{ .wire = "session.fusion_route_started", .tag = .session_fusion_route_started },
     .{ .wire = "session.handoff", .tag = .session_handoff },
     .{ .wire = "session.idle", .tag = .session_idle },
+    .{ .wire = "session.indexed_search", .tag = .session_indexed_search },
     .{ .wire = "session.info", .tag = .session_info },
     .{ .wire = "session.managed_settings_enforced", .tag = .session_managed_settings_enforced },
     .{ .wire = "session.managed_settings_resolved", .tag = .session_managed_settings_resolved },
@@ -4481,6 +5006,8 @@ pub const pinned_discriminators = [_]RegistryEntry{
     .{ .wire = "session.mode_changed", .tag = .session_mode_changed },
     .{ .wire = "session.mode_notice_delivered", .tag = .session_mode_notice_delivered },
     .{ .wire = "session.model_change", .tag = .session_model_change },
+    .{ .wire = "session.model_deselected", .tag = .session_model_deselected },
+    .{ .wire = "session.permission_recovery", .tag = .session_permission_recovery },
     .{ .wire = "session.permissions_changed", .tag = .session_permissions_changed },
     .{ .wire = "session.plan_changed", .tag = .session_plan_changed },
     .{ .wire = "session.remote_steerable_changed", .tag = .session_remote_steerable_changed },
@@ -4504,7 +5031,10 @@ pub const pinned_discriminators = [_]RegistryEntry{
     .{ .wire = "session.workspace_file_changed", .tag = .session_workspace_file_changed },
     .{ .wire = "session_limits_exhausted.completed", .tag = .session_limits_exhausted_completed },
     .{ .wire = "session_limits_exhausted.requested", .tag = .session_limits_exhausted_requested },
+    .{ .wire = "skill.context_delivered", .tag = .skill_context_delivered },
+    .{ .wire = "skill.context_delivered_ref", .tag = .skill_context_delivered_ref },
     .{ .wire = "skill.invoked", .tag = .skill_invoked },
+    .{ .wire = "skill.invoked_ref", .tag = .skill_invoked_ref },
     .{ .wire = "subagent.completed", .tag = .subagent_completed },
     .{ .wire = "subagent.configured", .tag = .subagent_configured },
     .{ .wire = "subagent.deselected", .tag = .subagent_deselected },
@@ -4523,6 +5053,9 @@ pub const pinned_discriminators = [_]RegistryEntry{
     .{ .wire = "user.message", .tag = .user_message },
     .{ .wire = "user_input.completed", .tag = .user_input_completed },
     .{ .wire = "user_input.requested", .tag = .user_input_requested },
+    .{ .wire = "workflow.run_settled", .tag = .workflow_run_settled },
+    .{ .wire = "workflow.run_started", .tag = .workflow_run_started },
+    .{ .wire = "workflow.run_updated", .tag = .workflow_run_updated },
 };
 
 fn valueString(value: std.json.Value) ![]const u8 {
@@ -4910,6 +5443,24 @@ fn parseAssistantUsageCopilotUsageTokenDetailsArray(allocator: std.mem.Allocator
     return result;
 }
 
+fn parseAssistantUsageDataThinkingDroppedReasonsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc([]const u8, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeString(item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseString(allocator, item, null, null);
+        initialized += 1;
+    }
+    return result;
+}
+
 fn parseAssistantUsageDataQuotaSnapshotsMap(allocator: std.mem.Allocator, value: std.json.Value) !std.json.ArrayHashMap(AssistantUsageQuotaSnapshot) {
     const source = try payloads.requiredObject(value);
     var result: std.json.ArrayHashMap(AssistantUsageQuotaSnapshot) = .{};
@@ -5164,6 +5715,42 @@ fn parseModelCallFailureDataQuotaSnapshotsMap(allocator: std.mem.Allocator, valu
     return result;
 }
 
+fn parsePermissionRecoveryDataAttemptsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const PermissionRecoveryAttempt {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc(PermissionRecoveryAttempt, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipePermissionRecoveryAttempt(&item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parsePermissionRecoveryAttempt(allocator, item);
+        initialized += 1;
+    }
+    return result;
+}
+
+fn parsePermissionApprovedReadOnlyForSessionDirectoriesArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 1) return error.InvalidSessionEvent;
+    const result = try allocator.alloc([]const u8, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeString(item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseString(allocator, item, null, null);
+        initialized += 1;
+    }
+    return result;
+}
+
 fn parseUserToolSessionApprovalCommandsCommandIdentifiersArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
     const source = switch (value) {
         .array => |array| array.items,
@@ -5213,6 +5800,42 @@ fn parsePermissionDeniedByRulesRulesArray(allocator: std.mem.Allocator, value: s
     };
     for (source, result) |item, *destination| {
         destination.* = try parsePermissionRule(allocator, item);
+        initialized += 1;
+    }
+    return result;
+}
+
+fn parsePermissionMessageAuthorizationDataTargetMembersArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc([]const u8, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeString(item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseString(allocator, item, null, null);
+        initialized += 1;
+    }
+    return result;
+}
+
+fn parsePermissionSandboxPathGrantRemovedReadonlyPathsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc([]const u8, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeString(item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseString(allocator, item, null, null);
         initialized += 1;
     }
     return result;
@@ -5272,6 +5895,30 @@ fn parsePermissionRequestShellPossiblePathsArray(allocator: std.mem.Allocator, v
     return result;
 }
 
+fn parsePermissionRequestShellResolvedPathsMap(allocator: std.mem.Allocator, value: std.json.Value) !std.json.ArrayHashMap([]const u8) {
+    const source = try payloads.requiredObject(value);
+    var result: std.json.ArrayHashMap([]const u8) = .{};
+    errdefer {
+        var cleanup_iterator = result.map.iterator();
+        while (cleanup_iterator.next()) |entry| {
+            wipeString(entry.key_ptr.*);
+            wipeString(entry.value_ptr.*);
+        }
+    }
+    var iterator = source.iterator();
+    while (iterator.next()) |entry| {
+        const key = try allocator.dupe(u8, entry.key_ptr.*);
+        errdefer wipeString(key);
+        const parsed_value = try parseString(allocator, entry.value_ptr.*, null, null);
+        errdefer {
+            const cleanup_value = parsed_value;
+            wipeString(cleanup_value);
+        }
+        try result.map.put(allocator, key, parsed_value);
+    }
+    return result;
+}
+
 fn parsePermissionRequestShellPossibleUrlsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const PermissionRequestShellPossibleUrl {
     const source = switch (value) {
         .array => |array| array.items,
@@ -5290,19 +5937,19 @@ fn parsePermissionRequestShellPossibleUrlsArray(allocator: std.mem.Allocator, va
     return result;
 }
 
-fn parsePermissionRequestFactoryPhasesArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const FactoryPermissionPhase {
+fn parsePermissionRequestWorkflowPhasesArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const WorkflowPermissionPhase {
     const source = switch (value) {
         .array => |array| array.items,
         else => return error.InvalidSessionEvent,
     };
     if (source.len < 0) return error.InvalidSessionEvent;
-    const result = try allocator.alloc(FactoryPermissionPhase, source.len);
+    const result = try allocator.alloc(WorkflowPermissionPhase, source.len);
     var initialized: usize = 0;
     errdefer for (@constCast(result[0..initialized])) |*item| {
-        wipeFactoryPermissionPhase(&item.*);
+        wipeWorkflowPermissionPhase(&item.*);
     };
     for (source, result) |item, *destination| {
-        destination.* = try parseFactoryPermissionPhase(allocator, item);
+        destination.* = try parseWorkflowPermissionPhase(allocator, item);
         initialized += 1;
     }
     return result;
@@ -5380,19 +6027,37 @@ fn parsePermissionPromptRequestPathPathsArray(allocator: std.mem.Allocator, valu
     return result;
 }
 
-fn parsePermissionPromptRequestFactoryPhasesArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const FactoryPermissionPhase {
+fn parsePermissionPromptRequestPathReadOnlyDirectoriesArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
     const source = switch (value) {
         .array => |array| array.items,
         else => return error.InvalidSessionEvent,
     };
     if (source.len < 0) return error.InvalidSessionEvent;
-    const result = try allocator.alloc(FactoryPermissionPhase, source.len);
+    const result = try allocator.alloc([]const u8, source.len);
     var initialized: usize = 0;
     errdefer for (@constCast(result[0..initialized])) |*item| {
-        wipeFactoryPermissionPhase(&item.*);
+        wipeString(item.*);
     };
     for (source, result) |item, *destination| {
-        destination.* = try parseFactoryPermissionPhase(allocator, item);
+        destination.* = try parseString(allocator, item, null, null);
+        initialized += 1;
+    }
+    return result;
+}
+
+fn parsePermissionPromptRequestWorkflowPhasesArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const WorkflowPermissionPhase {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc(WorkflowPermissionPhase, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeWorkflowPermissionPhase(&item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseWorkflowPermissionPhase(allocator, item);
         initialized += 1;
     }
     return result;
@@ -5952,6 +6617,24 @@ fn parseExtensionsLoadedDataExtensionsArray(allocator: std.mem.Allocator, value:
     return result;
 }
 
+fn parseShutdownCodeChangesFilesModifiedArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc([]const u8, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeString(item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseString(allocator, item, null, null);
+        initialized += 1;
+    }
+    return result;
+}
+
 fn parseFusionResolvedDataPhasePlanArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const FusionPhasePlanStep {
     const source = switch (value) {
         .array => |array| array.items,
@@ -5965,6 +6648,24 @@ fn parseFusionResolvedDataPhasePlanArray(allocator: std.mem.Allocator, value: st
     };
     for (source, result) |item, *destination| {
         destination.* = try parseFusionPhasePlanStep(allocator, item);
+        initialized += 1;
+    }
+    return result;
+}
+
+fn parseFusionResolvedDataCriticsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const FusionCritic {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc(FusionCritic, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeFusionCritic(&item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseFusionCritic(allocator, item);
         initialized += 1;
     }
     return result;
@@ -6001,24 +6702,6 @@ fn parseMcpServersLoadedDataServersArray(allocator: std.mem.Allocator, value: st
     };
     for (source, result) |item, *destination| {
         destination.* = try parseMcpServersLoadedServer(allocator, item);
-        initialized += 1;
-    }
-    return result;
-}
-
-fn parseShutdownCodeChangesFilesModifiedArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
-    const source = switch (value) {
-        .array => |array| array.items,
-        else => return error.InvalidSessionEvent,
-    };
-    if (source.len < 0) return error.InvalidSessionEvent;
-    const result = try allocator.alloc([]const u8, source.len);
-    var initialized: usize = 0;
-    errdefer for (@constCast(result[0..initialized])) |*item| {
-        wipeString(item.*);
-    };
-    for (source, result) |item, *destination| {
-        destination.* = try parseString(allocator, item, null, null);
         initialized += 1;
     }
     return result;
@@ -6162,6 +6845,24 @@ fn parseSkillsLoadedDataSkillsArray(allocator: std.mem.Allocator, value: std.jso
     return result;
 }
 
+fn parseSnapshotRewindDataEventIdsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc([]const u8, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeString(item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseString(allocator, item, null, null);
+        initialized += 1;
+    }
+    return result;
+}
+
 fn parseGitHubMcpToolConfigAdditionalToolsetsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
     const source = switch (value) {
         .array => |array| array.items,
@@ -6252,6 +6953,24 @@ fn parseSkillInvokedDataAllowedToolsArray(allocator: std.mem.Allocator, value: s
     return result;
 }
 
+fn parseSkillInvokedRefDataAllowedToolsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc([]const u8, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeString(item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseString(allocator, item, null, null);
+        initialized += 1;
+    }
+    return result;
+}
+
 fn parseSubagentSelectedDataToolsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
     const source = switch (value) {
         .array => |array| array.items,
@@ -6290,6 +7009,24 @@ fn parseSystemMessageMetadataVariablesMap(allocator: std.mem.Allocator, value: s
             wipeJsonValue(&cleanup_value);
         }
         try result.map.put(allocator, key, parsed_value);
+    }
+    return result;
+}
+
+fn parseSystemMessageDataContentBlocksArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const SystemMessageContentBlock {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc(SystemMessageContentBlock, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeSystemMessageContentBlock(&item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseSystemMessageContentBlock(allocator, item);
+        initialized += 1;
     }
     return result;
 }
@@ -7025,6 +7762,13 @@ fn parseFusionPhaseCompletedData(allocator: std.mem.Allocator, value: std.json.V
         const cleanup_model = parsed_model;
         wipeString(cleanup_model);
     }
+    const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_reasoning_effort = parsed_reasoning_effort;
+        if (cleanup_reasoning_effort) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_status = try parseFusionPhaseStatus(allocator, object.get("status") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_status = parsed_status;
@@ -7076,6 +7820,7 @@ fn parseFusionPhaseCompletedData(allocator: std.mem.Allocator, value: std.json.V
         .role = parsed_role,
         .conversation_scope = parsed_conversation_scope,
         .model = parsed_model,
+        .reasoning_effort = parsed_reasoning_effort,
         .status = parsed_status,
         .content = parsed_content,
         .verdict = parsed_verdict,
@@ -7119,6 +7864,13 @@ fn parseFusionPhaseFailedData(allocator: std.mem.Allocator, value: std.json.Valu
         const cleanup_model = parsed_model;
         wipeString(cleanup_model);
     }
+    const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_reasoning_effort = parsed_reasoning_effort;
+        if (cleanup_reasoning_effort) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_status = try parseFusionPhaseStatus(allocator, object.get("status") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_status = parsed_status;
@@ -7156,6 +7908,7 @@ fn parseFusionPhaseFailedData(allocator: std.mem.Allocator, value: std.json.Valu
         .role = parsed_role,
         .conversation_scope = parsed_conversation_scope,
         .model = parsed_model,
+        .reasoning_effort = parsed_reasoning_effort,
         .status = parsed_status,
         .reason = parsed_reason,
         .duration_ms = parsed_duration_ms,
@@ -7202,6 +7955,13 @@ fn parseFusionPhaseStartedData(allocator: std.mem.Allocator, value: std.json.Val
         const cleanup_model = parsed_model;
         wipeString(cleanup_model);
     }
+    const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_reasoning_effort = parsed_reasoning_effort;
+        if (cleanup_reasoning_effort) |*present| {
+            wipeString(present.*);
+        }
+    }
     return .{
         .fusion_id = parsed_fusion_id,
         .phase_id = parsed_phase_id,
@@ -7210,6 +7970,7 @@ fn parseFusionPhaseStartedData(allocator: std.mem.Allocator, value: std.json.Val
         .role = parsed_role,
         .conversation_scope = parsed_conversation_scope,
         .model = parsed_model,
+        .reasoning_effort = parsed_reasoning_effort,
     };
 }
 
@@ -7599,6 +8360,7 @@ fn parseCitations(allocator: std.mem.Allocator, value: std.json.Value) !Citation
 
 fn parseFusionAttribution(allocator: std.mem.Allocator, value: std.json.Value) !FusionAttribution {
     const object = try payloads.requiredObject(value);
+    const parsed_has_user_steering = if (object.get("hasUserSteering")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_fusion_id = try parseString(allocator, object.get("fusionId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_fusion_id = parsed_fusion_id;
@@ -7669,6 +8431,7 @@ fn parseFusionAttribution(allocator: std.mem.Allocator, value: std.json.Value) !
         }
     }
     return .{
+        .has_user_steering = parsed_has_user_steering,
         .fusion_id = parsed_fusion_id,
         .commit_id = parsed_commit_id,
         .synthetic_model = parsed_synthetic_model,
@@ -7689,6 +8452,13 @@ fn parseAssistantMessageData(allocator: std.mem.Allocator, value: std.json.Value
     errdefer {
         const cleanup_message_id = parsed_message_id;
         wipeString(cleanup_message_id);
+    }
+    const parsed_originating_message_id = if (object.get("originatingMessageId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_originating_message_id = parsed_originating_message_id;
+        if (cleanup_originating_message_id) |*present| {
+            wipeString(present.*);
+        }
     }
     const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
@@ -7829,6 +8599,7 @@ fn parseAssistantMessageData(allocator: std.mem.Allocator, value: std.json.Value
     }
     return .{
         .message_id = parsed_message_id,
+        .originating_message_id = parsed_originating_message_id,
         .model = parsed_model,
         .content = parsed_content,
         .tool_requests = parsed_tool_requests,
@@ -8015,9 +8786,17 @@ fn parseAssistantTurnEndData(allocator: std.mem.Allocator, value: std.json.Value
             wipeString(present.*);
         }
     }
+    const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_parent_tool_call_id = parsed_parent_tool_call_id;
+        if (cleanup_parent_tool_call_id) |*present| {
+            wipeString(present.*);
+        }
+    }
     return .{
         .turn_id = parsed_turn_id,
         .model = parsed_model,
+        .parent_tool_call_id = parsed_parent_tool_call_id,
     };
 }
 
@@ -8070,10 +8849,18 @@ fn parseAssistantTurnStartData(allocator: std.mem.Allocator, value: std.json.Val
             wipeString(present.*);
         }
     }
+    const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_parent_tool_call_id = parsed_parent_tool_call_id;
+        if (cleanup_parent_tool_call_id) |*present| {
+            wipeString(present.*);
+        }
+    }
     return .{
         .turn_id = parsed_turn_id,
         .model = parsed_model,
         .interaction_id = parsed_interaction_id,
+        .parent_tool_call_id = parsed_parent_tool_call_id,
     };
 }
 
@@ -8206,6 +8993,16 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
         }
     }
     const parsed_reasoning_tokens = if (object.get("reasoningTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_thinking_dropped_blocks = if (object.get("thinkingDroppedBlocks")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_thinking_dropped_reasons = if (object.get("thinkingDroppedReasons")) |field_value| if ((field_value) == .null) null else try parseAssistantUsageDataThinkingDroppedReasonsArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_thinking_dropped_reasons = parsed_thinking_dropped_reasons;
+        if (cleanup_thinking_dropped_reasons) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipeString(item.*);
+            }
+        }
+    }
     const parsed_cost = if (object.get("cost")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, null, null) else null;
     const parsed_duration = if (object.get("duration")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_time_to_first_token_ms = if (object.get("timeToFirstTokenMs")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
@@ -8355,6 +9152,8 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
         .cache_write_tokens = parsed_cache_write_tokens,
         .cache_expires_at = parsed_cache_expires_at,
         .reasoning_tokens = parsed_reasoning_tokens,
+        .thinking_dropped_blocks = parsed_thinking_dropped_blocks,
+        .thinking_dropped_reasons = parsed_thinking_dropped_reasons,
         .cost = parsed_cost,
         .duration = parsed_duration,
         .time_to_first_token_ms = parsed_time_to_first_token_ms,
@@ -8874,82 +9673,6 @@ fn parseExternalToolRequestedData(allocator: std.mem.Allocator, value: std.json.
     };
 }
 
-fn parseFactoryRunSettledStatus(_: std.mem.Allocator, value: std.json.Value) !FactoryRunSettledStatus {
-    const wire = try valueString(value);
-    if (std.mem.eql(u8, wire, "completed")) return .completed;
-    if (std.mem.eql(u8, wire, "halted")) return .halted;
-    if (std.mem.eql(u8, wire, "paused")) return .paused;
-    if (std.mem.eql(u8, wire, "cancelled")) return .cancelled;
-    if (std.mem.eql(u8, wire, "error")) return .error_;
-    return error.InvalidSessionEvent;
-}
-
-fn parseFactoryRunSettledData(allocator: std.mem.Allocator, value: std.json.Value) !FactoryRunSettledData {
-    const object = try payloads.requiredObject(value);
-    const parsed_run_id = try parseString(allocator, object.get("runId") orelse return error.InvalidSessionEvent, null, null);
-    errdefer {
-        const cleanup_run_id = parsed_run_id;
-        wipeString(cleanup_run_id);
-    }
-    const parsed_status = try parseFactoryRunSettledStatus(allocator, object.get("status") orelse return error.InvalidSessionEvent);
-    errdefer {
-        var cleanup_status = parsed_status;
-        wipeFactoryRunSettledStatus(&cleanup_status);
-    }
-    const parsed_consumed_subagents = try parseInteger(u64, object.get("consumedSubagents") orelse return error.InvalidSessionEvent, 0, null, null);
-    const parsed_consumed_nano_aiu = try parseInteger(u64, object.get("consumedNanoAiu") orelse return error.InvalidSessionEvent, 0, null, null);
-    const parsed_elapsed_ms = try parseInteger(u64, object.get("elapsedMs") orelse return error.InvalidSessionEvent, 0, null, null);
-    const parsed_failure_type = if (object.get("failureType")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
-    errdefer {
-        var cleanup_failure_type = parsed_failure_type;
-        if (cleanup_failure_type) |*present| {
-            wipeString(present.*);
-        }
-    }
-    return .{
-        .run_id = parsed_run_id,
-        .status = parsed_status,
-        .consumed_subagents = parsed_consumed_subagents,
-        .consumed_nano_aiu = parsed_consumed_nano_aiu,
-        .elapsed_ms = parsed_elapsed_ms,
-        .failure_type = parsed_failure_type,
-    };
-}
-
-fn parseFactoryRunStartedData(allocator: std.mem.Allocator, value: std.json.Value) !FactoryRunStartedData {
-    const object = try payloads.requiredObject(value);
-    const parsed_run_id = try parseString(allocator, object.get("runId") orelse return error.InvalidSessionEvent, null, null);
-    errdefer {
-        const cleanup_run_id = parsed_run_id;
-        wipeString(cleanup_run_id);
-    }
-    const parsed_factory_name = try parseString(allocator, object.get("factoryName") orelse return error.InvalidSessionEvent, null, null);
-    errdefer {
-        const cleanup_factory_name = parsed_factory_name;
-        wipeString(cleanup_factory_name);
-    }
-    const parsed_attempt = try parseInteger(u64, object.get("attempt") orelse return error.InvalidSessionEvent, 1, null, null);
-    return .{
-        .run_id = parsed_run_id,
-        .factory_name = parsed_factory_name,
-        .attempt = parsed_attempt,
-    };
-}
-
-fn parseFactoryRunUpdatedData(allocator: std.mem.Allocator, value: std.json.Value) !FactoryRunUpdatedData {
-    const object = try payloads.requiredObject(value);
-    const parsed_run_id = try parseString(allocator, object.get("runId") orelse return error.InvalidSessionEvent, null, null);
-    errdefer {
-        const cleanup_run_id = parsed_run_id;
-        wipeString(cleanup_run_id);
-    }
-    const parsed_revision = try parseInteger(u64, object.get("revision") orelse return error.InvalidSessionEvent, 1, null, null);
-    return .{
-        .run_id = parsed_run_id,
-        .revision = parsed_revision,
-    };
-}
-
 fn parseHookEndError(allocator: std.mem.Allocator, value: std.json.Value) !HookEndError {
     const object = try payloads.requiredObject(value);
     const parsed_message = try parseString(allocator, object.get("message") orelse return error.InvalidSessionEvent, null, null);
@@ -9074,6 +9797,7 @@ fn parseMcpHeadersRefreshCompletedOutcome(_: std.mem.Allocator, value: std.json.
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "headers")) return .headers;
     if (std.mem.eql(u8, wire, "none")) return .none;
+    if (std.mem.eql(u8, wire, "error")) return .error_;
     if (std.mem.eql(u8, wire, "timeout")) return .timeout;
     return error.InvalidSessionEvent;
 }
@@ -9181,11 +9905,19 @@ fn parseMcpOauthRequiredStaticClientConfig(allocator: std.mem.Allocator, value: 
             wipeString(present.*);
         }
     }
+    const parsed_scope = if (object.get("scope")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_scope = parsed_scope;
+        if (cleanup_scope) |*present| {
+            wipeString(present.*);
+        }
+    }
     return .{
         .client_id = parsed_client_id,
         .client_secret = parsed_client_secret,
         .public_client = parsed_public_client,
         .grant_type = parsed_grant_type,
+        .scope = parsed_scope,
     };
 }
 
@@ -9517,6 +10249,13 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
             wipeString(present.*);
         }
     }
+    const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_parent_tool_call_id = parsed_parent_tool_call_id;
+        if (cleanup_parent_tool_call_id) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_initiator = if (object.get("initiator")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_initiator = parsed_initiator;
@@ -9649,6 +10388,7 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
     }
     return .{
         .model = parsed_model,
+        .parent_tool_call_id = parsed_parent_tool_call_id,
         .initiator = parsed_initiator,
         .api_call_id = parsed_api_call_id,
         .provider_call_id = parsed_provider_call_id,
@@ -9673,6 +10413,39 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
         .quota_snapshots = parsed_quota_snapshots,
         .request_fingerprint = parsed_request_fingerprint,
         .fusion = parsed_fusion,
+    };
+}
+
+fn parseModelCallFinalResult(_: std.mem.Allocator, value: std.json.Value) !ModelCallFinalResult {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "success")) return .success;
+    if (std.mem.eql(u8, wire, "http_400")) return .http_400;
+    if (std.mem.eql(u8, wire, "http_413")) return .http_413;
+    if (std.mem.eql(u8, wire, "http_429")) return .http_429;
+    if (std.mem.eql(u8, wire, "http_4xx")) return .http_4xx;
+    if (std.mem.eql(u8, wire, "http_5xx")) return .http_5xx;
+    if (std.mem.eql(u8, wire, "transport_error")) return .transport_error;
+    if (std.mem.eql(u8, wire, "other_error")) return .other_error;
+    return error.InvalidSessionEvent;
+}
+
+fn parseModelCallFinalResultData(allocator: std.mem.Allocator, value: std.json.Value) !ModelCallFinalResultData {
+    const object = try payloads.requiredObject(value);
+    const parsed_model = try parseString(allocator, object.get("model") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_model = parsed_model;
+        wipeString(cleanup_model);
+    }
+    const parsed_is_byok = if (object.get("isByok")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_result = try parseModelCallFinalResult(allocator, object.get("result") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_result = parsed_result;
+        wipeModelCallFinalResult(&cleanup_result);
+    }
+    return .{
+        .model = parsed_model,
+        .is_byok = parsed_is_byok,
+        .result = parsed_result,
     };
 }
 
@@ -9745,11 +10518,19 @@ fn parseModelCallStartData(allocator: std.mem.Allocator, value: std.json.Value) 
             wipeFusionAttribution(&present.*);
         }
     }
+    const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_parent_tool_call_id = parsed_parent_tool_call_id;
+        if (cleanup_parent_tool_call_id) |*present| {
+            wipeString(present.*);
+        }
+    }
     return .{
         .turn_id = parsed_turn_id,
         .model = parsed_model,
         .previous_response_id = parsed_previous_response_id,
         .fusion = parsed_fusion,
+        .parent_tool_call_id = parsed_parent_tool_call_id,
     };
 }
 
@@ -9757,6 +10538,243 @@ fn parsePendingMessagesModifiedData(_: std.mem.Allocator, value: std.json.Value)
     _ = try payloads.requiredObject(value);
 
     return .{};
+}
+
+fn parsePermissionAssentDetectedData(allocator: std.mem.Allocator, value: std.json.Value) !PermissionAssentDetectedData {
+    const object = try payloads.requiredObject(value);
+    const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_request_id = parsed_request_id;
+        wipeString(cleanup_request_id);
+    }
+    const parsed_turn_index = try parseInteger(u64, object.get("turnIndex") orelse return error.InvalidSessionEvent, 0, null, null);
+    return .{
+        .request_id = parsed_request_id,
+        .turn_index = parsed_turn_index,
+    };
+}
+
+fn parsePermissionDecisionSource(_: std.mem.Allocator, value: std.json.Value) !PermissionDecisionSource {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "assisted_approval")) return .assisted_approval;
+    if (std.mem.eql(u8, wire, "human_response")) return .human_response;
+    if (std.mem.eql(u8, wire, "host_policy")) return .host_policy;
+    if (std.mem.eql(u8, wire, "unattended_fallback")) return .unattended_fallback;
+    if (std.mem.eql(u8, wire, "authorization_carry_forward")) return .authorization_carry_forward;
+    return error.InvalidSessionEvent;
+}
+
+fn parsePermissionCarriedForwardData(allocator: std.mem.Allocator, value: std.json.Value) !PermissionCarriedForwardData {
+    const object = try payloads.requiredObject(value);
+    const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_request_id = parsed_request_id;
+        wipeString(cleanup_request_id);
+    }
+    const parsed_tool_call_id = try parseString(allocator, object.get("toolCallId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_tool_call_id = parsed_tool_call_id;
+        wipeString(cleanup_tool_call_id);
+    }
+    const parsed_record_id = try parseString(allocator, object.get("recordId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_record_id = parsed_record_id;
+        wipeString(cleanup_record_id);
+    }
+    const parsed_decision_source = try parsePermissionDecisionSource(allocator, object.get("decisionSource") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_decision_source = parsed_decision_source;
+        wipePermissionDecisionSource(&cleanup_decision_source);
+    }
+    return .{
+        .request_id = parsed_request_id,
+        .tool_call_id = parsed_tool_call_id,
+        .record_id = parsed_record_id,
+        .decision_source = parsed_decision_source,
+    };
+}
+
+fn parseTaskBlockerKind(_: std.mem.Allocator, value: std.json.Value) !TaskBlockerKind {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "permission_recovery")) return .permission_recovery;
+    return error.InvalidSessionEvent;
+}
+
+fn parsePermissionRecoveryReason(_: std.mem.Allocator, value: std.json.Value) !PermissionRecoveryReason {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "permission_required")) return .permission_required;
+    if (std.mem.eql(u8, wire, "repeated_attempt")) return .repeated_attempt;
+    if (std.mem.eql(u8, wire, "attempts_exhausted")) return .attempts_exhausted;
+    if (std.mem.eql(u8, wire, "permission_approved")) return .permission_approved;
+    if (std.mem.eql(u8, wire, "permission_denied")) return .permission_denied;
+    if (std.mem.eql(u8, wire, "responder_unavailable")) return .responder_unavailable;
+    if (std.mem.eql(u8, wire, "equivalent_alternative_succeeded")) return .equivalent_alternative_succeeded;
+    return error.InvalidSessionEvent;
+}
+
+fn parsePermissionRecoveryStatus(_: std.mem.Allocator, value: std.json.Value) !PermissionRecoveryStatus {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "recovering")) return .recovering;
+    if (std.mem.eql(u8, wire, "awaiting_approval")) return .awaiting_approval;
+    if (std.mem.eql(u8, wire, "resolved")) return .resolved;
+    if (std.mem.eql(u8, wire, "blocked")) return .blocked;
+    return error.InvalidSessionEvent;
+}
+
+fn parsePermissionRecoveryOnBlocked(_: std.mem.Allocator, value: std.json.Value) !PermissionRecoveryOnBlocked {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "ask")) return .ask;
+    if (std.mem.eql(u8, wire, "fail")) return .fail;
+    return error.InvalidSessionEvent;
+}
+
+fn parsePermissionRecoveryAttemptRelation(_: std.mem.Allocator, value: std.json.Value) !PermissionRecoveryAttemptRelation {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "initial")) return .initial;
+    if (std.mem.eql(u8, wire, "retry")) return .retry;
+    if (std.mem.eql(u8, wire, "alternative")) return .alternative;
+    return error.InvalidSessionEvent;
+}
+
+fn parsePermissionRecoveryAttemptDisposition(_: std.mem.Allocator, value: std.json.Value) !PermissionRecoveryAttemptDisposition {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "deferred")) return .deferred;
+    if (std.mem.eql(u8, wire, "prompted")) return .prompted;
+    if (std.mem.eql(u8, wire, "approved")) return .approved;
+    if (std.mem.eql(u8, wire, "denied")) return .denied;
+    if (std.mem.eql(u8, wire, "blocked")) return .blocked;
+    if (std.mem.eql(u8, wire, "succeeded")) return .succeeded;
+    return error.InvalidSessionEvent;
+}
+
+fn parsePermissionRecoveryAttemptReason(_: std.mem.Allocator, value: std.json.Value) !PermissionRecoveryAttemptReason {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "permission_required")) return .permission_required;
+    if (std.mem.eql(u8, wire, "repeated_attempt")) return .repeated_attempt;
+    if (std.mem.eql(u8, wire, "attempts_exhausted")) return .attempts_exhausted;
+    if (std.mem.eql(u8, wire, "permission_approved")) return .permission_approved;
+    if (std.mem.eql(u8, wire, "permission_denied")) return .permission_denied;
+    if (std.mem.eql(u8, wire, "responder_unavailable")) return .responder_unavailable;
+    if (std.mem.eql(u8, wire, "equivalent_alternative_succeeded")) return .equivalent_alternative_succeeded;
+    return error.InvalidSessionEvent;
+}
+
+fn parsePermissionRecoveryAttempt(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRecoveryAttempt {
+    const object = try payloads.requiredObject(value);
+    const parsed_attempt_id = try parseString(allocator, object.get("attemptId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_attempt_id = parsed_attempt_id;
+        wipeString(cleanup_attempt_id);
+    }
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_tool_call_id = parsed_tool_call_id;
+        if (cleanup_tool_call_id) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_permission_kind = try parseString(allocator, object.get("permissionKind") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_permission_kind = parsed_permission_kind;
+        wipeString(cleanup_permission_kind);
+    }
+    const parsed_request_fingerprint = try parseString(allocator, object.get("requestFingerprint") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_request_fingerprint = parsed_request_fingerprint;
+        wipeString(cleanup_request_fingerprint);
+    }
+    const parsed_relation = try parsePermissionRecoveryAttemptRelation(allocator, object.get("relation") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_relation = parsed_relation;
+        wipePermissionRecoveryAttemptRelation(&cleanup_relation);
+    }
+    const parsed_disposition = try parsePermissionRecoveryAttemptDisposition(allocator, object.get("disposition") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_disposition = parsed_disposition;
+        wipePermissionRecoveryAttemptDisposition(&cleanup_disposition);
+    }
+    const parsed_reason = try parsePermissionRecoveryAttemptReason(allocator, object.get("reason") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_reason = parsed_reason;
+        wipePermissionRecoveryAttemptReason(&cleanup_reason);
+    }
+    const parsed_ordinal = try parseInteger(u64, object.get("ordinal") orelse return error.InvalidSessionEvent, 1, null, null);
+    return .{
+        .attempt_id = parsed_attempt_id,
+        .tool_call_id = parsed_tool_call_id,
+        .permission_kind = parsed_permission_kind,
+        .request_fingerprint = parsed_request_fingerprint,
+        .relation = parsed_relation,
+        .disposition = parsed_disposition,
+        .reason = parsed_reason,
+        .ordinal = parsed_ordinal,
+    };
+}
+
+fn parsePermissionRecoveryData(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRecoveryData {
+    const object = try payloads.requiredObject(value);
+    const parsed_episode_id = try parseString(allocator, object.get("episodeId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_episode_id = parsed_episode_id;
+        wipeString(cleanup_episode_id);
+    }
+    const parsed_status = try parsePermissionRecoveryStatus(allocator, object.get("status") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_status = parsed_status;
+        wipePermissionRecoveryStatus(&cleanup_status);
+    }
+    const parsed_on_blocked = try parsePermissionRecoveryOnBlocked(allocator, object.get("onBlocked") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_on_blocked = parsed_on_blocked;
+        wipePermissionRecoveryOnBlocked(&cleanup_on_blocked);
+    }
+    const parsed_reason = try parsePermissionRecoveryReason(allocator, object.get("reason") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_reason = parsed_reason;
+        wipePermissionRecoveryReason(&cleanup_reason);
+    }
+    const parsed_max_attempts = try parseInteger(u64, object.get("maxAttempts") orelse return error.InvalidSessionEvent, 1, null, null);
+    const parsed_attempts = try parsePermissionRecoveryDataAttemptsArray(allocator, object.get("attempts") orelse return error.InvalidSessionEvent);
+    errdefer {
+        const cleanup_attempts = parsed_attempts;
+        for (@constCast(cleanup_attempts)) |*item| {
+            wipePermissionRecoveryAttempt(&item.*);
+        }
+    }
+    return .{
+        .episode_id = parsed_episode_id,
+        .status = parsed_status,
+        .on_blocked = parsed_on_blocked,
+        .reason = parsed_reason,
+        .max_attempts = parsed_max_attempts,
+        .attempts = parsed_attempts,
+    };
+}
+
+fn parseTaskBlocker(allocator: std.mem.Allocator, value: std.json.Value) !TaskBlocker {
+    const object = try payloads.requiredObject(value);
+    const parsed_kind = try parseTaskBlockerKind(allocator, object.get("kind") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_kind = parsed_kind;
+        wipeTaskBlockerKind(&cleanup_kind);
+    }
+    const parsed_reason = try parsePermissionRecoveryReason(allocator, object.get("reason") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_reason = parsed_reason;
+        wipePermissionRecoveryReason(&cleanup_reason);
+    }
+    const parsed_resumable = try parseBool(object.get("resumable") orelse return error.InvalidSessionEvent);
+    const parsed_permission_recovery = try parsePermissionRecoveryData(allocator, object.get("permissionRecovery") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_permission_recovery = parsed_permission_recovery;
+        wipePermissionRecoveryData(&cleanup_permission_recovery);
+    }
+    return .{
+        .kind = parsed_kind,
+        .reason = parsed_reason,
+        .resumable = parsed_resumable,
+        .permission_recovery = parsed_permission_recovery,
+    };
 }
 
 fn parsePermissionApproved(allocator: std.mem.Allocator, value: std.json.Value) !PermissionApproved {
@@ -9770,6 +10788,26 @@ fn parsePermissionApproved(allocator: std.mem.Allocator, value: std.json.Value) 
     return .{
         .kind = parsed_kind,
         .managed_approval_handled = parsed_managed_approval_handled,
+    };
+}
+
+fn parsePermissionApprovedReadOnlyForSession(allocator: std.mem.Allocator, value: std.json.Value) !PermissionApprovedReadOnlyForSession {
+    const object = try payloads.requiredObject(value);
+    const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "approved-read-only-for-session");
+    errdefer {
+        const cleanup_kind = parsed_kind;
+        wipeString(cleanup_kind);
+    }
+    const parsed_directories = try parsePermissionApprovedReadOnlyForSessionDirectoriesArray(allocator, object.get("directories") orelse return error.InvalidSessionEvent);
+    errdefer {
+        const cleanup_directories = parsed_directories;
+        for (@constCast(cleanup_directories)) |*item| {
+            wipeString(item.*);
+        }
+    }
+    return .{
+        .kind = parsed_kind,
+        .directories = parsed_directories,
     };
 }
 
@@ -9893,9 +10931,9 @@ fn parseUserToolSessionApprovalExtensionManagement(allocator: std.mem.Allocator,
     };
 }
 
-fn parseUserToolSessionApprovalFactory(allocator: std.mem.Allocator, value: std.json.Value) !UserToolSessionApprovalFactory {
+fn parseUserToolSessionApprovalWorkflow(allocator: std.mem.Allocator, value: std.json.Value) !UserToolSessionApprovalWorkflow {
     const object = try payloads.requiredObject(value);
-    const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "factory");
+    const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "workflow");
     errdefer {
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
@@ -9967,7 +11005,7 @@ fn parseUserToolSessionApproval(allocator: std.mem.Allocator, value: std.json.Va
     if (std.mem.eql(u8, discriminator, "memory")) return .{ .memory = try parseUserToolSessionApprovalMemory(allocator, value) };
     if (std.mem.eql(u8, discriminator, "custom-tool")) return .{ .custom_tool = try parseUserToolSessionApprovalCustomTool(allocator, value) };
     if (std.mem.eql(u8, discriminator, "extension-management")) return .{ .extension_management = try parseUserToolSessionApprovalExtensionManagement(allocator, value) };
-    if (std.mem.eql(u8, discriminator, "factory")) return .{ .factory = try parseUserToolSessionApprovalFactory(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "workflow")) return .{ .workflow = try parseUserToolSessionApprovalWorkflow(allocator, value) };
     if (std.mem.eql(u8, discriminator, "extension-permission-access")) return .{ .extension_permission_access = try parseUserToolSessionApprovalExtensionPermissionAccess(allocator, value) };
     if (std.mem.eql(u8, discriminator, "extension-env-access")) return .{ .extension_env_access = try parseUserToolSessionApprovalExtensionEnvAccess(allocator, value) };
     return error.InvalidSessionEvent;
@@ -10163,6 +11201,7 @@ fn parsePermissionResult(allocator: std.mem.Allocator, value: std.json.Value) !P
     const object = try payloads.requiredObject(value);
     const discriminator = try payloads.requiredString(object, "kind");
     if (std.mem.eql(u8, discriminator, "approved")) return .{ .approved = try parsePermissionApproved(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "approved-read-only-for-session")) return .{ .approved_read_only_for_session = try parsePermissionApprovedReadOnlyForSession(allocator, value) };
     if (std.mem.eql(u8, discriminator, "approved-for-session")) return .{ .approved_for_session = try parsePermissionApprovedForSession(allocator, value) };
     if (std.mem.eql(u8, discriminator, "approved-for-location")) return .{ .approved_for_location = try parsePermissionApprovedForLocation(allocator, value) };
     if (std.mem.eql(u8, discriminator, "cancelled")) return .{ .cancelled = try parsePermissionCancelled(allocator, value) };
@@ -10188,15 +11227,150 @@ fn parsePermissionCompletedData(allocator: std.mem.Allocator, value: std.json.Va
             wipeString(present.*);
         }
     }
+    const parsed_recovery_episode_id = if (object.get("recoveryEpisodeId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_recovery_episode_id = parsed_recovery_episode_id;
+        if (cleanup_recovery_episode_id) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_blocker = if (object.get("blocker")) |field_value| if ((field_value) == .null) null else try parseTaskBlocker(allocator, field_value) else null;
+    errdefer {
+        var cleanup_blocker = parsed_blocker;
+        if (cleanup_blocker) |*present| {
+            wipeTaskBlocker(&present.*);
+        }
+    }
     const parsed_result = try parsePermissionResult(allocator, object.get("result") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_result = parsed_result;
         wipePermissionResult(&cleanup_result);
     }
+    const parsed_decision_source = if (object.get("decisionSource")) |field_value| if ((field_value) == .null) null else try parsePermissionDecisionSource(allocator, field_value) else null;
+    errdefer {
+        var cleanup_decision_source = parsed_decision_source;
+        if (cleanup_decision_source) |*present| {
+            wipePermissionDecisionSource(&present.*);
+        }
+    }
     return .{
         .request_id = parsed_request_id,
         .tool_call_id = parsed_tool_call_id,
+        .recovery_episode_id = parsed_recovery_episode_id,
+        .blocker = parsed_blocker,
         .result = parsed_result,
+        .decision_source = parsed_decision_source,
+    };
+}
+
+fn parsePermissionMessageAuthorizationPolarity(_: std.mem.Allocator, value: std.json.Value) !PermissionMessageAuthorizationPolarity {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "grant")) return .grant;
+    if (std.mem.eql(u8, wire, "denial")) return .denial;
+    return error.InvalidSessionEvent;
+}
+
+fn parsePermissionContextualAuthorizationData(allocator: std.mem.Allocator, value: std.json.Value) !PermissionContextualAuthorizationData {
+    const object = try payloads.requiredObject(value);
+    const parsed_record_id = try parseString(allocator, object.get("recordId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_record_id = parsed_record_id;
+        wipeString(cleanup_record_id);
+    }
+    const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_request_id = parsed_request_id;
+        wipeString(cleanup_request_id);
+    }
+    const parsed_turn_index = try parseInteger(u64, object.get("turnIndex") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_polarity = try parsePermissionMessageAuthorizationPolarity(allocator, object.get("polarity") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_polarity = parsed_polarity;
+        wipePermissionMessageAuthorizationPolarity(&cleanup_polarity);
+    }
+    const parsed_span_start = try parseInteger(u64, object.get("spanStart") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_span_end = try parseInteger(u64, object.get("spanEnd") orelse return error.InvalidSessionEvent, 0, null, null);
+    return .{
+        .record_id = parsed_record_id,
+        .request_id = parsed_request_id,
+        .turn_index = parsed_turn_index,
+        .polarity = parsed_polarity,
+        .span_start = parsed_span_start,
+        .span_end = parsed_span_end,
+    };
+}
+
+fn parsePermissionMessageAuthorizationData(allocator: std.mem.Allocator, value: std.json.Value) !PermissionMessageAuthorizationData {
+    const object = try payloads.requiredObject(value);
+    const parsed_record_id = try parseString(allocator, object.get("recordId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_record_id = parsed_record_id;
+        wipeString(cleanup_record_id);
+    }
+    const parsed_turn_index = try parseInteger(u64, object.get("turnIndex") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_polarity = try parsePermissionMessageAuthorizationPolarity(allocator, object.get("polarity") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_polarity = parsed_polarity;
+        wipePermissionMessageAuthorizationPolarity(&cleanup_polarity);
+    }
+    const parsed_action_class = try parseString(allocator, object.get("actionClass") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_action_class = parsed_action_class;
+        wipeString(cleanup_action_class);
+    }
+    const parsed_span_start = try parseInteger(u64, object.get("spanStart") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_span_end = try parseInteger(u64, object.get("spanEnd") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_target_members = if (object.get("targetMembers")) |field_value| if ((field_value) == .null) null else try parsePermissionMessageAuthorizationDataTargetMembersArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_target_members = parsed_target_members;
+        if (cleanup_target_members) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipeString(item.*);
+            }
+        }
+    }
+    const parsed_task = if (object.get("task")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_task = parsed_task;
+        if (cleanup_task) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_world = if (object.get("world")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
+    errdefer {
+        var cleanup_world = parsed_world;
+        if (cleanup_world) |*present| {
+            wipeJsonValue(&present.*);
+        }
+    }
+    return .{
+        .record_id = parsed_record_id,
+        .turn_index = parsed_turn_index,
+        .polarity = parsed_polarity,
+        .action_class = parsed_action_class,
+        .span_start = parsed_span_start,
+        .span_end = parsed_span_end,
+        .target_members = parsed_target_members,
+        .task = parsed_task,
+        .world = parsed_world,
+    };
+}
+
+fn parsePermissionMessageAuthorizationDegradedData(_: std.mem.Allocator, value: std.json.Value) !PermissionMessageAuthorizationDegradedData {
+    const object = try payloads.requiredObject(value);
+    const parsed_turn_index = try parseInteger(u64, object.get("turnIndex") orelse return error.InvalidSessionEvent, 0, null, null);
+    return .{
+        .turn_index = parsed_turn_index,
+    };
+}
+
+fn parsePermissionMessageAuthorizationReadData(_: std.mem.Allocator, value: std.json.Value) !PermissionMessageAuthorizationReadData {
+    const object = try payloads.requiredObject(value);
+    const parsed_turn_index = try parseInteger(u64, object.get("turnIndex") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_activates_extraction = if (object.get("activatesExtraction")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    return .{
+        .turn_index = parsed_turn_index,
+        .activates_extraction = parsed_activates_extraction,
     };
 }
 
@@ -10241,6 +11415,49 @@ fn parsePermissionRequestShellPossibleUrl(allocator: std.mem.Allocator, value: s
     }
     return .{
         .url = parsed_url,
+    };
+}
+
+fn parsePermissionSandboxPathGrantAccess(_: std.mem.Allocator, value: std.json.Value) !PermissionSandboxPathGrantAccess {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "read")) return .read;
+    if (std.mem.eql(u8, wire, "readWrite")) return .read_write;
+    return error.InvalidSessionEvent;
+}
+
+fn parsePermissionSandboxPathGrant(allocator: std.mem.Allocator, value: std.json.Value) !PermissionSandboxPathGrant {
+    const object = try payloads.requiredObject(value);
+    const parsed_path = try parseString(allocator, object.get("path") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_path = parsed_path;
+        wipeString(cleanup_path);
+    }
+    const parsed_denied_path = if (object.get("deniedPath")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_denied_path = parsed_denied_path;
+        if (cleanup_denied_path) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_access = try parsePermissionSandboxPathGrantAccess(allocator, object.get("access") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_access = parsed_access;
+        wipePermissionSandboxPathGrantAccess(&cleanup_access);
+    }
+    const parsed_removed_readonly_paths = if (object.get("removedReadonlyPaths")) |field_value| if ((field_value) == .null) null else try parsePermissionSandboxPathGrantRemovedReadonlyPathsArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_removed_readonly_paths = parsed_removed_readonly_paths;
+        if (cleanup_removed_readonly_paths) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipeString(item.*);
+            }
+        }
+    }
+    return .{
+        .path = parsed_path,
+        .denied_path = parsed_denied_path,
+        .access = parsed_access,
+        .removed_readonly_paths = parsed_removed_readonly_paths,
     };
 }
 
@@ -10292,6 +11509,26 @@ fn parsePermissionRequestShell(allocator: std.mem.Allocator, value: std.json.Val
             wipeString(item.*);
         }
     }
+    const parsed_resolved_working_directory = if (object.get("resolvedWorkingDirectory")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_resolved_working_directory = parsed_resolved_working_directory;
+        if (cleanup_resolved_working_directory) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_resolved_paths = if (object.get("resolvedPaths")) |field_value| if ((field_value) == .null) null else try parsePermissionRequestShellResolvedPathsMap(allocator, field_value) else null;
+    errdefer {
+        var cleanup_resolved_paths = parsed_resolved_paths;
+        if (cleanup_resolved_paths) |*present| {
+            {
+                var iterator = present.*.map.iterator();
+                while (iterator.next()) |entry| {
+                    wipeString(entry.key_ptr.*);
+                    wipeString(entry.value_ptr.*);
+                }
+            }
+        }
+    }
     const parsed_possible_urls = try parsePermissionRequestShellPossibleUrlsArray(allocator, object.get("possibleUrls") orelse return error.InvalidSessionEvent);
     errdefer {
         const cleanup_possible_urls = parsed_possible_urls;
@@ -10317,6 +11554,13 @@ fn parsePermissionRequestShell(allocator: std.mem.Allocator, value: std.json.Val
             wipeString(present.*);
         }
     }
+    const parsed_sandbox_path_grant = if (object.get("sandboxPathGrant")) |field_value| if ((field_value) == .null) null else try parsePermissionSandboxPathGrant(allocator, field_value) else null;
+    errdefer {
+        var cleanup_sandbox_path_grant = parsed_sandbox_path_grant;
+        if (cleanup_sandbox_path_grant) |*present| {
+            wipePermissionSandboxPathGrant(&present.*);
+        }
+    }
     return .{
         .kind = parsed_kind,
         .tool_call_id = parsed_tool_call_id,
@@ -10326,6 +11570,8 @@ fn parsePermissionRequestShell(allocator: std.mem.Allocator, value: std.json.Val
         .commands = parsed_commands,
         .command_segments = parsed_command_segments,
         .possible_paths = parsed_possible_paths,
+        .resolved_working_directory = parsed_resolved_working_directory,
+        .resolved_paths = parsed_resolved_paths,
         .possible_urls = parsed_possible_urls,
         .has_write_file_redirection = parsed_has_write_file_redirection,
         .can_offer_session_approval = parsed_can_offer_session_approval,
@@ -10333,6 +11579,7 @@ fn parsePermissionRequestShell(allocator: std.mem.Allocator, value: std.json.Val
         .request_sandbox_bypass = parsed_request_sandbox_bypass,
         .request_sandbox_permissive = parsed_request_sandbox_permissive,
         .request_sandbox_bypass_reason = parsed_request_sandbox_bypass_reason,
+        .sandbox_path_grant = parsed_sandbox_path_grant,
     };
 }
 
@@ -10361,6 +11608,13 @@ fn parsePermissionRequestWrite(allocator: std.mem.Allocator, value: std.json.Val
         const cleanup_file_name = parsed_file_name;
         wipeString(cleanup_file_name);
     }
+    const parsed_resolved_path = if (object.get("resolvedPath")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_resolved_path = parsed_resolved_path;
+        if (cleanup_resolved_path) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_diff = try parseString(allocator, object.get("diff") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_diff = parsed_diff;
@@ -10382,17 +11636,26 @@ fn parsePermissionRequestWrite(allocator: std.mem.Allocator, value: std.json.Val
             wipeString(present.*);
         }
     }
+    const parsed_sandbox_path_grant = if (object.get("sandboxPathGrant")) |field_value| if ((field_value) == .null) null else try parsePermissionSandboxPathGrant(allocator, field_value) else null;
+    errdefer {
+        var cleanup_sandbox_path_grant = parsed_sandbox_path_grant;
+        if (cleanup_sandbox_path_grant) |*present| {
+            wipePermissionSandboxPathGrant(&present.*);
+        }
+    }
     return .{
         .kind = parsed_kind,
         .tool_call_id = parsed_tool_call_id,
         .managed_approval_required = parsed_managed_approval_required,
         .intention = parsed_intention,
         .file_name = parsed_file_name,
+        .resolved_path = parsed_resolved_path,
         .diff = parsed_diff,
         .new_file_contents = parsed_new_file_contents,
         .can_offer_session_approval = parsed_can_offer_session_approval,
         .request_sandbox_bypass = parsed_request_sandbox_bypass,
         .request_sandbox_bypass_reason = parsed_request_sandbox_bypass_reason,
+        .sandbox_path_grant = parsed_sandbox_path_grant,
     };
 }
 
@@ -10421,6 +11684,13 @@ fn parsePermissionRequestRead(allocator: std.mem.Allocator, value: std.json.Valu
         const cleanup_path = parsed_path;
         wipeString(cleanup_path);
     }
+    const parsed_resolved_path = if (object.get("resolvedPath")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_resolved_path = parsed_resolved_path;
+        if (cleanup_resolved_path) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_request_sandbox_bypass = if (object.get("requestSandboxBypass")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_request_sandbox_bypass_reason = if (object.get("requestSandboxBypassReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
@@ -10429,14 +11699,23 @@ fn parsePermissionRequestRead(allocator: std.mem.Allocator, value: std.json.Valu
             wipeString(present.*);
         }
     }
+    const parsed_sandbox_path_grant = if (object.get("sandboxPathGrant")) |field_value| if ((field_value) == .null) null else try parsePermissionSandboxPathGrant(allocator, field_value) else null;
+    errdefer {
+        var cleanup_sandbox_path_grant = parsed_sandbox_path_grant;
+        if (cleanup_sandbox_path_grant) |*present| {
+            wipePermissionSandboxPathGrant(&present.*);
+        }
+    }
     return .{
         .kind = parsed_kind,
         .tool_call_id = parsed_tool_call_id,
         .managed_approval_required = parsed_managed_approval_required,
         .intention = parsed_intention,
         .path = parsed_path,
+        .resolved_path = parsed_resolved_path,
         .request_sandbox_bypass = parsed_request_sandbox_bypass,
         .request_sandbox_bypass_reason = parsed_request_sandbox_bypass_reason,
+        .sandbox_path_grant = parsed_sandbox_path_grant,
     };
 }
 
@@ -10575,6 +11854,72 @@ fn parsePermissionRequestMemoryScope(_: std.mem.Allocator, value: std.json.Value
     return error.InvalidSessionEvent;
 }
 
+fn parsePermissionApprovalEvaluationReasonCode(_: std.mem.Allocator, value: std.json.Value) !PermissionApprovalEvaluationReasonCode {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "unknown")) return .unknown;
+    if (std.mem.eql(u8, wire, "not-reached")) return .not_reached;
+    if (std.mem.eql(u8, wire, "inactive")) return .inactive;
+    if (std.mem.eql(u8, wire, "authorization-history-incomplete")) return .authorization_history_incomplete;
+    if (std.mem.eql(u8, wire, "managed-approval-required")) return .managed_approval_required;
+    if (std.mem.eql(u8, wire, "sandbox-bypass")) return .sandbox_bypass;
+    if (std.mem.eql(u8, wire, "action-too-long")) return .action_too_long;
+    if (std.mem.eql(u8, wire, "path-not-authorized")) return .path_not_authorized;
+    if (std.mem.eql(u8, wire, "invalid-working-directory")) return .invalid_working_directory;
+    if (std.mem.eql(u8, wire, "unreadable")) return .unreadable;
+    if (std.mem.eql(u8, wire, "not-regular-file")) return .not_regular_file;
+    if (std.mem.eql(u8, wire, "too-large")) return .too_large;
+    if (std.mem.eql(u8, wire, "non-utf8")) return .non_utf8;
+    if (std.mem.eql(u8, wire, "interpreter-unavailable")) return .interpreter_unavailable;
+    if (std.mem.eql(u8, wire, "interpreter-too-large")) return .interpreter_too_large;
+    if (std.mem.eql(u8, wire, "shell-environment-unreviewable")) return .shell_environment_unreviewable;
+    if (std.mem.eql(u8, wire, "unrepresentable-path")) return .unrepresentable_path;
+    if (std.mem.eql(u8, wire, "interpreter-wrapped-script")) return .interpreter_wrapped_script;
+    if (std.mem.eql(u8, wire, "unreviewable-script-invocation")) return .unreviewable_script_invocation;
+    if (std.mem.eql(u8, wire, "argument-binding-unreviewable")) return .argument_binding_unreviewable;
+    if (std.mem.eql(u8, wire, "malformed-script-action-review")) return .malformed_script_action_review;
+    if (std.mem.eql(u8, wire, "malformed-script-action-manifest")) return .malformed_script_action_manifest;
+    if (std.mem.eql(u8, wire, "unavailable")) return .unavailable;
+    if (std.mem.eql(u8, wire, "judge-verdict")) return .judge_verdict;
+    if (std.mem.eql(u8, wire, "judge-error")) return .judge_error;
+    if (std.mem.eql(u8, wire, "inherited")) return .inherited;
+    return error.InvalidSessionEvent;
+}
+
+fn parsePermissionApprovalEvaluationJudgeStatus(_: std.mem.Allocator, value: std.json.Value) !PermissionApprovalEvaluationJudgeStatus {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "unknown")) return .unknown;
+    if (std.mem.eql(u8, wire, "not_called")) return .not_called;
+    if (std.mem.eql(u8, wire, "completed")) return .completed;
+    if (std.mem.eql(u8, wire, "failed")) return .failed;
+    if (std.mem.eql(u8, wire, "cached")) return .cached;
+    if (std.mem.eql(u8, wire, "inherited")) return .inherited;
+    return error.InvalidSessionEvent;
+}
+
+fn parsePermissionApprovalEvaluationEvaluationStage(_: std.mem.Allocator, value: std.json.Value) !PermissionApprovalEvaluationEvaluationStage {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "unknown")) return .unknown;
+    if (std.mem.eql(u8, wire, "not_reached")) return .not_reached;
+    if (std.mem.eql(u8, wire, "pre_judge")) return .pre_judge;
+    if (std.mem.eql(u8, wire, "judge")) return .judge;
+    if (std.mem.eql(u8, wire, "reuse")) return .reuse;
+    return error.InvalidSessionEvent;
+}
+
+fn parsePermissionApprovalEvaluation(allocator: std.mem.Allocator, value: std.json.Value) !PermissionApprovalEvaluation {
+    const object = try payloads.requiredObject(value);
+    const parsed_reason_code = try parsePermissionApprovalEvaluationReasonCode(allocator, object.get("reasonCode") orelse return error.InvalidSessionEvent);
+    const parsed_judge_status = try parsePermissionApprovalEvaluationJudgeStatus(allocator, object.get("judgeStatus") orelse return error.InvalidSessionEvent);
+    const parsed_evaluation_stage = try parsePermissionApprovalEvaluationEvaluationStage(allocator, object.get("evaluationStage") orelse return error.InvalidSessionEvent);
+    const parsed_judge_attempted = if (object.get("judgeAttempted")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    return .{
+        .reason_code = parsed_reason_code,
+        .judge_status = parsed_judge_status,
+        .evaluation_stage = parsed_evaluation_stage,
+        .judge_attempted = parsed_judge_attempted,
+    };
+}
+
 fn parseAssistedApprovalRecommendation(_: std.mem.Allocator, value: std.json.Value) !AssistedApprovalRecommendation {
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "approve")) return .approve;
@@ -10596,6 +11941,13 @@ fn parseAssistedApprovalJudgeFailureReason(_: std.mem.Allocator, value: std.json
 
 fn parsePermissionAssistedApproval(allocator: std.mem.Allocator, value: std.json.Value) !PermissionAssistedApproval {
     const object = try payloads.requiredObject(value);
+    const parsed_evaluation = if (object.get("evaluation")) |field_value| if ((field_value) == .null) null else try parsePermissionApprovalEvaluation(allocator, field_value) else null;
+    errdefer {
+        var cleanup_evaluation = parsed_evaluation;
+        if (cleanup_evaluation) |*present| {
+            wipePermissionApprovalEvaluation(&present.*);
+        }
+    }
     const parsed_recommendation = try parseAssistedApprovalRecommendation(allocator, object.get("recommendation") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_recommendation = parsed_recommendation;
@@ -10623,6 +11975,7 @@ fn parsePermissionAssistedApproval(allocator: std.mem.Allocator, value: std.json
         }
     }
     return .{
+        .evaluation = parsed_evaluation,
         .recommendation = parsed_recommendation,
         .reason = parsed_reason,
         .model = parsed_model,
@@ -10838,14 +12191,14 @@ fn parsePermissionRequestExtensionManagement(allocator: std.mem.Allocator, value
     };
 }
 
-fn parseFactoryPermissionOperation(_: std.mem.Allocator, value: std.json.Value) !FactoryPermissionOperation {
+fn parseWorkflowPermissionOperation(_: std.mem.Allocator, value: std.json.Value) !WorkflowPermissionOperation {
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "run")) return .run;
     if (std.mem.eql(u8, wire, "author")) return .author;
     return error.InvalidSessionEvent;
 }
 
-fn parseFactoryPermissionPhase(allocator: std.mem.Allocator, value: std.json.Value) !FactoryPermissionPhase {
+fn parseWorkflowPermissionPhase(allocator: std.mem.Allocator, value: std.json.Value) !WorkflowPermissionPhase {
     const object = try payloads.requiredObject(value);
     const parsed_title = try parseString(allocator, object.get("title") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
@@ -10865,9 +12218,9 @@ fn parseFactoryPermissionPhase(allocator: std.mem.Allocator, value: std.json.Val
     };
 }
 
-fn parsePermissionRequestFactory(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRequestFactory {
+fn parsePermissionRequestWorkflow(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRequestWorkflow {
     const object = try payloads.requiredObject(value);
-    const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "factory");
+    const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "workflow");
     errdefer {
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
@@ -10879,10 +12232,10 @@ fn parsePermissionRequestFactory(allocator: std.mem.Allocator, value: std.json.V
             wipeString(present.*);
         }
     }
-    const parsed_operation = try parseFactoryPermissionOperation(allocator, object.get("operation") orelse return error.InvalidSessionEvent);
+    const parsed_operation = try parseWorkflowPermissionOperation(allocator, object.get("operation") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_operation = parsed_operation;
-        wipeFactoryPermissionOperation(&cleanup_operation);
+        wipeWorkflowPermissionOperation(&cleanup_operation);
     }
     const parsed_name = try parseString(allocator, object.get("name") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
@@ -10894,11 +12247,11 @@ fn parsePermissionRequestFactory(allocator: std.mem.Allocator, value: std.json.V
         const cleanup_description = parsed_description;
         wipeString(cleanup_description);
     }
-    const parsed_phases = try parsePermissionRequestFactoryPhasesArray(allocator, object.get("phases") orelse return error.InvalidSessionEvent);
+    const parsed_phases = try parsePermissionRequestWorkflowPhasesArray(allocator, object.get("phases") orelse return error.InvalidSessionEvent);
     errdefer {
         const cleanup_phases = parsed_phases;
         for (@constCast(cleanup_phases)) |*item| {
-            wipeFactoryPermissionPhase(&item.*);
+            wipeWorkflowPermissionPhase(&item.*);
         }
     }
     const parsed_max_concurrent_subagents = if (object.get("maxConcurrentSubagents")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
@@ -10915,6 +12268,7 @@ fn parsePermissionRequestFactory(allocator: std.mem.Allocator, value: std.json.V
         wipeString(cleanup_approval_key);
     }
     const parsed_can_persist_approval = try parseBool(object.get("canPersistApproval") orelse return error.InvalidSessionEvent);
+    const parsed_managed_approval_required = if (object.get("managedApprovalRequired")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .kind = parsed_kind,
         .tool_call_id = parsed_tool_call_id,
@@ -10932,6 +12286,7 @@ fn parsePermissionRequestFactory(allocator: std.mem.Allocator, value: std.json.V
         .declared_max_ai_credits = parsed_declared_max_ai_credits,
         .approval_key = parsed_approval_key,
         .can_persist_approval = parsed_can_persist_approval,
+        .managed_approval_required = parsed_managed_approval_required,
     };
 }
 
@@ -11015,7 +12370,7 @@ fn parsePermissionRequest(allocator: std.mem.Allocator, value: std.json.Value) !
     if (std.mem.eql(u8, discriminator, "custom-tool")) return .{ .custom_tool = try parsePermissionRequestCustomTool(allocator, value) };
     if (std.mem.eql(u8, discriminator, "hook")) return .{ .hook = try parsePermissionRequestHook(allocator, value) };
     if (std.mem.eql(u8, discriminator, "extension-management")) return .{ .extension_management = try parsePermissionRequestExtensionManagement(allocator, value) };
-    if (std.mem.eql(u8, discriminator, "factory")) return .{ .factory = try parsePermissionRequestFactory(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "workflow")) return .{ .workflow = try parsePermissionRequestWorkflow(allocator, value) };
     if (std.mem.eql(u8, discriminator, "extension-permission-access")) return .{ .extension_permission_access = try parsePermissionRequestExtensionPermissionAccess(allocator, value) };
     if (std.mem.eql(u8, discriminator, "extension-env-access")) return .{ .extension_env_access = try parsePermissionRequestExtensionEnvAccess(allocator, value) };
     return error.InvalidSessionEvent;
@@ -11077,6 +12432,13 @@ fn parsePermissionPromptRequestCommands(allocator: std.mem.Allocator, value: std
             wipeString(present.*);
         }
     }
+    const parsed_sandbox_path_grant = if (object.get("sandboxPathGrant")) |field_value| if ((field_value) == .null) null else try parsePermissionSandboxPathGrant(allocator, field_value) else null;
+    errdefer {
+        var cleanup_sandbox_path_grant = parsed_sandbox_path_grant;
+        if (cleanup_sandbox_path_grant) |*present| {
+            wipePermissionSandboxPathGrant(&present.*);
+        }
+    }
     return .{
         .kind = parsed_kind,
         .tool_call_id = parsed_tool_call_id,
@@ -11090,6 +12452,7 @@ fn parsePermissionPromptRequestCommands(allocator: std.mem.Allocator, value: std
         .request_sandbox_bypass = parsed_request_sandbox_bypass,
         .request_sandbox_permissive = parsed_request_sandbox_permissive,
         .request_sandbox_bypass_reason = parsed_request_sandbox_bypass_reason,
+        .sandbox_path_grant = parsed_sandbox_path_grant,
     };
 }
 
@@ -11117,6 +12480,13 @@ fn parsePermissionPromptRequestWrite(allocator: std.mem.Allocator, value: std.js
         const cleanup_file_name = parsed_file_name;
         wipeString(cleanup_file_name);
     }
+    const parsed_resolved_path = if (object.get("resolvedPath")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_resolved_path = parsed_resolved_path;
+        if (cleanup_resolved_path) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_diff = try parseString(allocator, object.get("diff") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_diff = parsed_diff;
@@ -11143,6 +12513,7 @@ fn parsePermissionPromptRequestWrite(allocator: std.mem.Allocator, value: std.js
         .tool_call_id = parsed_tool_call_id,
         .intention = parsed_intention,
         .file_name = parsed_file_name,
+        .resolved_path = parsed_resolved_path,
         .diff = parsed_diff,
         .new_file_contents = parsed_new_file_contents,
         .can_offer_session_approval = parsed_can_offer_session_approval,
@@ -11175,6 +12546,13 @@ fn parsePermissionPromptRequestRead(allocator: std.mem.Allocator, value: std.jso
         const cleanup_path = parsed_path;
         wipeString(cleanup_path);
     }
+    const parsed_resolved_path = if (object.get("resolvedPath")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_resolved_path = parsed_resolved_path;
+        if (cleanup_resolved_path) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| if ((field_value) == .null) null else try parsePermissionAssistedApproval(allocator, field_value) else null;
     errdefer {
         var cleanup_assisted_approval = parsed_assisted_approval;
@@ -11188,6 +12566,7 @@ fn parsePermissionPromptRequestRead(allocator: std.mem.Allocator, value: std.jso
         .tool_call_id = parsed_tool_call_id,
         .intention = parsed_intention,
         .path = parsed_path,
+        .resolved_path = parsed_resolved_path,
         .assisted_approval = parsed_assisted_approval,
         .managed_approval_required = parsed_managed_approval_required,
     };
@@ -11473,6 +12852,15 @@ fn parsePermissionPromptRequestPath(allocator: std.mem.Allocator, value: std.jso
             wipeString(item.*);
         }
     }
+    const parsed_read_only_directories = if (object.get("readOnlyDirectories")) |field_value| if ((field_value) == .null) null else try parsePermissionPromptRequestPathReadOnlyDirectoriesArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_read_only_directories = parsed_read_only_directories;
+        if (cleanup_read_only_directories) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipeString(item.*);
+            }
+        }
+    }
     const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| if ((field_value) == .null) null else try parsePermissionAssistedApproval(allocator, field_value) else null;
     errdefer {
         var cleanup_assisted_approval = parsed_assisted_approval;
@@ -11485,6 +12873,7 @@ fn parsePermissionPromptRequestPath(allocator: std.mem.Allocator, value: std.jso
         .tool_call_id = parsed_tool_call_id,
         .access_kind = parsed_access_kind,
         .paths = parsed_paths,
+        .read_only_directories = parsed_read_only_directories,
         .assisted_approval = parsed_assisted_approval,
     };
 }
@@ -11581,9 +12970,9 @@ fn parsePermissionPromptRequestExtensionManagement(allocator: std.mem.Allocator,
     };
 }
 
-fn parsePermissionPromptRequestFactory(allocator: std.mem.Allocator, value: std.json.Value) !PermissionPromptRequestFactory {
+fn parsePermissionPromptRequestWorkflow(allocator: std.mem.Allocator, value: std.json.Value) !PermissionPromptRequestWorkflow {
     const object = try payloads.requiredObject(value);
-    const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "factory");
+    const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "workflow");
     errdefer {
         const cleanup_kind = parsed_kind;
         wipeString(cleanup_kind);
@@ -11595,10 +12984,10 @@ fn parsePermissionPromptRequestFactory(allocator: std.mem.Allocator, value: std.
             wipeString(present.*);
         }
     }
-    const parsed_operation = try parseFactoryPermissionOperation(allocator, object.get("operation") orelse return error.InvalidSessionEvent);
+    const parsed_operation = try parseWorkflowPermissionOperation(allocator, object.get("operation") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_operation = parsed_operation;
-        wipeFactoryPermissionOperation(&cleanup_operation);
+        wipeWorkflowPermissionOperation(&cleanup_operation);
     }
     const parsed_name = try parseString(allocator, object.get("name") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
@@ -11610,11 +12999,11 @@ fn parsePermissionPromptRequestFactory(allocator: std.mem.Allocator, value: std.
         const cleanup_description = parsed_description;
         wipeString(cleanup_description);
     }
-    const parsed_phases = try parsePermissionPromptRequestFactoryPhasesArray(allocator, object.get("phases") orelse return error.InvalidSessionEvent);
+    const parsed_phases = try parsePermissionPromptRequestWorkflowPhasesArray(allocator, object.get("phases") orelse return error.InvalidSessionEvent);
     errdefer {
         const cleanup_phases = parsed_phases;
         for (@constCast(cleanup_phases)) |*item| {
-            wipeFactoryPermissionPhase(&item.*);
+            wipeWorkflowPermissionPhase(&item.*);
         }
     }
     const parsed_max_concurrent_subagents = if (object.get("maxConcurrentSubagents")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
@@ -11758,9 +13147,17 @@ fn parsePermissionPromptRequest(allocator: std.mem.Allocator, value: std.json.Va
     if (std.mem.eql(u8, discriminator, "path")) return .{ .path = try parsePermissionPromptRequestPath(allocator, value) };
     if (std.mem.eql(u8, discriminator, "hook")) return .{ .hook = try parsePermissionPromptRequestHook(allocator, value) };
     if (std.mem.eql(u8, discriminator, "extension-management")) return .{ .extension_management = try parsePermissionPromptRequestExtensionManagement(allocator, value) };
-    if (std.mem.eql(u8, discriminator, "factory")) return .{ .factory = try parsePermissionPromptRequestFactory(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "workflow")) return .{ .workflow = try parsePermissionPromptRequestWorkflow(allocator, value) };
     if (std.mem.eql(u8, discriminator, "extension-permission-access")) return .{ .extension_permission_access = try parsePermissionPromptRequestExtensionPermissionAccess(allocator, value) };
     if (std.mem.eql(u8, discriminator, "extension-env-access")) return .{ .extension_env_access = try parsePermissionPromptRequestExtensionEnvAccess(allocator, value) };
+    return error.InvalidSessionEvent;
+}
+
+fn parsePermissionMode(_: std.mem.Allocator, value: std.json.Value) !PermissionMode {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "manual")) return .manual;
+    if (std.mem.eql(u8, wire, "assisted")) return .assisted;
+    if (std.mem.eql(u8, wire, "allow-all")) return .allow_all;
     return error.InvalidSessionEvent;
 }
 
@@ -11791,6 +13188,13 @@ fn parsePermissionRequestedData(allocator: std.mem.Allocator, value: std.json.Va
             wipePermissionPromptRequest(&present.*);
         }
     }
+    const parsed_permission_mode = if (object.get("permissionMode")) |field_value| if ((field_value) == .null) null else try parsePermissionMode(allocator, field_value) else null;
+    errdefer {
+        var cleanup_permission_mode = parsed_permission_mode;
+        if (cleanup_permission_mode) |*present| {
+            wipePermissionMode(&present.*);
+        }
+    }
     const parsed_agent_mode = if (object.get("agentMode")) |field_value| if ((field_value) == .null) null else try parseSessionMode(allocator, field_value) else null;
     errdefer {
         var cleanup_agent_mode = parsed_agent_mode;
@@ -11806,13 +13210,22 @@ fn parsePermissionRequestedData(allocator: std.mem.Allocator, value: std.json.Va
         }
     }
     const parsed_resolved_by_hook = if (object.get("resolvedByHook")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_recovery_episode_id = if (object.get("recoveryEpisodeId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_recovery_episode_id = parsed_recovery_episode_id;
+        if (cleanup_recovery_episode_id) |*present| {
+            wipeString(present.*);
+        }
+    }
     return .{
         .request_id = parsed_request_id,
         .permission_request = parsed_permission_request,
         .prompt_request = parsed_prompt_request,
+        .permission_mode = parsed_permission_mode,
         .agent_mode = parsed_agent_mode,
         .risk_assessment = parsed_risk_assessment,
         .resolved_by_hook = parsed_resolved_by_hook,
+        .recovery_episode_id = parsed_recovery_episode_id,
     };
 }
 
@@ -12045,6 +13458,7 @@ fn parseSandboxOutcome(_: std.mem.Allocator, value: std.json.Value) !SandboxOutc
     if (std.mem.eql(u8, wire, "denied")) return .denied;
     if (std.mem.eql(u8, wire, "approved")) return .approved;
     if (std.mem.eql(u8, wire, "declined")) return .declined;
+    if (std.mem.eql(u8, wire, "allowed")) return .allowed;
     return error.InvalidSessionEvent;
 }
 
@@ -12374,6 +13788,7 @@ fn parseSandboxDenialClass(_: std.mem.Allocator, value: std.json.Value) !Sandbox
     if (std.mem.eql(u8, wire, "service_access")) return .service_access;
     if (std.mem.eql(u8, wire, "network_outbound")) return .network_outbound;
     if (std.mem.eql(u8, wire, "network_local")) return .network_local;
+    if (std.mem.eql(u8, wire, "network_host")) return .network_host;
     if (std.mem.eql(u8, wire, "other_access")) return .other_access;
     return error.InvalidSessionEvent;
 }
@@ -12475,6 +13890,85 @@ fn parseSandboxDecisionDataVariant4(allocator: std.mem.Allocator, value: std.jso
     };
 }
 
+fn parseSandboxPermissiveSource(_: std.mem.Allocator, value: std.json.Value) !SandboxPermissiveSource {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "approved_retry")) return .approved_retry;
+    if (std.mem.eql(u8, wire, "policy")) return .policy;
+    return error.InvalidSessionEvent;
+}
+
+fn parseSandboxDecisionDataVariant5(allocator: std.mem.Allocator, value: std.json.Value) !SandboxDecisionDataVariant5 {
+    const object = try payloads.requiredObject(value);
+    const parsed_control = try parseSandboxControl(allocator, object.get("control") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_control = parsed_control;
+        wipeSandboxControl(&cleanup_control);
+    }
+    const parsed_outcome = try parseSandboxOutcome(allocator, object.get("outcome") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_outcome = parsed_outcome;
+        wipeSandboxOutcome(&cleanup_outcome);
+    }
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_tool_call_id = parsed_tool_call_id;
+        if (cleanup_tool_call_id) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_platform = try parseSandboxPlatform(allocator, object.get("platform") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_platform = parsed_platform;
+        wipeSandboxPlatform(&cleanup_platform);
+    }
+    const parsed_enforcement_point = try parseSandboxEnforcementPoint(allocator, object.get("enforcementPoint") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_enforcement_point = parsed_enforcement_point;
+        wipeSandboxEnforcementPoint(&cleanup_enforcement_point);
+    }
+    const parsed_denial_class = try parseSandboxDenialClass(allocator, object.get("denialClass") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_denial_class = parsed_denial_class;
+        wipeSandboxDenialClass(&cleanup_denial_class);
+    }
+    const parsed_permissive_source = try parseSandboxPermissiveSource(allocator, object.get("permissiveSource") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_permissive_source = parsed_permissive_source;
+        wipeSandboxPermissiveSource(&cleanup_permissive_source);
+    }
+    const parsed_denied_resource = if (object.get("deniedResource")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_denied_resource = parsed_denied_resource;
+        if (cleanup_denied_resource) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_command = if (object.get("command")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_command = parsed_command;
+        if (cleanup_command) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "access_recorded");
+    errdefer {
+        const cleanup_kind = parsed_kind;
+        wipeString(cleanup_kind);
+    }
+    return .{
+        .control = parsed_control,
+        .outcome = parsed_outcome,
+        .tool_call_id = parsed_tool_call_id,
+        .platform = parsed_platform,
+        .enforcement_point = parsed_enforcement_point,
+        .denial_class = parsed_denial_class,
+        .permissive_source = parsed_permissive_source,
+        .denied_resource = parsed_denied_resource,
+        .command = parsed_command,
+        .kind = parsed_kind,
+    };
+}
+
 fn parseSandboxBypassSource(_: std.mem.Allocator, value: std.json.Value) !SandboxBypassSource {
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "model_requested")) return .model_requested;
@@ -12483,7 +13977,7 @@ fn parseSandboxBypassSource(_: std.mem.Allocator, value: std.json.Value) !Sandbo
     return error.InvalidSessionEvent;
 }
 
-fn parseSandboxDecisionDataVariant5(allocator: std.mem.Allocator, value: std.json.Value) !SandboxDecisionDataVariant5 {
+fn parseSandboxDecisionDataVariant6(allocator: std.mem.Allocator, value: std.json.Value) !SandboxDecisionDataVariant6 {
     const object = try payloads.requiredObject(value);
     const parsed_control = try parseSandboxControl(allocator, object.get("control") orelse return error.InvalidSessionEvent);
     errdefer {
@@ -12573,7 +14067,7 @@ fn parseSandboxDecisionDataVariant5(allocator: std.mem.Allocator, value: std.jso
     };
 }
 
-fn parseSandboxDecisionDataVariant6(allocator: std.mem.Allocator, value: std.json.Value) !SandboxDecisionDataVariant6 {
+fn parseSandboxDecisionDataVariant7(allocator: std.mem.Allocator, value: std.json.Value) !SandboxDecisionDataVariant7 {
     const object = try payloads.requiredObject(value);
     const parsed_control = try parseSandboxControl(allocator, object.get("control") orelse return error.InvalidSessionEvent);
     errdefer {
@@ -12663,7 +14157,7 @@ fn parseSandboxDecisionDataVariant6(allocator: std.mem.Allocator, value: std.jso
     };
 }
 
-fn parseSandboxDecisionDataVariant7(allocator: std.mem.Allocator, value: std.json.Value) !SandboxDecisionDataVariant7 {
+fn parseSandboxDecisionDataVariant8(allocator: std.mem.Allocator, value: std.json.Value) !SandboxDecisionDataVariant8 {
     const object = try payloads.requiredObject(value);
     const parsed_control = try parseSandboxControl(allocator, object.get("control") orelse return error.InvalidSessionEvent);
     errdefer {
@@ -12754,9 +14248,10 @@ fn parseSandboxDecisionData(allocator: std.mem.Allocator, value: std.json.Value)
     if (std.mem.eql(u8, discriminator, "spawn_completed")) return .{ .spawn_completed = try parseSandboxDecisionDataVariant2(allocator, value) };
     if (std.mem.eql(u8, discriminator, "enforcement_state")) return .{ .enforcement_state = try parseSandboxDecisionDataVariant3(allocator, value) };
     if (std.mem.eql(u8, discriminator, "access_denied")) return .{ .access_denied = try parseSandboxDecisionDataVariant4(allocator, value) };
-    if (std.mem.eql(u8, discriminator, "bypass_decided")) return .{ .bypass_decided = try parseSandboxDecisionDataVariant5(allocator, value) };
-    if (std.mem.eql(u8, discriminator, "permissive_retry_decided")) return .{ .permissive_retry_decided = try parseSandboxDecisionDataVariant6(allocator, value) };
-    if (std.mem.eql(u8, discriminator, "permissive_retry_completed")) return .{ .permissive_retry_completed = try parseSandboxDecisionDataVariant7(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "access_recorded")) return .{ .access_recorded = try parseSandboxDecisionDataVariant5(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "bypass_decided")) return .{ .bypass_decided = try parseSandboxDecisionDataVariant6(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "permissive_retry_decided")) return .{ .permissive_retry_decided = try parseSandboxDecisionDataVariant7(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "permissive_retry_completed")) return .{ .permissive_retry_completed = try parseSandboxDecisionDataVariant8(allocator, value) };
     return error.InvalidSessionEvent;
 }
 
@@ -13321,6 +14816,30 @@ fn parseCanvasUnavailableData(allocator: std.mem.Allocator, value: std.json.Valu
     };
 }
 
+fn parseResponsesReasoning(allocator: std.mem.Allocator, value: std.json.Value) !ResponsesReasoning {
+    const object = try payloads.requiredObject(value);
+    const parsed_model = try parseString(allocator, object.get("model") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_model = parsed_model;
+        wipeString(cleanup_model);
+    }
+    const parsed_initial_effort = try parseString(allocator, object.get("initialEffort") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_initial_effort = parsed_initial_effort;
+        wipeString(cleanup_initial_effort);
+    }
+    const parsed_effort = try parseString(allocator, object.get("effort") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_effort = parsed_effort;
+        wipeString(cleanup_effort);
+    }
+    return .{
+        .model = parsed_model,
+        .initial_effort = parsed_initial_effort,
+        .effort = parsed_effort,
+    };
+}
+
 fn parseCompactionCompleteCompactionTokensUsedCopilotUsageTokenDetail(allocator: std.mem.Allocator, value: std.json.Value) !CompactionCompleteCompactionTokensUsedCopilotUsageTokenDetail {
     const object = try payloads.requiredObject(value);
     const parsed_batch_size = try parseInteger(u64, object.get("batchSize") orelse return error.InvalidSessionEvent, 0, null, null);
@@ -13444,6 +14963,20 @@ fn parseCompactionCompleteData(allocator: std.mem.Allocator, value: std.json.Val
             wipeString(present.*);
         }
     }
+    const parsed_responses_reasoning = if (object.get("responsesReasoning")) |field_value| if ((field_value) == .null) null else try parseResponsesReasoning(allocator, field_value) else null;
+    errdefer {
+        var cleanup_responses_reasoning = parsed_responses_reasoning;
+        if (cleanup_responses_reasoning) |*present| {
+            wipeResponsesReasoning(&present.*);
+        }
+    }
+    const parsed_active_workflow_summary = if (object.get("activeWorkflowSummary")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_active_workflow_summary = parsed_active_workflow_summary;
+        if (cleanup_active_workflow_summary) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_active_factory_summary = if (object.get("activeFactorySummary")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_active_factory_summary = parsed_active_factory_summary;
@@ -13509,6 +15042,8 @@ fn parseCompactionCompleteData(allocator: std.mem.Allocator, value: std.json.Val
         .tokens_removed = parsed_tokens_removed,
         .custom_instructions = parsed_custom_instructions,
         .summary_content = parsed_summary_content,
+        .responses_reasoning = parsed_responses_reasoning,
+        .active_workflow_summary = parsed_active_workflow_summary,
         .active_factory_summary = parsed_active_factory_summary,
         .behavior_model_id = parsed_behavior_model_id,
         .checkpoint_number = parsed_checkpoint_number,
@@ -14807,6 +16342,36 @@ fn parseExtensionsLoadedData(allocator: std.mem.Allocator, value: std.json.Value
     };
 }
 
+fn parseShutdownCodeChanges(allocator: std.mem.Allocator, value: std.json.Value) !ShutdownCodeChanges {
+    const object = try payloads.requiredObject(value);
+    const parsed_lines_added = try parseInteger(u64, object.get("linesAdded") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_lines_removed = try parseInteger(u64, object.get("linesRemoved") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_files_modified = try parseShutdownCodeChangesFilesModifiedArray(allocator, object.get("filesModified") orelse return error.InvalidSessionEvent);
+    errdefer {
+        const cleanup_files_modified = parsed_files_modified;
+        for (@constCast(cleanup_files_modified)) |*item| {
+            wipeString(item.*);
+        }
+    }
+    return .{
+        .lines_added = parsed_lines_added,
+        .lines_removed = parsed_lines_removed,
+        .files_modified = parsed_files_modified,
+    };
+}
+
+fn parseFusionChangeCheckpointData(allocator: std.mem.Allocator, value: std.json.Value) !FusionChangeCheckpointData {
+    const object = try payloads.requiredObject(value);
+    const parsed_code_changes = try parseShutdownCodeChanges(allocator, object.get("codeChanges") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_code_changes = parsed_code_changes;
+        wipeShutdownCodeChanges(&cleanup_code_changes);
+    }
+    return .{
+        .code_changes = parsed_code_changes,
+    };
+}
+
 fn parseFusionCommitKind(_: std.mem.Allocator, value: std.json.Value) !FusionCommitKind {
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "text")) return .text;
@@ -15022,6 +16587,32 @@ fn parseFusionPhasePlanStep(allocator: std.mem.Allocator, value: std.json.Value)
     };
 }
 
+fn parseFusionCritic(allocator: std.mem.Allocator, value: std.json.Value) !FusionCritic {
+    const object = try payloads.requiredObject(value);
+    const parsed_phase_id = try parseString(allocator, object.get("phaseId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_phase_id = parsed_phase_id;
+        wipeString(cleanup_phase_id);
+    }
+    const parsed_model = try parseString(allocator, object.get("model") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_model = parsed_model;
+        wipeString(cleanup_model);
+    }
+    const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_reasoning_effort = parsed_reasoning_effort;
+        if (cleanup_reasoning_effort) |*present| {
+            wipeString(present.*);
+        }
+    }
+    return .{
+        .phase_id = parsed_phase_id,
+        .model = parsed_model,
+        .reasoning_effort = parsed_reasoning_effort,
+    };
+}
+
 fn parseFusionFollowUpAction(_: std.mem.Allocator, value: std.json.Value) !FusionFollowUpAction {
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "reuse_primary")) return .reuse_primary;
@@ -15125,6 +16716,13 @@ fn parseFusionResolvedData(allocator: std.mem.Allocator, value: std.json.Value) 
         var cleanup_pattern = parsed_pattern;
         wipeFusionPattern(&cleanup_pattern);
     }
+    const parsed_hint = if (object.get("hint")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_hint = parsed_hint;
+        if (cleanup_hint) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_phase_plan = if (object.get("phasePlan")) |field_value| if ((field_value) == .null) null else try parseFusionResolvedDataPhasePlanArray(allocator, field_value) else null;
     errdefer {
         var cleanup_phase_plan = parsed_phase_plan;
@@ -15144,6 +16742,29 @@ fn parseFusionResolvedData(allocator: std.mem.Allocator, value: std.json.Value) 
         var cleanup_secondary_model = parsed_secondary_model;
         if (cleanup_secondary_model) |*present| {
             wipeString(present.*);
+        }
+    }
+    const parsed_judge_model = if (object.get("judgeModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_judge_model = parsed_judge_model;
+        if (cleanup_judge_model) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_repair_model = if (object.get("repairModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_repair_model = parsed_repair_model;
+        if (cleanup_repair_model) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_critics = if (object.get("critics")) |field_value| if ((field_value) == .null) null else try parseFusionResolvedDataCriticsArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_critics = parsed_critics;
+        if (cleanup_critics) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipeFusionCritic(&item.*);
+            }
         }
     }
     const parsed_fallback_model = try parseString(allocator, object.get("fallbackModel") orelse return error.InvalidSessionEvent, null, null);
@@ -15179,9 +16800,13 @@ fn parseFusionResolvedData(allocator: std.mem.Allocator, value: std.json.Value) 
         .rule_name = parsed_rule_name,
         .scores = parsed_scores,
         .pattern = parsed_pattern,
+        .hint = parsed_hint,
         .phase_plan = parsed_phase_plan,
         .primary_model = parsed_primary_model,
         .secondary_model = parsed_secondary_model,
+        .judge_model = parsed_judge_model,
+        .repair_model = parsed_repair_model,
+        .critics = parsed_critics,
         .fallback_model = parsed_fallback_model,
         .follow_up_model = parsed_follow_up_model,
         .follow_up = parsed_follow_up,
@@ -15383,6 +17008,188 @@ fn parseIdleData(allocator: std.mem.Allocator, value: std.json.Value) !IdleData 
     };
 }
 
+fn parseIndexedSearchState(_: std.mem.Allocator, value: std.json.Value) !IndexedSearchState {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "disabled")) return .disabled;
+    if (std.mem.eql(u8, wire, "starting")) return .starting;
+    if (std.mem.eql(u8, wire, "enabled")) return .enabled;
+    if (std.mem.eql(u8, wire, "ready")) return .ready;
+    if (std.mem.eql(u8, wire, "failed")) return .failed;
+    return error.InvalidSessionEvent;
+}
+
+fn parseIndexedSearchDataVariant1(allocator: std.mem.Allocator, value: std.json.Value) !IndexedSearchDataVariant1 {
+    const object = try payloads.requiredObject(value);
+    const parsed_state = try parseIndexedSearchState(allocator, object.get("state") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_state = parsed_state;
+        wipeIndexedSearchState(&cleanup_state);
+    }
+    const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "status");
+    errdefer {
+        const cleanup_kind = parsed_kind;
+        wipeString(cleanup_kind);
+    }
+    return .{
+        .state = parsed_state,
+        .kind = parsed_kind,
+    };
+}
+
+fn parseIndexedSearchOutcome(_: std.mem.Allocator, value: std.json.Value) !IndexedSearchOutcome {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "started")) return .started;
+    if (std.mem.eql(u8, wire, "skipped_below_threshold")) return .skipped_below_threshold;
+    if (std.mem.eql(u8, wire, "skipped_no_gitroot")) return .skipped_no_gitroot;
+    if (std.mem.eql(u8, wire, "skipped_disabled")) return .skipped_disabled;
+    if (std.mem.eql(u8, wire, "reused_existing")) return .reused_existing;
+    if (std.mem.eql(u8, wire, "failed")) return .failed;
+    return error.InvalidSessionEvent;
+}
+
+fn parseIndexedSearchDisabledReason(_: std.mem.Allocator, value: std.json.Value) !IndexedSearchDisabledReason {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "use_tgrep_false")) return .use_tgrep_false;
+    if (std.mem.eql(u8, wire, "use_builtin_ripgrep_false")) return .use_builtin_ripgrep_false;
+    if (std.mem.eql(u8, wire, "organization")) return .organization;
+    if (std.mem.eql(u8, wire, "organization_policy_auth_pending")) return .organization_policy_auth_pending;
+    if (std.mem.eql(u8, wire, "organization_policy_unknown")) return .organization_policy_unknown;
+    if (std.mem.eql(u8, wire, "virtual_filesystem")) return .virtual_filesystem;
+    if (std.mem.eql(u8, wire, "cloud_sync_root")) return .cloud_sync_root;
+    if (std.mem.eql(u8, wire, "cloud_sync_detection_failed")) return .cloud_sync_detection_failed;
+    if (std.mem.eql(u8, wire, "workspace_not_local")) return .workspace_not_local;
+    return error.InvalidSessionEvent;
+}
+
+fn parseIndexedSearchDataVariant2(allocator: std.mem.Allocator, value: std.json.Value) !IndexedSearchDataVariant2 {
+    const object = try payloads.requiredObject(value);
+    const parsed_outcome = try parseIndexedSearchOutcome(allocator, object.get("outcome") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_outcome = parsed_outcome;
+        wipeIndexedSearchOutcome(&cleanup_outcome);
+    }
+    const parsed_file_count = if (object.get("fileCount")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_startup_duration_ms = try parseNumber(object.get("startupDurationMs") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_forced_by_env = try parseBool(object.get("forcedByEnv") orelse return error.InvalidSessionEvent);
+    const parsed_warm_start = try parseBool(object.get("warmStart") orelse return error.InvalidSessionEvent);
+    const parsed_disabled_reason = if (object.get("disabledReason")) |field_value| if ((field_value) == .null) null else try parseIndexedSearchDisabledReason(allocator, field_value) else null;
+    errdefer {
+        var cleanup_disabled_reason = parsed_disabled_reason;
+        if (cleanup_disabled_reason) |*present| {
+            wipeIndexedSearchDisabledReason(&present.*);
+        }
+    }
+    const parsed_error_message = if (object.get("errorMessage")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_error_message = parsed_error_message;
+        if (cleanup_error_message) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_eligible = if (object.get("eligible")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "startup");
+    errdefer {
+        const cleanup_kind = parsed_kind;
+        wipeString(cleanup_kind);
+    }
+    return .{
+        .outcome = parsed_outcome,
+        .file_count = parsed_file_count,
+        .startup_duration_ms = parsed_startup_duration_ms,
+        .forced_by_env = parsed_forced_by_env,
+        .warm_start = parsed_warm_start,
+        .disabled_reason = parsed_disabled_reason,
+        .error_message = parsed_error_message,
+        .eligible = parsed_eligible,
+        .kind = parsed_kind,
+    };
+}
+
+fn parseIndexedSearchErrorType(_: std.mem.Allocator, value: std.json.Value) !IndexedSearchErrorType {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "spawn_error")) return .spawn_error;
+    if (std.mem.eql(u8, wire, "unexpected_exit")) return .unexpected_exit;
+    if (std.mem.eql(u8, wire, "killed_by_signal")) return .killed_by_signal;
+    return error.InvalidSessionEvent;
+}
+
+fn parseIndexedSearchDataVariant3(allocator: std.mem.Allocator, value: std.json.Value) !IndexedSearchDataVariant3 {
+    const object = try payloads.requiredObject(value);
+    const parsed_error_type = try parseIndexedSearchErrorType(allocator, object.get("errorType") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_error_type = parsed_error_type;
+        wipeIndexedSearchErrorType(&cleanup_error_type);
+    }
+    const parsed_exit_code = if (object.get("exitCode")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, null, null) else null;
+    const parsed_error_message = if (object.get("errorMessage")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_error_message = parsed_error_message;
+        if (cleanup_error_message) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "server_error");
+    errdefer {
+        const cleanup_kind = parsed_kind;
+        wipeString(cleanup_kind);
+    }
+    return .{
+        .error_type = parsed_error_type,
+        .exit_code = parsed_exit_code,
+        .error_message = parsed_error_message,
+        .kind = parsed_kind,
+    };
+}
+
+fn parseIndexedSearchIncrementalPhase(_: std.mem.Allocator, value: std.json.Value) !IndexedSearchIncrementalPhase {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "changes_detected")) return .changes_detected;
+    if (std.mem.eql(u8, wire, "updated")) return .updated;
+    return error.InvalidSessionEvent;
+}
+
+fn parseIndexedSearchDataVariant4(allocator: std.mem.Allocator, value: std.json.Value) !IndexedSearchDataVariant4 {
+    const object = try payloads.requiredObject(value);
+    const parsed_phase = try parseIndexedSearchIncrementalPhase(allocator, object.get("phase") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_phase = parsed_phase;
+        wipeIndexedSearchIncrementalPhase(&cleanup_phase);
+    }
+    const parsed_changed_file_count = if (object.get("changedFileCount")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_added_file_count = if (object.get("addedFileCount")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_deleted_file_count = if (object.get("deletedFileCount")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_total_change_count = if (object.get("totalChangeCount")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_walk_duration_ms = if (object.get("walkDurationMs")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_update_duration_ms = if (object.get("updateDurationMs")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_total_duration_ms = if (object.get("totalDurationMs")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "incremental");
+    errdefer {
+        const cleanup_kind = parsed_kind;
+        wipeString(cleanup_kind);
+    }
+    return .{
+        .phase = parsed_phase,
+        .changed_file_count = parsed_changed_file_count,
+        .added_file_count = parsed_added_file_count,
+        .deleted_file_count = parsed_deleted_file_count,
+        .total_change_count = parsed_total_change_count,
+        .walk_duration_ms = parsed_walk_duration_ms,
+        .update_duration_ms = parsed_update_duration_ms,
+        .total_duration_ms = parsed_total_duration_ms,
+        .kind = parsed_kind,
+    };
+}
+
+fn parseIndexedSearchData(allocator: std.mem.Allocator, value: std.json.Value) !IndexedSearchData {
+    const object = try payloads.requiredObject(value);
+    const discriminator = try payloads.requiredString(object, "kind");
+    if (std.mem.eql(u8, discriminator, "status")) return .{ .status = try parseIndexedSearchDataVariant1(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "startup")) return .{ .startup = try parseIndexedSearchDataVariant2(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "server_error")) return .{ .server_error = try parseIndexedSearchDataVariant3(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "incremental")) return .{ .incremental = try parseIndexedSearchDataVariant4(allocator, value) };
+    return error.InvalidSessionEvent;
+}
+
 fn parseInfoData(allocator: std.mem.Allocator, value: std.json.Value) !InfoData {
     const object = try payloads.requiredObject(value);
     const parsed_info_type = try parseString(allocator, object.get("infoType") orelse return error.InvalidSessionEvent, null, null);
@@ -15578,10 +17385,26 @@ fn parseMcpServerStatusChangedData(allocator: std.mem.Allocator, value: std.json
             wipeString(present.*);
         }
     }
+    const parsed_error_classification = if (object.get("errorClassification")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_error_classification = parsed_error_classification;
+        if (cleanup_error_classification) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_config_source = if (object.get("configSource")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_config_source = parsed_config_source;
+        if (cleanup_config_source) |*present| {
+            wipeString(present.*);
+        }
+    }
     return .{
         .server_name = parsed_server_name,
         .status = parsed_status,
         .error_ = parsed_error_,
+        .error_classification = parsed_error_classification,
+        .config_source = parsed_config_source,
     };
 }
 
@@ -15591,6 +17414,7 @@ fn parseMcpServerSource(_: std.mem.Allocator, value: std.json.Value) !McpServerS
     if (std.mem.eql(u8, wire, "workspace")) return .workspace;
     if (std.mem.eql(u8, wire, "plugin")) return .plugin;
     if (std.mem.eql(u8, wire, "builtin")) return .builtin;
+    if (std.mem.eql(u8, wire, "managed")) return .managed;
     return error.InvalidSessionEvent;
 }
 
@@ -15636,6 +17460,13 @@ fn parseMcpServersLoadedServer(allocator: std.mem.Allocator, value: std.json.Val
             wipeMcpServerSource(&present.*);
         }
     }
+    const parsed_display_name = if (object.get("displayName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_display_name = parsed_display_name;
+        if (cleanup_display_name) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_error_ = if (object.get("error")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_error_ = parsed_error_;
@@ -15675,6 +17506,7 @@ fn parseMcpServersLoadedServer(allocator: std.mem.Allocator, value: std.json.Val
         .name = parsed_name,
         .status = parsed_status,
         .source = parsed_source,
+        .display_name = parsed_display_name,
         .error_ = parsed_error_,
         .server_metadata = parsed_server_metadata,
         .transport = parsed_transport,
@@ -15768,7 +17600,9 @@ fn parseModelChangeSource(_: std.mem.Allocator, value: std.json.Value) !ModelCha
     if (std.mem.eql(u8, wire, "agent")) return .agent;
     if (std.mem.eql(u8, wire, "plan_mode")) return .plan_mode;
     if (std.mem.eql(u8, wire, "automatic")) return .automatic;
+    if (std.mem.eql(u8, wire, "changeboarding_shortcut")) return .changeboarding_shortcut;
     if (std.mem.eql(u8, wire, "sdk")) return .sdk;
+    if (std.mem.eql(u8, wire, "auto_tier_recommendation")) return .auto_tier_recommendation;
     return error.InvalidSessionEvent;
 }
 
@@ -15880,12 +17714,28 @@ fn parseModelChangeData(allocator: std.mem.Allocator, value: std.json.Value) !Mo
     };
 }
 
-fn parsePermissionMode(_: std.mem.Allocator, value: std.json.Value) !PermissionMode {
+fn parseModelDeselectedReason(_: std.mem.Allocator, value: std.json.Value) !ModelDeselectedReason {
     const wire = try valueString(value);
-    if (std.mem.eql(u8, wire, "manual")) return .manual;
-    if (std.mem.eql(u8, wire, "assisted")) return .assisted;
-    if (std.mem.eql(u8, wire, "allow-all")) return .allow_all;
+    if (std.mem.eql(u8, wire, "provider_withdrawn")) return .provider_withdrawn;
     return error.InvalidSessionEvent;
+}
+
+fn parseModelDeselectedData(allocator: std.mem.Allocator, value: std.json.Value) !ModelDeselectedData {
+    const object = try payloads.requiredObject(value);
+    const parsed_previous_model = try parseString(allocator, object.get("previousModel") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_previous_model = parsed_previous_model;
+        wipeString(cleanup_previous_model);
+    }
+    const parsed_reason = try parseModelDeselectedReason(allocator, object.get("reason") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_reason = parsed_reason;
+        wipeModelDeselectedReason(&cleanup_reason);
+    }
+    return .{
+        .previous_model = parsed_previous_model,
+        .reason = parsed_reason,
+    };
 }
 
 fn parsePermissionsChangedData(allocator: std.mem.Allocator, value: std.json.Value) !PermissionsChangedData {
@@ -16147,24 +17997,6 @@ fn parseShutdownTokenDetail(_: std.mem.Allocator, value: std.json.Value) !Shutdo
     const parsed_token_count = try parseInteger(u64, object.get("tokenCount") orelse return error.InvalidSessionEvent, 0, null, null);
     return .{
         .token_count = parsed_token_count,
-    };
-}
-
-fn parseShutdownCodeChanges(allocator: std.mem.Allocator, value: std.json.Value) !ShutdownCodeChanges {
-    const object = try payloads.requiredObject(value);
-    const parsed_lines_added = try parseInteger(u64, object.get("linesAdded") orelse return error.InvalidSessionEvent, 0, null, null);
-    const parsed_lines_removed = try parseInteger(u64, object.get("linesRemoved") orelse return error.InvalidSessionEvent, 0, null, null);
-    const parsed_files_modified = try parseShutdownCodeChangesFilesModifiedArray(allocator, object.get("filesModified") orelse return error.InvalidSessionEvent);
-    errdefer {
-        const cleanup_files_modified = parsed_files_modified;
-        for (@constCast(cleanup_files_modified)) |*item| {
-            wipeString(item.*);
-        }
-    }
-    return .{
-        .lines_added = parsed_lines_added,
-        .lines_removed = parsed_lines_removed,
-        .files_modified = parsed_files_modified,
     };
 }
 
@@ -16453,9 +18285,19 @@ fn parseSnapshotRewindData(allocator: std.mem.Allocator, value: std.json.Value) 
         wipeString(cleanup_up_to_event_id);
     }
     const parsed_events_removed = try parseInteger(u64, object.get("eventsRemoved") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_event_ids = if (object.get("eventIds")) |field_value| if ((field_value) == .null) null else try parseSnapshotRewindDataEventIdsArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_event_ids = parsed_event_ids;
+        if (cleanup_event_ids) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipeString(item.*);
+            }
+        }
+    }
     return .{
         .up_to_event_id = parsed_up_to_event_id,
         .events_removed = parsed_events_removed,
+        .event_ids = parsed_event_ids,
     };
 }
 
@@ -16638,12 +18480,20 @@ fn parseTaskCompleteData(allocator: std.mem.Allocator, value: std.json.Value) !T
         }
     }
     const parsed_objective_id = if (object.get("objectiveId")) |field_value| if ((field_value) == .null) null else try parseInteger(i64, field_value, null, null, null) else null;
+    const parsed_blocker = if (object.get("blocker")) |field_value| if ((field_value) == .null) null else try parseTaskBlocker(allocator, field_value) else null;
+    errdefer {
+        var cleanup_blocker = parsed_blocker;
+        if (cleanup_blocker) |*present| {
+            wipeTaskBlocker(&present.*);
+        }
+    }
     return .{
         .summary = parsed_summary,
         .success = parsed_success,
         .outcome = parsed_outcome,
         .reason = parsed_reason,
         .objective_id = parsed_objective_id,
+        .blocker = parsed_blocker,
     };
 }
 
@@ -16891,6 +18741,74 @@ fn parseSessionLimitsExhaustedRequestedData(allocator: std.mem.Allocator, value:
     };
 }
 
+fn parseSkillContextDeliveredData(allocator: std.mem.Allocator, value: std.json.Value) !SkillContextDeliveredData {
+    const object = try payloads.requiredObject(value);
+    const parsed_content = try parseString(allocator, object.get("content") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_content = parsed_content;
+        wipeString(cleanup_content);
+    }
+    const parsed_source = try parseString(allocator, object.get("source") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_source = parsed_source;
+        wipeString(cleanup_source);
+    }
+    const parsed_interaction_id = if (object.get("interactionId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_interaction_id = parsed_interaction_id;
+        if (cleanup_interaction_id) |*present| {
+            wipeString(present.*);
+        }
+    }
+    return .{
+        .content = parsed_content,
+        .source = parsed_source,
+        .interaction_id = parsed_interaction_id,
+    };
+}
+
+fn parseSkillContextDeliveredRefData(allocator: std.mem.Allocator, value: std.json.Value) !SkillContextDeliveredRefData {
+    const object = try payloads.requiredObject(value);
+    const parsed_content_id = try parseString(allocator, object.get("contentId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_content_id = parsed_content_id;
+        wipeString(cleanup_content_id);
+    }
+    const parsed_prefix = if (object.get("prefix")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_prefix = parsed_prefix;
+        if (cleanup_prefix) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_suffix = if (object.get("suffix")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_suffix = parsed_suffix;
+        if (cleanup_suffix) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_source = try parseString(allocator, object.get("source") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_source = parsed_source;
+        wipeString(cleanup_source);
+    }
+    const parsed_interaction_id = if (object.get("interactionId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_interaction_id = parsed_interaction_id;
+        if (cleanup_interaction_id) |*present| {
+            wipeString(present.*);
+        }
+    }
+    return .{
+        .content_id = parsed_content_id,
+        .prefix = parsed_prefix,
+        .suffix = parsed_suffix,
+        .source = parsed_source,
+        .interaction_id = parsed_interaction_id,
+    };
+}
+
 fn parseSkillInvokedTrigger(_: std.mem.Allocator, value: std.json.Value) !SkillInvokedTrigger {
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "user-invoked")) return .user_invoked;
@@ -16906,6 +18824,7 @@ fn parseSkillInvokedData(allocator: std.mem.Allocator, value: std.json.Value) !S
         const cleanup_name = parsed_name;
         wipeString(cleanup_name);
     }
+    const parsed_invoked_at_turn = if (object.get("invokedAtTurn")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, 9007199254740991) else null;
     const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
@@ -16970,9 +18889,98 @@ fn parseSkillInvokedData(allocator: std.mem.Allocator, value: std.json.Value) !S
     }
     return .{
         .name = parsed_name,
+        .invoked_at_turn = parsed_invoked_at_turn,
         .model = parsed_model,
         .path = parsed_path,
         .content = parsed_content,
+        .allowed_tools = parsed_allowed_tools,
+        .disable_model_invocation = parsed_disable_model_invocation,
+        .source = parsed_source,
+        .plugin_name = parsed_plugin_name,
+        .plugin_version = parsed_plugin_version,
+        .description = parsed_description,
+        .trigger = parsed_trigger,
+    };
+}
+
+fn parseSkillInvokedRefData(allocator: std.mem.Allocator, value: std.json.Value) !SkillInvokedRefData {
+    const object = try payloads.requiredObject(value);
+    const parsed_name = try parseString(allocator, object.get("name") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_name = parsed_name;
+        wipeString(cleanup_name);
+    }
+    const parsed_invoked_at_turn = if (object.get("invokedAtTurn")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, 9007199254740991) else null;
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_model = parsed_model;
+        if (cleanup_model) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_path = try parseString(allocator, object.get("path") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_path = parsed_path;
+        wipeString(cleanup_path);
+    }
+    const parsed_content_id = try parseString(allocator, object.get("contentId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_content_id = parsed_content_id;
+        wipeString(cleanup_content_id);
+    }
+    const parsed_content_length = try parseInteger(u64, object.get("contentLength") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_allowed_tools = if (object.get("allowedTools")) |field_value| if ((field_value) == .null) null else try parseSkillInvokedRefDataAllowedToolsArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_allowed_tools = parsed_allowed_tools;
+        if (cleanup_allowed_tools) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipeString(item.*);
+            }
+        }
+    }
+    const parsed_disable_model_invocation = if (object.get("disableModelInvocation")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_source = if (object.get("source")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_source = parsed_source;
+        if (cleanup_source) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_plugin_name = if (object.get("pluginName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_plugin_name = parsed_plugin_name;
+        if (cleanup_plugin_name) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_plugin_version = if (object.get("pluginVersion")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_plugin_version = parsed_plugin_version;
+        if (cleanup_plugin_version) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_description = if (object.get("description")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_description = parsed_description;
+        if (cleanup_description) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_trigger = if (object.get("trigger")) |field_value| if ((field_value) == .null) null else try parseSkillInvokedTrigger(allocator, field_value) else null;
+    errdefer {
+        var cleanup_trigger = parsed_trigger;
+        if (cleanup_trigger) |*present| {
+            wipeSkillInvokedTrigger(&present.*);
+        }
+    }
+    return .{
+        .name = parsed_name,
+        .invoked_at_turn = parsed_invoked_at_turn,
+        .model = parsed_model,
+        .path = parsed_path,
+        .content_id = parsed_content_id,
+        .content_length = parsed_content_length,
         .allowed_tools = parsed_allowed_tools,
         .disable_model_invocation = parsed_disable_model_invocation,
         .source = parsed_source,
@@ -17276,10 +19284,24 @@ fn parseSubagentStartedData(allocator: std.mem.Allocator, value: std.json.Value)
             wipeSubagentTaskModelSource(&present.*);
         }
     }
+    const parsed_model_selection_source = if (object.get("modelSelectionSource")) |field_value| if ((field_value) == .null) null else try parseSubagentModelSelectionSource(allocator, field_value) else null;
+    errdefer {
+        var cleanup_model_selection_source = parsed_model_selection_source;
+        if (cleanup_model_selection_source) |*present| {
+            wipeSubagentModelSelectionSource(&present.*);
+        }
+    }
     const parsed_factory_run_id = if (object.get("factoryRunId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_factory_run_id = parsed_factory_run_id;
         if (cleanup_factory_run_id) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_workflow_run_id = if (object.get("workflowRunId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_workflow_run_id = parsed_workflow_run_id;
+        if (cleanup_workflow_run_id) |*present| {
             wipeString(present.*);
         }
     }
@@ -17312,11 +19334,29 @@ fn parseSubagentStartedData(allocator: std.mem.Allocator, value: std.json.Value)
         .agent_description = parsed_agent_description,
         .model = parsed_model,
         .task_model_source = parsed_task_model_source,
+        .model_selection_source = parsed_model_selection_source,
         .factory_run_id = parsed_factory_run_id,
+        .workflow_run_id = parsed_workflow_run_id,
         .parent_id = parsed_parent_id,
         .resumable = parsed_resumable,
         .agent_type = parsed_agent_type,
         .execution_mode = parsed_execution_mode,
+    };
+}
+
+fn parseSystemMessageContentBlock(allocator: std.mem.Allocator, value: std.json.Value) !SystemMessageContentBlock {
+    const object = try payloads.requiredObject(value);
+    const parsed_content = try parseString(allocator, object.get("content") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_content = parsed_content;
+        wipeString(cleanup_content);
+    }
+    const parsed_is_static = if (object.get("isStatic")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_cache_breakpoint = if (object.get("cacheBreakpoint")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    return .{
+        .content = parsed_content,
+        .is_static = parsed_is_static,
+        .cache_breakpoint = parsed_cache_breakpoint,
     };
 }
 
@@ -17362,6 +19402,15 @@ fn parseSystemMessageData(allocator: std.mem.Allocator, value: std.json.Value) !
         const cleanup_content = parsed_content;
         wipeString(cleanup_content);
     }
+    const parsed_content_blocks = if (object.get("contentBlocks")) |field_value| if ((field_value) == .null) null else try parseSystemMessageDataContentBlocksArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_content_blocks = parsed_content_blocks;
+        if (cleanup_content_blocks) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipeSystemMessageContentBlock(&item.*);
+            }
+        }
+    }
     const parsed_interaction_id = if (object.get("interactionId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_interaction_id = parsed_interaction_id;
@@ -17390,6 +19439,7 @@ fn parseSystemMessageData(allocator: std.mem.Allocator, value: std.json.Value) !
     }
     return .{
         .content = parsed_content,
+        .content_blocks = parsed_content_blocks,
         .interaction_id = parsed_interaction_id,
         .role = parsed_role,
         .name = parsed_name,
@@ -17626,7 +19676,7 @@ fn parseSystemNotificationInstructionDiscovered(allocator: std.mem.Allocator, va
     };
 }
 
-fn parseSystemNotificationFactoryCompletedStatus(_: std.mem.Allocator, value: std.json.Value) !SystemNotificationFactoryCompletedStatus {
+fn parseSystemNotificationWorkflowCompletedStatus(_: std.mem.Allocator, value: std.json.Value) !SystemNotificationWorkflowCompletedStatus {
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "completed")) return .completed;
     if (std.mem.eql(u8, wire, "halted")) return .halted;
@@ -17636,7 +19686,7 @@ fn parseSystemNotificationFactoryCompletedStatus(_: std.mem.Allocator, value: st
     return error.InvalidSessionEvent;
 }
 
-fn parseSystemNotificationFactoryPauseInfoVariant1(allocator: std.mem.Allocator, value: std.json.Value) !SystemNotificationFactoryPauseInfoVariant1 {
+fn parseSystemNotificationWorkflowPauseInfoVariant1(allocator: std.mem.Allocator, value: std.json.Value) !SystemNotificationWorkflowPauseInfoVariant1 {
     const object = try payloads.requiredObject(value);
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "user");
     errdefer {
@@ -17648,7 +19698,7 @@ fn parseSystemNotificationFactoryPauseInfoVariant1(allocator: std.mem.Allocator,
     };
 }
 
-fn parseSystemNotificationFactoryPauseInfoVariant2(allocator: std.mem.Allocator, value: std.json.Value) !SystemNotificationFactoryPauseInfoVariant2 {
+fn parseSystemNotificationWorkflowPauseInfoVariant2(allocator: std.mem.Allocator, value: std.json.Value) !SystemNotificationWorkflowPauseInfoVariant2 {
     const object = try payloads.requiredObject(value);
     const parsed_key = try parseString(allocator, object.get("key") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
@@ -17666,17 +19716,17 @@ fn parseSystemNotificationFactoryPauseInfoVariant2(allocator: std.mem.Allocator,
     };
 }
 
-fn parseSystemNotificationFactoryPauseInfo(allocator: std.mem.Allocator, value: std.json.Value) !SystemNotificationFactoryPauseInfo {
+fn parseSystemNotificationWorkflowPauseInfo(allocator: std.mem.Allocator, value: std.json.Value) !SystemNotificationWorkflowPauseInfo {
     const object = try payloads.requiredObject(value);
     const discriminator = try payloads.requiredString(object, "type");
-    if (std.mem.eql(u8, discriminator, "user")) return .{ .user = try parseSystemNotificationFactoryPauseInfoVariant1(allocator, value) };
-    if (std.mem.eql(u8, discriminator, "checkpoint")) return .{ .checkpoint = try parseSystemNotificationFactoryPauseInfoVariant2(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "user")) return .{ .user = try parseSystemNotificationWorkflowPauseInfoVariant1(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "checkpoint")) return .{ .checkpoint = try parseSystemNotificationWorkflowPauseInfoVariant2(allocator, value) };
     return error.InvalidSessionEvent;
 }
 
-fn parseSystemNotificationFactoryCompleted(allocator: std.mem.Allocator, value: std.json.Value) !SystemNotificationFactoryCompleted {
+fn parseSystemNotificationWorkflowCompleted(allocator: std.mem.Allocator, value: std.json.Value) !SystemNotificationWorkflowCompleted {
     const object = try payloads.requiredObject(value);
-    const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "factory_completed");
+    const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "workflow_completed");
     errdefer {
         const cleanup_type = parsed_type;
         wipeString(cleanup_type);
@@ -17686,15 +19736,15 @@ fn parseSystemNotificationFactoryCompleted(allocator: std.mem.Allocator, value: 
         const cleanup_run_id = parsed_run_id;
         wipeString(cleanup_run_id);
     }
-    const parsed_factory_name = try parseString(allocator, object.get("factoryName") orelse return error.InvalidSessionEvent, null, null);
+    const parsed_workflow_name = try parseString(allocator, object.get("workflowName") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
-        const cleanup_factory_name = parsed_factory_name;
-        wipeString(cleanup_factory_name);
+        const cleanup_workflow_name = parsed_workflow_name;
+        wipeString(cleanup_workflow_name);
     }
-    const parsed_status = try parseSystemNotificationFactoryCompletedStatus(allocator, object.get("status") orelse return error.InvalidSessionEvent);
+    const parsed_status = try parseSystemNotificationWorkflowCompletedStatus(allocator, object.get("status") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_status = parsed_status;
-        wipeSystemNotificationFactoryCompletedStatus(&cleanup_status);
+        wipeSystemNotificationWorkflowCompletedStatus(&cleanup_status);
     }
     const parsed_consumed_subagents = try parseInteger(u64, object.get("consumedSubagents") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_elapsed_ms = try parseInteger(u64, object.get("elapsedMs") orelse return error.InvalidSessionEvent, 0, null, null);
@@ -17721,17 +19771,17 @@ fn parseSystemNotificationFactoryCompleted(allocator: std.mem.Allocator, value: 
             wipeString(present.*);
         }
     }
-    const parsed_pause_info = if (object.get("pauseInfo")) |field_value| if ((field_value) == .null) null else try parseSystemNotificationFactoryPauseInfo(allocator, field_value) else null;
+    const parsed_pause_info = if (object.get("pauseInfo")) |field_value| if ((field_value) == .null) null else try parseSystemNotificationWorkflowPauseInfo(allocator, field_value) else null;
     errdefer {
         var cleanup_pause_info = parsed_pause_info;
         if (cleanup_pause_info) |*present| {
-            wipeSystemNotificationFactoryPauseInfo(&present.*);
+            wipeSystemNotificationWorkflowPauseInfo(&present.*);
         }
     }
     return .{
         .type = parsed_type,
         .run_id = parsed_run_id,
-        .factory_name = parsed_factory_name,
+        .workflow_name = parsed_workflow_name,
         .status = parsed_status,
         .consumed_subagents = parsed_consumed_subagents,
         .elapsed_ms = parsed_elapsed_ms,
@@ -17773,7 +19823,7 @@ fn parseSystemNotification(allocator: std.mem.Allocator, value: std.json.Value) 
     if (std.mem.eql(u8, discriminator, "shell_completed")) return .{ .shell_completed = try parseSystemNotificationShellCompleted(allocator, value) };
     if (std.mem.eql(u8, discriminator, "shell_detached_completed")) return .{ .shell_detached_completed = try parseSystemNotificationShellDetachedCompleted(allocator, value) };
     if (std.mem.eql(u8, discriminator, "instruction_discovered")) return .{ .instruction_discovered = try parseSystemNotificationInstructionDiscovered(allocator, value) };
-    if (std.mem.eql(u8, discriminator, "factory_completed")) return .{ .factory_completed = try parseSystemNotificationFactoryCompleted(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "workflow_completed")) return .{ .workflow_completed = try parseSystemNotificationWorkflowCompleted(allocator, value) };
     if (std.mem.eql(u8, discriminator, "unclassified")) return .{ .unclassified = try parseSystemNotificationUnclassified(allocator, value) };
     return error.InvalidSessionEvent;
 }
@@ -17790,9 +19840,17 @@ fn parseSystemNotificationData(allocator: std.mem.Allocator, value: std.json.Val
         var cleanup_kind = parsed_kind;
         wipeSystemNotification(&cleanup_kind);
     }
+    const parsed_responses_reasoning = if (object.get("responsesReasoning")) |field_value| if ((field_value) == .null) null else try parseResponsesReasoning(allocator, field_value) else null;
+    errdefer {
+        var cleanup_responses_reasoning = parsed_responses_reasoning;
+        if (cleanup_responses_reasoning) |*present| {
+            wipeResponsesReasoning(&present.*);
+        }
+    }
     return .{
         .content = parsed_content,
         .kind = parsed_kind,
+        .responses_reasoning = parsed_responses_reasoning,
     };
 }
 
@@ -18724,6 +20782,14 @@ fn parseToolExecutionCompleteToolDescription(allocator: std.mem.Allocator, value
     };
 }
 
+fn parseToolExecutionCompleteShellExecution(_: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteShellExecution {
+    const object = try payloads.requiredObject(value);
+    const parsed_exit_code = try parseInteger(i64, object.get("exitCode") orelse return error.InvalidSessionEvent, null, null, null);
+    return .{
+        .exit_code = parsed_exit_code,
+    };
+}
+
 fn parseToolExecutionCompleteData(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteData {
     const object = try payloads.requiredObject(value);
     const parsed_tool_call_id = try parseString(allocator, object.get("toolCallId") orelse return error.InvalidSessionEvent, null, null);
@@ -18797,6 +20863,13 @@ fn parseToolExecutionCompleteData(allocator: std.mem.Allocator, value: std.json.
         }
     }
     const parsed_sandboxed = if (object.get("sandboxed")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_shell_execution = if (object.get("shellExecution")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteShellExecution(allocator, field_value) else null;
+    errdefer {
+        var cleanup_shell_execution = parsed_shell_execution;
+        if (cleanup_shell_execution) |*present| {
+            wipeToolExecutionCompleteShellExecution(&present.*);
+        }
+    }
     const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_parent_tool_call_id = parsed_parent_tool_call_id;
@@ -18825,6 +20898,7 @@ fn parseToolExecutionCompleteData(allocator: std.mem.Allocator, value: std.json.
         .turn_id = parsed_turn_id,
         .tool_description = parsed_tool_description,
         .sandboxed = parsed_sandboxed,
+        .shell_execution = parsed_shell_execution,
         .parent_tool_call_id = parsed_parent_tool_call_id,
         .fusion = parsed_fusion,
     };
@@ -18975,6 +21049,13 @@ fn parseToolExecutionStartData(allocator: std.mem.Allocator, value: std.json.Val
         const cleanup_tool_name = parsed_tool_name;
         wipeString(cleanup_tool_name);
     }
+    const parsed_tool_title = if (object.get("toolTitle")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_tool_title = parsed_tool_title;
+        if (cleanup_tool_title) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_arguments = if (object.get("arguments")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_arguments = parsed_arguments;
@@ -19004,11 +21085,32 @@ fn parseToolExecutionStartData(allocator: std.mem.Allocator, value: std.json.Val
             wipeString(present.*);
         }
     }
+    const parsed_mcp_config_server_name = if (object.get("mcpConfigServerName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_mcp_config_server_name = parsed_mcp_config_server_name;
+        if (cleanup_mcp_config_server_name) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_mcp_tool_name = if (object.get("mcpToolName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_mcp_tool_name = parsed_mcp_tool_name;
         if (cleanup_mcp_tool_name) |*present| {
             wipeString(present.*);
+        }
+    }
+    const parsed_mcp_transport = if (object.get("mcpTransport")) |field_value| if ((field_value) == .null) null else try parseMcpServerTransport(allocator, field_value) else null;
+    errdefer {
+        var cleanup_mcp_transport = parsed_mcp_transport;
+        if (cleanup_mcp_transport) |*present| {
+            wipeMcpServerTransport(&present.*);
+        }
+    }
+    const parsed_mcp_config_source = if (object.get("mcpConfigSource")) |field_value| if ((field_value) == .null) null else try parseMcpServerSource(allocator, field_value) else null;
+    errdefer {
+        var cleanup_mcp_config_source = parsed_mcp_config_source;
+        if (cleanup_mcp_config_source) |*present| {
+            wipeMcpServerSource(&present.*);
         }
     }
     const parsed_turn_id = if (object.get("turnId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
@@ -19043,12 +21145,16 @@ fn parseToolExecutionStartData(allocator: std.mem.Allocator, value: std.json.Val
     return .{
         .tool_call_id = parsed_tool_call_id,
         .tool_name = parsed_tool_name,
+        .tool_title = parsed_tool_title,
         .arguments = parsed_arguments,
         .shell_tool_info = parsed_shell_tool_info,
         .model = parsed_model,
         .rte = parsed_rte,
         .mcp_server_name = parsed_mcp_server_name,
+        .mcp_config_server_name = parsed_mcp_config_server_name,
         .mcp_tool_name = parsed_mcp_tool_name,
+        .mcp_transport = parsed_mcp_transport,
+        .mcp_config_source = parsed_mcp_config_source,
         .turn_id = parsed_turn_id,
         .display_verbatim = parsed_display_verbatim,
         .tool_description = parsed_tool_description,
@@ -19179,6 +21285,13 @@ fn parseUserMessageData(allocator: std.mem.Allocator, value: std.json.Value) !Us
         const cleanup_content = parsed_content;
         wipeString(cleanup_content);
     }
+    const parsed_responses_reasoning = if (object.get("responsesReasoning")) |field_value| if ((field_value) == .null) null else try parseResponsesReasoning(allocator, field_value) else null;
+    errdefer {
+        var cleanup_responses_reasoning = parsed_responses_reasoning;
+        if (cleanup_responses_reasoning) |*present| {
+            wipeResponsesReasoning(&present.*);
+        }
+    }
     const parsed_message_id = if (object.get("messageId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_message_id = parsed_message_id;
@@ -19265,6 +21378,7 @@ fn parseUserMessageData(allocator: std.mem.Allocator, value: std.json.Value) !Us
     }
     return .{
         .content = parsed_content,
+        .responses_reasoning = parsed_responses_reasoning,
         .message_id = parsed_message_id,
         .transformed_content = parsed_transformed_content,
         .attachments = parsed_attachments,
@@ -19337,6 +21451,82 @@ fn parseUserInputRequestedData(allocator: std.mem.Allocator, value: std.json.Val
         .choices = parsed_choices,
         .allow_freeform = parsed_allow_freeform,
         .tool_call_id = parsed_tool_call_id,
+    };
+}
+
+fn parseWorkflowRunSettledStatus(_: std.mem.Allocator, value: std.json.Value) !WorkflowRunSettledStatus {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "completed")) return .completed;
+    if (std.mem.eql(u8, wire, "halted")) return .halted;
+    if (std.mem.eql(u8, wire, "paused")) return .paused;
+    if (std.mem.eql(u8, wire, "cancelled")) return .cancelled;
+    if (std.mem.eql(u8, wire, "error")) return .error_;
+    return error.InvalidSessionEvent;
+}
+
+fn parseWorkflowRunSettledData(allocator: std.mem.Allocator, value: std.json.Value) !WorkflowRunSettledData {
+    const object = try payloads.requiredObject(value);
+    const parsed_run_id = try parseString(allocator, object.get("runId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_run_id = parsed_run_id;
+        wipeString(cleanup_run_id);
+    }
+    const parsed_status = try parseWorkflowRunSettledStatus(allocator, object.get("status") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_status = parsed_status;
+        wipeWorkflowRunSettledStatus(&cleanup_status);
+    }
+    const parsed_consumed_subagents = try parseInteger(u64, object.get("consumedSubagents") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_consumed_nano_aiu = try parseInteger(u64, object.get("consumedNanoAiu") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_elapsed_ms = try parseInteger(u64, object.get("elapsedMs") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_failure_type = if (object.get("failureType")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_failure_type = parsed_failure_type;
+        if (cleanup_failure_type) |*present| {
+            wipeString(present.*);
+        }
+    }
+    return .{
+        .run_id = parsed_run_id,
+        .status = parsed_status,
+        .consumed_subagents = parsed_consumed_subagents,
+        .consumed_nano_aiu = parsed_consumed_nano_aiu,
+        .elapsed_ms = parsed_elapsed_ms,
+        .failure_type = parsed_failure_type,
+    };
+}
+
+fn parseWorkflowRunStartedData(allocator: std.mem.Allocator, value: std.json.Value) !WorkflowRunStartedData {
+    const object = try payloads.requiredObject(value);
+    const parsed_run_id = try parseString(allocator, object.get("runId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_run_id = parsed_run_id;
+        wipeString(cleanup_run_id);
+    }
+    const parsed_workflow_name = try parseString(allocator, object.get("workflowName") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_workflow_name = parsed_workflow_name;
+        wipeString(cleanup_workflow_name);
+    }
+    const parsed_attempt = try parseInteger(u64, object.get("attempt") orelse return error.InvalidSessionEvent, 1, null, null);
+    return .{
+        .run_id = parsed_run_id,
+        .workflow_name = parsed_workflow_name,
+        .attempt = parsed_attempt,
+    };
+}
+
+fn parseWorkflowRunUpdatedData(allocator: std.mem.Allocator, value: std.json.Value) !WorkflowRunUpdatedData {
+    const object = try payloads.requiredObject(value);
+    const parsed_run_id = try parseString(allocator, object.get("runId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_run_id = parsed_run_id;
+        wipeString(cleanup_run_id);
+    }
+    const parsed_revision = try parseInteger(u64, object.get("revision") orelse return error.InvalidSessionEvent, 1, null, null);
+    return .{
+        .run_id = parsed_run_id,
+        .revision = parsed_revision,
     };
 }
 
@@ -19450,6 +21640,9 @@ fn wipeFusionPhaseCompletedData(value: *FusionPhaseCompletedData) void {
     wipeString(value.role);
     wipeFusionConversationScope(&value.conversation_scope);
     wipeString(value.model);
+    if (value.reasoning_effort) |*present| {
+        wipeString(present.*);
+    }
     wipeFusionPhaseStatus(&value.status);
     wipeString(value.content);
     if (value.verdict) |*present| {
@@ -19474,6 +21667,9 @@ fn wipeFusionPhaseFailedData(value: *FusionPhaseFailedData) void {
     wipeString(value.role);
     wipeFusionConversationScope(&value.conversation_scope);
     wipeString(value.model);
+    if (value.reasoning_effort) |*present| {
+        wipeString(present.*);
+    }
     wipeFusionPhaseStatus(&value.status);
     wipeString(value.reason);
     wipeFusionPhaseUsage(&value.usage);
@@ -19493,6 +21689,9 @@ fn wipeFusionPhaseStartedData(value: *FusionPhaseStartedData) void {
     wipeString(value.role);
     wipeFusionConversationScope(&value.conversation_scope);
     wipeString(value.model);
+    if (value.reasoning_effort) |*present| {
+        wipeString(present.*);
+    }
 }
 
 fn wipeAssistantIdleData(value: *AssistantIdleData) void {
@@ -19679,6 +21878,9 @@ fn wipeFusionAttribution(value: *FusionAttribution) void {
 
 fn wipeAssistantMessageData(value: *AssistantMessageData) void {
     wipeString(value.message_id);
+    if (value.originating_message_id) |*present| {
+        wipeString(present.*);
+    }
     if (value.model) |*present| {
         wipeString(present.*);
     }
@@ -19788,6 +21990,9 @@ fn wipeAssistantTurnEndData(value: *AssistantTurnEndData) void {
     if (value.model) |*present| {
         wipeString(present.*);
     }
+    if (value.parent_tool_call_id) |*present| {
+        wipeString(present.*);
+    }
 }
 
 fn wipeAssistantTurnRetryData(value: *AssistantTurnRetryData) void {
@@ -19806,6 +22011,9 @@ fn wipeAssistantTurnStartData(value: *AssistantTurnStartData) void {
         wipeString(present.*);
     }
     if (value.interaction_id) |*present| {
+        wipeString(present.*);
+    }
+    if (value.parent_tool_call_id) |*present| {
         wipeString(present.*);
     }
 }
@@ -19850,6 +22058,11 @@ fn wipeAssistantUsageData(value: *AssistantUsageData) void {
     wipeString(value.model);
     if (value.cache_expires_at) |*present| {
         wipeString(present.*);
+    }
+    if (value.thinking_dropped_reasons) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+        }
     }
     if (value.initiator) |*present| {
         wipeString(present.*);
@@ -20084,27 +22297,6 @@ fn wipeExternalToolRequestedData(value: *ExternalToolRequestedData) void {
     }
 }
 
-fn wipeFactoryRunSettledStatus(value: *FactoryRunSettledStatus) void {
-    _ = value;
-}
-
-fn wipeFactoryRunSettledData(value: *FactoryRunSettledData) void {
-    wipeString(value.run_id);
-    wipeFactoryRunSettledStatus(&value.status);
-    if (value.failure_type) |*present| {
-        wipeString(present.*);
-    }
-}
-
-fn wipeFactoryRunStartedData(value: *FactoryRunStartedData) void {
-    wipeString(value.run_id);
-    wipeString(value.factory_name);
-}
-
-fn wipeFactoryRunUpdatedData(value: *FactoryRunUpdatedData) void {
-    wipeString(value.run_id);
-}
-
 fn wipeHookEndError(value: *HookEndError) void {
     wipeString(value.message);
     if (value.stack) |*present| {
@@ -20179,6 +22371,9 @@ fn wipeMcpOauthRequiredStaticClientConfig(value: *McpOauthRequiredStaticClientCo
         wipeString(present.*);
     }
     if (value.grant_type) |*present| {
+        wipeString(present.*);
+    }
+    if (value.scope) |*present| {
         wipeString(present.*);
     }
 }
@@ -20308,6 +22503,9 @@ fn wipeModelCallFailureData(value: *ModelCallFailureData) void {
     if (value.model) |*present| {
         wipeString(present.*);
     }
+    if (value.parent_tool_call_id) |*present| {
+        wipeString(present.*);
+    }
     if (value.initiator) |*present| {
         wipeString(present.*);
     }
@@ -20365,6 +22563,15 @@ fn wipeModelCallFailureData(value: *ModelCallFailureData) void {
     }
 }
 
+fn wipeModelCallFinalResult(value: *ModelCallFinalResult) void {
+    _ = value;
+}
+
+fn wipeModelCallFinalResultData(value: *ModelCallFinalResultData) void {
+    wipeString(value.model);
+    wipeModelCallFinalResult(&value.result);
+}
+
 fn wipeModelCallFinishedOutcome(value: *ModelCallFinishedOutcome) void {
     _ = value;
 }
@@ -20388,14 +22595,95 @@ fn wipeModelCallStartData(value: *ModelCallStartData) void {
     if (value.fusion) |*present| {
         wipeFusionAttribution(&present.*);
     }
+    if (value.parent_tool_call_id) |*present| {
+        wipeString(present.*);
+    }
 }
 
 fn wipePendingMessagesModifiedData(value: *PendingMessagesModifiedData) void {
     _ = value;
 }
 
+fn wipePermissionAssentDetectedData(value: *PermissionAssentDetectedData) void {
+    wipeString(value.request_id);
+}
+
+fn wipePermissionDecisionSource(value: *PermissionDecisionSource) void {
+    _ = value;
+}
+
+fn wipePermissionCarriedForwardData(value: *PermissionCarriedForwardData) void {
+    wipeString(value.request_id);
+    wipeString(value.tool_call_id);
+    wipeString(value.record_id);
+    wipePermissionDecisionSource(&value.decision_source);
+}
+
+fn wipeTaskBlockerKind(value: *TaskBlockerKind) void {
+    _ = value;
+}
+
+fn wipePermissionRecoveryReason(value: *PermissionRecoveryReason) void {
+    _ = value;
+}
+
+fn wipePermissionRecoveryStatus(value: *PermissionRecoveryStatus) void {
+    _ = value;
+}
+
+fn wipePermissionRecoveryOnBlocked(value: *PermissionRecoveryOnBlocked) void {
+    _ = value;
+}
+
+fn wipePermissionRecoveryAttemptRelation(value: *PermissionRecoveryAttemptRelation) void {
+    _ = value;
+}
+
+fn wipePermissionRecoveryAttemptDisposition(value: *PermissionRecoveryAttemptDisposition) void {
+    _ = value;
+}
+
+fn wipePermissionRecoveryAttemptReason(value: *PermissionRecoveryAttemptReason) void {
+    _ = value;
+}
+
+fn wipePermissionRecoveryAttempt(value: *PermissionRecoveryAttempt) void {
+    wipeString(value.attempt_id);
+    if (value.tool_call_id) |*present| {
+        wipeString(present.*);
+    }
+    wipeString(value.permission_kind);
+    wipeString(value.request_fingerprint);
+    wipePermissionRecoveryAttemptRelation(&value.relation);
+    wipePermissionRecoveryAttemptDisposition(&value.disposition);
+    wipePermissionRecoveryAttemptReason(&value.reason);
+}
+
+fn wipePermissionRecoveryData(value: *PermissionRecoveryData) void {
+    wipeString(value.episode_id);
+    wipePermissionRecoveryStatus(&value.status);
+    wipePermissionRecoveryOnBlocked(&value.on_blocked);
+    wipePermissionRecoveryReason(&value.reason);
+    for (@constCast(value.attempts)) |*item| {
+        wipePermissionRecoveryAttempt(&item.*);
+    }
+}
+
+fn wipeTaskBlocker(value: *TaskBlocker) void {
+    wipeTaskBlockerKind(&value.kind);
+    wipePermissionRecoveryReason(&value.reason);
+    wipePermissionRecoveryData(&value.permission_recovery);
+}
+
 fn wipePermissionApproved(value: *PermissionApproved) void {
     wipeString(value.kind);
+}
+
+fn wipePermissionApprovedReadOnlyForSession(value: *PermissionApprovedReadOnlyForSession) void {
+    wipeString(value.kind);
+    for (@constCast(value.directories)) |*item| {
+        wipeString(item.*);
+    }
 }
 
 fn wipeUserToolSessionApprovalCommands(value: *UserToolSessionApprovalCommands) void {
@@ -20437,7 +22725,7 @@ fn wipeUserToolSessionApprovalExtensionManagement(value: *UserToolSessionApprova
     }
 }
 
-fn wipeUserToolSessionApprovalFactory(value: *UserToolSessionApprovalFactory) void {
+fn wipeUserToolSessionApprovalWorkflow(value: *UserToolSessionApprovalWorkflow) void {
     wipeString(value.kind);
     if (value.approval_key) |*present| {
         wipeString(present.*);
@@ -20480,8 +22768,8 @@ fn wipeUserToolSessionApproval(value: *UserToolSessionApproval) void {
         .extension_management => |*payload| {
             wipeUserToolSessionApprovalExtensionManagement(&payload.*);
         },
-        .factory => |*payload| {
-            wipeUserToolSessionApprovalFactory(&payload.*);
+        .workflow => |*payload| {
+            wipeUserToolSessionApprovalWorkflow(&payload.*);
         },
         .extension_permission_access => |*payload| {
             wipeUserToolSessionApprovalExtensionPermissionAccess(&payload.*);
@@ -20553,6 +22841,9 @@ fn wipePermissionResult(value: *PermissionResult) void {
         .approved => |*payload| {
             wipePermissionApproved(&payload.*);
         },
+        .approved_read_only_for_session => |*payload| {
+            wipePermissionApprovedReadOnlyForSession(&payload.*);
+        },
         .approved_for_session => |*payload| {
             wipePermissionApprovedForSession(&payload.*);
         },
@@ -20585,7 +22876,51 @@ fn wipePermissionCompletedData(value: *PermissionCompletedData) void {
     if (value.tool_call_id) |*present| {
         wipeString(present.*);
     }
+    if (value.recovery_episode_id) |*present| {
+        wipeString(present.*);
+    }
+    if (value.blocker) |*present| {
+        wipeTaskBlocker(&present.*);
+    }
     wipePermissionResult(&value.result);
+    if (value.decision_source) |*present| {
+        wipePermissionDecisionSource(&present.*);
+    }
+}
+
+fn wipePermissionMessageAuthorizationPolarity(value: *PermissionMessageAuthorizationPolarity) void {
+    _ = value;
+}
+
+fn wipePermissionContextualAuthorizationData(value: *PermissionContextualAuthorizationData) void {
+    wipeString(value.record_id);
+    wipeString(value.request_id);
+    wipePermissionMessageAuthorizationPolarity(&value.polarity);
+}
+
+fn wipePermissionMessageAuthorizationData(value: *PermissionMessageAuthorizationData) void {
+    wipeString(value.record_id);
+    wipePermissionMessageAuthorizationPolarity(&value.polarity);
+    wipeString(value.action_class);
+    if (value.target_members) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+        }
+    }
+    if (value.task) |*present| {
+        wipeString(present.*);
+    }
+    if (value.world) |*present| {
+        wipeJsonValue(&present.*);
+    }
+}
+
+fn wipePermissionMessageAuthorizationDegradedData(value: *PermissionMessageAuthorizationDegradedData) void {
+    _ = value;
+}
+
+fn wipePermissionMessageAuthorizationReadData(value: *PermissionMessageAuthorizationReadData) void {
+    _ = value;
 }
 
 fn wipePermissionRequestShellCommand(value: *PermissionRequestShellCommand) void {
@@ -20599,6 +22934,23 @@ fn wipePermissionRequestShellCommandSegment(value: *PermissionRequestShellComman
 
 fn wipePermissionRequestShellPossibleUrl(value: *PermissionRequestShellPossibleUrl) void {
     wipeString(value.url);
+}
+
+fn wipePermissionSandboxPathGrantAccess(value: *PermissionSandboxPathGrantAccess) void {
+    _ = value;
+}
+
+fn wipePermissionSandboxPathGrant(value: *PermissionSandboxPathGrant) void {
+    wipeString(value.path);
+    if (value.denied_path) |*present| {
+        wipeString(present.*);
+    }
+    wipePermissionSandboxPathGrantAccess(&value.access);
+    if (value.removed_readonly_paths) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+        }
+    }
 }
 
 fn wipePermissionRequestShell(value: *PermissionRequestShell) void {
@@ -20619,6 +22971,18 @@ fn wipePermissionRequestShell(value: *PermissionRequestShell) void {
     for (@constCast(value.possible_paths)) |*item| {
         wipeString(item.*);
     }
+    if (value.resolved_working_directory) |*present| {
+        wipeString(present.*);
+    }
+    if (value.resolved_paths) |*present| {
+        {
+            var iterator = present.*.map.iterator();
+            while (iterator.next()) |entry| {
+                wipeString(entry.key_ptr.*);
+                wipeString(entry.value_ptr.*);
+            }
+        }
+    }
     for (@constCast(value.possible_urls)) |*item| {
         wipePermissionRequestShellPossibleUrl(&item.*);
     }
@@ -20627,6 +22991,9 @@ fn wipePermissionRequestShell(value: *PermissionRequestShell) void {
     }
     if (value.request_sandbox_bypass_reason) |*present| {
         wipeString(present.*);
+    }
+    if (value.sandbox_path_grant) |*present| {
+        wipePermissionSandboxPathGrant(&present.*);
     }
 }
 
@@ -20637,12 +23004,18 @@ fn wipePermissionRequestWrite(value: *PermissionRequestWrite) void {
     }
     wipeString(value.intention);
     wipeString(value.file_name);
+    if (value.resolved_path) |*present| {
+        wipeString(present.*);
+    }
     wipeString(value.diff);
     if (value.new_file_contents) |*present| {
         wipeString(present.*);
     }
     if (value.request_sandbox_bypass_reason) |*present| {
         wipeString(present.*);
+    }
+    if (value.sandbox_path_grant) |*present| {
+        wipePermissionSandboxPathGrant(&present.*);
     }
 }
 
@@ -20653,8 +23026,14 @@ fn wipePermissionRequestRead(value: *PermissionRequestRead) void {
     }
     wipeString(value.intention);
     wipeString(value.path);
+    if (value.resolved_path) |*present| {
+        wipeString(present.*);
+    }
     if (value.request_sandbox_bypass_reason) |*present| {
         wipeString(present.*);
+    }
+    if (value.sandbox_path_grant) |*present| {
+        wipePermissionSandboxPathGrant(&present.*);
     }
 }
 
@@ -20705,6 +23084,22 @@ fn wipePermissionRequestMemoryScope(value: *PermissionRequestMemoryScope) void {
     _ = value;
 }
 
+fn wipePermissionApprovalEvaluationReasonCode(value: *PermissionApprovalEvaluationReasonCode) void {
+    _ = value;
+}
+
+fn wipePermissionApprovalEvaluationJudgeStatus(value: *PermissionApprovalEvaluationJudgeStatus) void {
+    _ = value;
+}
+
+fn wipePermissionApprovalEvaluationEvaluationStage(value: *PermissionApprovalEvaluationEvaluationStage) void {
+    _ = value;
+}
+
+fn wipePermissionApprovalEvaluation(value: *PermissionApprovalEvaluation) void {
+    _ = value;
+}
+
 fn wipeAssistedApprovalRecommendation(value: *AssistedApprovalRecommendation) void {
     _ = value;
 }
@@ -20714,6 +23109,9 @@ fn wipeAssistedApprovalJudgeFailureReason(value: *AssistedApprovalJudgeFailureRe
 }
 
 fn wipePermissionAssistedApproval(value: *PermissionAssistedApproval) void {
+    if (value.evaluation) |*present| {
+        wipePermissionApprovalEvaluation(&present.*);
+    }
     wipeAssistedApprovalRecommendation(&value.recommendation);
     if (value.reason) |*present| {
         wipeString(present.*);
@@ -20795,27 +23193,27 @@ fn wipePermissionRequestExtensionManagement(value: *PermissionRequestExtensionMa
     }
 }
 
-fn wipeFactoryPermissionOperation(value: *FactoryPermissionOperation) void {
+fn wipeWorkflowPermissionOperation(value: *WorkflowPermissionOperation) void {
     _ = value;
 }
 
-fn wipeFactoryPermissionPhase(value: *FactoryPermissionPhase) void {
+fn wipeWorkflowPermissionPhase(value: *WorkflowPermissionPhase) void {
     wipeString(value.title);
     if (value.detail) |*present| {
         wipeString(present.*);
     }
 }
 
-fn wipePermissionRequestFactory(value: *PermissionRequestFactory) void {
+fn wipePermissionRequestWorkflow(value: *PermissionRequestWorkflow) void {
     wipeString(value.kind);
     if (value.tool_call_id) |*present| {
         wipeString(present.*);
     }
-    wipeFactoryPermissionOperation(&value.operation);
+    wipeWorkflowPermissionOperation(&value.operation);
     wipeString(value.name);
     wipeString(value.description);
     for (@constCast(value.phases)) |*item| {
-        wipeFactoryPermissionPhase(&item.*);
+        wipeWorkflowPermissionPhase(&item.*);
     }
     wipeString(value.approval_key);
 }
@@ -20871,8 +23269,8 @@ fn wipePermissionRequest(value: *PermissionRequest) void {
         .extension_management => |*payload| {
             wipePermissionRequestExtensionManagement(&payload.*);
         },
-        .factory => |*payload| {
-            wipePermissionRequestFactory(&payload.*);
+        .workflow => |*payload| {
+            wipePermissionRequestWorkflow(&payload.*);
         },
         .extension_permission_access => |*payload| {
             wipePermissionRequestExtensionPermissionAccess(&payload.*);
@@ -20902,6 +23300,9 @@ fn wipePermissionPromptRequestCommands(value: *PermissionPromptRequestCommands) 
     if (value.request_sandbox_bypass_reason) |*present| {
         wipeString(present.*);
     }
+    if (value.sandbox_path_grant) |*present| {
+        wipePermissionSandboxPathGrant(&present.*);
+    }
 }
 
 fn wipePermissionPromptRequestWrite(value: *PermissionPromptRequestWrite) void {
@@ -20911,6 +23312,9 @@ fn wipePermissionPromptRequestWrite(value: *PermissionPromptRequestWrite) void {
     }
     wipeString(value.intention);
     wipeString(value.file_name);
+    if (value.resolved_path) |*present| {
+        wipeString(present.*);
+    }
     wipeString(value.diff);
     if (value.new_file_contents) |*present| {
         wipeString(present.*);
@@ -20927,6 +23331,9 @@ fn wipePermissionPromptRequestRead(value: *PermissionPromptRequestRead) void {
     }
     wipeString(value.intention);
     wipeString(value.path);
+    if (value.resolved_path) |*present| {
+        wipeString(present.*);
+    }
     if (value.assisted_approval) |*present| {
         wipePermissionAssistedApproval(&present.*);
     }
@@ -21023,6 +23430,11 @@ fn wipePermissionPromptRequestPath(value: *PermissionPromptRequestPath) void {
     for (@constCast(value.paths)) |*item| {
         wipeString(item.*);
     }
+    if (value.read_only_directories) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+        }
+    }
     if (value.assisted_approval) |*present| {
         wipePermissionAssistedApproval(&present.*);
     }
@@ -21059,16 +23471,16 @@ fn wipePermissionPromptRequestExtensionManagement(value: *PermissionPromptReques
     }
 }
 
-fn wipePermissionPromptRequestFactory(value: *PermissionPromptRequestFactory) void {
+fn wipePermissionPromptRequestWorkflow(value: *PermissionPromptRequestWorkflow) void {
     wipeString(value.kind);
     if (value.tool_call_id) |*present| {
         wipeString(present.*);
     }
-    wipeFactoryPermissionOperation(&value.operation);
+    wipeWorkflowPermissionOperation(&value.operation);
     wipeString(value.name);
     wipeString(value.description);
     for (@constCast(value.phases)) |*item| {
-        wipeFactoryPermissionPhase(&item.*);
+        wipeWorkflowPermissionPhase(&item.*);
     }
     wipeString(value.approval_key);
     if (value.assisted_approval) |*present| {
@@ -21136,8 +23548,8 @@ fn wipePermissionPromptRequest(value: *PermissionPromptRequest) void {
         .extension_management => |*payload| {
             wipePermissionPromptRequestExtensionManagement(&payload.*);
         },
-        .factory => |*payload| {
-            wipePermissionPromptRequestFactory(&payload.*);
+        .workflow => |*payload| {
+            wipePermissionPromptRequestWorkflow(&payload.*);
         },
         .extension_permission_access => |*payload| {
             wipePermissionPromptRequestExtensionPermissionAccess(&payload.*);
@@ -21146,6 +23558,10 @@ fn wipePermissionPromptRequest(value: *PermissionPromptRequest) void {
             wipePermissionPromptRequestExtensionEnvAccess(&payload.*);
         },
     }
+}
+
+fn wipePermissionMode(value: *PermissionMode) void {
+    _ = value;
 }
 
 fn wipeSessionMode(value: *SessionMode) void {
@@ -21158,11 +23574,17 @@ fn wipePermissionRequestedData(value: *PermissionRequestedData) void {
     if (value.prompt_request) |*present| {
         wipePermissionPromptRequest(&present.*);
     }
+    if (value.permission_mode) |*present| {
+        wipePermissionMode(&present.*);
+    }
     if (value.agent_mode) |*present| {
         wipeSessionMode(&present.*);
     }
     if (value.risk_assessment) |*present| {
         wipeJsonValue(&present.*);
+    }
+    if (value.recovery_episode_id) |*present| {
+        wipeString(present.*);
     }
 }
 
@@ -21380,7 +23802,7 @@ fn wipeSandboxDecisionDataVariant4(value: *SandboxDecisionDataVariant4) void {
     wipeString(value.kind);
 }
 
-fn wipeSandboxBypassSource(value: *SandboxBypassSource) void {
+fn wipeSandboxPermissiveSource(value: *SandboxPermissiveSource) void {
     _ = value;
 }
 
@@ -21392,23 +23814,19 @@ fn wipeSandboxDecisionDataVariant5(value: *SandboxDecisionDataVariant5) void {
     }
     wipeSandboxPlatform(&value.platform);
     wipeSandboxEnforcementPoint(&value.enforcement_point);
-    wipeSandboxBypassSource(&value.source);
-    if (value.denial_class) |*present| {
-        wipeSandboxDenialClass(&present.*);
-    }
-    if (value.confidence) |*present| {
-        wipeSandboxDenialConfidence(&present.*);
-    }
+    wipeSandboxDenialClass(&value.denial_class);
+    wipeSandboxPermissiveSource(&value.permissive_source);
     if (value.denied_resource) |*present| {
         wipeString(present.*);
     }
     if (value.command) |*present| {
         wipeString(present.*);
     }
-    if (value.process_name) |*present| {
-        wipeString(present.*);
-    }
     wipeString(value.kind);
+}
+
+fn wipeSandboxBypassSource(value: *SandboxBypassSource) void {
+    _ = value;
 }
 
 fn wipeSandboxDecisionDataVariant6(value: *SandboxDecisionDataVariant6) void {
@@ -21439,6 +23857,33 @@ fn wipeSandboxDecisionDataVariant6(value: *SandboxDecisionDataVariant6) void {
 }
 
 fn wipeSandboxDecisionDataVariant7(value: *SandboxDecisionDataVariant7) void {
+    wipeSandboxControl(&value.control);
+    wipeSandboxOutcome(&value.outcome);
+    if (value.tool_call_id) |*present| {
+        wipeString(present.*);
+    }
+    wipeSandboxPlatform(&value.platform);
+    wipeSandboxEnforcementPoint(&value.enforcement_point);
+    wipeSandboxBypassSource(&value.source);
+    if (value.denial_class) |*present| {
+        wipeSandboxDenialClass(&present.*);
+    }
+    if (value.confidence) |*present| {
+        wipeSandboxDenialConfidence(&present.*);
+    }
+    if (value.denied_resource) |*present| {
+        wipeString(present.*);
+    }
+    if (value.command) |*present| {
+        wipeString(present.*);
+    }
+    if (value.process_name) |*present| {
+        wipeString(present.*);
+    }
+    wipeString(value.kind);
+}
+
+fn wipeSandboxDecisionDataVariant8(value: *SandboxDecisionDataVariant8) void {
     wipeSandboxControl(&value.control);
     wipeSandboxOutcome(&value.outcome);
     if (value.tool_call_id) |*present| {
@@ -21478,14 +23923,17 @@ fn wipeSandboxDecisionData(value: *SandboxDecisionData) void {
         .access_denied => |*payload| {
             wipeSandboxDecisionDataVariant4(&payload.*);
         },
-        .bypass_decided => |*payload| {
+        .access_recorded => |*payload| {
             wipeSandboxDecisionDataVariant5(&payload.*);
         },
-        .permissive_retry_decided => |*payload| {
+        .bypass_decided => |*payload| {
             wipeSandboxDecisionDataVariant6(&payload.*);
         },
-        .permissive_retry_completed => |*payload| {
+        .permissive_retry_decided => |*payload| {
             wipeSandboxDecisionDataVariant7(&payload.*);
+        },
+        .permissive_retry_completed => |*payload| {
+            wipeSandboxDecisionDataVariant8(&payload.*);
         },
     }
 }
@@ -21687,6 +24135,12 @@ fn wipeCanvasUnavailableData(value: *CanvasUnavailableData) void {
     wipeString(value.canvas_id);
 }
 
+fn wipeResponsesReasoning(value: *ResponsesReasoning) void {
+    wipeString(value.model);
+    wipeString(value.initial_effort);
+    wipeString(value.effort);
+}
+
 fn wipeCompactionCompleteCompactionTokensUsedCopilotUsageTokenDetail(value: *CompactionCompleteCompactionTokensUsedCopilotUsageTokenDetail) void {
     if (value.model) |*present| {
         wipeString(present.*);
@@ -21726,6 +24180,12 @@ fn wipeCompactionCompleteData(value: *CompactionCompleteData) void {
         wipeString(present.*);
     }
     if (value.summary_content) |*present| {
+        wipeString(present.*);
+    }
+    if (value.responses_reasoning) |*present| {
+        wipeResponsesReasoning(&present.*);
+    }
+    if (value.active_workflow_summary) |*present| {
         wipeString(present.*);
     }
     if (value.active_factory_summary) |*present| {
@@ -22191,6 +24651,16 @@ fn wipeExtensionsLoadedData(value: *ExtensionsLoadedData) void {
     }
 }
 
+fn wipeShutdownCodeChanges(value: *ShutdownCodeChanges) void {
+    for (@constCast(value.files_modified)) |*item| {
+        wipeString(item.*);
+    }
+}
+
+fn wipeFusionChangeCheckpointData(value: *FusionChangeCheckpointData) void {
+    wipeShutdownCodeChanges(&value.code_changes);
+}
+
 fn wipeFusionCommitKind(value: *FusionCommitKind) void {
     _ = value;
 }
@@ -22243,6 +24713,14 @@ fn wipeFusionPhasePlanStep(value: *FusionPhasePlanStep) void {
     wipeFusionConversationScope(&value.scope);
 }
 
+fn wipeFusionCritic(value: *FusionCritic) void {
+    wipeString(value.phase_id);
+    wipeString(value.model);
+    if (value.reasoning_effort) |*present| {
+        wipeString(present.*);
+    }
+}
+
 fn wipeFusionFollowUpAction(value: *FusionFollowUpAction) void {
     _ = value;
 }
@@ -22279,6 +24757,9 @@ fn wipeFusionResolvedData(value: *FusionResolvedData) void {
         wipeFusionScores(&present.*);
     }
     wipeFusionPattern(&value.pattern);
+    if (value.hint) |*present| {
+        wipeString(present.*);
+    }
     if (value.phase_plan) |*present| {
         for (@constCast(present.*)) |*item| {
             wipeFusionPhasePlanStep(&item.*);
@@ -22287,6 +24768,17 @@ fn wipeFusionResolvedData(value: *FusionResolvedData) void {
     wipeString(value.primary_model);
     if (value.secondary_model) |*present| {
         wipeString(present.*);
+    }
+    if (value.judge_model) |*present| {
+        wipeString(present.*);
+    }
+    if (value.repair_model) |*present| {
+        wipeString(present.*);
+    }
+    if (value.critics) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeFusionCritic(&item.*);
+        }
     }
     wipeString(value.fallback_model);
     wipeString(value.follow_up_model);
@@ -22359,6 +24851,72 @@ fn wipeIdleData(value: *IdleData) void {
     }
 }
 
+fn wipeIndexedSearchState(value: *IndexedSearchState) void {
+    _ = value;
+}
+
+fn wipeIndexedSearchDataVariant1(value: *IndexedSearchDataVariant1) void {
+    wipeIndexedSearchState(&value.state);
+    wipeString(value.kind);
+}
+
+fn wipeIndexedSearchOutcome(value: *IndexedSearchOutcome) void {
+    _ = value;
+}
+
+fn wipeIndexedSearchDisabledReason(value: *IndexedSearchDisabledReason) void {
+    _ = value;
+}
+
+fn wipeIndexedSearchDataVariant2(value: *IndexedSearchDataVariant2) void {
+    wipeIndexedSearchOutcome(&value.outcome);
+    if (value.disabled_reason) |*present| {
+        wipeIndexedSearchDisabledReason(&present.*);
+    }
+    if (value.error_message) |*present| {
+        wipeString(present.*);
+    }
+    wipeString(value.kind);
+}
+
+fn wipeIndexedSearchErrorType(value: *IndexedSearchErrorType) void {
+    _ = value;
+}
+
+fn wipeIndexedSearchDataVariant3(value: *IndexedSearchDataVariant3) void {
+    wipeIndexedSearchErrorType(&value.error_type);
+    if (value.error_message) |*present| {
+        wipeString(present.*);
+    }
+    wipeString(value.kind);
+}
+
+fn wipeIndexedSearchIncrementalPhase(value: *IndexedSearchIncrementalPhase) void {
+    _ = value;
+}
+
+fn wipeIndexedSearchDataVariant4(value: *IndexedSearchDataVariant4) void {
+    wipeIndexedSearchIncrementalPhase(&value.phase);
+    wipeString(value.kind);
+}
+
+fn wipeIndexedSearchData(value: *IndexedSearchData) void {
+    switch (value.*) {
+        .status => |*payload| {
+            wipeIndexedSearchDataVariant1(&payload.*);
+        },
+        .startup => |*payload| {
+            wipeIndexedSearchDataVariant2(&payload.*);
+        },
+        .server_error => |*payload| {
+            wipeIndexedSearchDataVariant3(&payload.*);
+        },
+        .incremental => |*payload| {
+            wipeIndexedSearchDataVariant4(&payload.*);
+        },
+    }
+}
+
 fn wipeInfoData(value: *InfoData) void {
     wipeString(value.info_type);
     wipeString(value.message);
@@ -22419,6 +24977,12 @@ fn wipeMcpServerStatusChangedData(value: *McpServerStatusChangedData) void {
     if (value.error_) |*present| {
         wipeString(present.*);
     }
+    if (value.error_classification) |*present| {
+        wipeString(present.*);
+    }
+    if (value.config_source) |*present| {
+        wipeString(present.*);
+    }
 }
 
 fn wipeMcpServerSource(value: *McpServerSource) void {
@@ -22440,6 +25004,9 @@ fn wipeMcpServersLoadedServer(value: *McpServersLoadedServer) void {
     wipeMcpServerStatus(&value.status);
     if (value.source) |*present| {
         wipeMcpServerSource(&present.*);
+    }
+    if (value.display_name) |*present| {
+        wipeString(present.*);
     }
     if (value.error_) |*present| {
         wipeString(present.*);
@@ -22532,8 +25099,13 @@ fn wipeModelChangeData(value: *ModelChangeData) void {
     }
 }
 
-fn wipePermissionMode(value: *PermissionMode) void {
+fn wipeModelDeselectedReason(value: *ModelDeselectedReason) void {
     _ = value;
+}
+
+fn wipeModelDeselectedData(value: *ModelDeselectedData) void {
+    wipeString(value.previous_model);
+    wipeModelDeselectedReason(&value.reason);
 }
 
 fn wipePermissionsChangedData(value: *PermissionsChangedData) void {
@@ -22632,12 +25204,6 @@ fn wipeShutdownType(value: *ShutdownType) void {
 
 fn wipeShutdownTokenDetail(value: *ShutdownTokenDetail) void {
     _ = value;
-}
-
-fn wipeShutdownCodeChanges(value: *ShutdownCodeChanges) void {
-    for (@constCast(value.files_modified)) |*item| {
-        wipeString(item.*);
-    }
 }
 
 fn wipeShutdownModelMetricRequests(value: *ShutdownModelMetricRequests) void {
@@ -22745,6 +25311,11 @@ fn wipeSkillsLoadedData(value: *SkillsLoadedData) void {
 
 fn wipeSnapshotRewindData(value: *SnapshotRewindData) void {
     wipeString(value.up_to_event_id);
+    if (value.event_ids) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+        }
+    }
 }
 
 fn wipeGitHubMcpToolConfig(value: *GitHubMcpToolConfig) void {
@@ -22810,6 +25381,9 @@ fn wipeTaskCompleteData(value: *TaskCompleteData) void {
     }
     if (value.reason) |*present| {
         wipeString(present.*);
+    }
+    if (value.blocker) |*present| {
+        wipeTaskBlocker(&present.*);
     }
 }
 
@@ -22888,6 +25462,28 @@ fn wipeSessionLimitsExhaustedRequestedData(value: *SessionLimitsExhaustedRequest
     wipeString(value.request_id);
 }
 
+fn wipeSkillContextDeliveredData(value: *SkillContextDeliveredData) void {
+    wipeString(value.content);
+    wipeString(value.source);
+    if (value.interaction_id) |*present| {
+        wipeString(present.*);
+    }
+}
+
+fn wipeSkillContextDeliveredRefData(value: *SkillContextDeliveredRefData) void {
+    wipeString(value.content_id);
+    if (value.prefix) |*present| {
+        wipeString(present.*);
+    }
+    if (value.suffix) |*present| {
+        wipeString(present.*);
+    }
+    wipeString(value.source);
+    if (value.interaction_id) |*present| {
+        wipeString(present.*);
+    }
+}
+
 fn wipeSkillInvokedTrigger(value: *SkillInvokedTrigger) void {
     _ = value;
 }
@@ -22899,6 +25495,35 @@ fn wipeSkillInvokedData(value: *SkillInvokedData) void {
     }
     wipeString(value.path);
     wipeString(value.content);
+    if (value.allowed_tools) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+        }
+    }
+    if (value.source) |*present| {
+        wipeString(present.*);
+    }
+    if (value.plugin_name) |*present| {
+        wipeString(present.*);
+    }
+    if (value.plugin_version) |*present| {
+        wipeString(present.*);
+    }
+    if (value.description) |*present| {
+        wipeString(present.*);
+    }
+    if (value.trigger) |*present| {
+        wipeSkillInvokedTrigger(&present.*);
+    }
+}
+
+fn wipeSkillInvokedRefData(value: *SkillInvokedRefData) void {
+    wipeString(value.name);
+    if (value.model) |*present| {
+        wipeString(present.*);
+    }
+    wipeString(value.path);
+    wipeString(value.content_id);
     if (value.allowed_tools) |*present| {
         for (@constCast(present.*)) |*item| {
             wipeString(item.*);
@@ -23013,7 +25638,13 @@ fn wipeSubagentStartedData(value: *SubagentStartedData) void {
     if (value.task_model_source) |*present| {
         wipeSubagentTaskModelSource(&present.*);
     }
+    if (value.model_selection_source) |*present| {
+        wipeSubagentModelSelectionSource(&present.*);
+    }
     if (value.factory_run_id) |*present| {
+        wipeString(present.*);
+    }
+    if (value.workflow_run_id) |*present| {
         wipeString(present.*);
     }
     if (value.parent_id) |*present| {
@@ -23025,6 +25656,10 @@ fn wipeSubagentStartedData(value: *SubagentStartedData) void {
     if (value.execution_mode) |*present| {
         wipeString(present.*);
     }
+}
+
+fn wipeSystemMessageContentBlock(value: *SystemMessageContentBlock) void {
+    wipeString(value.content);
 }
 
 fn wipeSystemMessageRole(value: *SystemMessageRole) void {
@@ -23048,6 +25683,11 @@ fn wipeSystemMessageMetadata(value: *SystemMessageMetadata) void {
 
 fn wipeSystemMessageData(value: *SystemMessageData) void {
     wipeString(value.content);
+    if (value.content_blocks) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeSystemMessageContentBlock(&item.*);
+        }
+    }
     if (value.interaction_id) |*present| {
         wipeString(present.*);
     }
@@ -23126,35 +25766,35 @@ fn wipeSystemNotificationInstructionDiscovered(value: *SystemNotificationInstruc
     }
 }
 
-fn wipeSystemNotificationFactoryCompletedStatus(value: *SystemNotificationFactoryCompletedStatus) void {
+fn wipeSystemNotificationWorkflowCompletedStatus(value: *SystemNotificationWorkflowCompletedStatus) void {
     _ = value;
 }
 
-fn wipeSystemNotificationFactoryPauseInfoVariant1(value: *SystemNotificationFactoryPauseInfoVariant1) void {
+fn wipeSystemNotificationWorkflowPauseInfoVariant1(value: *SystemNotificationWorkflowPauseInfoVariant1) void {
     wipeString(value.type);
 }
 
-fn wipeSystemNotificationFactoryPauseInfoVariant2(value: *SystemNotificationFactoryPauseInfoVariant2) void {
+fn wipeSystemNotificationWorkflowPauseInfoVariant2(value: *SystemNotificationWorkflowPauseInfoVariant2) void {
     wipeString(value.key);
     wipeString(value.type);
 }
 
-fn wipeSystemNotificationFactoryPauseInfo(value: *SystemNotificationFactoryPauseInfo) void {
+fn wipeSystemNotificationWorkflowPauseInfo(value: *SystemNotificationWorkflowPauseInfo) void {
     switch (value.*) {
         .user => |*payload| {
-            wipeSystemNotificationFactoryPauseInfoVariant1(&payload.*);
+            wipeSystemNotificationWorkflowPauseInfoVariant1(&payload.*);
         },
         .checkpoint => |*payload| {
-            wipeSystemNotificationFactoryPauseInfoVariant2(&payload.*);
+            wipeSystemNotificationWorkflowPauseInfoVariant2(&payload.*);
         },
     }
 }
 
-fn wipeSystemNotificationFactoryCompleted(value: *SystemNotificationFactoryCompleted) void {
+fn wipeSystemNotificationWorkflowCompleted(value: *SystemNotificationWorkflowCompleted) void {
     wipeString(value.type);
     wipeString(value.run_id);
-    wipeString(value.factory_name);
-    wipeSystemNotificationFactoryCompletedStatus(&value.status);
+    wipeString(value.workflow_name);
+    wipeSystemNotificationWorkflowCompletedStatus(&value.status);
     if (value.result_preview) |*present| {
         wipeString(present.*);
     }
@@ -23165,7 +25805,7 @@ fn wipeSystemNotificationFactoryCompleted(value: *SystemNotificationFactoryCompl
         wipeString(present.*);
     }
     if (value.pause_info) |*present| {
-        wipeSystemNotificationFactoryPauseInfo(&present.*);
+        wipeSystemNotificationWorkflowPauseInfo(&present.*);
     }
 }
 
@@ -23196,8 +25836,8 @@ fn wipeSystemNotification(value: *SystemNotification) void {
         .instruction_discovered => |*payload| {
             wipeSystemNotificationInstructionDiscovered(&payload.*);
         },
-        .factory_completed => |*payload| {
-            wipeSystemNotificationFactoryCompleted(&payload.*);
+        .workflow_completed => |*payload| {
+            wipeSystemNotificationWorkflowCompleted(&payload.*);
         },
         .unclassified => |*payload| {
             wipeSystemNotificationUnclassified(&payload.*);
@@ -23208,6 +25848,9 @@ fn wipeSystemNotification(value: *SystemNotification) void {
 fn wipeSystemNotificationData(value: *SystemNotificationData) void {
     wipeString(value.content);
     wipeSystemNotification(&value.kind);
+    if (value.responses_reasoning) |*present| {
+        wipeResponsesReasoning(&present.*);
+    }
 }
 
 fn wipeToolExecutionCompleteContentText(value: *ToolExecutionCompleteContentText) void {
@@ -23598,6 +26241,10 @@ fn wipeToolExecutionCompleteToolDescription(value: *ToolExecutionCompleteToolDes
     }
 }
 
+fn wipeToolExecutionCompleteShellExecution(value: *ToolExecutionCompleteShellExecution) void {
+    _ = value;
+}
+
 fn wipeToolExecutionCompleteData(value: *ToolExecutionCompleteData) void {
     wipeString(value.tool_call_id);
     if (value.model) |*present| {
@@ -23629,6 +26276,9 @@ fn wipeToolExecutionCompleteData(value: *ToolExecutionCompleteData) void {
     }
     if (value.tool_description) |*present| {
         wipeToolExecutionCompleteToolDescription(&present.*);
+    }
+    if (value.shell_execution) |*present| {
+        wipeToolExecutionCompleteShellExecution(&present.*);
     }
     if (value.parent_tool_call_id) |*present| {
         wipeString(present.*);
@@ -23691,6 +26341,9 @@ fn wipeToolExecutionStartToolDescription(value: *ToolExecutionStartToolDescripti
 fn wipeToolExecutionStartData(value: *ToolExecutionStartData) void {
     wipeString(value.tool_call_id);
     wipeString(value.tool_name);
+    if (value.tool_title) |*present| {
+        wipeString(present.*);
+    }
     if (value.arguments) |*present| {
         wipeJsonValue(&present.*);
     }
@@ -23703,8 +26356,17 @@ fn wipeToolExecutionStartData(value: *ToolExecutionStartData) void {
     if (value.mcp_server_name) |*present| {
         wipeString(present.*);
     }
+    if (value.mcp_config_server_name) |*present| {
+        wipeString(present.*);
+    }
     if (value.mcp_tool_name) |*present| {
         wipeString(present.*);
+    }
+    if (value.mcp_transport) |*present| {
+        wipeMcpServerTransport(&present.*);
+    }
+    if (value.mcp_config_source) |*present| {
+        wipeMcpServerSource(&present.*);
     }
     if (value.turn_id) |*present| {
         wipeString(present.*);
@@ -23763,6 +26425,9 @@ fn wipeUserMessageAgentMode(value: *UserMessageAgentMode) void {
 
 fn wipeUserMessageData(value: *UserMessageData) void {
     wipeString(value.content);
+    if (value.responses_reasoning) |*present| {
+        wipeResponsesReasoning(&present.*);
+    }
     if (value.message_id) |*present| {
         wipeString(present.*);
     }
@@ -23822,6 +26487,27 @@ fn wipeUserInputRequestedData(value: *UserInputRequestedData) void {
     if (value.tool_call_id) |*present| {
         wipeString(present.*);
     }
+}
+
+fn wipeWorkflowRunSettledStatus(value: *WorkflowRunSettledStatus) void {
+    _ = value;
+}
+
+fn wipeWorkflowRunSettledData(value: *WorkflowRunSettledData) void {
+    wipeString(value.run_id);
+    wipeWorkflowRunSettledStatus(&value.status);
+    if (value.failure_type) |*present| {
+        wipeString(present.*);
+    }
+}
+
+fn wipeWorkflowRunStartedData(value: *WorkflowRunStartedData) void {
+    wipeString(value.run_id);
+    wipeString(value.workflow_name);
+}
+
+fn wipeWorkflowRunUpdatedData(value: *WorkflowRunUpdatedData) void {
+    wipeString(value.run_id);
 }
 
 fn freeAbortReason(value: *AbortReason, _: std.mem.Allocator) void {
@@ -23956,6 +26642,10 @@ fn freeFusionPhaseCompletedData(value: *FusionPhaseCompletedData, allocator: std
     freeFusionConversationScope(&value.conversation_scope, allocator);
     wipeString(value.model);
     allocator.free(@constCast(value.model));
+    if (value.reasoning_effort) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     freeFusionPhaseStatus(&value.status, allocator);
     wipeString(value.content);
     allocator.free(@constCast(value.content));
@@ -23986,6 +26676,10 @@ fn freeFusionPhaseFailedData(value: *FusionPhaseFailedData, allocator: std.mem.A
     freeFusionConversationScope(&value.conversation_scope, allocator);
     wipeString(value.model);
     allocator.free(@constCast(value.model));
+    if (value.reasoning_effort) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     freeFusionPhaseStatus(&value.status, allocator);
     wipeString(value.reason);
     allocator.free(@constCast(value.reason));
@@ -24012,6 +26706,10 @@ fn freeFusionPhaseStartedData(value: *FusionPhaseStartedData, allocator: std.mem
     freeFusionConversationScope(&value.conversation_scope, allocator);
     wipeString(value.model);
     allocator.free(@constCast(value.model));
+    if (value.reasoning_effort) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
 }
 
 fn freeAssistantIdleData(value: *AssistantIdleData, allocator: std.mem.Allocator) void {
@@ -24240,6 +26938,10 @@ fn freeFusionAttribution(value: *FusionAttribution, allocator: std.mem.Allocator
 fn freeAssistantMessageData(value: *AssistantMessageData, allocator: std.mem.Allocator) void {
     wipeString(value.message_id);
     allocator.free(@constCast(value.message_id));
+    if (value.originating_message_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.model) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
@@ -24381,6 +27083,10 @@ fn freeAssistantTurnEndData(value: *AssistantTurnEndData, allocator: std.mem.All
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.parent_tool_call_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
 }
 
 fn freeAssistantTurnRetryData(value: *AssistantTurnRetryData, allocator: std.mem.Allocator) void {
@@ -24404,6 +27110,10 @@ fn freeAssistantTurnStartData(value: *AssistantTurnStartData, allocator: std.mem
         allocator.free(@constCast(present.*));
     }
     if (value.interaction_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.parent_tool_call_id) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
@@ -24455,6 +27165,13 @@ fn freeAssistantUsageData(value: *AssistantUsageData, allocator: std.mem.Allocat
     allocator.free(@constCast(value.model));
     if (value.cache_expires_at) |*present| {
         wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.thinking_dropped_reasons) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+            allocator.free(@constCast(item.*));
+        }
         allocator.free(@constCast(present.*));
     }
     if (value.initiator) |*present| {
@@ -24746,32 +27463,6 @@ fn freeExternalToolRequestedData(value: *ExternalToolRequestedData, allocator: s
     }
 }
 
-fn freeFactoryRunSettledStatus(value: *FactoryRunSettledStatus, _: std.mem.Allocator) void {
-    _ = value;
-}
-
-fn freeFactoryRunSettledData(value: *FactoryRunSettledData, allocator: std.mem.Allocator) void {
-    wipeString(value.run_id);
-    allocator.free(@constCast(value.run_id));
-    freeFactoryRunSettledStatus(&value.status, allocator);
-    if (value.failure_type) |*present| {
-        wipeString(present.*);
-        allocator.free(@constCast(present.*));
-    }
-}
-
-fn freeFactoryRunStartedData(value: *FactoryRunStartedData, allocator: std.mem.Allocator) void {
-    wipeString(value.run_id);
-    allocator.free(@constCast(value.run_id));
-    wipeString(value.factory_name);
-    allocator.free(@constCast(value.factory_name));
-}
-
-fn freeFactoryRunUpdatedData(value: *FactoryRunUpdatedData, allocator: std.mem.Allocator) void {
-    wipeString(value.run_id);
-    allocator.free(@constCast(value.run_id));
-}
-
 fn freeHookEndError(value: *HookEndError, allocator: std.mem.Allocator) void {
     wipeString(value.message);
     allocator.free(@constCast(value.message));
@@ -24863,6 +27554,10 @@ fn freeMcpOauthRequiredStaticClientConfig(value: *McpOauthRequiredStaticClientCo
         allocator.free(@constCast(present.*));
     }
     if (value.grant_type) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.scope) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
@@ -25017,6 +27712,10 @@ fn freeModelCallFailureData(value: *ModelCallFailureData, allocator: std.mem.All
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.parent_tool_call_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.initiator) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
@@ -25085,6 +27784,16 @@ fn freeModelCallFailureData(value: *ModelCallFailureData, allocator: std.mem.All
     }
 }
 
+fn freeModelCallFinalResult(value: *ModelCallFinalResult, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeModelCallFinalResultData(value: *ModelCallFinalResultData, allocator: std.mem.Allocator) void {
+    wipeString(value.model);
+    allocator.free(@constCast(value.model));
+    freeModelCallFinalResult(&value.result, allocator);
+}
+
 fn freeModelCallFinishedOutcome(value: *ModelCallFinishedOutcome, _: std.mem.Allocator) void {
     _ = value;
 }
@@ -25113,6 +27822,10 @@ fn freeModelCallStartData(value: *ModelCallStartData, allocator: std.mem.Allocat
     if (value.fusion) |*present| {
         freeFusionAttribution(&present.*, allocator);
     }
+    if (value.parent_tool_call_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
 }
 
 fn freePendingMessagesModifiedData(value: *PendingMessagesModifiedData, allocator: std.mem.Allocator) void {
@@ -25120,9 +27833,100 @@ fn freePendingMessagesModifiedData(value: *PendingMessagesModifiedData, allocato
     _ = allocator;
 }
 
+fn freePermissionAssentDetectedData(value: *PermissionAssentDetectedData, allocator: std.mem.Allocator) void {
+    wipeString(value.request_id);
+    allocator.free(@constCast(value.request_id));
+}
+
+fn freePermissionDecisionSource(value: *PermissionDecisionSource, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freePermissionCarriedForwardData(value: *PermissionCarriedForwardData, allocator: std.mem.Allocator) void {
+    wipeString(value.request_id);
+    allocator.free(@constCast(value.request_id));
+    wipeString(value.tool_call_id);
+    allocator.free(@constCast(value.tool_call_id));
+    wipeString(value.record_id);
+    allocator.free(@constCast(value.record_id));
+    freePermissionDecisionSource(&value.decision_source, allocator);
+}
+
+fn freeTaskBlockerKind(value: *TaskBlockerKind, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freePermissionRecoveryReason(value: *PermissionRecoveryReason, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freePermissionRecoveryStatus(value: *PermissionRecoveryStatus, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freePermissionRecoveryOnBlocked(value: *PermissionRecoveryOnBlocked, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freePermissionRecoveryAttemptRelation(value: *PermissionRecoveryAttemptRelation, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freePermissionRecoveryAttemptDisposition(value: *PermissionRecoveryAttemptDisposition, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freePermissionRecoveryAttemptReason(value: *PermissionRecoveryAttemptReason, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freePermissionRecoveryAttempt(value: *PermissionRecoveryAttempt, allocator: std.mem.Allocator) void {
+    wipeString(value.attempt_id);
+    allocator.free(@constCast(value.attempt_id));
+    if (value.tool_call_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    wipeString(value.permission_kind);
+    allocator.free(@constCast(value.permission_kind));
+    wipeString(value.request_fingerprint);
+    allocator.free(@constCast(value.request_fingerprint));
+    freePermissionRecoveryAttemptRelation(&value.relation, allocator);
+    freePermissionRecoveryAttemptDisposition(&value.disposition, allocator);
+    freePermissionRecoveryAttemptReason(&value.reason, allocator);
+}
+
+fn freePermissionRecoveryData(value: *PermissionRecoveryData, allocator: std.mem.Allocator) void {
+    wipeString(value.episode_id);
+    allocator.free(@constCast(value.episode_id));
+    freePermissionRecoveryStatus(&value.status, allocator);
+    freePermissionRecoveryOnBlocked(&value.on_blocked, allocator);
+    freePermissionRecoveryReason(&value.reason, allocator);
+    for (@constCast(value.attempts)) |*item| {
+        freePermissionRecoveryAttempt(&item.*, allocator);
+    }
+    allocator.free(@constCast(value.attempts));
+}
+
+fn freeTaskBlocker(value: *TaskBlocker, allocator: std.mem.Allocator) void {
+    freeTaskBlockerKind(&value.kind, allocator);
+    freePermissionRecoveryReason(&value.reason, allocator);
+    freePermissionRecoveryData(&value.permission_recovery, allocator);
+}
+
 fn freePermissionApproved(value: *PermissionApproved, allocator: std.mem.Allocator) void {
     wipeString(value.kind);
     allocator.free(@constCast(value.kind));
+}
+
+fn freePermissionApprovedReadOnlyForSession(value: *PermissionApprovedReadOnlyForSession, allocator: std.mem.Allocator) void {
+    wipeString(value.kind);
+    allocator.free(@constCast(value.kind));
+    for (@constCast(value.directories)) |*item| {
+        wipeString(item.*);
+        allocator.free(@constCast(item.*));
+    }
+    allocator.free(@constCast(value.directories));
 }
 
 fn freeUserToolSessionApprovalCommands(value: *UserToolSessionApprovalCommands, allocator: std.mem.Allocator) void {
@@ -25177,7 +27981,7 @@ fn freeUserToolSessionApprovalExtensionManagement(value: *UserToolSessionApprova
     }
 }
 
-fn freeUserToolSessionApprovalFactory(value: *UserToolSessionApprovalFactory, allocator: std.mem.Allocator) void {
+fn freeUserToolSessionApprovalWorkflow(value: *UserToolSessionApprovalWorkflow, allocator: std.mem.Allocator) void {
     wipeString(value.kind);
     allocator.free(@constCast(value.kind));
     if (value.approval_key) |*present| {
@@ -25228,8 +28032,8 @@ fn freeUserToolSessionApproval(value: *UserToolSessionApproval, allocator: std.m
         .extension_management => |*payload| {
             freeUserToolSessionApprovalExtensionManagement(&payload.*, allocator);
         },
-        .factory => |*payload| {
-            freeUserToolSessionApprovalFactory(&payload.*, allocator);
+        .workflow => |*payload| {
+            freeUserToolSessionApprovalWorkflow(&payload.*, allocator);
         },
         .extension_permission_access => |*payload| {
             freeUserToolSessionApprovalExtensionPermissionAccess(&payload.*, allocator);
@@ -25318,6 +28122,9 @@ fn freePermissionResult(value: *PermissionResult, allocator: std.mem.Allocator) 
         .approved => |*payload| {
             freePermissionApproved(&payload.*, allocator);
         },
+        .approved_read_only_for_session => |*payload| {
+            freePermissionApprovedReadOnlyForSession(&payload.*, allocator);
+        },
         .approved_for_session => |*payload| {
             freePermissionApprovedForSession(&payload.*, allocator);
         },
@@ -25352,7 +28159,61 @@ fn freePermissionCompletedData(value: *PermissionCompletedData, allocator: std.m
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.recovery_episode_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.blocker) |*present| {
+        freeTaskBlocker(&present.*, allocator);
+    }
     freePermissionResult(&value.result, allocator);
+    if (value.decision_source) |*present| {
+        freePermissionDecisionSource(&present.*, allocator);
+    }
+}
+
+fn freePermissionMessageAuthorizationPolarity(value: *PermissionMessageAuthorizationPolarity, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freePermissionContextualAuthorizationData(value: *PermissionContextualAuthorizationData, allocator: std.mem.Allocator) void {
+    wipeString(value.record_id);
+    allocator.free(@constCast(value.record_id));
+    wipeString(value.request_id);
+    allocator.free(@constCast(value.request_id));
+    freePermissionMessageAuthorizationPolarity(&value.polarity, allocator);
+}
+
+fn freePermissionMessageAuthorizationData(value: *PermissionMessageAuthorizationData, allocator: std.mem.Allocator) void {
+    wipeString(value.record_id);
+    allocator.free(@constCast(value.record_id));
+    freePermissionMessageAuthorizationPolarity(&value.polarity, allocator);
+    wipeString(value.action_class);
+    allocator.free(@constCast(value.action_class));
+    if (value.target_members) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+            allocator.free(@constCast(item.*));
+        }
+        allocator.free(@constCast(present.*));
+    }
+    if (value.task) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.world) |*present| {
+        freeJsonValue(&present.*, allocator);
+    }
+}
+
+fn freePermissionMessageAuthorizationDegradedData(value: *PermissionMessageAuthorizationDegradedData, allocator: std.mem.Allocator) void {
+    _ = value;
+    _ = allocator;
+}
+
+fn freePermissionMessageAuthorizationReadData(value: *PermissionMessageAuthorizationReadData, allocator: std.mem.Allocator) void {
+    _ = value;
+    _ = allocator;
 }
 
 fn freePermissionRequestShellCommand(value: *PermissionRequestShellCommand, allocator: std.mem.Allocator) void {
@@ -25370,6 +28231,27 @@ fn freePermissionRequestShellCommandSegment(value: *PermissionRequestShellComman
 fn freePermissionRequestShellPossibleUrl(value: *PermissionRequestShellPossibleUrl, allocator: std.mem.Allocator) void {
     wipeString(value.url);
     allocator.free(@constCast(value.url));
+}
+
+fn freePermissionSandboxPathGrantAccess(value: *PermissionSandboxPathGrantAccess, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freePermissionSandboxPathGrant(value: *PermissionSandboxPathGrant, allocator: std.mem.Allocator) void {
+    wipeString(value.path);
+    allocator.free(@constCast(value.path));
+    if (value.denied_path) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    freePermissionSandboxPathGrantAccess(&value.access, allocator);
+    if (value.removed_readonly_paths) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+            allocator.free(@constCast(item.*));
+        }
+        allocator.free(@constCast(present.*));
+    }
 }
 
 fn freePermissionRequestShell(value: *PermissionRequestShell, allocator: std.mem.Allocator) void {
@@ -25398,6 +28280,22 @@ fn freePermissionRequestShell(value: *PermissionRequestShell, allocator: std.mem
         allocator.free(@constCast(item.*));
     }
     allocator.free(@constCast(value.possible_paths));
+    if (value.resolved_working_directory) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.resolved_paths) |*present| {
+        {
+            var iterator = present.*.map.iterator();
+            while (iterator.next()) |entry| {
+                wipeString(entry.key_ptr.*);
+                allocator.free(@constCast(entry.key_ptr.*));
+                wipeString(entry.value_ptr.*);
+                allocator.free(@constCast(entry.value_ptr.*));
+            }
+            present.*.deinit(allocator);
+        }
+    }
     for (@constCast(value.possible_urls)) |*item| {
         freePermissionRequestShellPossibleUrl(&item.*, allocator);
     }
@@ -25409,6 +28307,9 @@ fn freePermissionRequestShell(value: *PermissionRequestShell, allocator: std.mem
     if (value.request_sandbox_bypass_reason) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
+    }
+    if (value.sandbox_path_grant) |*present| {
+        freePermissionSandboxPathGrant(&present.*, allocator);
     }
 }
 
@@ -25423,6 +28324,10 @@ fn freePermissionRequestWrite(value: *PermissionRequestWrite, allocator: std.mem
     allocator.free(@constCast(value.intention));
     wipeString(value.file_name);
     allocator.free(@constCast(value.file_name));
+    if (value.resolved_path) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     wipeString(value.diff);
     allocator.free(@constCast(value.diff));
     if (value.new_file_contents) |*present| {
@@ -25432,6 +28337,9 @@ fn freePermissionRequestWrite(value: *PermissionRequestWrite, allocator: std.mem
     if (value.request_sandbox_bypass_reason) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
+    }
+    if (value.sandbox_path_grant) |*present| {
+        freePermissionSandboxPathGrant(&present.*, allocator);
     }
 }
 
@@ -25446,9 +28354,16 @@ fn freePermissionRequestRead(value: *PermissionRequestRead, allocator: std.mem.A
     allocator.free(@constCast(value.intention));
     wipeString(value.path);
     allocator.free(@constCast(value.path));
+    if (value.resolved_path) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.request_sandbox_bypass_reason) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
+    }
+    if (value.sandbox_path_grant) |*present| {
+        freePermissionSandboxPathGrant(&present.*, allocator);
     }
 }
 
@@ -25510,6 +28425,23 @@ fn freePermissionRequestMemoryScope(value: *PermissionRequestMemoryScope, _: std
     _ = value;
 }
 
+fn freePermissionApprovalEvaluationReasonCode(value: *PermissionApprovalEvaluationReasonCode, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freePermissionApprovalEvaluationJudgeStatus(value: *PermissionApprovalEvaluationJudgeStatus, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freePermissionApprovalEvaluationEvaluationStage(value: *PermissionApprovalEvaluationEvaluationStage, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freePermissionApprovalEvaluation(value: *PermissionApprovalEvaluation, allocator: std.mem.Allocator) void {
+    _ = value;
+    _ = allocator;
+}
+
 fn freeAssistedApprovalRecommendation(value: *AssistedApprovalRecommendation, _: std.mem.Allocator) void {
     _ = value;
 }
@@ -25519,6 +28451,9 @@ fn freeAssistedApprovalJudgeFailureReason(value: *AssistedApprovalJudgeFailureRe
 }
 
 fn freePermissionAssistedApproval(value: *PermissionAssistedApproval, allocator: std.mem.Allocator) void {
+    if (value.evaluation) |*present| {
+        freePermissionApprovalEvaluation(&present.*, allocator);
+    }
     freeAssistedApprovalRecommendation(&value.recommendation, allocator);
     if (value.reason) |*present| {
         wipeString(present.*);
@@ -25621,11 +28556,11 @@ fn freePermissionRequestExtensionManagement(value: *PermissionRequestExtensionMa
     }
 }
 
-fn freeFactoryPermissionOperation(value: *FactoryPermissionOperation, _: std.mem.Allocator) void {
+fn freeWorkflowPermissionOperation(value: *WorkflowPermissionOperation, _: std.mem.Allocator) void {
     _ = value;
 }
 
-fn freeFactoryPermissionPhase(value: *FactoryPermissionPhase, allocator: std.mem.Allocator) void {
+fn freeWorkflowPermissionPhase(value: *WorkflowPermissionPhase, allocator: std.mem.Allocator) void {
     wipeString(value.title);
     allocator.free(@constCast(value.title));
     if (value.detail) |*present| {
@@ -25634,20 +28569,20 @@ fn freeFactoryPermissionPhase(value: *FactoryPermissionPhase, allocator: std.mem
     }
 }
 
-fn freePermissionRequestFactory(value: *PermissionRequestFactory, allocator: std.mem.Allocator) void {
+fn freePermissionRequestWorkflow(value: *PermissionRequestWorkflow, allocator: std.mem.Allocator) void {
     wipeString(value.kind);
     allocator.free(@constCast(value.kind));
     if (value.tool_call_id) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
-    freeFactoryPermissionOperation(&value.operation, allocator);
+    freeWorkflowPermissionOperation(&value.operation, allocator);
     wipeString(value.name);
     allocator.free(@constCast(value.name));
     wipeString(value.description);
     allocator.free(@constCast(value.description));
     for (@constCast(value.phases)) |*item| {
-        freeFactoryPermissionPhase(&item.*, allocator);
+        freeWorkflowPermissionPhase(&item.*, allocator);
     }
     allocator.free(@constCast(value.phases));
     wipeString(value.approval_key);
@@ -25715,8 +28650,8 @@ fn freePermissionRequest(value: *PermissionRequest, allocator: std.mem.Allocator
         .extension_management => |*payload| {
             freePermissionRequestExtensionManagement(&payload.*, allocator);
         },
-        .factory => |*payload| {
-            freePermissionRequestFactory(&payload.*, allocator);
+        .workflow => |*payload| {
+            freePermissionRequestWorkflow(&payload.*, allocator);
         },
         .extension_permission_access => |*payload| {
             freePermissionRequestExtensionPermissionAccess(&payload.*, allocator);
@@ -25754,6 +28689,9 @@ fn freePermissionPromptRequestCommands(value: *PermissionPromptRequestCommands, 
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.sandbox_path_grant) |*present| {
+        freePermissionSandboxPathGrant(&present.*, allocator);
+    }
 }
 
 fn freePermissionPromptRequestWrite(value: *PermissionPromptRequestWrite, allocator: std.mem.Allocator) void {
@@ -25767,6 +28705,10 @@ fn freePermissionPromptRequestWrite(value: *PermissionPromptRequestWrite, alloca
     allocator.free(@constCast(value.intention));
     wipeString(value.file_name);
     allocator.free(@constCast(value.file_name));
+    if (value.resolved_path) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     wipeString(value.diff);
     allocator.free(@constCast(value.diff));
     if (value.new_file_contents) |*present| {
@@ -25789,6 +28731,10 @@ fn freePermissionPromptRequestRead(value: *PermissionPromptRequestRead, allocato
     allocator.free(@constCast(value.intention));
     wipeString(value.path);
     allocator.free(@constCast(value.path));
+    if (value.resolved_path) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.assisted_approval) |*present| {
         freePermissionAssistedApproval(&present.*, allocator);
     }
@@ -25910,6 +28856,13 @@ fn freePermissionPromptRequestPath(value: *PermissionPromptRequestPath, allocato
         allocator.free(@constCast(item.*));
     }
     allocator.free(@constCast(value.paths));
+    if (value.read_only_directories) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+            allocator.free(@constCast(item.*));
+        }
+        allocator.free(@constCast(present.*));
+    }
     if (value.assisted_approval) |*present| {
         freePermissionAssistedApproval(&present.*, allocator);
     }
@@ -25954,20 +28907,20 @@ fn freePermissionPromptRequestExtensionManagement(value: *PermissionPromptReques
     }
 }
 
-fn freePermissionPromptRequestFactory(value: *PermissionPromptRequestFactory, allocator: std.mem.Allocator) void {
+fn freePermissionPromptRequestWorkflow(value: *PermissionPromptRequestWorkflow, allocator: std.mem.Allocator) void {
     wipeString(value.kind);
     allocator.free(@constCast(value.kind));
     if (value.tool_call_id) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
-    freeFactoryPermissionOperation(&value.operation, allocator);
+    freeWorkflowPermissionOperation(&value.operation, allocator);
     wipeString(value.name);
     allocator.free(@constCast(value.name));
     wipeString(value.description);
     allocator.free(@constCast(value.description));
     for (@constCast(value.phases)) |*item| {
-        freeFactoryPermissionPhase(&item.*, allocator);
+        freeWorkflowPermissionPhase(&item.*, allocator);
     }
     allocator.free(@constCast(value.phases));
     wipeString(value.approval_key);
@@ -26047,8 +29000,8 @@ fn freePermissionPromptRequest(value: *PermissionPromptRequest, allocator: std.m
         .extension_management => |*payload| {
             freePermissionPromptRequestExtensionManagement(&payload.*, allocator);
         },
-        .factory => |*payload| {
-            freePermissionPromptRequestFactory(&payload.*, allocator);
+        .workflow => |*payload| {
+            freePermissionPromptRequestWorkflow(&payload.*, allocator);
         },
         .extension_permission_access => |*payload| {
             freePermissionPromptRequestExtensionPermissionAccess(&payload.*, allocator);
@@ -26057,6 +29010,10 @@ fn freePermissionPromptRequest(value: *PermissionPromptRequest, allocator: std.m
             freePermissionPromptRequestExtensionEnvAccess(&payload.*, allocator);
         },
     }
+}
+
+fn freePermissionMode(value: *PermissionMode, _: std.mem.Allocator) void {
+    _ = value;
 }
 
 fn freeSessionMode(value: *SessionMode, _: std.mem.Allocator) void {
@@ -26070,11 +29027,18 @@ fn freePermissionRequestedData(value: *PermissionRequestedData, allocator: std.m
     if (value.prompt_request) |*present| {
         freePermissionPromptRequest(&present.*, allocator);
     }
+    if (value.permission_mode) |*present| {
+        freePermissionMode(&present.*, allocator);
+    }
     if (value.agent_mode) |*present| {
         freeSessionMode(&present.*, allocator);
     }
     if (value.risk_assessment) |*present| {
         freeJsonValue(&present.*, allocator);
+    }
+    if (value.recovery_episode_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
     }
 }
 
@@ -26338,7 +29302,7 @@ fn freeSandboxDecisionDataVariant4(value: *SandboxDecisionDataVariant4, allocato
     allocator.free(@constCast(value.kind));
 }
 
-fn freeSandboxBypassSource(value: *SandboxBypassSource, _: std.mem.Allocator) void {
+fn freeSandboxPermissiveSource(value: *SandboxPermissiveSource, _: std.mem.Allocator) void {
     _ = value;
 }
 
@@ -26351,13 +29315,8 @@ fn freeSandboxDecisionDataVariant5(value: *SandboxDecisionDataVariant5, allocato
     }
     freeSandboxPlatform(&value.platform, allocator);
     freeSandboxEnforcementPoint(&value.enforcement_point, allocator);
-    freeSandboxBypassSource(&value.source, allocator);
-    if (value.denial_class) |*present| {
-        freeSandboxDenialClass(&present.*, allocator);
-    }
-    if (value.confidence) |*present| {
-        freeSandboxDenialConfidence(&present.*, allocator);
-    }
+    freeSandboxDenialClass(&value.denial_class, allocator);
+    freeSandboxPermissiveSource(&value.permissive_source, allocator);
     if (value.denied_resource) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
@@ -26366,12 +29325,12 @@ fn freeSandboxDecisionDataVariant5(value: *SandboxDecisionDataVariant5, allocato
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
-    if (value.process_name) |*present| {
-        wipeString(present.*);
-        allocator.free(@constCast(present.*));
-    }
     wipeString(value.kind);
     allocator.free(@constCast(value.kind));
+}
+
+fn freeSandboxBypassSource(value: *SandboxBypassSource, _: std.mem.Allocator) void {
+    _ = value;
 }
 
 fn freeSandboxDecisionDataVariant6(value: *SandboxDecisionDataVariant6, allocator: std.mem.Allocator) void {
@@ -26407,6 +29366,38 @@ fn freeSandboxDecisionDataVariant6(value: *SandboxDecisionDataVariant6, allocato
 }
 
 fn freeSandboxDecisionDataVariant7(value: *SandboxDecisionDataVariant7, allocator: std.mem.Allocator) void {
+    freeSandboxControl(&value.control, allocator);
+    freeSandboxOutcome(&value.outcome, allocator);
+    if (value.tool_call_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    freeSandboxPlatform(&value.platform, allocator);
+    freeSandboxEnforcementPoint(&value.enforcement_point, allocator);
+    freeSandboxBypassSource(&value.source, allocator);
+    if (value.denial_class) |*present| {
+        freeSandboxDenialClass(&present.*, allocator);
+    }
+    if (value.confidence) |*present| {
+        freeSandboxDenialConfidence(&present.*, allocator);
+    }
+    if (value.denied_resource) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.command) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.process_name) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    wipeString(value.kind);
+    allocator.free(@constCast(value.kind));
+}
+
+fn freeSandboxDecisionDataVariant8(value: *SandboxDecisionDataVariant8, allocator: std.mem.Allocator) void {
     freeSandboxControl(&value.control, allocator);
     freeSandboxOutcome(&value.outcome, allocator);
     if (value.tool_call_id) |*present| {
@@ -26451,14 +29442,17 @@ fn freeSandboxDecisionData(value: *SandboxDecisionData, allocator: std.mem.Alloc
         .access_denied => |*payload| {
             freeSandboxDecisionDataVariant4(&payload.*, allocator);
         },
-        .bypass_decided => |*payload| {
+        .access_recorded => |*payload| {
             freeSandboxDecisionDataVariant5(&payload.*, allocator);
         },
-        .permissive_retry_decided => |*payload| {
+        .bypass_decided => |*payload| {
             freeSandboxDecisionDataVariant6(&payload.*, allocator);
         },
-        .permissive_retry_completed => |*payload| {
+        .permissive_retry_decided => |*payload| {
             freeSandboxDecisionDataVariant7(&payload.*, allocator);
+        },
+        .permissive_retry_completed => |*payload| {
+            freeSandboxDecisionDataVariant8(&payload.*, allocator);
         },
     }
 }
@@ -26708,6 +29702,15 @@ fn freeCanvasUnavailableData(value: *CanvasUnavailableData, allocator: std.mem.A
     allocator.free(@constCast(value.canvas_id));
 }
 
+fn freeResponsesReasoning(value: *ResponsesReasoning, allocator: std.mem.Allocator) void {
+    wipeString(value.model);
+    allocator.free(@constCast(value.model));
+    wipeString(value.initial_effort);
+    allocator.free(@constCast(value.initial_effort));
+    wipeString(value.effort);
+    allocator.free(@constCast(value.effort));
+}
+
 fn freeCompactionCompleteCompactionTokensUsedCopilotUsageTokenDetail(value: *CompactionCompleteCompactionTokensUsedCopilotUsageTokenDetail, allocator: std.mem.Allocator) void {
     if (value.model) |*present| {
         wipeString(present.*);
@@ -26754,6 +29757,13 @@ fn freeCompactionCompleteData(value: *CompactionCompleteData, allocator: std.mem
         allocator.free(@constCast(present.*));
     }
     if (value.summary_content) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.responses_reasoning) |*present| {
+        freeResponsesReasoning(&present.*, allocator);
+    }
+    if (value.active_workflow_summary) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
@@ -27338,6 +30348,18 @@ fn freeExtensionsLoadedData(value: *ExtensionsLoadedData, allocator: std.mem.All
     allocator.free(@constCast(value.extensions));
 }
 
+fn freeShutdownCodeChanges(value: *ShutdownCodeChanges, allocator: std.mem.Allocator) void {
+    for (@constCast(value.files_modified)) |*item| {
+        wipeString(item.*);
+        allocator.free(@constCast(item.*));
+    }
+    allocator.free(@constCast(value.files_modified));
+}
+
+fn freeFusionChangeCheckpointData(value: *FusionChangeCheckpointData, allocator: std.mem.Allocator) void {
+    freeShutdownCodeChanges(&value.code_changes, allocator);
+}
+
 fn freeFusionCommitKind(value: *FusionCommitKind, _: std.mem.Allocator) void {
     _ = value;
 }
@@ -27410,6 +30432,17 @@ fn freeFusionPhasePlanStep(value: *FusionPhasePlanStep, allocator: std.mem.Alloc
     freeFusionConversationScope(&value.scope, allocator);
 }
 
+fn freeFusionCritic(value: *FusionCritic, allocator: std.mem.Allocator) void {
+    wipeString(value.phase_id);
+    allocator.free(@constCast(value.phase_id));
+    wipeString(value.model);
+    allocator.free(@constCast(value.model));
+    if (value.reasoning_effort) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+}
+
 fn freeFusionFollowUpAction(value: *FusionFollowUpAction, _: std.mem.Allocator) void {
     _ = value;
 }
@@ -27456,6 +30489,10 @@ fn freeFusionResolvedData(value: *FusionResolvedData, allocator: std.mem.Allocat
         freeFusionScores(&present.*, allocator);
     }
     freeFusionPattern(&value.pattern, allocator);
+    if (value.hint) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.phase_plan) |*present| {
         for (@constCast(present.*)) |*item| {
             freeFusionPhasePlanStep(&item.*, allocator);
@@ -27466,6 +30503,20 @@ fn freeFusionResolvedData(value: *FusionResolvedData, allocator: std.mem.Allocat
     allocator.free(@constCast(value.primary_model));
     if (value.secondary_model) |*present| {
         wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.judge_model) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.repair_model) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.critics) |*present| {
+        for (@constCast(present.*)) |*item| {
+            freeFusionCritic(&item.*, allocator);
+        }
         allocator.free(@constCast(present.*));
     }
     wipeString(value.fallback_model);
@@ -27558,6 +30609,78 @@ fn freeIdleData(value: *IdleData, allocator: std.mem.Allocator) void {
     }
 }
 
+fn freeIndexedSearchState(value: *IndexedSearchState, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeIndexedSearchDataVariant1(value: *IndexedSearchDataVariant1, allocator: std.mem.Allocator) void {
+    freeIndexedSearchState(&value.state, allocator);
+    wipeString(value.kind);
+    allocator.free(@constCast(value.kind));
+}
+
+fn freeIndexedSearchOutcome(value: *IndexedSearchOutcome, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeIndexedSearchDisabledReason(value: *IndexedSearchDisabledReason, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeIndexedSearchDataVariant2(value: *IndexedSearchDataVariant2, allocator: std.mem.Allocator) void {
+    freeIndexedSearchOutcome(&value.outcome, allocator);
+    if (value.disabled_reason) |*present| {
+        freeIndexedSearchDisabledReason(&present.*, allocator);
+    }
+    if (value.error_message) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    wipeString(value.kind);
+    allocator.free(@constCast(value.kind));
+}
+
+fn freeIndexedSearchErrorType(value: *IndexedSearchErrorType, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeIndexedSearchDataVariant3(value: *IndexedSearchDataVariant3, allocator: std.mem.Allocator) void {
+    freeIndexedSearchErrorType(&value.error_type, allocator);
+    if (value.error_message) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    wipeString(value.kind);
+    allocator.free(@constCast(value.kind));
+}
+
+fn freeIndexedSearchIncrementalPhase(value: *IndexedSearchIncrementalPhase, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeIndexedSearchDataVariant4(value: *IndexedSearchDataVariant4, allocator: std.mem.Allocator) void {
+    freeIndexedSearchIncrementalPhase(&value.phase, allocator);
+    wipeString(value.kind);
+    allocator.free(@constCast(value.kind));
+}
+
+fn freeIndexedSearchData(value: *IndexedSearchData, allocator: std.mem.Allocator) void {
+    switch (value.*) {
+        .status => |*payload| {
+            freeIndexedSearchDataVariant1(&payload.*, allocator);
+        },
+        .startup => |*payload| {
+            freeIndexedSearchDataVariant2(&payload.*, allocator);
+        },
+        .server_error => |*payload| {
+            freeIndexedSearchDataVariant3(&payload.*, allocator);
+        },
+        .incremental => |*payload| {
+            freeIndexedSearchDataVariant4(&payload.*, allocator);
+        },
+    }
+}
+
 fn freeInfoData(value: *InfoData, allocator: std.mem.Allocator) void {
     wipeString(value.info_type);
     allocator.free(@constCast(value.info_type));
@@ -27630,6 +30753,14 @@ fn freeMcpServerStatusChangedData(value: *McpServerStatusChangedData, allocator:
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.error_classification) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.config_source) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
 }
 
 fn freeMcpServerSource(value: *McpServerSource, _: std.mem.Allocator) void {
@@ -27653,6 +30784,10 @@ fn freeMcpServersLoadedServer(value: *McpServersLoadedServer, allocator: std.mem
     freeMcpServerStatus(&value.status, allocator);
     if (value.source) |*present| {
         freeMcpServerSource(&present.*, allocator);
+    }
+    if (value.display_name) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
     }
     if (value.error_) |*present| {
         wipeString(present.*);
@@ -27756,8 +30891,14 @@ fn freeModelChangeData(value: *ModelChangeData, allocator: std.mem.Allocator) vo
     }
 }
 
-fn freePermissionMode(value: *PermissionMode, _: std.mem.Allocator) void {
+fn freeModelDeselectedReason(value: *ModelDeselectedReason, _: std.mem.Allocator) void {
     _ = value;
+}
+
+fn freeModelDeselectedData(value: *ModelDeselectedData, allocator: std.mem.Allocator) void {
+    wipeString(value.previous_model);
+    allocator.free(@constCast(value.previous_model));
+    freeModelDeselectedReason(&value.reason, allocator);
 }
 
 fn freePermissionsChangedData(value: *PermissionsChangedData, allocator: std.mem.Allocator) void {
@@ -27869,14 +31010,6 @@ fn freeShutdownType(value: *ShutdownType, _: std.mem.Allocator) void {
 fn freeShutdownTokenDetail(value: *ShutdownTokenDetail, allocator: std.mem.Allocator) void {
     _ = value;
     _ = allocator;
-}
-
-fn freeShutdownCodeChanges(value: *ShutdownCodeChanges, allocator: std.mem.Allocator) void {
-    for (@constCast(value.files_modified)) |*item| {
-        wipeString(item.*);
-        allocator.free(@constCast(item.*));
-    }
-    allocator.free(@constCast(value.files_modified));
 }
 
 fn freeShutdownModelMetricRequests(value: *ShutdownModelMetricRequests, allocator: std.mem.Allocator) void {
@@ -28008,6 +31141,13 @@ fn freeSkillsLoadedData(value: *SkillsLoadedData, allocator: std.mem.Allocator) 
 fn freeSnapshotRewindData(value: *SnapshotRewindData, allocator: std.mem.Allocator) void {
     wipeString(value.up_to_event_id);
     allocator.free(@constCast(value.up_to_event_id));
+    if (value.event_ids) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+            allocator.free(@constCast(item.*));
+        }
+        allocator.free(@constCast(present.*));
+    }
 }
 
 fn freeGitHubMcpToolConfig(value: *GitHubMcpToolConfig, allocator: std.mem.Allocator) void {
@@ -28086,6 +31226,9 @@ fn freeTaskCompleteData(value: *TaskCompleteData, allocator: std.mem.Allocator) 
     if (value.reason) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
+    }
+    if (value.blocker) |*present| {
+        freeTaskBlocker(&present.*, allocator);
     }
 }
 
@@ -28179,6 +31322,36 @@ fn freeSessionLimitsExhaustedRequestedData(value: *SessionLimitsExhaustedRequest
     allocator.free(@constCast(value.request_id));
 }
 
+fn freeSkillContextDeliveredData(value: *SkillContextDeliveredData, allocator: std.mem.Allocator) void {
+    wipeString(value.content);
+    allocator.free(@constCast(value.content));
+    wipeString(value.source);
+    allocator.free(@constCast(value.source));
+    if (value.interaction_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+}
+
+fn freeSkillContextDeliveredRefData(value: *SkillContextDeliveredRefData, allocator: std.mem.Allocator) void {
+    wipeString(value.content_id);
+    allocator.free(@constCast(value.content_id));
+    if (value.prefix) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.suffix) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    wipeString(value.source);
+    allocator.free(@constCast(value.source));
+    if (value.interaction_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+}
+
 fn freeSkillInvokedTrigger(value: *SkillInvokedTrigger, _: std.mem.Allocator) void {
     _ = value;
 }
@@ -28194,6 +31367,45 @@ fn freeSkillInvokedData(value: *SkillInvokedData, allocator: std.mem.Allocator) 
     allocator.free(@constCast(value.path));
     wipeString(value.content);
     allocator.free(@constCast(value.content));
+    if (value.allowed_tools) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+            allocator.free(@constCast(item.*));
+        }
+        allocator.free(@constCast(present.*));
+    }
+    if (value.source) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.plugin_name) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.plugin_version) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.description) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.trigger) |*present| {
+        freeSkillInvokedTrigger(&present.*, allocator);
+    }
+}
+
+fn freeSkillInvokedRefData(value: *SkillInvokedRefData, allocator: std.mem.Allocator) void {
+    wipeString(value.name);
+    allocator.free(@constCast(value.name));
+    if (value.model) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    wipeString(value.path);
+    allocator.free(@constCast(value.path));
+    wipeString(value.content_id);
+    allocator.free(@constCast(value.content_id));
     if (value.allowed_tools) |*present| {
         for (@constCast(present.*)) |*item| {
             wipeString(item.*);
@@ -28344,7 +31556,14 @@ fn freeSubagentStartedData(value: *SubagentStartedData, allocator: std.mem.Alloc
     if (value.task_model_source) |*present| {
         freeSubagentTaskModelSource(&present.*, allocator);
     }
+    if (value.model_selection_source) |*present| {
+        freeSubagentModelSelectionSource(&present.*, allocator);
+    }
     if (value.factory_run_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.workflow_run_id) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
@@ -28360,6 +31579,11 @@ fn freeSubagentStartedData(value: *SubagentStartedData, allocator: std.mem.Alloc
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+}
+
+fn freeSystemMessageContentBlock(value: *SystemMessageContentBlock, allocator: std.mem.Allocator) void {
+    wipeString(value.content);
+    allocator.free(@constCast(value.content));
 }
 
 fn freeSystemMessageRole(value: *SystemMessageRole, _: std.mem.Allocator) void {
@@ -28387,6 +31611,12 @@ fn freeSystemMessageMetadata(value: *SystemMessageMetadata, allocator: std.mem.A
 fn freeSystemMessageData(value: *SystemMessageData, allocator: std.mem.Allocator) void {
     wipeString(value.content);
     allocator.free(@constCast(value.content));
+    if (value.content_blocks) |*present| {
+        for (@constCast(present.*)) |*item| {
+            freeSystemMessageContentBlock(&item.*, allocator);
+        }
+        allocator.free(@constCast(present.*));
+    }
     if (value.interaction_id) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
@@ -28494,41 +31724,41 @@ fn freeSystemNotificationInstructionDiscovered(value: *SystemNotificationInstruc
     }
 }
 
-fn freeSystemNotificationFactoryCompletedStatus(value: *SystemNotificationFactoryCompletedStatus, _: std.mem.Allocator) void {
+fn freeSystemNotificationWorkflowCompletedStatus(value: *SystemNotificationWorkflowCompletedStatus, _: std.mem.Allocator) void {
     _ = value;
 }
 
-fn freeSystemNotificationFactoryPauseInfoVariant1(value: *SystemNotificationFactoryPauseInfoVariant1, allocator: std.mem.Allocator) void {
+fn freeSystemNotificationWorkflowPauseInfoVariant1(value: *SystemNotificationWorkflowPauseInfoVariant1, allocator: std.mem.Allocator) void {
     wipeString(value.type);
     allocator.free(@constCast(value.type));
 }
 
-fn freeSystemNotificationFactoryPauseInfoVariant2(value: *SystemNotificationFactoryPauseInfoVariant2, allocator: std.mem.Allocator) void {
+fn freeSystemNotificationWorkflowPauseInfoVariant2(value: *SystemNotificationWorkflowPauseInfoVariant2, allocator: std.mem.Allocator) void {
     wipeString(value.key);
     allocator.free(@constCast(value.key));
     wipeString(value.type);
     allocator.free(@constCast(value.type));
 }
 
-fn freeSystemNotificationFactoryPauseInfo(value: *SystemNotificationFactoryPauseInfo, allocator: std.mem.Allocator) void {
+fn freeSystemNotificationWorkflowPauseInfo(value: *SystemNotificationWorkflowPauseInfo, allocator: std.mem.Allocator) void {
     switch (value.*) {
         .user => |*payload| {
-            freeSystemNotificationFactoryPauseInfoVariant1(&payload.*, allocator);
+            freeSystemNotificationWorkflowPauseInfoVariant1(&payload.*, allocator);
         },
         .checkpoint => |*payload| {
-            freeSystemNotificationFactoryPauseInfoVariant2(&payload.*, allocator);
+            freeSystemNotificationWorkflowPauseInfoVariant2(&payload.*, allocator);
         },
     }
 }
 
-fn freeSystemNotificationFactoryCompleted(value: *SystemNotificationFactoryCompleted, allocator: std.mem.Allocator) void {
+fn freeSystemNotificationWorkflowCompleted(value: *SystemNotificationWorkflowCompleted, allocator: std.mem.Allocator) void {
     wipeString(value.type);
     allocator.free(@constCast(value.type));
     wipeString(value.run_id);
     allocator.free(@constCast(value.run_id));
-    wipeString(value.factory_name);
-    allocator.free(@constCast(value.factory_name));
-    freeSystemNotificationFactoryCompletedStatus(&value.status, allocator);
+    wipeString(value.workflow_name);
+    allocator.free(@constCast(value.workflow_name));
+    freeSystemNotificationWorkflowCompletedStatus(&value.status, allocator);
     if (value.result_preview) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
@@ -28541,7 +31771,7 @@ fn freeSystemNotificationFactoryCompleted(value: *SystemNotificationFactoryCompl
         allocator.free(@constCast(present.*));
     }
     if (value.pause_info) |*present| {
-        freeSystemNotificationFactoryPauseInfo(&present.*, allocator);
+        freeSystemNotificationWorkflowPauseInfo(&present.*, allocator);
     }
 }
 
@@ -28573,8 +31803,8 @@ fn freeSystemNotification(value: *SystemNotification, allocator: std.mem.Allocat
         .instruction_discovered => |*payload| {
             freeSystemNotificationInstructionDiscovered(&payload.*, allocator);
         },
-        .factory_completed => |*payload| {
-            freeSystemNotificationFactoryCompleted(&payload.*, allocator);
+        .workflow_completed => |*payload| {
+            freeSystemNotificationWorkflowCompleted(&payload.*, allocator);
         },
         .unclassified => |*payload| {
             freeSystemNotificationUnclassified(&payload.*, allocator);
@@ -28586,6 +31816,9 @@ fn freeSystemNotificationData(value: *SystemNotificationData, allocator: std.mem
     wipeString(value.content);
     allocator.free(@constCast(value.content));
     freeSystemNotification(&value.kind, allocator);
+    if (value.responses_reasoning) |*present| {
+        freeResponsesReasoning(&present.*, allocator);
+    }
 }
 
 fn freeToolExecutionCompleteContentText(value: *ToolExecutionCompleteContentText, allocator: std.mem.Allocator) void {
@@ -29057,6 +32290,11 @@ fn freeToolExecutionCompleteToolDescription(value: *ToolExecutionCompleteToolDes
     }
 }
 
+fn freeToolExecutionCompleteShellExecution(value: *ToolExecutionCompleteShellExecution, allocator: std.mem.Allocator) void {
+    _ = value;
+    _ = allocator;
+}
+
 fn freeToolExecutionCompleteData(value: *ToolExecutionCompleteData, allocator: std.mem.Allocator) void {
     wipeString(value.tool_call_id);
     allocator.free(@constCast(value.tool_call_id));
@@ -29094,6 +32332,9 @@ fn freeToolExecutionCompleteData(value: *ToolExecutionCompleteData, allocator: s
     }
     if (value.tool_description) |*present| {
         freeToolExecutionCompleteToolDescription(&present.*, allocator);
+    }
+    if (value.shell_execution) |*present| {
+        freeToolExecutionCompleteShellExecution(&present.*, allocator);
     }
     if (value.parent_tool_call_id) |*present| {
         wipeString(present.*);
@@ -29170,6 +32411,10 @@ fn freeToolExecutionStartData(value: *ToolExecutionStartData, allocator: std.mem
     allocator.free(@constCast(value.tool_call_id));
     wipeString(value.tool_name);
     allocator.free(@constCast(value.tool_name));
+    if (value.tool_title) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.arguments) |*present| {
         freeJsonValue(&present.*, allocator);
     }
@@ -29184,9 +32429,19 @@ fn freeToolExecutionStartData(value: *ToolExecutionStartData, allocator: std.mem
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.mcp_config_server_name) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.mcp_tool_name) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
+    }
+    if (value.mcp_transport) |*present| {
+        freeMcpServerTransport(&present.*, allocator);
+    }
+    if (value.mcp_config_source) |*present| {
+        freeMcpServerSource(&present.*, allocator);
     }
     if (value.turn_id) |*present| {
         wipeString(present.*);
@@ -29257,6 +32512,9 @@ fn freeUserMessageAgentMode(value: *UserMessageAgentMode, _: std.mem.Allocator) 
 fn freeUserMessageData(value: *UserMessageData, allocator: std.mem.Allocator) void {
     wipeString(value.content);
     allocator.free(@constCast(value.content));
+    if (value.responses_reasoning) |*present| {
+        freeResponsesReasoning(&present.*, allocator);
+    }
     if (value.message_id) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
@@ -29336,8 +32594,37 @@ fn freeUserInputRequestedData(value: *UserInputRequestedData, allocator: std.mem
     }
 }
 
+fn freeWorkflowRunSettledStatus(value: *WorkflowRunSettledStatus, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeWorkflowRunSettledData(value: *WorkflowRunSettledData, allocator: std.mem.Allocator) void {
+    wipeString(value.run_id);
+    allocator.free(@constCast(value.run_id));
+    freeWorkflowRunSettledStatus(&value.status, allocator);
+    if (value.failure_type) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+}
+
+fn freeWorkflowRunStartedData(value: *WorkflowRunStartedData, allocator: std.mem.Allocator) void {
+    wipeString(value.run_id);
+    allocator.free(@constCast(value.run_id));
+    wipeString(value.workflow_name);
+    allocator.free(@constCast(value.workflow_name));
+}
+
+fn freeWorkflowRunUpdatedData(value: *WorkflowRunUpdatedData, allocator: std.mem.Allocator) void {
+    wipeString(value.run_id);
+    allocator.free(@constCast(value.run_id));
+}
+
 fn wipeAssistantMessageDataFields(value: *AssistantMessage) void {
     if (value.message_id) |*present| {
+        wipeString(present.*);
+    }
+    if (value.originating_message_id) |*present| {
         wipeString(present.*);
     }
     if (value.model) |*present| {
@@ -29493,11 +32780,17 @@ fn wipePermissionRequestedDataFields(value: *PermissionRequested) void {
     if (value.prompt_request) |*present| {
         wipePermissionPromptRequest(&present.*);
     }
+    if (value.permission_mode) |*present| {
+        wipePermissionMode(&present.*);
+    }
     if (value.agent_mode) |*present| {
         wipeSessionMode(&present.*);
     }
     if (value.risk_assessment) |*present| {
         wipeJsonValue(&present.*);
+    }
+    if (value.recovery_episode_id) |*present| {
+        wipeString(present.*);
     }
 }
 
@@ -29535,6 +32828,10 @@ fn freeAssistantMessageDataFields(
     allocator: std.mem.Allocator,
 ) void {
     if (value.message_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.originating_message_id) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
@@ -29759,11 +33056,18 @@ fn freePermissionRequestedDataFields(
     if (value.prompt_request) |*present| {
         freePermissionPromptRequest(&present.*, allocator);
     }
+    if (value.permission_mode) |*present| {
+        freePermissionMode(&present.*, allocator);
+    }
     if (value.agent_mode) |*present| {
         freeSessionMode(&present.*, allocator);
     }
     if (value.risk_assessment) |*present| {
         freeJsonValue(&present.*, allocator);
+    }
+    if (value.recovery_episode_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
     }
 }
 
@@ -29820,7 +33124,7 @@ fn isKnownPermissionRequestKind(kind: []const u8) bool {
     if (std.mem.eql(u8, kind, "custom-tool")) return true;
     if (std.mem.eql(u8, kind, "hook")) return true;
     if (std.mem.eql(u8, kind, "extension-management")) return true;
-    if (std.mem.eql(u8, kind, "factory")) return true;
+    if (std.mem.eql(u8, kind, "workflow")) return true;
     if (std.mem.eql(u8, kind, "extension-permission-access")) return true;
     if (std.mem.eql(u8, kind, "extension-env-access")) return true;
     return false;
@@ -29848,6 +33152,7 @@ fn parseAssistantMessage(
 
     return .{
         .message_id = parsed.message_id,
+        .originating_message_id = parsed.originating_message_id,
         .model = parsed.model,
         .content = parsed.content,
         .tool_requests = parsed.tool_requests,
@@ -30094,9 +33399,11 @@ fn parsePermissionRequested(
         .request_id = parsed.request_id,
         .permission_request = parsed.permission_request,
         .prompt_request = parsed.prompt_request,
+        .permission_mode = parsed.permission_mode,
         .agent_mode = parsed.agent_mode,
         .risk_assessment = parsed.risk_assessment,
         .resolved_by_hook = parsed.resolved_by_hook,
+        .recovery_episode_id = parsed.recovery_episode_id,
         .permission_request_json = helper_json,
         .managed_approval_required = try managedApprovalRequired(data),
         .raw = raw.take(),
@@ -30184,9 +33491,6 @@ fn tagFromDiscriminator(wire: []const u8) ?SessionEventTag {
     if (std.mem.eql(u8, wire, "exit_plan_mode.requested")) return .exit_plan_mode_requested;
     if (std.mem.eql(u8, wire, "external_tool.completed")) return .external_tool_completed;
     if (std.mem.eql(u8, wire, "external_tool.requested")) return .external_tool_requested;
-    if (std.mem.eql(u8, wire, "factory.run_settled")) return .factory_run_settled;
-    if (std.mem.eql(u8, wire, "factory.run_started")) return .factory_run_started;
-    if (std.mem.eql(u8, wire, "factory.run_updated")) return .factory_run_updated;
     if (std.mem.eql(u8, wire, "hook.end")) return .hook_end;
     if (std.mem.eql(u8, wire, "hook.progress")) return .hook_progress;
     if (std.mem.eql(u8, wire, "hook.start")) return .hook_start;
@@ -30199,10 +33503,17 @@ fn tagFromDiscriminator(wire: []const u8) ?SessionEventTag {
     if (std.mem.eql(u8, wire, "mcp.tools.list_changed")) return .mcp_tools_list_changed;
     if (std.mem.eql(u8, wire, "mcp_app.tool_call_complete")) return .mcp_app_tool_call_complete;
     if (std.mem.eql(u8, wire, "model.call_failure")) return .model_call_failure;
+    if (std.mem.eql(u8, wire, "model.call_final_result")) return .model_call_final_result;
     if (std.mem.eql(u8, wire, "model.call_finished")) return .model_call_finished;
     if (std.mem.eql(u8, wire, "model.call_start")) return .model_call_start;
     if (std.mem.eql(u8, wire, "pending_messages.modified")) return .pending_messages_modified;
+    if (std.mem.eql(u8, wire, "permission.assentDetected")) return .permission_assent_detected;
+    if (std.mem.eql(u8, wire, "permission.carriedForward")) return .permission_carried_forward;
     if (std.mem.eql(u8, wire, "permission.completed")) return .permission_completed;
+    if (std.mem.eql(u8, wire, "permission.contextualAuthorization")) return .permission_contextual_authorization;
+    if (std.mem.eql(u8, wire, "permission.messageAuthorization")) return .permission_message_authorization;
+    if (std.mem.eql(u8, wire, "permission.messageAuthorizationDegraded")) return .permission_message_authorization_degraded;
+    if (std.mem.eql(u8, wire, "permission.messageAuthorizationRead")) return .permission_message_authorization_read;
     if (std.mem.eql(u8, wire, "permission.requested")) return .permission_requested;
     if (std.mem.eql(u8, wire, "prompt_cache_break")) return .prompt_cache_break;
     if (std.mem.eql(u8, wire, "sampling.completed")) return .sampling_completed;
@@ -30230,6 +33541,7 @@ fn tagFromDiscriminator(wire: []const u8) ?SessionEventTag {
     if (std.mem.eql(u8, wire, "session.error")) return .session_error;
     if (std.mem.eql(u8, wire, "session.extensions.attachments_pushed")) return .session_extensions_attachments_pushed;
     if (std.mem.eql(u8, wire, "session.extensions_loaded")) return .session_extensions_loaded;
+    if (std.mem.eql(u8, wire, "session.fusion_change_checkpoint")) return .session_fusion_change_checkpoint;
     if (std.mem.eql(u8, wire, "session.fusion_commit_started")) return .session_fusion_commit_started;
     if (std.mem.eql(u8, wire, "session.fusion_completed")) return .session_fusion_completed;
     if (std.mem.eql(u8, wire, "session.fusion_handoff")) return .session_fusion_handoff;
@@ -30238,6 +33550,7 @@ fn tagFromDiscriminator(wire: []const u8) ?SessionEventTag {
     if (std.mem.eql(u8, wire, "session.fusion_route_started")) return .session_fusion_route_started;
     if (std.mem.eql(u8, wire, "session.handoff")) return .session_handoff;
     if (std.mem.eql(u8, wire, "session.idle")) return .session_idle;
+    if (std.mem.eql(u8, wire, "session.indexed_search")) return .session_indexed_search;
     if (std.mem.eql(u8, wire, "session.info")) return .session_info;
     if (std.mem.eql(u8, wire, "session.managed_settings_enforced")) return .session_managed_settings_enforced;
     if (std.mem.eql(u8, wire, "session.managed_settings_resolved")) return .session_managed_settings_resolved;
@@ -30249,6 +33562,8 @@ fn tagFromDiscriminator(wire: []const u8) ?SessionEventTag {
     if (std.mem.eql(u8, wire, "session.mode_changed")) return .session_mode_changed;
     if (std.mem.eql(u8, wire, "session.mode_notice_delivered")) return .session_mode_notice_delivered;
     if (std.mem.eql(u8, wire, "session.model_change")) return .session_model_change;
+    if (std.mem.eql(u8, wire, "session.model_deselected")) return .session_model_deselected;
+    if (std.mem.eql(u8, wire, "session.permission_recovery")) return .session_permission_recovery;
     if (std.mem.eql(u8, wire, "session.permissions_changed")) return .session_permissions_changed;
     if (std.mem.eql(u8, wire, "session.plan_changed")) return .session_plan_changed;
     if (std.mem.eql(u8, wire, "session.remote_steerable_changed")) return .session_remote_steerable_changed;
@@ -30272,7 +33587,10 @@ fn tagFromDiscriminator(wire: []const u8) ?SessionEventTag {
     if (std.mem.eql(u8, wire, "session.workspace_file_changed")) return .session_workspace_file_changed;
     if (std.mem.eql(u8, wire, "session_limits_exhausted.completed")) return .session_limits_exhausted_completed;
     if (std.mem.eql(u8, wire, "session_limits_exhausted.requested")) return .session_limits_exhausted_requested;
+    if (std.mem.eql(u8, wire, "skill.context_delivered")) return .skill_context_delivered;
+    if (std.mem.eql(u8, wire, "skill.context_delivered_ref")) return .skill_context_delivered_ref;
     if (std.mem.eql(u8, wire, "skill.invoked")) return .skill_invoked;
+    if (std.mem.eql(u8, wire, "skill.invoked_ref")) return .skill_invoked_ref;
     if (std.mem.eql(u8, wire, "subagent.completed")) return .subagent_completed;
     if (std.mem.eql(u8, wire, "subagent.configured")) return .subagent_configured;
     if (std.mem.eql(u8, wire, "subagent.deselected")) return .subagent_deselected;
@@ -30291,6 +33609,9 @@ fn tagFromDiscriminator(wire: []const u8) ?SessionEventTag {
     if (std.mem.eql(u8, wire, "user.message")) return .user_message;
     if (std.mem.eql(u8, wire, "user_input.completed")) return .user_input_completed;
     if (std.mem.eql(u8, wire, "user_input.requested")) return .user_input_requested;
+    if (std.mem.eql(u8, wire, "workflow.run_settled")) return .workflow_run_settled;
+    if (std.mem.eql(u8, wire, "workflow.run_started")) return .workflow_run_started;
+    if (std.mem.eql(u8, wire, "workflow.run_updated")) return .workflow_run_updated;
     return null;
 }
 
@@ -30581,36 +33902,6 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
             } };
         },
         .external_tool_requested => return .{ .external_tool_requested = try parseExternalToolRequested(allocator, data, &raw) },
-        .factory_run_settled => {
-            var arena = std.heap.ArenaAllocator.init(allocator);
-            errdefer arena.deinit();
-            const typed = try parseFactoryRunSettledData(arena.allocator(), data_value);
-            return .{ .factory_run_settled = .{
-                .data = typed,
-                .data_json = raw.takeData(),
-                .arena = arena,
-            } };
-        },
-        .factory_run_started => {
-            var arena = std.heap.ArenaAllocator.init(allocator);
-            errdefer arena.deinit();
-            const typed = try parseFactoryRunStartedData(arena.allocator(), data_value);
-            return .{ .factory_run_started = .{
-                .data = typed,
-                .data_json = raw.takeData(),
-                .arena = arena,
-            } };
-        },
-        .factory_run_updated => {
-            var arena = std.heap.ArenaAllocator.init(allocator);
-            errdefer arena.deinit();
-            const typed = try parseFactoryRunUpdatedData(arena.allocator(), data_value);
-            return .{ .factory_run_updated = .{
-                .data = typed,
-                .data_json = raw.takeData(),
-                .arena = arena,
-            } };
-        },
         .hook_end => {
             var arena = std.heap.ArenaAllocator.init(allocator);
             errdefer arena.deinit();
@@ -30722,6 +34013,16 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
                 .arena = arena,
             } };
         },
+        .model_call_final_result => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseModelCallFinalResultData(arena.allocator(), data_value);
+            return .{ .model_call_final_result = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
         .model_call_finished => {
             var arena = std.heap.ArenaAllocator.init(allocator);
             errdefer arena.deinit();
@@ -30752,11 +34053,71 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
                 .arena = arena,
             } };
         },
+        .permission_assent_detected => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parsePermissionAssentDetectedData(arena.allocator(), data_value);
+            return .{ .permission_assent_detected = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
+        .permission_carried_forward => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parsePermissionCarriedForwardData(arena.allocator(), data_value);
+            return .{ .permission_carried_forward = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
         .permission_completed => {
             var arena = std.heap.ArenaAllocator.init(allocator);
             errdefer arena.deinit();
             const typed = try parsePermissionCompletedData(arena.allocator(), data_value);
             return .{ .permission_completed = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
+        .permission_contextual_authorization => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parsePermissionContextualAuthorizationData(arena.allocator(), data_value);
+            return .{ .permission_contextual_authorization = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
+        .permission_message_authorization => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parsePermissionMessageAuthorizationData(arena.allocator(), data_value);
+            return .{ .permission_message_authorization = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
+        .permission_message_authorization_degraded => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parsePermissionMessageAuthorizationDegradedData(arena.allocator(), data_value);
+            return .{ .permission_message_authorization_degraded = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
+        .permission_message_authorization_read => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parsePermissionMessageAuthorizationReadData(arena.allocator(), data_value);
+            return .{ .permission_message_authorization_read = .{
                 .data = typed,
                 .data_json = raw.takeData(),
                 .arena = arena,
@@ -31014,6 +34375,16 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
                 .arena = arena,
             } };
         },
+        .session_fusion_change_checkpoint => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseFusionChangeCheckpointData(arena.allocator(), data_value);
+            return .{ .session_fusion_change_checkpoint = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
         .session_fusion_commit_started => {
             var arena = std.heap.ArenaAllocator.init(allocator);
             errdefer arena.deinit();
@@ -31085,6 +34456,16 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
             } };
         },
         .session_idle => return .{ .session_idle = try parseSessionIdle(allocator, data, &raw) },
+        .session_indexed_search => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseIndexedSearchData(arena.allocator(), data_value);
+            return .{ .session_indexed_search = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
         .session_info => {
             var arena = std.heap.ArenaAllocator.init(allocator);
             errdefer arena.deinit();
@@ -31190,6 +34571,26 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
             errdefer arena.deinit();
             const typed = try parseModelChangeData(arena.allocator(), data_value);
             return .{ .session_model_change = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
+        .session_model_deselected => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseModelDeselectedData(arena.allocator(), data_value);
+            return .{ .session_model_deselected = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
+        .session_permission_recovery => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parsePermissionRecoveryData(arena.allocator(), data_value);
+            return .{ .session_permission_recovery = .{
                 .data = typed,
                 .data_json = raw.takeData(),
                 .arena = arena,
@@ -31425,11 +34826,41 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
                 .arena = arena,
             } };
         },
+        .skill_context_delivered => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseSkillContextDeliveredData(arena.allocator(), data_value);
+            return .{ .skill_context_delivered = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
+        .skill_context_delivered_ref => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseSkillContextDeliveredRefData(arena.allocator(), data_value);
+            return .{ .skill_context_delivered_ref = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
         .skill_invoked => {
             var arena = std.heap.ArenaAllocator.init(allocator);
             errdefer arena.deinit();
             const typed = try parseSkillInvokedData(arena.allocator(), data_value);
             return .{ .skill_invoked = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
+        .skill_invoked_ref => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseSkillInvokedRefData(arena.allocator(), data_value);
+            return .{ .skill_invoked_ref = .{
                 .data = typed,
                 .data_json = raw.takeData(),
                 .arena = arena,
@@ -31615,6 +35046,36 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
                 .arena = arena,
             } };
         },
+        .workflow_run_settled => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseWorkflowRunSettledData(arena.allocator(), data_value);
+            return .{ .workflow_run_settled = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
+        .workflow_run_started => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseWorkflowRunStartedData(arena.allocator(), data_value);
+            return .{ .workflow_run_started = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
+        .workflow_run_updated => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseWorkflowRunUpdatedData(arena.allocator(), data_value);
+            return .{ .workflow_run_updated = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
         .unknown => unreachable,
     }
 }
@@ -31658,9 +35119,6 @@ const pinned_event_samples = [_]EventSample{
     .{ .json = "{\"type\":\"exit_plan_mode.requested\",\"data\":{\"requestId\":\"\",\"summary\":\"\",\"planContent\":\"\",\"actions\":[],\"recommendedAction\":\"exit_only\"}}", .tag = .exit_plan_mode_requested },
     .{ .json = "{\"type\":\"external_tool.completed\",\"data\":{\"requestId\":\"\"}}", .tag = .external_tool_completed },
     .{ .json = "{\"type\":\"external_tool.requested\",\"data\":{\"requestId\":\"\",\"sessionId\":\"\",\"toolCallId\":\"\",\"toolName\":\"\"}}", .tag = .external_tool_requested },
-    .{ .json = "{\"type\":\"factory.run_settled\",\"data\":{\"runId\":\"\",\"status\":\"completed\",\"consumedSubagents\":0,\"consumedNanoAiu\":0,\"elapsedMs\":0}}", .tag = .factory_run_settled },
-    .{ .json = "{\"type\":\"factory.run_started\",\"data\":{\"runId\":\"\",\"factoryName\":\"\",\"attempt\":1}}", .tag = .factory_run_started },
-    .{ .json = "{\"type\":\"factory.run_updated\",\"data\":{\"runId\":\"\",\"revision\":1}}", .tag = .factory_run_updated },
     .{ .json = "{\"type\":\"hook.end\",\"data\":{\"hookInvocationId\":\"\",\"hookType\":\"\",\"success\":false}}", .tag = .hook_end },
     .{ .json = "{\"type\":\"hook.progress\",\"data\":{\"message\":\"\"}}", .tag = .hook_progress },
     .{ .json = "{\"type\":\"hook.start\",\"data\":{\"hookInvocationId\":\"\",\"hookType\":\"\"}}", .tag = .hook_start },
@@ -31673,10 +35131,17 @@ const pinned_event_samples = [_]EventSample{
     .{ .json = "{\"type\":\"mcp.tools.list_changed\",\"data\":{\"serverName\":\"\"}}", .tag = .mcp_tools_list_changed },
     .{ .json = "{\"type\":\"mcp_app.tool_call_complete\",\"data\":{\"serverName\":\"\",\"toolName\":\"\",\"success\":false,\"durationMs\":0}}", .tag = .mcp_app_tool_call_complete },
     .{ .json = "{\"type\":\"model.call_failure\",\"data\":{\"source\":\"top_level\"}}", .tag = .model_call_failure },
+    .{ .json = "{\"type\":\"model.call_final_result\",\"data\":{\"model\":\"\",\"result\":\"success\"}}", .tag = .model_call_final_result },
     .{ .json = "{\"type\":\"model.call_finished\",\"data\":{\"turnId\":\"\",\"dispatchDurationMs\":0,\"outcome\":\"success\",\"editClassifierVersion\":1}}", .tag = .model_call_finished },
     .{ .json = "{\"type\":\"model.call_start\",\"data\":{\"turnId\":\"\"}}", .tag = .model_call_start },
     .{ .json = "{\"type\":\"pending_messages.modified\",\"data\":{}}", .tag = .pending_messages_modified },
+    .{ .json = "{\"type\":\"permission.assentDetected\",\"data\":{\"requestId\":\"\",\"turnIndex\":0}}", .tag = .permission_assent_detected },
+    .{ .json = "{\"type\":\"permission.carriedForward\",\"data\":{\"requestId\":\"\",\"toolCallId\":\"\",\"recordId\":\"\",\"decisionSource\":\"assisted_approval\"}}", .tag = .permission_carried_forward },
     .{ .json = "{\"type\":\"permission.completed\",\"data\":{\"requestId\":\"\",\"result\":{\"kind\":\"approved\"}}}", .tag = .permission_completed },
+    .{ .json = "{\"type\":\"permission.contextualAuthorization\",\"data\":{\"recordId\":\"\",\"requestId\":\"\",\"turnIndex\":0,\"polarity\":\"grant\",\"spanStart\":0,\"spanEnd\":0}}", .tag = .permission_contextual_authorization },
+    .{ .json = "{\"type\":\"permission.messageAuthorization\",\"data\":{\"recordId\":\"\",\"turnIndex\":0,\"polarity\":\"grant\",\"actionClass\":\"\",\"spanStart\":0,\"spanEnd\":0}}", .tag = .permission_message_authorization },
+    .{ .json = "{\"type\":\"permission.messageAuthorizationDegraded\",\"data\":{\"turnIndex\":0}}", .tag = .permission_message_authorization_degraded },
+    .{ .json = "{\"type\":\"permission.messageAuthorizationRead\",\"data\":{\"turnIndex\":0}}", .tag = .permission_message_authorization_read },
     .{ .json = "{\"type\":\"permission.requested\",\"data\":{\"requestId\":\"\",\"permissionRequest\":{\"kind\":\"shell\",\"fullCommandText\":\"\",\"intention\":\"\",\"commands\":[],\"possiblePaths\":[],\"possibleUrls\":[],\"hasWriteFileRedirection\":false,\"canOfferSessionApproval\":false}}}", .tag = .permission_requested },
     .{ .json = "{\"type\":\"prompt_cache_break\",\"data\":{\"primaryReason\":\"\",\"contributingReasons\":[],\"survivedTokens\":0,\"frontierTokens\":0,\"shortfallTokens\":0,\"retentionRatio\":0}}", .tag = .prompt_cache_break },
     .{ .json = "{\"type\":\"sampling.completed\",\"data\":{\"requestId\":\"\"}}", .tag = .sampling_completed },
@@ -31704,6 +35169,7 @@ const pinned_event_samples = [_]EventSample{
     .{ .json = "{\"type\":\"session.error\",\"data\":{\"errorType\":\"\",\"message\":\"\"}}", .tag = .session_error },
     .{ .json = "{\"type\":\"session.extensions.attachments_pushed\",\"data\":{\"attachments\":[]}}", .tag = .session_extensions_attachments_pushed },
     .{ .json = "{\"type\":\"session.extensions_loaded\",\"data\":{\"extensions\":[]}}", .tag = .session_extensions_loaded },
+    .{ .json = "{\"type\":\"session.fusion_change_checkpoint\",\"data\":{\"codeChanges\":{\"linesAdded\":0,\"linesRemoved\":0,\"filesModified\":[]}}}", .tag = .session_fusion_change_checkpoint },
     .{ .json = "{\"type\":\"session.fusion_commit_started\",\"data\":{\"fusionId\":\"\",\"commitId\":\"\",\"sourcePhaseId\":\"\",\"sourceModel\":\"\",\"kind\":\"text\",\"toolCallId\":null}}", .tag = .session_fusion_commit_started },
     .{ .json = "{\"type\":\"session.fusion_completed\",\"data\":{\"fusionId\":\"\",\"commitId\":\"\",\"turnId\":\"\",\"syntheticModel\":\"\",\"pattern\":\"single\",\"outcome\":\"\",\"finalSourcePhaseId\":null,\"finalSourceModel\":null,\"followUpModel\":\"\",\"degradedReason\":null,\"phaseCount\":0,\"requestCount\":0,\"inputTokens\":0,\"outputTokens\":0,\"cachedTokens\":0,\"totalNanoAiu\":0,\"durationMs\":0}}", .tag = .session_fusion_completed },
     .{ .json = "{\"type\":\"session.fusion_handoff\",\"data\":{\"fusionId\":\"\",\"sourcePhaseId\":\"\",\"targetPhaseId\":\"\",\"targetModel\":\"\",\"message\":null}}", .tag = .session_fusion_handoff },
@@ -31712,6 +35178,7 @@ const pinned_event_samples = [_]EventSample{
     .{ .json = "{\"type\":\"session.fusion_route_started\",\"data\":{\"attemptId\":\"\",\"turnKind\":\"user\"}}", .tag = .session_fusion_route_started },
     .{ .json = "{\"type\":\"session.handoff\",\"data\":{\"handoffTime\":\"\",\"sourceType\":\"remote\"}}", .tag = .session_handoff },
     .{ .json = "{\"type\":\"session.idle\",\"data\":{}}", .tag = .session_idle },
+    .{ .json = "{\"type\":\"session.indexed_search\",\"data\":{\"kind\":\"status\",\"state\":\"disabled\"}}", .tag = .session_indexed_search },
     .{ .json = "{\"type\":\"session.info\",\"data\":{\"infoType\":\"\",\"message\":\"\"}}", .tag = .session_info },
     .{ .json = "{\"type\":\"session.managed_settings_enforced\",\"data\":{\"action\":\"bypass_permissions_blocked\",\"setting\":\"\",\"failClosed\":false,\"message\":\"\"}}", .tag = .session_managed_settings_enforced },
     .{ .json = "{\"type\":\"session.managed_settings_resolved\",\"data\":{\"source\":\"server\",\"serverManaged\":false,\"deviceManaged\":false,\"failClosed\":false,\"bypassPermissionsDisabled\":false,\"managedKeys\":[]}}", .tag = .session_managed_settings_resolved },
@@ -31723,6 +35190,8 @@ const pinned_event_samples = [_]EventSample{
     .{ .json = "{\"type\":\"session.mode_changed\",\"data\":{\"previousMode\":\"interactive\",\"newMode\":\"interactive\"}}", .tag = .session_mode_changed },
     .{ .json = "{\"type\":\"session.mode_notice_delivered\",\"data\":{\"mode\":\"interactive\"}}", .tag = .session_mode_notice_delivered },
     .{ .json = "{\"type\":\"session.model_change\",\"data\":{\"newModel\":\"\"}}", .tag = .session_model_change },
+    .{ .json = "{\"type\":\"session.model_deselected\",\"data\":{\"previousModel\":\"\",\"reason\":\"provider_withdrawn\"}}", .tag = .session_model_deselected },
+    .{ .json = "{\"type\":\"session.permission_recovery\",\"data\":{\"episodeId\":\"\",\"status\":\"recovering\",\"onBlocked\":\"ask\",\"reason\":\"permission_required\",\"maxAttempts\":1,\"attempts\":[]}}", .tag = .session_permission_recovery },
     .{ .json = "{\"type\":\"session.permissions_changed\",\"data\":{}}", .tag = .session_permissions_changed },
     .{ .json = "{\"type\":\"session.plan_changed\",\"data\":{\"operation\":\"create\"}}", .tag = .session_plan_changed },
     .{ .json = "{\"type\":\"session.remote_steerable_changed\",\"data\":{\"remoteSteerable\":false}}", .tag = .session_remote_steerable_changed },
@@ -31746,7 +35215,10 @@ const pinned_event_samples = [_]EventSample{
     .{ .json = "{\"type\":\"session.workspace_file_changed\",\"data\":{\"path\":\"\",\"operation\":\"create\"}}", .tag = .session_workspace_file_changed },
     .{ .json = "{\"type\":\"session_limits_exhausted.completed\",\"data\":{\"requestId\":\"\",\"response\":{\"action\":\"add\"}}}", .tag = .session_limits_exhausted_completed },
     .{ .json = "{\"type\":\"session_limits_exhausted.requested\",\"data\":{\"requestId\":\"\",\"usedAiCredits\":0,\"maxAiCredits\":1}}", .tag = .session_limits_exhausted_requested },
+    .{ .json = "{\"type\":\"skill.context_delivered\",\"data\":{\"content\":\"\",\"source\":\"\"}}", .tag = .skill_context_delivered },
+    .{ .json = "{\"type\":\"skill.context_delivered_ref\",\"data\":{\"contentId\":\"\",\"source\":\"\"}}", .tag = .skill_context_delivered_ref },
     .{ .json = "{\"type\":\"skill.invoked\",\"data\":{\"name\":\"\",\"path\":\"\",\"content\":\"\"}}", .tag = .skill_invoked },
+    .{ .json = "{\"type\":\"skill.invoked_ref\",\"data\":{\"name\":\"\",\"path\":\"\",\"contentId\":\"\",\"contentLength\":0}}", .tag = .skill_invoked_ref },
     .{ .json = "{\"type\":\"subagent.completed\",\"data\":{\"toolCallId\":\"\",\"agentName\":\"\",\"agentDisplayName\":\"\"}}", .tag = .subagent_completed },
     .{ .json = "{\"type\":\"subagent.configured\",\"data\":{\"model\":\"\",\"multiTurn\":false}}", .tag = .subagent_configured },
     .{ .json = "{\"type\":\"subagent.deselected\",\"data\":{}}", .tag = .subagent_deselected },
@@ -31765,6 +35237,9 @@ const pinned_event_samples = [_]EventSample{
     .{ .json = "{\"type\":\"user.message\",\"data\":{\"content\":\"\"}}", .tag = .user_message },
     .{ .json = "{\"type\":\"user_input.completed\",\"data\":{\"requestId\":\"\"}}", .tag = .user_input_completed },
     .{ .json = "{\"type\":\"user_input.requested\",\"data\":{\"requestId\":\"\",\"question\":\"\"}}", .tag = .user_input_requested },
+    .{ .json = "{\"type\":\"workflow.run_settled\",\"data\":{\"runId\":\"\",\"status\":\"completed\",\"consumedSubagents\":0,\"consumedNanoAiu\":0,\"elapsedMs\":0}}", .tag = .workflow_run_settled },
+    .{ .json = "{\"type\":\"workflow.run_started\",\"data\":{\"runId\":\"\",\"workflowName\":\"\",\"attempt\":1}}", .tag = .workflow_run_started },
+    .{ .json = "{\"type\":\"workflow.run_updated\",\"data\":{\"runId\":\"\",\"revision\":1}}", .tag = .workflow_run_updated },
 };
 
 test "every pinned discriminator parses to its explicit tag" {
@@ -31831,9 +35306,6 @@ const malformed_event_samples = [_][]const u8{
     "{\"type\":\"exit_plan_mode.requested\",\"data\":{\"summary\":\"\",\"planContent\":\"\",\"actions\":[],\"recommendedAction\":\"exit_only\"}}",
     "{\"type\":\"external_tool.completed\",\"data\":{}}",
     "{\"type\":\"external_tool.requested\",\"data\":{\"sessionId\":\"\",\"toolCallId\":\"\",\"toolName\":\"\"}}",
-    "{\"type\":\"factory.run_settled\",\"data\":{\"status\":\"completed\",\"consumedSubagents\":0,\"consumedNanoAiu\":0,\"elapsedMs\":0}}",
-    "{\"type\":\"factory.run_started\",\"data\":{\"factoryName\":\"\",\"attempt\":1}}",
-    "{\"type\":\"factory.run_updated\",\"data\":{\"revision\":1}}",
     "{\"type\":\"hook.end\",\"data\":{\"hookType\":\"\",\"success\":false}}",
     "{\"type\":\"hook.progress\",\"data\":{}}",
     "{\"type\":\"hook.start\",\"data\":{\"hookType\":\"\"}}",
@@ -31846,9 +35318,16 @@ const malformed_event_samples = [_][]const u8{
     "{\"type\":\"mcp.tools.list_changed\",\"data\":{}}",
     "{\"type\":\"mcp_app.tool_call_complete\",\"data\":{\"toolName\":\"\",\"success\":false,\"durationMs\":0}}",
     "{\"type\":\"model.call_failure\",\"data\":{}}",
+    "{\"type\":\"model.call_final_result\",\"data\":{\"result\":\"success\"}}",
     "{\"type\":\"model.call_finished\",\"data\":{\"dispatchDurationMs\":0,\"outcome\":\"success\",\"editClassifierVersion\":1}}",
     "{\"type\":\"model.call_start\",\"data\":{}}",
+    "{\"type\":\"permission.assentDetected\",\"data\":{\"turnIndex\":0}}",
+    "{\"type\":\"permission.carriedForward\",\"data\":{\"toolCallId\":\"\",\"recordId\":\"\",\"decisionSource\":\"assisted_approval\"}}",
     "{\"type\":\"permission.completed\",\"data\":{\"result\":{\"kind\":\"approved\"}}}",
+    "{\"type\":\"permission.contextualAuthorization\",\"data\":{\"requestId\":\"\",\"turnIndex\":0,\"polarity\":\"grant\",\"spanStart\":0,\"spanEnd\":0}}",
+    "{\"type\":\"permission.messageAuthorization\",\"data\":{\"turnIndex\":0,\"polarity\":\"grant\",\"actionClass\":\"\",\"spanStart\":0,\"spanEnd\":0}}",
+    "{\"type\":\"permission.messageAuthorizationDegraded\",\"data\":{}}",
+    "{\"type\":\"permission.messageAuthorizationRead\",\"data\":{}}",
     "{\"type\":\"permission.requested\",\"data\":{\"permissionRequest\":{\"kind\":\"shell\",\"fullCommandText\":\"\",\"intention\":\"\",\"commands\":[],\"possiblePaths\":[],\"possibleUrls\":[],\"hasWriteFileRedirection\":false,\"canOfferSessionApproval\":false}}}",
     "{\"type\":\"prompt_cache_break\",\"data\":{\"contributingReasons\":[],\"survivedTokens\":0,\"frontierTokens\":0,\"shortfallTokens\":0,\"retentionRatio\":0}}",
     "{\"type\":\"sampling.completed\",\"data\":{}}",
@@ -31873,6 +35352,7 @@ const malformed_event_samples = [_][]const u8{
     "{\"type\":\"session.error\",\"data\":{\"message\":\"\"}}",
     "{\"type\":\"session.extensions.attachments_pushed\",\"data\":{}}",
     "{\"type\":\"session.extensions_loaded\",\"data\":{}}",
+    "{\"type\":\"session.fusion_change_checkpoint\",\"data\":{}}",
     "{\"type\":\"session.fusion_commit_started\",\"data\":{\"commitId\":\"\",\"sourcePhaseId\":\"\",\"sourceModel\":\"\",\"kind\":\"text\",\"toolCallId\":null}}",
     "{\"type\":\"session.fusion_completed\",\"data\":{\"commitId\":\"\",\"turnId\":\"\",\"syntheticModel\":\"\",\"pattern\":\"single\",\"outcome\":\"\",\"finalSourcePhaseId\":null,\"finalSourceModel\":null,\"followUpModel\":\"\",\"degradedReason\":null,\"phaseCount\":0,\"requestCount\":0,\"inputTokens\":0,\"outputTokens\":0,\"cachedTokens\":0,\"totalNanoAiu\":0,\"durationMs\":0}}",
     "{\"type\":\"session.fusion_handoff\",\"data\":{\"sourcePhaseId\":\"\",\"targetPhaseId\":\"\",\"targetModel\":\"\",\"message\":null}}",
@@ -31890,6 +35370,8 @@ const malformed_event_samples = [_][]const u8{
     "{\"type\":\"session.mode_changed\",\"data\":{\"newMode\":\"interactive\"}}",
     "{\"type\":\"session.mode_notice_delivered\",\"data\":{}}",
     "{\"type\":\"session.model_change\",\"data\":{}}",
+    "{\"type\":\"session.model_deselected\",\"data\":{\"reason\":\"provider_withdrawn\"}}",
+    "{\"type\":\"session.permission_recovery\",\"data\":{\"status\":\"recovering\",\"onBlocked\":\"ask\",\"reason\":\"permission_required\",\"maxAttempts\":1,\"attempts\":[]}}",
     "{\"type\":\"session.plan_changed\",\"data\":{}}",
     "{\"type\":\"session.remote_steerable_changed\",\"data\":{}}",
     "{\"type\":\"session.resume\",\"data\":{\"eventCount\":0}}",
@@ -31910,7 +35392,10 @@ const malformed_event_samples = [_][]const u8{
     "{\"type\":\"session.workspace_file_changed\",\"data\":{\"operation\":\"create\"}}",
     "{\"type\":\"session_limits_exhausted.completed\",\"data\":{\"response\":{\"action\":\"add\"}}}",
     "{\"type\":\"session_limits_exhausted.requested\",\"data\":{\"usedAiCredits\":0,\"maxAiCredits\":1}}",
+    "{\"type\":\"skill.context_delivered\",\"data\":{\"source\":\"\"}}",
+    "{\"type\":\"skill.context_delivered_ref\",\"data\":{\"source\":\"\"}}",
     "{\"type\":\"skill.invoked\",\"data\":{\"path\":\"\",\"content\":\"\"}}",
+    "{\"type\":\"skill.invoked_ref\",\"data\":{\"path\":\"\",\"contentId\":\"\",\"contentLength\":0}}",
     "{\"type\":\"subagent.completed\",\"data\":{\"agentName\":\"\",\"agentDisplayName\":\"\"}}",
     "{\"type\":\"subagent.configured\",\"data\":{\"multiTurn\":false}}",
     "{\"type\":\"subagent.failed\",\"data\":{\"agentName\":\"\",\"agentDisplayName\":\"\",\"error\":\"\"}}",
@@ -31928,6 +35413,9 @@ const malformed_event_samples = [_][]const u8{
     "{\"type\":\"user.message\",\"data\":{}}",
     "{\"type\":\"user_input.completed\",\"data\":{}}",
     "{\"type\":\"user_input.requested\",\"data\":{\"question\":\"\"}}",
+    "{\"type\":\"workflow.run_settled\",\"data\":{\"status\":\"completed\",\"consumedSubagents\":0,\"consumedNanoAiu\":0,\"elapsedMs\":0}}",
+    "{\"type\":\"workflow.run_started\",\"data\":{\"workflowName\":\"\",\"attempt\":1}}",
+    "{\"type\":\"workflow.run_updated\",\"data\":{\"revision\":1}}",
 };
 
 test "missing required fields fail for every generated payload" {

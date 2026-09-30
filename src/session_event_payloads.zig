@@ -69,7 +69,7 @@ pub const PermissionRequestKind = enum {
     custom_tool,
     hook,
     extension_management,
-    factory,
+    workflow,
     extension_permission_access,
     extension_env_access,
     unknown,
@@ -86,7 +86,7 @@ pub const PermissionRequestKind = enum {
             .{ "custom-tool", PermissionRequestKind.custom_tool },
             .{ "hook", PermissionRequestKind.hook },
             .{ "extension-management", PermissionRequestKind.extension_management },
-            .{ "factory", PermissionRequestKind.factory },
+            .{ "workflow", PermissionRequestKind.workflow },
             .{ "extension-permission-access", PermissionRequestKind.extension_permission_access },
             .{ "extension-env-access", PermissionRequestKind.extension_env_access },
         };

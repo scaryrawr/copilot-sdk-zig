@@ -13,6 +13,7 @@ pub const Model = struct {
     id: []const u8,
     name: []const u8,
     capabilities: Capabilities,
+    provider: ?ProviderRef = null,
     metadata: ?std.json.Value = null,
     policy: ?Policy = null,
     billing: ?Billing = null,
@@ -33,6 +34,7 @@ pub const Capabilities = struct {
 
 pub const Supports = struct {
     vision: ?bool = null,
+    toolCalls: ?bool = null,
     reasoningEffort: ?bool = null,
     adaptive_thinking: ?AdaptiveThinking = null,
 };
@@ -41,7 +43,16 @@ pub const AdaptiveThinking = enum {
     unsupported,
     optional,
     required,
+    adaptive_only,
 };
+
+pub const ProviderRef = struct {
+    id: []const u8,
+    label: []const u8,
+    kind: ProviderKind,
+};
+
+pub const ProviderKind = enum { copilot, loki };
 
 pub const Limits = struct {
     max_prompt_tokens: ?u64 = null,
@@ -155,8 +166,9 @@ test "model list preserves published metadata" {
         \\{"models":[{
         \\  "id":"claude-opus-5",
         \\  "name":"Claude Opus 5",
+        \\  "provider":{"id":"github","label":"GitHub Copilot","kind":"copilot"},
         \\  "capabilities":{
-        \\    "supports":{"vision":true,"reasoningEffort":true,"adaptive_thinking":"required"},
+        \\    "supports":{"vision":true,"toolCalls":true,"reasoningEffort":true,"adaptive_thinking":"adaptive_only"},
         \\    "limits":{"max_prompt_tokens":200000,"max_output_tokens":32000,"max_context_window_tokens":232000,
         \\      "vision":{"supported_media_types":["image/png","image/jpeg"],"max_prompt_images":8,"max_prompt_image_size":10485760}}
         \\  },
@@ -187,7 +199,10 @@ test "model list preserves published metadata" {
 
     const model = parsed.value.models[0];
     try std.testing.expectEqualStrings("claude-opus-5", model.id);
-    try std.testing.expectEqual(AdaptiveThinking.required, model.capabilities.supports.?.adaptive_thinking.?);
+    try std.testing.expectEqual(AdaptiveThinking.adaptive_only, model.capabilities.supports.?.adaptive_thinking.?);
+    try std.testing.expect(model.capabilities.supports.?.toolCalls.?);
+    try std.testing.expectEqual(ProviderKind.copilot, model.provider.?.kind);
+    try std.testing.expectEqualStrings("github", model.provider.?.id);
     try std.testing.expectEqual(@as(u64, 232000), model.capabilities.limits.?.max_context_window_tokens.?);
     try std.testing.expectEqualStrings("anthropic", model.metadata.?.object.get("provider").?.string);
     try std.testing.expectEqual(PolicyState.enabled, model.policy.?.state);

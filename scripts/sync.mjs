@@ -49,7 +49,8 @@ const metadataPath = join(vendorDirectory, "upstream.json");
 const generatedPath = join(root, "src", "protocol_version.zig");
 const zigSessionSource = readFileSync(join(root, "src", "session.zig"), "utf8");
 const zigClientSource = readFileSync(join(root, "src", "client.zig"), "utf8");
-const zigFactorySource = readFileSync(join(root, "src", "factory.zig"), "utf8");
+const zigWorkflowSource = readFileSync(join(root, "src", "workflow.zig"), "utf8");
+const zigModelsSource = readFileSync(join(root, "src", "models.zig"), "utf8");
 const zigRuntimeSource = readFileSync(join(root, "src", "runtime.zig"), "utf8");
 const compatibilityPath = join(root, "sync", "compatibility.json");
 const publicRpcSurfacePath = join(root, "sync", "public-rpc-surface.json");
@@ -297,21 +298,21 @@ const extensibilityMethods = [
   "session.mcp.apps.listTools",
   "session.mcp.apps.callTool",
   "session.mcp.apps.readResource",
-  "session.factory.run",
-  "session.factory.resume",
-  "session.factory.getRun",
-  "session.factory.listRuns",
-  "session.factory.getRunDetail",
-  "session.factory.getRunProgress",
-  "session.factory.pause",
-  "session.factory.cancel",
-  "session.factory.agent",
-  "session.factory.journal.get",
-  "session.factory.journal.put",
-  "session.factory.pauseAtCheckpoint",
-  "session.factory.log",
-  "factory.execute",
-  "factory.abort",
+  "session.workflow.run",
+  "session.workflow.resume",
+  "session.workflow.getRun",
+  "session.workflow.listRuns",
+  "session.workflow.getRunDetail",
+  "session.workflow.getRunProgress",
+  "session.workflow.pause",
+  "session.workflow.cancel",
+  "session.workflow.agent",
+  "session.workflow.journal.get",
+  "session.workflow.journal.put",
+  "session.workflow.pauseAtCheckpoint",
+  "session.workflow.log",
+  "workflow.execute",
+  "workflow.abort",
 ];
 
 function expectedExtensibilityContract(upstreamCommit) {
@@ -344,7 +345,7 @@ function expectedExtensibilityContract(upstreamCommit) {
       },
       extensionJoin: {
         wireMethod: "session.resume",
-        fields: ["factories", "requestedEnvironmentVariables"],
+        fields: ["workflows", "requestedEnvironmentVariables"],
         responseFields: ["grantedEnvironmentVariables"],
         ownership: "owned-result",
         redeclared: ["onPermissionRequest"],
@@ -394,10 +395,10 @@ function expectedExtensibilityContract(upstreamCommit) {
         "session.mcp.apps.readResource",
       ],
     },
-    agentFactories: {
+    dynamicWorkflows: {
       status: "typed",
-      registrationField: "factories",
-      methods: extensibilityMethods.filter((method) => method.includes("factory")),
+      registrationField: "workflows",
+      methods: extensibilityMethods.filter((method) => method.includes("workflow")),
     },
     deferred: {
       extensionsCapability: "The pinned lifecycle response has no extension-management acknowledgement bit.",
@@ -447,7 +448,7 @@ const expectedCustomAgentSourceContract = {
       properties: {
         onPermissionRequest: "optional:PermissionHandler",
         requestedEnvironmentVariables: "optional:string[]",
-        factories: "optional:FactoryHandle[]",
+        workflows: "optional:WorkflowHandle[]",
       },
     },
   },
@@ -787,7 +788,7 @@ function verifyLifecycleContract(contract, clientSource, typesSource, extensionS
   assertFieldsOwnedBy(
     contract.lifecycle.extensionJoin.fields,
     {
-      factories: ["factories", "optional:FactoryHandle[]"],
+      workflows: ["workflows", "optional:WorkflowHandle[]"],
       requestedEnvironmentVariables: ["requestedEnvironmentVariables", "optional:string[]"],
     },
     join.properties,
@@ -887,11 +888,12 @@ function verifyOutboundMessageEnumContract(typesSource, zigSessionSource) {
       prompt: "required:string",
       source: "optional:MessageSource",
       attachments:
-        'optional:Array<|{type:"file";path:string;displayName?:string;}|{type:"directory";path:string;displayName?:string;}|{type:"selection";filePath:string;displayName:string;selection?:{start:{line:number;character:number};end:{line:number;character:number};};text?:string;}|{type:"blob";data:string;mimeType:string;displayName?:string;}>',
+        'optional:Array<|{type:"file";path:string;displayName?:string;}|{type:"directory";path:string;displayName?:string;}|{type:"selection";filePath:string;displayName:string;selection?:{start:{line:number;character:number};end:{line:number;character:number};};text?:string;}|{type:"blob";data:string;mimeType:string;displayName?:string;}|ExtensionContextAttachment>',
       mode: 'optional:"enqueue"|"immediate"',
       agentMode: 'optional:"interactive"|"plan"|"autopilot"|"shell"',
       requestHeaders: "optional:Record<string,string>",
       displayPrompt: "optional:string",
+      responseSchema: "optional:ZodSchema|Record<string,unknown>",
     },
     "MessageOptions",
   );
@@ -1218,6 +1220,7 @@ function verifyPinnedSourceContracts(
   typesSource,
   extensionSource,
   publicTypesSource,
+  workflowSource,
 ) {
   verifyCustomAgentSourceContract(
     clientSource,
@@ -1232,6 +1235,67 @@ function verifyPinnedSourceContracts(
     clientSource,
     typesSource,
     extensionSource,
+  );
+  verifyWorkflowSourceContract(workflowSource, clientSource);
+}
+
+function verifyWorkflowSourceContract(workflowSource, clientSource) {
+  requireExactPropertySignatures(
+    interfacePropertySignatures(workflowSource, "WorkflowMeta"),
+    {
+      name: "required:string",
+      description: "required:string",
+      phases: "required:Array<{title:string;detail?:string}>",
+      argsSchema: "optional:WorkflowJsonSchema",
+      limits: "optional:WorkflowLimits",
+    },
+    "WorkflowMeta",
+  );
+  requireExactPropertySignatures(
+    interfacePropertySignatures(workflowSource, "WorkflowLimits"),
+    {
+      maxConcurrentSubagents: "optional:number",
+      maxTotalSubagents: "optional:number",
+      maxAiCredits: "optional:number",
+      timeoutSeconds: "optional:number",
+    },
+    "WorkflowLimits",
+  );
+  requireExactPropertySignatures(
+    interfacePropertySignatures(workflowSource, "WorkflowLimitOverrides"),
+    {
+      maxConcurrentSubagents: "optional:number|null",
+      maxTotalSubagents: "optional:number|null",
+      maxAiCredits: "optional:number|null",
+      timeoutSeconds: "optional:number|null",
+    },
+    "WorkflowLimitOverrides",
+  );
+  const handle = findNamedNode(
+    workflowSource,
+    "WorkflowHandle",
+    ts.isInterfaceDeclaration,
+    "WorkflowHandle",
+  );
+  assert(handle.node.members.length === 2, "WorkflowHandle members changed");
+  requireAstNodes(handle.node, handle.sourceFile, [
+    "readonly meta: DeepReadonly<WorkflowMeta>;",
+    "readonly [workflowHandleBrand]: { readonly args: TArgs; readonly result: TResult; };",
+  ], "WorkflowHandle");
+  requireSourceFragments(clientSource, [
+    "session.registerWorkflows(workflows)",
+    "workflows: workflows?.map((workflow) => workflow.meta)",
+  ], "workflow registration");
+  requireExactPropertySignatures(
+    zigStructFields(zigWorkflowSource, "WorkflowMeta"),
+    {
+      name: { type: "[]const u8", default: null },
+      description: { type: "[]const u8", default: null },
+      phases: { type: "[]const WorkflowPhase", default: "&.{}" },
+      args_schema: { type: "?JsonView", default: "null" },
+      limits: { type: "?WorkflowDeclaredLimits", default: "null" },
+    },
+    "Zig WorkflowMeta",
   );
 }
 
@@ -1875,6 +1939,58 @@ function eventDiscriminators(schema) {
   return values;
 }
 
+function expectedModelCompatibility(apiSchema) {
+  const definitions = [
+    "ModelsListRequest",
+    "ModelList",
+    "Model",
+    "ModelCapabilities",
+    "ModelCapabilitiesSupports",
+    "ModelCapabilitiesLimits",
+    "ModelCapabilitiesLimitsVision",
+    "ModelPolicy",
+    "ModelBilling",
+    "ModelBillingTokenPrices",
+    "ModelBillingTokenPricesLongContext",
+    "ModelBillingPromo",
+    "ModelWarningText",
+    "ModelMessage",
+    "ModelProviderRef",
+  ];
+  const enums = {
+    AdaptiveThinkingSupport: "AdaptiveThinking",
+    ModelPickerCategory: "PickerCategory",
+    ModelPickerPriceCategory: "PickerPriceCategory",
+    ModelPolicyState: "PolicyState",
+    ModelProviderKind: "ProviderKind",
+  };
+  return {
+    modelDefinitions: Object.fromEntries(
+      definitions.map((name) => [name, definitionCompatibility(apiSchema, name)]),
+    ),
+    modelEnums: Object.fromEntries(
+      Object.entries(enums).map(([name, zigName]) => {
+        const values = stringEnum(apiSchema, name);
+        requireExactStrings(
+          zigEnumValues(zigModelsSource, zigName),
+          values,
+          `Zig ${zigName} values`,
+        );
+        return [name, values];
+      }),
+    ),
+  };
+}
+
+function writeCompatibility() {
+  const compatibility = parseJson(compatibilityPath);
+  Object.assign(
+    compatibility,
+    expectedModelCompatibility(parseJson(join(schemaDirectory, "api.schema.json"))),
+  );
+  writeFileSync(compatibilityPath, `${JSON.stringify(compatibility, null, 2)}\n`);
+}
+
 function verifyCompatibility(apiSchema, eventSchema) {
   const compatibility = parseJson(compatibilityPath);
   assert(Array.isArray(compatibility.wireMethods), "wireMethods must be an array");
@@ -1915,23 +2031,20 @@ function verifyCompatibility(apiSchema, eventSchema) {
       `invalid direct RPC coverage for ${method}`,
     );
   }
-  for (const [name, expected] of Object.entries(compatibility.modelDefinitions)) {
+  for (const [name, expected] of Object.entries(expectedModelCompatibility(apiSchema))) {
     assert(
-      JSON.stringify(definitionCompatibility(apiSchema, name)) === JSON.stringify(expected),
-      `${name} model contract changed`,
+      JSON.stringify(compatibility[name]) === JSON.stringify(expected),
+      `${name} compatibility is stale`,
     );
   }
-  for (const [name, expected] of Object.entries(compatibility.modelEnums)) {
-    requireExactStrings(stringEnum(apiSchema, name), expected, `${name} model enum`);
-  }
   for (const contract of [
-    ["FactoryLogLineKind", "FactoryLogKind"],
-    ["FactoryRunStatus", "FactoryRunStatus"],
-    ["FactoryRunFailureKind", "FactoryFailureKind"],
-    ["FactoryDurableOperation", "FactoryDurableOperation"],
+    ["WorkflowLogLineKind", "WorkflowLogKind"],
+    ["WorkflowRunStatus", "WorkflowRunStatus"],
+    ["WorkflowRunFailureKind", "WorkflowFailureKind"],
+    ["WorkflowDurableOperation", "WorkflowDurableOperation"],
   ]) {
     requireExactStrings(
-      zigEnumValues(zigFactorySource, contract[1]),
+      zigEnumValues(zigWorkflowSource, contract[1]),
       stringEnum(apiSchema, contract[0]).map((value) =>
         value.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)
       ),
@@ -2321,6 +2434,7 @@ async function synchronize(explicitCommit, ifPublished = false) {
     nodeSession,
     nodeTypes,
     nodeExtension,
+    nodeWorkflow,
     publicClient,
     publicSession,
     publicTypes,
@@ -2333,6 +2447,7 @@ async function synchronize(explicitCommit, ifPublished = false) {
     fetchText(rawUrl(commit, "nodejs/src/session.ts")),
     fetchText(rawUrl(commit, "nodejs/src/types.ts")),
     fetchText(rawUrl(commit, "nodejs/src/extension.ts")),
+    fetchText(rawUrl(commit, "nodejs/src/workflow.ts")),
     fetchText(rawUrl(publicSdkCommit, "nodejs/src/client.ts")),
     fetchText(rawUrl(publicSdkCommit, "nodejs/src/session.ts")),
     fetchText(rawUrl(publicSdkCommit, "nodejs/src/types.ts")),
@@ -2352,6 +2467,7 @@ async function synchronize(explicitCommit, ifPublished = false) {
     nodeTypes,
     nodeExtension,
     publicTypes,
+    nodeWorkflow,
   );
   verifyStableParitySourceContract(
     { name: "protocol commit", commit },
@@ -2399,6 +2515,7 @@ async function synchronize(explicitCommit, ifPublished = false) {
       `${JSON.stringify(expectedStableParityContract(commit), null, 2)}\n`,
     );
     writeSchemaSnapshot();
+    writeCompatibility();
     generateSessionEvents();
   } finally {
     rmSync(workDirectory, { force: true, recursive: true });
@@ -2420,6 +2537,7 @@ if (options.check) {
     nodeSession,
     nodeTypes,
     nodeExtension,
+    nodeWorkflow,
     publicClient,
     publicSession,
     publicTypes,
@@ -2429,6 +2547,7 @@ if (options.check) {
     fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/session.ts")),
     fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/types.ts")),
     fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/extension.ts")),
+    fetchText(rawUrl(metadata.upstreamCommit, "nodejs/src/workflow.ts")),
     fetchText(rawUrl(publicSdkCommit, "nodejs/src/client.ts")),
     fetchText(rawUrl(publicSdkCommit, "nodejs/src/session.ts")),
     fetchText(rawUrl(publicSdkCommit, "nodejs/src/types.ts")),
@@ -2440,6 +2559,7 @@ if (options.check) {
     nodeTypes,
     nodeExtension,
     publicTypes,
+    nodeWorkflow,
   );
   verifyStableParitySourceContract(
     { name: "protocol commit", commit: metadata.upstreamCommit },
