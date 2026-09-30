@@ -579,6 +579,7 @@ function parseUsesAllocator(model) {
     case "array":
     case "map":
     case "ref":
+    case "enum":
       return true;
     case "nullable":
       return parseUsesAllocator(model.child);
@@ -586,7 +587,6 @@ function parseUsesAllocator(model) {
       return model.fields.some((field) => parseUsesAllocator(field.model));
     case "union":
       return model.branches.some((branch) => parseUsesAllocator(branch.model));
-    case "enum":
     case "boolean":
     case "integer":
     case "number":

@@ -1370,6 +1370,61 @@ test "generated integers accept full u64 range and raw data keeps future fields"
     );
 }
 
+test "workflow lifecycle events decode current names and nullable optional fields" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{
+        \\{"type":"workflow.run_started","data":{"runId":"run-1","workflowName":"review","attempt":2}}
+        ,
+        \\{"type":"workflow.run_updated","data":{"runId":"run-1","revision":3}}
+        ,
+        \\{"type":"workflow.run_settled","data":{"runId":"run-1","status":"paused","consumedSubagents":1,"consumedNanoAiu":2,"elapsedMs":3,"failureType":null}}
+    }) |source| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, source, .{});
+        defer parsed.deinit();
+        var event = try parseEvent(allocator, parsed.value);
+        defer event.deinit(allocator);
+        switch (event) {
+            .workflow_run_started => |started| {
+                try std.testing.expectEqualStrings("review", started.data.workflow_name);
+                try std.testing.expectEqual(@as(u64, 2), started.data.attempt);
+            },
+            .workflow_run_updated => |updated| try std.testing.expectEqual(@as(u64, 3), updated.data.revision),
+            .workflow_run_settled => |settled| {
+                try std.testing.expect(settled.data.status == .paused);
+                try std.testing.expect(settled.data.failure_type == null);
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+    const missing_name = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"workflow.run_started","data":{"runId":"run-1","attempt":2}}
+    ,
+        .{},
+    );
+    defer missing_name.deinit();
+    try std.testing.expectError(error.InvalidSessionEvent, parseEvent(allocator, missing_name.value));
+}
+
+test "workflow permissions use the current discriminator" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        \\{"type":"permission.requested","data":{"requestId":"approval-1","permissionRequest":{"kind":"workflow","operation":"run","name":"review","description":"Review changes.","phases":[],"approvalKey":"review","canPersistApproval":false,"maxAiCredits":null}}}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    var event = try parseEvent(allocator, parsed.value);
+    defer event.deinit(allocator);
+    const request = event.permission_requested.permission_request.?.workflow;
+    try std.testing.expectEqualStrings("review", request.name);
+    try std.testing.expect(request.max_ai_credits == null);
+    try std.testing.expect(PermissionRequestKind.fromString("workflow") == .workflow);
+}
+
 test "generated string bounds count code points and numbers accept large integer tokens" {
     const allocator = std.testing.allocator;
 
@@ -1379,7 +1434,7 @@ test "generated string bounds count code points and numbers accept large integer
     }
     const notification_json = try std.fmt.allocPrint(
         allocator,
-        \\{{"type":"system.notification","data":{{"content":"","kind":{{"type":"factory_completed","runId":"run-1","factoryName":"factory","status":"completed","consumedSubagents":0,"elapsedMs":0,"consumedNanoAiu":0,"attempt":1,"resultPreview":"{s}"}}}}}}
+        \\{{"type":"system.notification","data":{{"content":"","kind":{{"type":"workflow_completed","runId":"run-1","workflowName":"workflow","status":"completed","consumedSubagents":0,"elapsedMs":0,"consumedNanoAiu":0,"attempt":1,"resultPreview":"{s}"}}}}}}
     ,
         .{preview},
     );
@@ -1396,7 +1451,7 @@ test "generated string bounds count code points and numbers accept large integer
 
     try std.testing.expectEqual(
         @as(usize, 512),
-        notification.system_notification.data.kind.factory_completed.result_preview.?.len,
+        notification.system_notification.data.kind.workflow_completed.result_preview.?.len,
     );
 
     const parsed_usage = try std.json.parseFromSlice(

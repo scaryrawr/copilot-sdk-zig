@@ -67,44 +67,44 @@ pub fn LimitOverride(comptime T: type) type {
     };
 }
 
-pub const FactoryDeclaredLimits = struct {
+pub const WorkflowDeclaredLimits = struct {
     max_concurrent_subagents: ?u32 = null,
     max_total_subagents: ?u64 = null,
     timeout_seconds: ?f64 = null,
     max_ai_credits: ?f64 = null,
 };
 
-pub const FactoryLimitOverrides = struct {
+pub const WorkflowLimitOverrides = struct {
     max_concurrent_subagents: LimitOverride(u32) = .inherit,
     max_total_subagents: LimitOverride(u64) = .inherit,
     timeout_seconds: LimitOverride(f64) = .inherit,
     max_ai_credits: LimitOverride(f64) = .inherit,
 };
 
-pub const FactoryPhase = struct {
+pub const WorkflowPhase = struct {
     title: []const u8,
     detail: ?[]const u8 = null,
 };
 
-pub const FactoryMeta = struct {
+pub const WorkflowMeta = struct {
     name: []const u8,
     description: []const u8,
-    phases: []const FactoryPhase = &.{},
+    phases: []const WorkflowPhase = &.{},
     args_schema: ?JsonView = null,
-    limits: ?FactoryDeclaredLimits = null,
+    limits: ?WorkflowDeclaredLimits = null,
 };
 
-pub const AgentFactory = struct {
-    meta: FactoryMeta,
+pub const WorkflowDefinition = struct {
+    meta: WorkflowMeta,
     run: *const fn (
         allocator: std.mem.Allocator,
-        context: *FactoryContext,
+        context: *WorkflowContext,
         user_context: ?*anyopaque,
     ) anyerror!?Json,
     context: ?*anyopaque = null,
 };
 
-pub const FactoryAgentOptions = struct {
+pub const WorkflowAgentOptions = struct {
     label: ?[]const u8 = null,
     schema: ?JsonView = null,
     model: ?[]const u8 = null,
@@ -113,35 +113,35 @@ pub const FactoryAgentOptions = struct {
     agent: ?[]const u8 = null,
 };
 
-pub const FactoryStepOptions = struct {
+pub const WorkflowStepOptions = struct {
     is_volatile: bool = false,
 };
 
-pub const FactoryProducer = struct {
+pub const WorkflowProducer = struct {
     context: ?*anyopaque = null,
     produce: *const fn (std.mem.Allocator, ?*anyopaque) anyerror!Json,
 };
 
-pub const FactoryTask = struct {
+pub const WorkflowTask = struct {
     context: ?*anyopaque = null,
     run: *const fn (
         allocator: std.mem.Allocator,
-        branch: *FactoryBranch,
+        branch: *WorkflowBranch,
         context: ?*anyopaque,
     ) anyerror!?Json,
     deinit_context: ?*const fn (std.mem.Allocator, ?*anyopaque) void = null,
 
-    pub fn deinit(self: *FactoryTask, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *WorkflowTask, allocator: std.mem.Allocator) void {
         if (self.deinit_context) |deinit_context| deinit_context(allocator, self.context);
         self.* = undefined;
     }
 };
 
-pub const FactoryStage = struct {
+pub const WorkflowStage = struct {
     context: ?*anyopaque = null,
     run: *const fn (
         allocator: std.mem.Allocator,
-        branch: *FactoryBranch,
+        branch: *WorkflowBranch,
         previous: JsonView,
         original: JsonView,
         index: usize,
@@ -149,15 +149,15 @@ pub const FactoryStage = struct {
     ) anyerror!?Json,
 };
 
-pub const FactoryCancellation = struct {
+pub const WorkflowCancellation = struct {
     event: *std.Io.Event,
     io: std.Io,
 
-    pub fn isCancelled(self: FactoryCancellation) bool {
+    pub fn isCancelled(self: WorkflowCancellation) bool {
         return self.event.isSet();
     }
 
-    pub fn wait(self: FactoryCancellation) !void {
+    pub fn wait(self: WorkflowCancellation) !void {
         try self.event.wait(self.io);
     }
 };
@@ -167,46 +167,46 @@ pub const JournalLookup = union(enum) {
     value: Json,
 };
 
-pub const FactoryExecution = struct {
+pub const WorkflowExecution = struct {
     state: *anyopaque,
     io: std.Io,
     agent_fn: *const fn (
         *anyopaque,
         std.mem.Allocator,
         []const u8,
-        FactoryAgentOptions,
+        WorkflowAgentOptions,
     ) anyerror!?Json,
     journal_get_fn: *const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror!JournalLookup,
     journal_put_fn: *const fn (*anyopaque, []const u8, JsonView) anyerror!void,
     pause_fn: *const fn (*anyopaque, []const u8) anyerror!void,
-    progress_fn: *const fn (*anyopaque, FactoryLogKind, []const u8) anyerror!void,
+    progress_fn: *const fn (*anyopaque, WorkflowLogKind, []const u8) anyerror!void,
 };
 
-pub const FactoryLogKind = enum { log, phase };
+pub const WorkflowLogKind = enum { log, phase };
 
-pub const FactoryBranch = struct {
-    execution: *FactoryExecution,
-    cancel: FactoryCancellation,
+pub const WorkflowBranch = struct {
+    execution: *WorkflowExecution,
+    cancel: WorkflowCancellation,
 
     pub fn agent(
-        self: *FactoryBranch,
+        self: *WorkflowBranch,
         allocator: std.mem.Allocator,
         prompt: []const u8,
-        options: FactoryAgentOptions,
+        options: WorkflowAgentOptions,
     ) !?Json {
-        if (self.cancel.isCancelled()) return error.FactoryCancelled;
+        if (self.cancel.isCancelled()) return error.WorkflowCancelled;
         return self.execution.agent_fn(self.execution.state, allocator, prompt, options);
     }
 
     pub fn step(
-        self: *FactoryBranch,
+        self: *WorkflowBranch,
         allocator: std.mem.Allocator,
         key: []const u8,
-        producer: FactoryProducer,
-        options: FactoryStepOptions,
+        producer: WorkflowProducer,
+        options: WorkflowStepOptions,
     ) !Json {
-        if (key.len == 0) return error.InvalidFactoryStepKey;
-        if (self.cancel.isCancelled()) return error.FactoryCancelled;
+        if (key.len == 0) return error.InvalidWorkflowStepKey;
+        if (self.cancel.isCancelled()) return error.WorkflowCancelled;
         if (!options.is_volatile) {
             switch (try self.execution.journal_get_fn(
                 self.execution.state,
@@ -224,66 +224,66 @@ pub const FactoryBranch = struct {
         return value;
     }
 
-    pub fn log(self: *FactoryBranch, message: []const u8) !void {
-        if (self.cancel.isCancelled()) return error.FactoryCancelled;
+    pub fn log(self: *WorkflowBranch, message: []const u8) !void {
+        if (self.cancel.isCancelled()) return error.WorkflowCancelled;
         return self.execution.progress_fn(self.execution.state, .log, message);
     }
 };
 
-pub const FactoryContext = struct {
+pub const WorkflowContext = struct {
     run_id: []const u8,
     args: JsonView,
-    cancel: FactoryCancellation,
-    execution: FactoryExecution,
+    cancel: WorkflowCancellation,
+    execution: WorkflowExecution,
 
-    fn branch(self: *FactoryContext) FactoryBranch {
+    fn branch(self: *WorkflowContext) WorkflowBranch {
         return .{ .execution = &self.execution, .cancel = self.cancel };
     }
 
     pub fn agent(
-        self: *FactoryContext,
+        self: *WorkflowContext,
         allocator: std.mem.Allocator,
         prompt: []const u8,
-        options: FactoryAgentOptions,
+        options: WorkflowAgentOptions,
     ) !?Json {
         var value = self.branch();
         return value.agent(allocator, prompt, options);
     }
 
     pub fn step(
-        self: *FactoryContext,
+        self: *WorkflowContext,
         allocator: std.mem.Allocator,
         key: []const u8,
-        producer: FactoryProducer,
-        options: FactoryStepOptions,
+        producer: WorkflowProducer,
+        options: WorkflowStepOptions,
     ) !Json {
         var value = self.branch();
         return value.step(allocator, key, producer, options);
     }
 
-    pub fn pause(self: *FactoryContext, key: []const u8) !void {
-        if (key.len == 0) return error.InvalidFactoryCheckpointKey;
-        if (self.cancel.isCancelled()) return error.FactoryCancelled;
+    pub fn pause(self: *WorkflowContext, key: []const u8) !void {
+        if (key.len == 0) return error.InvalidWorkflowCheckpointKey;
+        if (self.cancel.isCancelled()) return error.WorkflowCancelled;
         return self.execution.pause_fn(self.execution.state, key);
     }
 
-    pub fn phase(self: *FactoryContext, title: []const u8) !void {
-        if (title.len == 0) return error.InvalidFactoryPhase;
-        if (self.cancel.isCancelled()) return error.FactoryCancelled;
+    pub fn phase(self: *WorkflowContext, title: []const u8) !void {
+        if (title.len == 0) return error.InvalidWorkflowPhase;
+        if (self.cancel.isCancelled()) return error.WorkflowCancelled;
         return self.execution.progress_fn(self.execution.state, .phase, title);
     }
 
-    pub fn log(self: *FactoryContext, message: []const u8) !void {
+    pub fn log(self: *WorkflowContext, message: []const u8) !void {
         var value = self.branch();
         return value.log(message);
     }
 
     pub fn parallel(
-        self: *FactoryContext,
+        self: *WorkflowContext,
         allocator: std.mem.Allocator,
-        tasks: []const FactoryTask,
+        tasks: []const WorkflowTask,
     ) ![]?Json {
-        if (tasks.len > 4096) return error.FactoryFanoutTooLarge;
+        if (tasks.len > 4096) return error.WorkflowFanoutTooLarge;
         const states = try allocator.alloc(TaskState, tasks.len);
         defer allocator.free(states);
         const futures = try allocator.alloc(std.Io.Future(void), tasks.len);
@@ -315,12 +315,12 @@ pub const FactoryContext = struct {
     }
 
     pub fn pipeline(
-        self: *FactoryContext,
+        self: *WorkflowContext,
         allocator: std.mem.Allocator,
         items: []const JsonView,
-        stages: []const FactoryStage,
+        stages: []const WorkflowStage,
     ) ![]?Json {
-        if (items.len > 4096) return error.FactoryFanoutTooLarge;
+        if (items.len > 4096) return error.WorkflowFanoutTooLarge;
         const states = try allocator.alloc(PipelineState, items.len);
         defer allocator.free(states);
         const futures = try allocator.alloc(std.Io.Future(void), items.len);
@@ -356,8 +356,8 @@ pub const FactoryContext = struct {
 
 const TaskState = struct {
     allocator: std.mem.Allocator,
-    branch: FactoryBranch,
-    task: FactoryTask,
+    branch: WorkflowBranch,
+    task: WorkflowTask,
     result: ?Json = null,
     failure: ?anyerror = null,
 };
@@ -375,10 +375,10 @@ fn runTask(state: *TaskState) void {
 
 const PipelineState = struct {
     allocator: std.mem.Allocator,
-    branch: FactoryBranch,
+    branch: WorkflowBranch,
     item: JsonView,
     index: usize,
-    stages: []const FactoryStage,
+    stages: []const WorkflowStage,
     result: ?Json = null,
     failure: ?anyerror = null,
 };
@@ -410,10 +410,10 @@ fn runPipeline(state: *PipelineState) void {
 fn isFatal(err: anyerror) bool {
     return switch (err) {
         error.OutOfMemory,
-        error.FactoryCancelled,
-        error.FactoryTransportFailure,
-        error.FactoryDurableFailure,
-        error.FactoryLimitReached,
+        error.WorkflowCancelled,
+        error.WorkflowTransportFailure,
+        error.WorkflowDurableFailure,
+        error.WorkflowLimitReached,
         => true,
         else => false,
     };
@@ -424,7 +424,7 @@ pub const JsonPresence = union(enum) {
     value: JsonView,
 };
 
-pub const FactoryRunStatus = enum {
+pub const WorkflowRunStatus = enum {
     pending,
     running,
     completed,
@@ -434,18 +434,18 @@ pub const FactoryRunStatus = enum {
     @"error",
 };
 
-pub const FactoryPauseInfo = union(enum) {
+pub const WorkflowPauseInfo = union(enum) {
     user,
     checkpoint: []const u8,
 };
 
-pub const FactoryFailureKind = enum {
+pub const WorkflowFailureKind = enum {
     max_total_subagents,
     timeout_seconds,
     max_ai_credits,
 };
 
-pub const FactoryDurableOperation = enum {
+pub const WorkflowDurableOperation = enum {
     create_run,
     mark_run_started,
     finish_run,
@@ -459,9 +459,9 @@ pub const FactoryDurableOperation = enum {
     refresh_lease,
 };
 
-pub const FactoryFailure = union(enum) {
+pub const WorkflowFailure = union(enum) {
     limit_reached: struct {
-        kind: FactoryFailureKind,
+        kind: WorkflowFailureKind,
         value: f64,
         suggested_value: ?f64,
         run_id: []const u8,
@@ -469,46 +469,46 @@ pub const FactoryFailure = union(enum) {
     resume_declined: struct { run_id: []const u8, reason: []const u8 },
     durable_failure: struct {
         code: []const u8,
-        operation: FactoryDurableOperation,
+        operation: WorkflowDurableOperation,
         run_id: []const u8,
     },
     accounting_incomplete: struct { run_id: []const u8, drained_nano_aiu: i64 },
     provider_disconnected: struct { run_id: []const u8 },
 };
 
-pub const FactoryRunError = struct {
+pub const WorkflowRunError = struct {
     message: ?[]const u8 = null,
-    failure: ?FactoryFailure = null,
+    failure: ?WorkflowFailure = null,
 };
 
-pub const FactoryHalt = struct {
+pub const WorkflowHalt = struct {
     reason: ?[]const u8 = null,
-    failure: ?FactoryFailure = null,
+    failure: ?WorkflowFailure = null,
 };
 
-pub const FactoryOutcome = union(enum) {
+pub const WorkflowOutcome = union(enum) {
     pending,
     running,
     completed: JsonPresence,
-    halted: FactoryHalt,
-    paused: FactoryPauseInfo,
+    halted: WorkflowHalt,
+    paused: ?WorkflowPauseInfo,
     cancelled: ?[]const u8,
-    @"error": FactoryRunError,
+    @"error": WorkflowRunError,
 };
 
-pub const FactoryRun = struct {
+pub const WorkflowRun = struct {
     arena: std.heap.ArenaAllocator,
     run_id: []const u8,
     attempt: ?u32,
     snapshot: ?JsonView,
-    outcome: FactoryOutcome,
+    outcome: WorkflowOutcome,
 
-    pub fn deinit(self: *FactoryRun) void {
+    pub fn deinit(self: *WorkflowRun) void {
         self.arena.deinit();
         self.* = undefined;
     }
 
-    pub fn isTerminal(self: FactoryRun) bool {
+    pub fn isTerminal(self: WorkflowRun) bool {
         return switch (self.outcome) {
             .pending, .running => false,
             else => true,
@@ -516,67 +516,66 @@ pub const FactoryRun = struct {
     }
 };
 
-pub const FactoryRunOptions = struct {
+pub const WorkflowRunOptions = struct {
     args: ?JsonView = null,
-    limits: ?FactoryLimitOverrides = null,
-    notify_on_complete: ?bool = null,
-    log_phase_names: ?bool = null,
-    resume_from_run_id: ?[]const u8 = null,
-};
-
-pub const FactoryResumeOptions = struct {
-    limits: ?FactoryLimitOverrides = null,
+    limits: ?WorkflowLimitOverrides = null,
     notify_on_complete: ?bool = null,
     log_phase_names: ?bool = null,
 };
 
-pub const FactoryListRunsOptions = struct {
+pub const WorkflowResumeOptions = struct {
+    limits: ?WorkflowLimitOverrides = null,
+    notify_on_complete: ?bool = null,
+    log_phase_names: ?bool = null,
+};
+
+pub const WorkflowListRunsOptions = struct {
     after_seq: ?i64 = null,
     before_seq: ?i64 = null,
     limit: ?u16 = null,
 };
 
-pub const FactoryProgressOptions = struct {
+pub const WorkflowProgressOptions = struct {
     phase_id: ?[]const u8 = null,
     after_seq: ?i64 = null,
     before_seq: ?i64 = null,
     limit: ?u16 = null,
 };
 
-pub const FactoryWaitOptions = struct {
+pub const WorkflowWaitOptions = struct {
     poll_interval_ns: u64 = 5 * std.time.ns_per_s,
     timeout_ns: ?u64 = null,
     cancellation: ?*session.Cancellation = null,
 };
 
-pub const FactoryRunsPage = struct {
+pub const WorkflowRunsPage = struct {
     value: Json,
 
-    pub fn deinit(self: *FactoryRunsPage) void {
+    pub fn deinit(self: *WorkflowRunsPage) void {
         self.value.deinit();
         self.* = undefined;
     }
 };
 
-pub const FactoryProgressPage = struct {
+pub const WorkflowProgressPage = struct {
     value: Json,
 
-    pub fn deinit(self: *FactoryProgressPage) void {
+    pub fn deinit(self: *WorkflowProgressPage) void {
         self.value.deinit();
         self.* = undefined;
     }
 };
 
-pub const FactoryRunDetail = struct {
+pub const WorkflowRunDetail = struct {
     value: Json,
 
-    pub fn deinit(self: *FactoryRunDetail) void {
+    pub fn deinit(self: *WorkflowRunDetail) void {
         self.value.deinit();
         self.* = undefined;
     }
 };
 
-pub fn FactoryApi(comptime SessionType: type) type {
+pub fn WorkflowApi(comptime SessionType: type) type {
     return struct {
         session: SessionType,
 
@@ -586,82 +585,82 @@ pub fn FactoryApi(comptime SessionType: type) type {
             self: Self,
             allocator: std.mem.Allocator,
             name: []const u8,
-            options: FactoryRunOptions,
-        ) !FactoryRun {
-            return self.session.factoryRun(allocator, name, options);
+            options: WorkflowRunOptions,
+        ) !WorkflowRun {
+            return self.session.workflowRun(allocator, name, options);
         }
 
         pub fn @"resume"(
             self: Self,
             allocator: std.mem.Allocator,
             run_id: []const u8,
-            options: FactoryResumeOptions,
-        ) !FactoryRun {
-            return self.session.factoryResume(allocator, run_id, options);
+            options: WorkflowResumeOptions,
+        ) !WorkflowRun {
+            return self.session.workflowResume(allocator, run_id, options);
         }
 
-        pub fn getRun(self: Self, allocator: std.mem.Allocator, run_id: []const u8) !FactoryRun {
-            return self.session.factoryGetRun(allocator, run_id);
+        pub fn getRun(self: Self, allocator: std.mem.Allocator, run_id: []const u8) !WorkflowRun {
+            return self.session.workflowGetRun(allocator, run_id);
         }
 
         pub fn waitForRun(
             self: Self,
             allocator: std.mem.Allocator,
             run_id: []const u8,
-            options: FactoryWaitOptions,
-        ) !FactoryRun {
-            return self.session.factoryWaitForRun(allocator, run_id, options);
+            options: WorkflowWaitOptions,
+        ) !WorkflowRun {
+            return self.session.workflowWaitForRun(allocator, run_id, options);
         }
 
         pub fn listRuns(
             self: Self,
             allocator: std.mem.Allocator,
-            options: FactoryListRunsOptions,
-        ) !FactoryRunsPage {
-            return self.session.factoryListRuns(allocator, options);
+            options: WorkflowListRunsOptions,
+        ) !WorkflowRunsPage {
+            return self.session.workflowListRuns(allocator, options);
         }
 
         pub fn getRunDetail(
             self: Self,
             allocator: std.mem.Allocator,
             run_id: []const u8,
-        ) !FactoryRunDetail {
-            return self.session.factoryGetRunDetail(allocator, run_id);
+        ) !WorkflowRunDetail {
+            return self.session.workflowGetRunDetail(allocator, run_id);
         }
 
         pub fn getRunProgress(
             self: Self,
             allocator: std.mem.Allocator,
             run_id: []const u8,
-            options: FactoryProgressOptions,
-        ) !FactoryProgressPage {
-            return self.session.factoryGetRunProgress(allocator, run_id, options);
+            options: WorkflowProgressOptions,
+        ) !WorkflowProgressPage {
+            return self.session.workflowGetRunProgress(allocator, run_id, options);
         }
 
-        pub fn pause(self: Self, allocator: std.mem.Allocator, run_id: []const u8) !FactoryRun {
-            return self.session.factoryPause(allocator, run_id);
+        pub fn pause(self: Self, allocator: std.mem.Allocator, run_id: []const u8) !WorkflowRun {
+            return self.session.workflowPause(allocator, run_id);
         }
 
-        pub fn cancel(self: Self, allocator: std.mem.Allocator, run_id: []const u8) !FactoryRun {
-            return self.session.factoryCancel(allocator, run_id);
+        pub fn cancel(self: Self, allocator: std.mem.Allocator, run_id: []const u8) !WorkflowRun {
+            return self.session.workflowCancel(allocator, run_id);
         }
     };
 }
 
-pub fn validateFactories(factories: []const AgentFactory) !void {
-    for (factories, 0..) |definition, index| {
+pub fn validateWorkflows(workflows: []const WorkflowDefinition) !void {
+    for (workflows, 0..) |definition, index| {
         if (std.mem.trim(u8, definition.meta.name, " \t\r\n").len == 0)
-            return error.InvalidFactoryName;
-        for (factories[0..index]) |previous| {
+            return error.InvalidWorkflowName;
+        for (workflows[0..index]) |previous| {
             if (std.mem.eql(u8, previous.meta.name, definition.meta.name))
-                return error.DuplicateFactoryName;
+                return error.DuplicateWorkflowName;
         }
         for (definition.meta.phases, 0..) |phase, phase_index| {
             if (std.mem.trim(u8, phase.title, " \t\r\n").len == 0)
-                return error.InvalidFactoryPhase;
+                return error.InvalidWorkflowPhase;
             for (definition.meta.phases[0..phase_index]) |previous| {
                 if (std.mem.eql(u8, previous.title, phase.title))
-                    return error.DuplicateFactoryPhase;
+                    return error.DuplicateWorkflowPhase;
             }
         }
         if (definition.meta.args_schema) |schema| {
@@ -670,47 +669,47 @@ pub fn validateFactories(factories: []const AgentFactory) !void {
                 std.heap.page_allocator,
                 schema.bytes,
                 .{},
-            ) catch return error.InvalidFactoryArgsSchema;
+            ) catch return error.InvalidWorkflowArgsSchema;
             defer parsed.deinit();
             switch (parsed.value) {
                 .object, .bool => {},
-                else => return error.InvalidFactoryArgsSchema,
+                else => return error.InvalidWorkflowArgsSchema,
             }
         }
         if (definition.meta.limits) |limits| try validateDeclaredLimits(limits);
     }
 }
 
-pub fn validateDeclaredLimits(limits: FactoryDeclaredLimits) !void {
+pub fn validateDeclaredLimits(limits: WorkflowDeclaredLimits) !void {
     if (limits.max_concurrent_subagents) |value|
-        if (value == 0) return error.InvalidFactoryLimit;
+        if (value == 0) return error.InvalidWorkflowLimit;
     if (limits.max_total_subagents) |value|
-        if (value == 0) return error.InvalidFactoryLimit;
+        if (value == 0) return error.InvalidWorkflowLimit;
     if (limits.timeout_seconds) |value|
         if (!std.math.isFinite(value) or value <= 0 or value > 2_147_483.647)
-            return error.InvalidFactoryLimit;
+            return error.InvalidWorkflowLimit;
     if (limits.max_ai_credits) |value| {
         const nano = value * 1_000_000_000;
         if (!std.math.isFinite(value) or value <= 0 or
             nano < 1 or nano > @as(f64, @floatFromInt(std.math.maxInt(i64))))
-            return error.InvalidFactoryLimit;
+            return error.InvalidWorkflowLimit;
     }
 }
 
-pub fn validateLimitOverrides(limits: FactoryLimitOverrides) !void {
+pub fn validateLimitOverrides(limits: WorkflowLimitOverrides) !void {
     switch (limits.max_concurrent_subagents) {
-        .value => |value| if (value == 0) return error.InvalidFactoryLimit,
+        .value => |value| if (value == 0) return error.InvalidWorkflowLimit,
         else => {},
     }
     switch (limits.max_total_subagents) {
         .value => |value| if (value == 0 or value > std.math.maxInt(i64))
-            return error.InvalidFactoryLimit,
+            return error.InvalidWorkflowLimit,
         else => {},
     }
     switch (limits.timeout_seconds) {
         .value => |value| if (!std.math.isFinite(value) or
             value <= 0 or value > 2_147_483.647)
-            return error.InvalidFactoryLimit,
+            return error.InvalidWorkflowLimit,
         else => {},
     }
     switch (limits.max_ai_credits) {
@@ -718,7 +717,7 @@ pub fn validateLimitOverrides(limits: FactoryLimitOverrides) !void {
             const nano = value * 1_000_000_000;
             if (!std.math.isFinite(value) or value <= 0 or
                 nano < 1 or nano > @as(f64, @floatFromInt(std.math.maxInt(i64))))
-                return error.InvalidFactoryLimit;
+                return error.InvalidWorkflowLimit;
         },
         else => {},
     }
@@ -733,17 +732,17 @@ test "owned JSON preserves null and arbitrary top-level values" {
     try std.testing.expectError(error.InvalidJson, Json.init(std.testing.allocator, "{} trailing"));
 }
 
-test "factory registration rejects duplicate names and phase titles" {
+test "workflow registration rejects duplicate names and phase titles" {
     const run = struct {
-        fn callback(_: std.mem.Allocator, _: *FactoryContext, _: ?*anyopaque) !?Json {
+        fn callback(_: std.mem.Allocator, _: *WorkflowContext, _: ?*anyopaque) !?Json {
             return null;
         }
     }.callback;
-    try std.testing.expectError(error.DuplicateFactoryName, validateFactories(&.{
+    try std.testing.expectError(error.DuplicateWorkflowName, validateWorkflows(&.{
         .{ .meta = .{ .name = "same", .description = "one" }, .run = run },
         .{ .meta = .{ .name = "same", .description = "two" }, .run = run },
     }));
-    try std.testing.expectError(error.DuplicateFactoryPhase, validateFactories(&.{
+    try std.testing.expectError(error.DuplicateWorkflowPhase, validateWorkflows(&.{
         .{
             .meta = .{
                 .name = "phases",
@@ -754,7 +753,7 @@ test "factory registration rejects duplicate names and phase titles" {
         },
     }));
 
-    try validateFactories(&.{
+    try validateWorkflows(&.{
         .{
             .meta = .{
                 .name = "boolean-schema",
@@ -764,7 +763,7 @@ test "factory registration rejects duplicate names and phase titles" {
             .run = run,
         },
     });
-    try std.testing.expectError(error.InvalidFactoryArgsSchema, validateFactories(&.{
+    try std.testing.expectError(error.InvalidWorkflowArgsSchema, validateWorkflows(&.{
         .{
             .meta = .{
                 .name = "invalid-schema",
@@ -776,19 +775,44 @@ test "factory registration rejects duplicate names and phase titles" {
     }));
 }
 
+test "workflow authoring rejects zero declared subagent ceilings" {
+    const run = struct {
+        fn callback(_: std.mem.Allocator, _: *WorkflowContext, _: ?*anyopaque) !?Json {
+            return null;
+        }
+    }.callback;
+    for ([_]WorkflowDeclaredLimits{
+        .{ .max_concurrent_subagents = 0 },
+        .{ .max_total_subagents = 0 },
+    }) |limits| {
+        try std.testing.expectError(error.InvalidWorkflowLimit, validateWorkflows(&.{.{
+            .meta = .{ .name = "zero", .description = "Invalid authoring limit.", .limits = limits },
+            .run = run,
+        }}));
+    }
+    try validateWorkflows(&.{.{
+        .meta = .{
+            .name = "one",
+            .description = "Positive authoring limits.",
+            .limits = .{ .max_concurrent_subagents = 1, .max_total_subagents = 1 },
+        },
+        .run = run,
+    }});
+}
+
 test "limit override preserves three distinct states" {
-    const inherited = FactoryLimitOverrides{};
+    const inherited = WorkflowLimitOverrides{};
     try std.testing.expect(inherited.max_ai_credits == .inherit);
-    const unlimited = FactoryLimitOverrides{ .max_ai_credits = .unlimited };
+    const unlimited = WorkflowLimitOverrides{ .max_ai_credits = .unlimited };
     try std.testing.expect(unlimited.max_ai_credits == .unlimited);
-    const bounded = FactoryLimitOverrides{ .max_ai_credits = .{ .value = 2.5 } };
+    const bounded = WorkflowLimitOverrides{ .max_ai_credits = .{ .value = 2.5 } };
     try std.testing.expectEqual(@as(f64, 2.5), bounded.max_ai_credits.value);
     try std.testing.expectError(
-        error.InvalidFactoryLimit,
+        error.InvalidWorkflowLimit,
         validateLimitOverrides(.{ .max_concurrent_subagents = .{ .value = 0 } }),
     );
     try std.testing.expectError(
-        error.InvalidFactoryLimit,
+        error.InvalidWorkflowLimit,
         validateLimitOverrides(.{
             .max_total_subagents = .{ .value = @as(u64, std.math.maxInt(i64)) + 1 },
         }),
@@ -801,7 +825,7 @@ test "parallel and pipeline return owned results" {
             _: *anyopaque,
             _: std.mem.Allocator,
             _: []const u8,
-            _: FactoryAgentOptions,
+            _: WorkflowAgentOptions,
         ) !?Json {
             return null;
         }
@@ -816,11 +840,11 @@ test "parallel and pipeline return owned results" {
 
         fn journalPut(_: *anyopaque, _: []const u8, _: JsonView) !void {}
         fn pause(_: *anyopaque, _: []const u8) !void {}
-        fn progress(_: *anyopaque, _: FactoryLogKind, _: []const u8) !void {}
+        fn progress(_: *anyopaque, _: WorkflowLogKind, _: []const u8) !void {}
 
         fn task(
             allocator: std.mem.Allocator,
-            _: *FactoryBranch,
+            _: *WorkflowBranch,
             _: ?*anyopaque,
         ) !?Json {
             return try Json.init(allocator, "{\"task\":true}");
@@ -828,28 +852,28 @@ test "parallel and pipeline return owned results" {
 
         fn failTask(
             _: std.mem.Allocator,
-            _: *FactoryBranch,
+            _: *WorkflowBranch,
             _: ?*anyopaque,
         ) !?Json {
-            return error.FactoryLimitReached;
+            return error.WorkflowLimitReached;
         }
 
         fn stage(
             allocator: std.mem.Allocator,
-            _: *FactoryBranch,
+            _: *WorkflowBranch,
             _: JsonView,
             _: JsonView,
             index: usize,
             _: ?*anyopaque,
         ) !?Json {
-            if (index == 1) return error.FactoryLimitReached;
+            if (index == 1) return error.WorkflowLimitReached;
             return try Json.initValue(allocator, .{ .index = index });
         }
     };
 
     var cancellation: std.Io.Event = .unset;
     var state: u8 = 0;
-    var context = FactoryContext{
+    var context = WorkflowContext{
         .run_id = "run-1",
         .args = try JsonView.init("{}"),
         .cancel = .{ .event = &cancellation, .io = std.testing.io },
@@ -879,14 +903,14 @@ test "parallel and pipeline return owned results" {
     try std.testing.expectEqualStrings("{\"index\":0}", pipeline[0].?.bytes);
 
     try std.testing.expectError(
-        error.FactoryLimitReached,
+        error.WorkflowLimitReached,
         context.parallel(std.testing.allocator, &.{
             .{ .run = callbacks.task },
             .{ .run = callbacks.failTask },
         }),
     );
     try std.testing.expectError(
-        error.FactoryLimitReached,
+        error.WorkflowLimitReached,
         context.pipeline(
             std.testing.allocator,
             &.{

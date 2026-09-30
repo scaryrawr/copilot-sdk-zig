@@ -1,5 +1,5 @@
 {
-  "upstreamCommit": "39c777fe7bf893ba5a4f8b710feeb2172d1d40f9",
+  "upstreamCommit": "4dc774c91aff609c338563aadc699d5c2dc596f7",
   "startup": {
     "builtinPluginDirectories": {
       "status": "typed",
@@ -57,7 +57,7 @@
     "extensionJoin": {
       "wireMethod": "session.resume",
       "fields": [
-        "factories",
+        "workflows",
         "requestedEnvironmentVariables"
       ],
       "responseFields": [
@@ -122,25 +122,25 @@
       "session.mcp.apps.readResource"
     ]
   },
-  "agentFactories": {
+  "dynamicWorkflows": {
     "status": "typed",
-    "registrationField": "factories",
+    "registrationField": "workflows",
     "methods": [
-      "session.factory.run",
-      "session.factory.resume",
-      "session.factory.getRun",
-      "session.factory.listRuns",
-      "session.factory.getRunDetail",
-      "session.factory.getRunProgress",
-      "session.factory.pause",
-      "session.factory.cancel",
-      "session.factory.agent",
-      "session.factory.journal.get",
-      "session.factory.journal.put",
-      "session.factory.pauseAtCheckpoint",
-      "session.factory.log",
-      "factory.execute",
-      "factory.abort"
+      "session.workflow.run",
+      "session.workflow.resume",
+      "session.workflow.getRun",
+      "session.workflow.listRuns",
+      "session.workflow.getRunDetail",
+      "session.workflow.getRunProgress",
+      "session.workflow.pause",
+      "session.workflow.cancel",
+      "session.workflow.agent",
+      "session.workflow.journal.get",
+      "session.workflow.journal.put",
+      "session.workflow.pauseAtCheckpoint",
+      "session.workflow.log",
+      "workflow.execute",
+      "workflow.abort"
     ]
   },
   "deferred": {

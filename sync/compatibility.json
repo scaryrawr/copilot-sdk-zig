@@ -103,6 +103,7 @@
         "modelPickerPriceCategory": "ref:ModelPickerPriceCategory",
         "name": "string",
         "policy": "ref:ModelPolicy",
+        "provider": "ref:ModelProviderRef",
         "supportedContextTiers": "array:string",
         "supportedReasoningEfforts": "array:string",
         "warningMessages": "array:ref:ModelMessage",
@@ -125,6 +126,7 @@
       "properties": {
         "adaptive_thinking": "ref:AdaptiveThinkingSupport",
         "reasoningEffort": "boolean",
+        "toolCalls": "boolean",
         "vision": "boolean"
       },
       "required": []
@@ -221,10 +223,23 @@
         "code",
         "message"
       ]
+    },
+    "ModelProviderRef": {
+      "properties": {
+        "id": "string",
+        "kind": "ref:ModelProviderKind",
+        "label": "string"
+      },
+      "required": [
+        "id",
+        "kind",
+        "label"
+      ]
     }
   },
   "modelEnums": {
     "AdaptiveThinkingSupport": [
+      "adaptive_only",
       "optional",
       "required",
       "unsupported"
@@ -244,6 +259,10 @@
       "disabled",
       "enabled",
       "unconfigured"
+    ],
+    "ModelProviderKind": [
+      "copilot",
+      "loki"
     ]
   },
   "providerConfig": {

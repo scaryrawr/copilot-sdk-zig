@@ -17,8 +17,8 @@
   lifecycle, and per-session extension runtime; `src/session.zig` owns public
   session types; `src/runtime.zig` owns public connection, callback, and
   filesystem-provider configuration types; `src/extensibility.zig` owns hooks,
-  MCP, skills, canvases, and environment grants; `src/factory.zig` owns Agent
-  Factory definitions, execution contexts, orchestration helpers, and run
+  MCP, skills, canvases, and environment grants; `src/workflow.zig` owns Dynamic
+  Workflow definitions, execution contexts, orchestration helpers, and run
   result types.
 - The client starts Copilot CLI and exchanges JSON-RPC over stdio by default.
   Preserve explicit ownership and `deinit` behavior for allocated results.

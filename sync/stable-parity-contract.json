@@ -1,6 +1,6 @@
 {
-  "publicSdkCommit": "f45c46fd1812f8bed5b4cbc250f47177c83068f0",
-  "protocolCommit": "39c777fe7bf893ba5a4f8b710feeb2172d1d40f9",
+  "publicSdkCommit": "4dc774c91aff609c338563aadc699d5c2dc596f7",
+  "protocolCommit": "4dc774c91aff609c338563aadc699d5c2dc596f7",
   "lifecycle": {
     "createOnly": [
       "cloud"

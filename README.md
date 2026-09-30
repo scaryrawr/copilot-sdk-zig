@@ -564,13 +564,17 @@ host-owned OAuth token-store callbacks are not present in the pinned contract;
 see `sync/extensibility-contract.json` for the reproducible compatibility
 classification.
 
-### Agent factories
+### Dynamic workflows
 
-Register Agent Factories when joining a parent session, then start and inspect
-durable runs through `session.factory()`:
+The SDK uses `WorkflowDefinition`, `WorkflowContext`, and the `Workflow*` run
+types. Register definitions with `extensions.workflows`. There are no factory
+aliases or legacy RPC fallbacks.
+
+Register Dynamic Workflows when joining a parent session, then start and inspect
+durable runs through `session.workflow()`:
 
 ```zig
-const factory = copilot.AgentFactory{
+const workflow = copilot.WorkflowDefinition{
     .meta = .{
         .name = "research",
         .description = "Research a topic with one focused subagent.",
@@ -586,7 +590,7 @@ const factory = copilot.AgentFactory{
     .run = struct {
         fn run(
             allocator: std.mem.Allocator,
-            context: *copilot.FactoryContext,
+            context: *copilot.WorkflowContext,
             _: ?*anyopaque,
         ) !?copilot.Json {
             const input = try context.args.parse(
@@ -604,33 +608,47 @@ const factory = copilot.AgentFactory{
 };
 
 var joined = try client.joinParentSession("parent-session-id", .{
-    .extensions = .{ .factories = &.{factory} },
+    .extensions = .{ .workflows = &.{workflow} },
 });
 defer joined.deinit();
 
 const args = try copilot.JsonView.init(
     \\{"topic":"Compare the supported transport modes"}
 );
-var run = try joined.session.factory().run(allocator, "research", .{
+var run = try joined.session.workflow().run(allocator, "research", .{
     .args = args,
 });
 defer run.deinit();
 ```
 
-Factory callbacks may call `agent`, `step`, `phase`, `log`, and `pause`.
-`parallel` runs independent `FactoryTask` values behind a barrier; `pipeline`
+Workflow callbacks may call `agent`, `step`, `phase`, `log`, and `pause`.
+`parallel` runs independent `WorkflowTask` values behind a barrier; `pipeline`
 runs each input through its stages sequentially while processing inputs
 concurrently. Give independent agents stable, unique labels. Use `step` for
 idempotent work whose owned JSON result should survive retries; set
 `.is_volatile = true` only when replay is intended.
 
-`factory().run`, `resume`, `getRun`, `waitForRun`, `listRuns`, `getRunDetail`,
+`workflow().run`, `resume`, `getRun`, `waitForRun`, `listRuns`, `getRunDetail`,
 `getRunProgress`, `pause`, and `cancel` implement the pinned experimental
-factory protocol. `FactoryRun`, list/detail/progress results, agent results, and
+workflow protocol. `WorkflowRun`, list/detail/progress results, agent results, and
 step results own their JSON storage and must be deinitialized. A returned
-`null` JSON value is distinct from no factory result. Cancellation is
+`null` JSON value is distinct from no workflow result. Cancellation is
 cooperative: callbacks and pattern helpers observe `context.cancel`, and nested
-factory registration is intentionally unsupported by the protocol.
+workflow registration is intentionally unsupported by the protocol.
+
+Use `workflow().resume` to resume a durable run. Run options do not accept
+`resume_from_run_id`. In `WorkflowLimitOverrides`, `.inherit` omits a ceiling,
+`.unlimited` sends JSON `null`, and `.value` replaces the ceiling. A paused
+envelope settles the current attempt but can later resume under the same run ID.
+The `.paused` outcome carries optional `WorkflowPauseInfo`. Missing or JSON-null
+pause metadata yields `null`. A checkpoint key is available only when metadata
+is present.
+
+The wire uses `session.workflow.*`, `workflow.execute`, and `workflow.abort`.
+Agent requests carry `workflowRunId`. Resume results and run summaries carry
+`workflowName`. Workflow events, permissions, and failure types use the new
+terminology. Run `node --test scripts/workflow-contract.test.mjs` to check these
+contracts without authentication.
 
 Use `CreateSessionConfig.available_tools` and
 `ResumeSessionConfig.available_tools`, with their matching `excluded_tools`
@@ -699,6 +717,10 @@ before it changes local session state or sends a lifecycle request.
 includes model IDs and names, capabilities and limits, policy, billing and token
 prices, reasoning and context tiers, picker categories, promotions, warnings,
 messages, and provider metadata.
+
+`Model.provider` is an optional `ModelProviderRef` with an `id`, a `label`, and
+a `ModelProviderKind` of `.copilot` or `.loki`. Capabilities include optional
+`toolCalls` support. `adaptive_thinking` also accepts `.adaptive_only`.
 
 ```zig
 var result = try client.listModels(.{});
@@ -838,7 +860,7 @@ remains available for source compatibility and delegates to `resumeSession`.
 is optional. Null fields are omitted so the runtime keeps its defaults; explicit
 `false` disables a capability. Overrides do not change the model ID or wire model.
 The nested types follow the existing model metadata field names: `ModelSupports`
-has `vision`, `reasoningEffort`, and `adaptive_thinking`; `ModelLimitsOverride`
+has `vision`, `toolCalls`, `reasoningEffort`, and `adaptive_thinking`; `ModelLimitsOverride`
 has `max_prompt_tokens`, `max_output_tokens`, `max_context_window_tokens`, and
 optional `vision`. `ModelVisionLimitsOverride` has optional
 `supported_media_types`, `max_prompt_images`, and `max_prompt_image_size`.

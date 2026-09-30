@@ -52,12 +52,12 @@ function reachablePayloadDefinitions(value) {
   return seen;
 }
 
-test("the pinned schema renders 140 explicit event tags", () => {
+test("the pinned schema renders 154 explicit event tags", () => {
   const value = schema();
   const { entries } = buildRegistry(value);
   const rendered = renderSessionEvents(value);
 
-  assert.equal(entries.length, 140);
+  assert.equal(entries.length, 154);
   assert.doesNotMatch(rendered, /Schema sha256|Discriminators:|Regenerate with:|Source:/);
   assert.match(rendered, /pub const SessionEvent = union\(enum\)/);
   assert.match(rendered, /mcp_oauth_required: McpOauthRequired/);
@@ -67,6 +67,19 @@ test("the pinned schema renders 140 explicit event tags", () => {
   assert.match(rendered, /pub const StartData = struct/);
   assert.match(rendered, /session_id: \[\]const u8/);
   assert.match(rendered, /pub const PermissionRequest = union\(enum\)/);
+});
+
+test("objects containing only inline enums retain the parser allocator", () => {
+  const value = schema();
+  const data = value.definitions[
+    eventDefinition(value, "session.start").properties.data.$ref.split("/").at(-1)
+  ];
+  data.properties.inlineEnum = { type: "string", enum: ["one", "two"] };
+  data.required = ["inlineEnum"];
+  data.properties = { inlineEnum: data.properties.inlineEnum };
+  const rendered = renderSessionEvents(value);
+  assert.match(rendered, /fn parseStartData\(allocator: std\.mem\.Allocator,/);
+  assert.match(rendered, /parseStartDataInlineEnum\(allocator,/);
 });
 
 test("the committed generated registry is current", () => {
