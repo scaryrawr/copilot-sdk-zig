@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { verifyWorkflowOptionsSourceContract } from "./workflow-source-contract.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const read = (path) => readFileSync(join(root, path), "utf8");
@@ -64,6 +65,11 @@ test("the pinned workflow wire methods and ownership fields are exact", () => {
 });
 
 test("workflow results and limit overrides preserve wire presence", () => {
+  assert.deepEqual(api.definitions.WorkflowRunResult.required, ["runId", "status"]);
+  assert.equal(
+    api.definitions.WorkflowRunResult.properties.pauseInfo.$ref,
+    "#/definitions/WorkflowPauseInfo",
+  );
   assert.equal(api.definitions.WorkflowExecuteResult.required, undefined);
   assert.equal(api.definitions.WorkflowAgentResult.required, undefined);
   assert.equal(api.definitions.WorkflowJournalGetResult.properties.resultJson["x-opaque-json"], true);
@@ -85,6 +91,59 @@ test("workflow results and limit overrides preserve wire presence", () => {
     "workflow_provider_disconnected",
     "workflow_resume_declined",
   ]);
+});
+
+const workflowOptionsSource = `
+export interface WorkflowRunOptions<TArgs extends JsonValue = JsonValue> {
+  args?: TArgs;
+  limits?: WorkflowLimitOverrides;
+  notifyOnComplete?: boolean;
+  logPhaseNames?: boolean;
+}
+export interface WorkflowResumeOptions {
+  limits?: WorkflowLimitOverrides;
+  notifyOnComplete?: boolean;
+  logPhaseNames?: boolean;
+}
+`;
+
+test("workflow option parity checks the owning run and resume declarations", () => {
+  const zigSource = read("src/workflow.zig");
+  assert.doesNotThrow(() =>
+    verifyWorkflowOptionsSourceContract(workflowOptionsSource, zigSource)
+  );
+  for (const declaration of ["WorkflowRunOptions", "WorkflowResumeOptions"]) {
+    const position = workflowOptionsSource.indexOf("{", workflowOptionsSource.indexOf(declaration));
+    const withLegacyField =
+      workflowOptionsSource.slice(0, position + 1) +
+      "\n  resumeFromRunId?: string;" +
+      workflowOptionsSource.slice(position + 1);
+    assert.throws(
+      () => verifyWorkflowOptionsSourceContract(withLegacyField, zigSource),
+      new RegExp(`${declaration} fields changed`),
+    );
+    const before = workflowOptionsSource.slice(0, position);
+    const after = workflowOptionsSource.slice(position);
+    for (const [from, to, message] of [
+      ["notifyOnComplete?: boolean;", "", "fields changed"],
+      ["limits?: WorkflowLimitOverrides;", "limits?: number;", "limits changed"],
+      ["logPhaseNames?: boolean;", "logPhaseNames: boolean;", "logPhaseNames changed"],
+    ]) {
+      assert.throws(
+        () => verifyWorkflowOptionsSourceContract(before + after.replace(from, to), zigSource),
+        new RegExp(`${declaration}[ .]${message}`),
+      );
+    }
+    const zigPosition = zigSource.indexOf("{", zigSource.indexOf(`pub const ${declaration} =`));
+    const withZigLegacyField =
+      zigSource.slice(0, zigPosition + 1) +
+      "\n    resume_from_run_id: ?[]const u8 = null," +
+      zigSource.slice(zigPosition + 1);
+    assert.throws(
+      () => verifyWorkflowOptionsSourceContract(workflowOptionsSource, withZigLegacyField),
+      new RegExp(`Zig ${declaration} fields changed`),
+    );
+  }
 });
 
 test("workflow events use the current vocabulary", () => {

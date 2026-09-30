@@ -491,7 +491,7 @@ pub const WorkflowOutcome = union(enum) {
     running,
     completed: JsonPresence,
     halted: WorkflowHalt,
-    paused: WorkflowPauseInfo,
+    paused: ?WorkflowPauseInfo,
     cancelled: ?[]const u8,
     @"error": WorkflowRunError,
 };
@@ -773,6 +773,31 @@ test "workflow registration rejects duplicate names and phase titles" {
             .run = run,
         },
     }));
+}
+
+test "workflow authoring rejects zero declared subagent ceilings" {
+    const run = struct {
+        fn callback(_: std.mem.Allocator, _: *WorkflowContext, _: ?*anyopaque) !?Json {
+            return null;
+        }
+    }.callback;
+    for ([_]WorkflowDeclaredLimits{
+        .{ .max_concurrent_subagents = 0 },
+        .{ .max_total_subagents = 0 },
+    }) |limits| {
+        try std.testing.expectError(error.InvalidWorkflowLimit, validateWorkflows(&.{.{
+            .meta = .{ .name = "zero", .description = "Invalid authoring limit.", .limits = limits },
+            .run = run,
+        }}));
+    }
+    try validateWorkflows(&.{.{
+        .meta = .{
+            .name = "one",
+            .description = "Positive authoring limits.",
+            .limits = .{ .max_concurrent_subagents = 1, .max_total_subagents = 1 },
+        },
+        .run = run,
+    }});
 }
 
 test "limit override preserves three distinct states" {

@@ -640,6 +640,9 @@ Use `workflow().resume` to resume a durable run. Run options do not accept
 `resume_from_run_id`. In `WorkflowLimitOverrides`, `.inherit` omits a ceiling,
 `.unlimited` sends JSON `null`, and `.value` replaces the ceiling. A paused
 envelope settles the current attempt but can later resume under the same run ID.
+The `.paused` outcome carries optional `WorkflowPauseInfo`. Missing or JSON-null
+pause metadata yields `null`. A checkpoint key is available only when metadata
+is present.
 
 The wire uses `session.workflow.*`, `workflow.execute`, and `workflow.abort`.
 Agent requests carry `workflowRunId`. Resume results and run summaries carry

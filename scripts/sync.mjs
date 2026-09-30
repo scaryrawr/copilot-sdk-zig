@@ -38,6 +38,7 @@ import {
   registeredStringCallbacks,
 } from "./typescript-contract.mjs";
 import { parseSyncArgs } from "./sync-args.mjs";
+import { verifyWorkflowOptionsSourceContract } from "./workflow-source-contract.mjs";
 
 const repository = "github/copilot-sdk";
 const ref = "main";
@@ -1240,6 +1241,7 @@ function verifyPinnedSourceContracts(
 }
 
 function verifyWorkflowSourceContract(workflowSource, clientSource) {
+  verifyWorkflowOptionsSourceContract(workflowSource, zigWorkflowSource);
   requireExactPropertySignatures(
     interfacePropertySignatures(workflowSource, "WorkflowMeta"),
     {

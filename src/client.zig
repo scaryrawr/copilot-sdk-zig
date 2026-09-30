@@ -15751,17 +15751,18 @@ fn cloneWorkflowJson(
 fn decodeWorkflowPauseInfo(
     allocator: std.mem.Allocator,
     value: ?std.json.Value,
-) !workflow_types.WorkflowPauseInfo {
-    const object = switch (value orelse return error.InvalidWorkflowRun) {
+) !?workflow_types.WorkflowPauseInfo {
+    const object = switch (value orelse return null) {
+        .null => return null,
         .object => |object| object,
         else => return error.InvalidWorkflowRun,
     };
-    const kind = try jsonRequiredString(object, "type");
+    const kind = jsonRequiredString(object, "type") catch return error.InvalidWorkflowRun;
     if (std.mem.eql(u8, kind, "user")) return .user;
     if (std.mem.eql(u8, kind, "checkpoint"))
         return .{ .checkpoint = try allocator.dupe(
             u8,
-            try jsonRequiredString(object, "key"),
+            jsonRequiredString(object, "key") catch return error.InvalidWorkflowRun,
         ) };
     return error.InvalidWorkflowRun;
 }
@@ -30155,7 +30156,7 @@ test "workflow API preserves wire options and decodes run envelopes" {
     var paused = try api.getRun(allocator, "run-1");
     defer paused.deinit();
     switch (paused.outcome) {
-        .paused => |info| switch (info) {
+        .paused => |info| switch (info orelse return error.TestUnexpectedResult) {
             .checkpoint => |key| try std.testing.expectEqualStrings("review", key),
             else => return error.TestUnexpectedResult,
         },
@@ -30293,6 +30294,88 @@ test "workflow run and resume wait for terminal envelopes" {
             "session.workflow.getRun",
         ),
     );
+}
+
+test "workflow paused envelopes may omit pause metadata" {
+    const allocator = std.testing.allocator;
+    const fake_runtime = try fakeRuntimePath(allocator);
+    defer allocator.free(fake_runtime);
+    for ([_]?[]const u8{ null, "--workflow-pause-info=null" }) |pause_info| {
+        var client = try Client.init(allocator, std.testing.io, .{
+            .connection = .{ .stdio = .{
+                .path = "node",
+                .args = if (pause_info) |flag|
+                    &.{ fake_runtime, "--workflow-paused", flag }
+                else
+                    &.{ fake_runtime, "--workflow-paused" },
+            } },
+        });
+        defer client.deinit();
+        const session = try client.createSession(.{ .session_id = "session-1" });
+        const api = session.workflow();
+        var run = try api.run(allocator, "demo", .{});
+        defer run.deinit();
+        try std.testing.expect(run.outcome == .paused);
+        try std.testing.expect(run.outcome.paused == null);
+        try std.testing.expect(run.isTerminal());
+
+        var resumed = try api.@"resume"(allocator, "run-1", .{});
+        defer resumed.deinit();
+        try std.testing.expect(resumed.outcome == .paused);
+        try std.testing.expect(resumed.outcome.paused == null);
+        try std.testing.expect(resumed.isTerminal());
+
+        var current = try api.getRun(allocator, "run-1");
+        defer current.deinit();
+        try std.testing.expect(current.outcome == .paused);
+        try std.testing.expect(current.outcome.paused == null);
+        try std.testing.expect(current.isTerminal());
+    }
+}
+
+test "workflow paused envelopes validate present pause metadata" {
+    const allocator = std.testing.allocator;
+    const fake_runtime = try fakeRuntimePath(allocator);
+    defer allocator.free(fake_runtime);
+    for ([_][]const u8{
+        "true",
+        "42",
+        "\"checkpoint\"",
+        "[]",
+        "{}",
+        "{\"type\":42}",
+        "{\"type\":\"unknown\"}",
+        "{\"type\":\"checkpoint\"}",
+        "{\"type\":\"checkpoint\",\"key\":null}",
+        "{\"type\":\"checkpoint\",\"key\":42}",
+    }) |pause_info| {
+        const flag = try std.fmt.allocPrint(allocator, "--workflow-pause-info={s}", .{pause_info});
+        defer allocator.free(flag);
+        var client = try Client.init(allocator, std.testing.io, .{
+            .connection = .{ .stdio = .{
+                .path = "node",
+                .args = &.{ fake_runtime, "--workflow-paused", flag },
+            } },
+        });
+        defer client.deinit();
+        const session = try client.createSession(.{ .session_id = "session-1" });
+        try std.testing.expectError(
+            error.InvalidWorkflowRun,
+            session.workflow().getRun(allocator, "run-1"),
+        );
+    }
+
+    var client = try Client.init(allocator, std.testing.io, .{
+        .connection = .{ .stdio = .{
+            .path = "node",
+            .args = &.{ fake_runtime, "--workflow-paused", "--workflow-pause-info={\"type\":\"user\"}" },
+        } },
+    });
+    defer client.deinit();
+    const session = try client.createSession(.{ .session_id = "session-1" });
+    var paused = try session.workflow().getRun(allocator, "run-1");
+    defer paused.deinit();
+    try std.testing.expect(paused.outcome.paused.? == .user);
 }
 
 test "workflow registration preserves omitted and explicitly empty values" {

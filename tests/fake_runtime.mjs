@@ -87,6 +87,15 @@ function workflowProgress() {
     };
 }
 
+function pausedWorkflowRun() {
+    const run = { runId: "run-1", status: "paused" };
+    const pauseInfo = args.find((arg) => arg.startsWith("--workflow-pause-info="));
+    if (pauseInfo !== undefined) {
+        run.pauseInfo = JSON.parse(pauseInfo.slice("--workflow-pause-info=".length));
+    }
+    return run;
+}
+
 function attach(input, output) {
     let buffer = Buffer.alloc(0);
     const pending = new Map();
@@ -230,6 +239,10 @@ function attach(input, output) {
                 result = { success: true };
                 break;
             case "session.workflow.run":
+                if (args.includes("--workflow-paused")) {
+                    result = pausedWorkflowRun();
+                    break;
+                }
                 result = args.includes("--workflow-pending")
                     ? { runId: "run-1", status: "pending" }
                     : {
@@ -240,6 +253,10 @@ function attach(input, output) {
                       };
                 break;
             case "session.workflow.resume":
+                if (args.includes("--workflow-paused")) {
+                    result = { workflowName: "demo", run: pausedWorkflowRun() };
+                    break;
+                }
                 result = args.includes("--workflow-pending")
                     ? {
                           workflowName: "demo",
@@ -263,6 +280,10 @@ function attach(input, output) {
                       };
                 break;
             case "session.workflow.getRun":
+                if (args.includes("--workflow-paused")) {
+                    result = pausedWorkflowRun();
+                    break;
+                }
                 result = args.includes("--workflow-pending")
                     ? { runId: "run-1", status: "completed", result: 42 }
                     : {
