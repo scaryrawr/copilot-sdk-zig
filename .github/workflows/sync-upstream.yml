@@ -34,6 +34,7 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           remote_branch=false
+          remote_sha=
           set +e
           git ls-remote --exit-code --heads origin "$branch" >/dev/null
           status=$?
@@ -42,6 +43,7 @@ jobs:
             0)
               git fetch origin "$branch"
               remote_branch=true
+              remote_sha=$(git rev-parse FETCH_HEAD)
               ;;
             2)
               ;;
@@ -49,12 +51,7 @@ jobs:
               exit "$status"
               ;;
           esac
-          if [ "$remote_branch" = true ]; then
-            git checkout -B "$branch" "origin/$branch"
-            git merge --no-edit origin/main
-          else
-            git checkout -b "$branch" origin/main
-          fi
+          git checkout -B "$branch" origin/main
           npm ci
           public_sdk_commit=$(gh api repos/github/copilot-sdk/commits/main --jq .sha)
           log_file=$(mktemp)
@@ -116,7 +113,11 @@ jobs:
           if ! git diff --cached --quiet; then
             git commit -m "Sync Copilot SDK contracts"
           fi
-          git push --set-upstream origin "$branch"
+          if [ "$remote_branch" = true ]; then
+            git push --force-with-lease="refs/heads/$branch:$remote_sha" --set-upstream origin "$branch"
+          else
+            git push --set-upstream origin "$branch"
+          fi
           pr=$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')
           body="Updates the vendored schemas, generated Zig protocol/event sources, and pinned public/protocol parity contracts from github/copilot-sdk main."
           if [ -n "$pr" ]; then

@@ -1215,8 +1215,9 @@ lifecycle messages, so the compatibility check verifies those names in
 
 The scheduled workflow checks upstream once a week. When inputs change, it
 updates one `sync/upstream` branch and opens or refreshes one pull request. The
-workflow waits for the exact CLI package version to reach the registry and
-never force-pushes.
+workflow starts from current `main`, waits for the exact CLI package version to
+reach the registry, and replaces the bot branch only if its fetched tip has not
+changed.
 
 ## License
 
