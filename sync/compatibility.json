@@ -126,6 +126,7 @@
       "properties": {
         "adaptive_thinking": "ref:AdaptiveThinkingSupport",
         "reasoningEffort": "boolean",
+        "thinking": "boolean",
         "toolCalls": "boolean",
         "vision": "boolean"
       },
@@ -385,6 +386,12 @@
         "status": "supported",
         "contract": {
           "type": "string"
+        }
+      },
+      "modelProvider": {
+        "status": "supported",
+        "contract": {
+          "ref": "ProviderConfigModelProvider"
         }
       }
     }

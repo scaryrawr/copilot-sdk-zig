@@ -36,6 +36,7 @@ pub const Supports = struct {
     vision: ?bool = null,
     toolCalls: ?bool = null,
     reasoningEffort: ?bool = null,
+    thinking: ?bool = null,
     adaptive_thinking: ?AdaptiveThinking = null,
 };
 
@@ -70,8 +71,15 @@ pub const VisionLimits = struct {
 /// Per-property overrides deep-merged over runtime defaults.
 /// Null fields are omitted from session requests, not set to false or zero.
 pub const CapabilitiesOverride = struct {
-    supports: ?Supports = null,
+    supports: ?SupportsOverride = null,
     limits: ?LimitsOverride = null,
+};
+
+pub const SupportsOverride = struct {
+    vision: ?bool = null,
+    toolCalls: ?bool = null,
+    reasoningEffort: ?bool = null,
+    adaptive_thinking: ?AdaptiveThinking = null,
 };
 
 pub const LimitsOverride = struct {
@@ -168,7 +176,7 @@ test "model list preserves published metadata" {
         \\  "name":"Claude Opus 5",
         \\  "provider":{"id":"github","label":"GitHub Copilot","kind":"copilot"},
         \\  "capabilities":{
-        \\    "supports":{"vision":true,"toolCalls":true,"reasoningEffort":true,"adaptive_thinking":"adaptive_only"},
+        \\    "supports":{"vision":true,"toolCalls":true,"reasoningEffort":true,"thinking":true,"adaptive_thinking":"adaptive_only"},
         \\    "limits":{"max_prompt_tokens":200000,"max_output_tokens":32000,"max_context_window_tokens":232000,
         \\      "vision":{"supported_media_types":["image/png","image/jpeg"],"max_prompt_images":8,"max_prompt_image_size":10485760}}
         \\  },
@@ -201,6 +209,7 @@ test "model list preserves published metadata" {
     try std.testing.expectEqualStrings("claude-opus-5", model.id);
     try std.testing.expectEqual(AdaptiveThinking.adaptive_only, model.capabilities.supports.?.adaptive_thinking.?);
     try std.testing.expect(model.capabilities.supports.?.toolCalls.?);
+    try std.testing.expect(model.capabilities.supports.?.thinking.?);
     try std.testing.expectEqual(ProviderKind.copilot, model.provider.?.kind);
     try std.testing.expectEqualStrings("github", model.provider.?.id);
     try std.testing.expectEqual(@as(u64, 232000), model.capabilities.limits.?.max_context_window_tokens.?);

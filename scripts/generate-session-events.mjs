@@ -270,6 +270,20 @@ class SchemaModel {
 
   checkKeywords(node, path) {
     for (const keyword of Object.keys(node)) {
+      if (keyword === "not") {
+        const constraint = node.not;
+        if (node.type === "object" && !node.$ref && !node.anyOf &&
+            !node.enum && node.const === undefined && node["x-opaque-json"] !== true && constraint &&
+            Object.keys(constraint).length === 1 &&
+            Array.isArray(constraint.required) && constraint.required.length > 0 &&
+            new Set(constraint.required).size === constraint.required.length &&
+            constraint.required.every((name) =>
+              typeof name === "string" && Object.hasOwn(node.properties ?? {}, name)
+            )) {
+          continue;
+        }
+        throw new Error(`unsupported schema constraint not at ${path}`);
+      }
       if (!shapeKeywords.has(keyword) && !ignoredKeywords.has(keyword)) {
         throw new Error(`unsupported schema keyword ${keyword} at ${path}`);
       }
@@ -452,6 +466,7 @@ class SchemaModel {
           name,
           fields,
           rejectUnknown: additional === false,
+          forbiddenTogether: node.not?.required ?? [],
         };
         if (!publicType) this.nodes.set(name, model);
         return model;
@@ -655,6 +670,14 @@ ${model.fields.map((field) => {
 }
 
 function renderObjectParser(model) {
+  const constraint = model.forbiddenTogether.length > 0
+    ? `if (${model.forbiddenTogether.map((name) => {
+      const field = model.fields.find((field) => field.wire === name);
+      return field.required
+        ? `object.contains(${zigString(name)})`
+        : `(if (object.get(${zigString(name)})) |field_value| field_value != .null else false)`;
+    }).join(" and ")}) return error.InvalidSessionEvent;`
+    : "";
   const declarations = model.fields.map((field) => {
     const source = `object.get(${zigString(field.wire)})`;
     const effectiveModel = !field.required && field.model.kind !== "nullable"
@@ -684,6 +707,7 @@ function renderObjectParser(model) {
   const objectUsed = model.fields.length > 0;
   return `fn parse${model.name}(${parseUsesAllocator(model) ? "allocator" : "_"}: std.mem.Allocator, value: std.json.Value) !${model.name} {
     ${objectUsed ? "const object =" : "_ ="} try payloads.requiredObject(value);
+    ${constraint}
     ${declarations}
     return .{
 ${assignments}

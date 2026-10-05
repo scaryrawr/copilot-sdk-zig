@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 const workflow = readFileSync(
@@ -19,6 +19,10 @@ const pushEnd = workflow.indexOf("          pr=$(gh pr list", pushStart);
 assert(setupStart >= 0 && setupEnd > setupStart && pushStart >= 0 && pushEnd > pushStart);
 const setup = workflow.slice(setupStart, setupEnd).replace(/^ {10}/gm, "");
 const push = workflow.slice(pushStart, pushEnd).replace(/^ {10}/gm, "");
+const stageStart = workflow.indexOf("          git add \\\n");
+const stageEnd = workflow.indexOf("          if ! git diff --cached --quiet", stageStart);
+assert(stageStart >= 0 && stageEnd > stageStart);
+const stage = workflow.slice(stageStart, stageEnd).replace(/^ {10}/gm, "");
 
 function run(cwd, command, args, env = process.env) {
   return execFileSync(command, args, {
@@ -87,6 +91,30 @@ ${push}`]);
   assert.equal(git(work, "merge-base", "main", "HEAD"), main);
   assert.equal(git(work, "ls-remote", "origin", "refs/heads/sync/upstream").split("\t")[0],
     git(work, "rev-parse", "HEAD"));
+});
+
+test("stages every generated synchronization artifact", (t) => {
+  const { work } = fixture(t, { staleBranch: false });
+  const outputs = [
+    "vendor/copilot/upstream.json",
+    "vendor/copilot/schemas/api.schema.json",
+    "vendor/copilot/schemas/session-events.schema.json",
+    "src/protocol_version.zig",
+    "src/session_event_generated.zig",
+    "sync/compatibility.json",
+    "sync/extensibility-contract.json",
+    "sync/public-rpc-surface.json",
+    "sync/schema-snapshot.json",
+    "sync/stable-parity-contract.json",
+  ];
+  for (const output of outputs) {
+    const path = join(work, output);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, "generated\n");
+  }
+  run(work, "bash", ["-e", "-c", stage]);
+  assert.deepEqual(git(work, "diff", "--cached", "--name-only").split("\n"), outputs.sort());
+  assert.equal(git(work, "diff", "--name-only"), "");
 });
 
 test("refuses to overwrite a sync branch updated after fetch", (t) => {
