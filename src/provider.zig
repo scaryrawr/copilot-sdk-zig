@@ -44,6 +44,7 @@ pub const ProviderConfig = struct {
     model_id: ?[]const u8 = null,
     model_capabilities: ?models.CapabilitiesOverride = null,
     provider_name: ?[]const u8 = null,
+    model_provider: ?ModelProvider = null,
     wire_model: ?[]const u8 = null,
     max_prompt_tokens: ?u64 = null,
     max_context_window_tokens: ?u64 = null,
@@ -72,6 +73,16 @@ pub const ProviderConfig = struct {
         http,
         websockets,
     };
+};
+
+pub const ModelProvider = enum {
+    openai,
+    anthropic,
+    azure_openai,
+    ollama,
+    lm_studio,
+    foundry_local,
+    llama_cpp,
 };
 
 pub const NamedProviderConfig = struct {
@@ -166,6 +177,7 @@ pub const WireProvider = struct {
     modelId: ?[]const u8 = null,
     modelCapabilities: ?models.CapabilitiesOverride = null,
     providerName: ?[]const u8 = null,
+    modelProvider: ?ModelProvider = null,
     wireModel: ?[]const u8 = null,
     maxPromptTokens: ?u64 = null,
     maxContextWindowTokens: ?u64 = null,
@@ -303,6 +315,7 @@ fn lowerProvider(config: ProviderConfig) !WireProvider {
         .modelId = config.model_id,
         .modelCapabilities = config.model_capabilities,
         .providerName = config.provider_name,
+        .modelProvider = config.model_provider,
         .wireModel = config.wire_model,
         .maxPromptTokens = config.max_prompt_tokens,
         .maxContextWindowTokens = config.max_context_window_tokens,
@@ -475,6 +488,7 @@ test "singular provider preserves static credentials and derives callback flag" 
         .model_id = "gpt-4.1",
         .model_capabilities = .{ .supports = .{ .vision = true } },
         .provider_name = "telemetry-name",
+        .model_provider = .ollama,
         .wire_model = "deployment",
         .max_prompt_tokens = 100,
         .max_context_window_tokens = 200,
@@ -483,7 +497,7 @@ test "singular provider preserves static credentials and derives callback flag" 
     defer std.testing.allocator.free(encoded);
 
     try std.testing.expectEqualStrings(
-        "{\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"https://api.example.test\",\"apiKey\":\"key\",\"bearerToken\":\"static\",\"modelId\":\"gpt-4.1\",\"modelCapabilities\":{\"supports\":{\"vision\":true}},\"providerName\":\"telemetry-name\",\"wireModel\":\"deployment\",\"maxPromptTokens\":100,\"maxContextWindowTokens\":200,\"maxOutputTokens\":50,\"hasBearerTokenProvider\":true}",
+        "{\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"https://api.example.test\",\"apiKey\":\"key\",\"bearerToken\":\"static\",\"modelId\":\"gpt-4.1\",\"modelCapabilities\":{\"supports\":{\"vision\":true}},\"providerName\":\"telemetry-name\",\"modelProvider\":\"ollama\",\"wireModel\":\"deployment\",\"maxPromptTokens\":100,\"maxContextWindowTokens\":200,\"maxOutputTokens\":50,\"hasBearerTokenProvider\":true}",
         encoded,
     );
 }

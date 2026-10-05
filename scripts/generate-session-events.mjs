@@ -194,6 +194,7 @@ const shapeKeywords = new Set([
   "minItems",
   "minLength",
   "minimum",
+  "not",
   "properties",
   "required",
   "type",
@@ -302,6 +303,9 @@ class SchemaModel {
       throw new Error(`invalid schema node at ${path}`);
     }
     this.checkKeywords(node, path);
+    if (node.not !== undefined && node.type !== "object") {
+      throw new Error(`unsupported not constraint at ${path}`);
+    }
 
     if (node.$ref) {
       const prefix = "#/definitions/";
@@ -407,6 +411,17 @@ class SchemaModel {
       }
       case "object": {
         const properties = node.properties ?? {};
+        const mutuallyExclusive = node.not?.required;
+        if (node.not !== undefined && (
+          !Array.isArray(mutuallyExclusive) ||
+          mutuallyExclusive.length !== 2 ||
+          new Set(mutuallyExclusive).size !== 2 ||
+          mutuallyExclusive.some((field) => !Object.hasOwn(properties, field) ||
+            (node.required ?? []).includes(field)) ||
+          Object.keys(node.not).some((key) => key !== "required")
+        )) {
+          throw new Error(`unsupported not constraint at ${path}`);
+        }
         if (Object.keys(properties).length === 0 &&
             node.additionalProperties &&
             typeof node.additionalProperties === "object") {
@@ -452,6 +467,7 @@ class SchemaModel {
           name,
           fields,
           rejectUnknown: additional === false,
+          mutuallyExclusive,
         };
         if (!publicType) this.nodes.set(name, model);
         return model;
@@ -684,6 +700,7 @@ function renderObjectParser(model) {
   const objectUsed = model.fields.length > 0;
   return `fn parse${model.name}(${parseUsesAllocator(model) ? "allocator" : "_"}: std.mem.Allocator, value: std.json.Value) !${model.name} {
     ${objectUsed ? "const object =" : "_ ="} try payloads.requiredObject(value);
+    ${model.mutuallyExclusive ? `if (object.get(${zigString(model.mutuallyExclusive[0])}) != null and object.get(${zigString(model.mutuallyExclusive[1])}) != null) return error.InvalidSessionEvent;` : ""}
     ${declarations}
     return .{
 ${assignments}

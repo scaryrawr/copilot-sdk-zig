@@ -203,6 +203,7 @@ pub const AssistantMessageServerTools = struct {
 pub const AssistantMessageReasoningBlocks = struct {
     provider: []const u8,
     blocks: ?[]const std.json.Value = null,
+    ordered_blocks: ?[]const std.json.Value = null,
 };
 
 pub const CitationProvider = enum {
@@ -426,6 +427,8 @@ pub const AssistantUsageData = struct {
     initiator: ?[]const u8 = null,
     interaction_type: ?[]const u8 = null,
     is_byok: ?bool = null,
+    byok_kind: ?[]const u8 = null,
+    model_provider: ?[]const u8 = null,
     is_auto: ?bool = null,
     max_prompt_tokens: ?u64 = null,
     max_output_tokens: ?u64 = null,
@@ -608,6 +611,53 @@ pub const HookStartData = struct {
     parent_tool_call_id: ?[]const u8 = null,
 };
 
+pub const HumanResponseActor = enum {
+    human_response,
+    host_automation,
+    unknown,
+};
+
+pub const HumanResponseRecordedResponseVariant1 = struct {
+    content: std.json.ArrayHashMap(ElicitationCompletedContent),
+    message: []const u8,
+    requested_schema: ElicitationRequestedSchema,
+    response_kind: []const u8,
+};
+
+pub const HumanResponseRecordedResponseVariant2 = struct {
+    question: []const u8,
+    choices: ?[]const []const u8 = null,
+    allow_freeform: ?bool = null,
+    answer: []const u8,
+    was_freeform: bool,
+    response_kind: []const u8,
+};
+
+pub const HumanResponseRecordedResponseVariant3 = struct {
+    summary: []const u8,
+    plan_content: []const u8,
+    actions: []const ExitPlanModeAction,
+    recommended_action: ExitPlanModeAction,
+    approved: bool,
+    selected_action: ?ExitPlanModeAction = null,
+    auto_approve_edits: ?bool = null,
+    feedback: ?[]const u8 = null,
+    response_kind: []const u8,
+};
+
+pub const HumanResponseRecordedResponse = union(enum) {
+    ask_user: HumanResponseRecordedResponseVariant1,
+    user_input: HumanResponseRecordedResponseVariant2,
+    exit_plan_mode: HumanResponseRecordedResponseVariant3,
+};
+
+pub const HumanResponseRecordedData = struct {
+    request_id: []const u8,
+    tool_call_id: ?[]const u8 = null,
+    actor: HumanResponseActor,
+    response: HumanResponseRecordedResponse,
+};
+
 pub const McpHeadersRefreshCompletedOutcome = enum {
     headers,
     none,
@@ -756,6 +806,8 @@ pub const ModelCallFailureData = struct {
     max_prompt_tokens: ?u64 = null,
     max_output_tokens: ?u64 = null,
     is_byok: ?bool = null,
+    byok_kind: ?[]const u8 = null,
+    model_provider: ?[]const u8 = null,
     is_auto: ?bool = null,
     reasoning_effort: ?[]const u8 = null,
     interaction_type: ?[]const u8 = null,
@@ -1586,6 +1638,7 @@ pub const PromptCacheBreakData = struct {
     tools_added_raw: ?[]const []const u8 = null,
     tools_removed_raw: ?[]const []const u8 = null,
     tools_redefined_raw: ?[]const []const u8 = null,
+    tools_redefined_parts: ?[]const []const u8 = null,
     tools_reordered: ?bool = null,
     system_segments_changed: ?[]const []const u8 = null,
     cache_config_changed_fields: ?[]const []const u8 = null,
@@ -1861,6 +1914,7 @@ pub const AutoModeResolvedData = struct {
     available_models: ?[]const []const u8 = null,
     fallback: ?bool = null,
     fallback_reason: ?[]const u8 = null,
+    selection_reason: ?[]const u8 = null,
     sticky_override: ?bool = null,
     router_latency_ms: ?f64 = null,
     end_to_end_latency_ms: ?f64 = null,
@@ -2804,6 +2858,7 @@ pub const ModelChangeData = struct {
     new_model: []const u8,
     previous_reasoning_effort: ?[]const u8 = null,
     reasoning_effort: ?[]const u8,
+    reasoning_effort_model: ?[]const u8 = null,
     previous_reasoning_summary: ?ReasoningSummary = null,
     reasoning_summary: ?ReasoningSummary = null,
     previous_verbosity: ?Verbosity = null,
@@ -2854,6 +2909,7 @@ pub const ResumeData = struct {
     events_file_size_bytes: ?u64 = null,
     selected_model: ?[]const u8 = null,
     reasoning_effort: ?[]const u8 = null,
+    reasoning_effort_model: ?[]const u8 = null,
     reasoning_summary: ?ReasoningSummary = null,
     verbosity: ?Verbosity = null,
     context_tier: ?ContextTier,
@@ -3004,6 +3060,7 @@ pub const StartData = struct {
     start_time: []const u8,
     selected_model: ?[]const u8 = null,
     reasoning_effort: ?[]const u8 = null,
+    reasoning_effort_model: ?[]const u8 = null,
     reasoning_summary: ?ReasoningSummary = null,
     verbosity: ?Verbosity = null,
     context_tier: ?ContextTier,
@@ -3613,6 +3670,17 @@ pub const ToolExecutionCompleteShellExecution = struct {
     exit_code: i64,
 };
 
+pub const ToolExecutionCompleteFileEditKind = enum {
+    create,
+    edit,
+    delete,
+};
+
+pub const ToolExecutionCompleteFileEdit = struct {
+    path: []const u8,
+    kind: ToolExecutionCompleteFileEditKind,
+};
+
 pub const ToolExecutionCompleteData = struct {
     tool_call_id: []const u8,
     success: bool,
@@ -3628,6 +3696,7 @@ pub const ToolExecutionCompleteData = struct {
     tool_description: ?ToolExecutionCompleteToolDescription = null,
     sandboxed: ?bool = null,
     shell_execution: ?ToolExecutionCompleteShellExecution = null,
+    file_edits: ?[]const ToolExecutionCompleteFileEdit = null,
     parent_tool_call_id: ?[]const u8 = null,
     fusion: ?FusionAttribution = null,
 };
@@ -3640,6 +3709,7 @@ pub const ToolExecutionPartialData = struct {
 pub const ToolExecutionProgressData = struct {
     tool_call_id: []const u8,
     progress_message: []const u8,
+    structured_content: ?std.json.Value = null,
 };
 
 pub const ToolExecutionStartShellToolInfo = struct {
@@ -3686,6 +3756,19 @@ pub const ToolExecutionStartData = struct {
     tool_description: ?ToolExecutionStartToolDescription = null,
     parent_tool_call_id: ?[]const u8 = null,
     fusion: ?FusionAttribution = null,
+};
+
+pub const ToolShellOutputStream = enum {
+    stdout,
+    stderr,
+    terminal,
+};
+
+pub const ToolShellOutputData = struct {
+    tool_call_id: []const u8,
+    stream: ?ToolShellOutputStream = null,
+    text: []const u8,
+    sequence: u64,
 };
 
 pub const ToolUserRequestedData = struct {
@@ -3831,6 +3914,7 @@ pub const ExternalToolCompletedEventPayload = OwnedPayload(ExternalToolCompleted
 pub const HookEndEventPayload = OwnedPayload(HookEndData, wipeHookEndData);
 pub const HookProgressEventPayload = OwnedPayload(HookProgressData, wipeHookProgressData);
 pub const HookStartEventPayload = OwnedPayload(HookStartData, wipeHookStartData);
+pub const HumanResponseRecordedEventPayload = OwnedPayload(HumanResponseRecordedData, wipeHumanResponseRecordedData);
 pub const McpHeadersRefreshCompletedEventPayload = OwnedPayload(McpHeadersRefreshCompletedData, wipeMcpHeadersRefreshCompletedData);
 pub const McpHeadersRefreshRequiredEventPayload = OwnedPayload(McpHeadersRefreshRequiredData, wipeMcpHeadersRefreshRequiredData);
 pub const McpOauthCompletedEventPayload = OwnedPayload(McpOauthCompletedData, wipeMcpOauthCompletedData);
@@ -3936,6 +4020,7 @@ pub const ToolExecutionCompleteEventPayload = OwnedPayload(ToolExecutionComplete
 pub const ToolExecutionPartialResultEventPayload = OwnedPayload(ToolExecutionPartialData, wipeToolExecutionPartialData);
 pub const ToolExecutionProgressEventPayload = OwnedPayload(ToolExecutionProgressData, wipeToolExecutionProgressData);
 pub const ToolExecutionStartEventPayload = OwnedPayload(ToolExecutionStartData, wipeToolExecutionStartData);
+pub const ToolShellOutputEventPayload = OwnedPayload(ToolShellOutputData, wipeToolShellOutputData);
 pub const ToolUserRequestedEventPayload = OwnedPayload(ToolUserRequestedData, wipeToolUserRequestedData);
 pub const ToolSearchActivatedEventPayload = OwnedPayload(ToolSearchActivatedData, wipeToolSearchActivatedData);
 pub const UIEphemeralQueryEventPayload = OwnedPayload(UIEphemeralQueryData, wipeUIEphemeralQueryData);
@@ -4293,6 +4378,7 @@ pub const SessionEvent = union(enum) {
     hook_end: HookEndEventPayload,
     hook_progress: HookProgressEventPayload,
     hook_start: HookStartEventPayload,
+    human_response_recorded: HumanResponseRecordedEventPayload,
     mcp_headers_refresh_completed: McpHeadersRefreshCompletedEventPayload,
     mcp_headers_refresh_required: McpHeadersRefreshRequiredEventPayload,
     mcp_oauth_completed: McpOauthCompletedEventPayload,
@@ -4402,6 +4488,7 @@ pub const SessionEvent = union(enum) {
     tool_execution_partial_result: ToolExecutionPartialResultEventPayload,
     tool_execution_progress: ToolExecutionProgressEventPayload,
     tool_execution_start: ToolExecutionStartEventPayload,
+    tool_shell_output: ToolShellOutputEventPayload,
     tool_user_requested: ToolUserRequestedEventPayload,
     tool_search_activated: ToolSearchActivatedEventPayload,
     ui_ephemeral_query: UIEphemeralQueryEventPayload,
@@ -4451,6 +4538,7 @@ pub const SessionEvent = union(enum) {
             .hook_end => "hook.end",
             .hook_progress => "hook.progress",
             .hook_start => "hook.start",
+            .human_response_recorded => "human_response.recorded",
             .mcp_headers_refresh_completed => "mcp.headers_refresh_completed",
             .mcp_headers_refresh_required => "mcp.headers_refresh_required",
             .mcp_oauth_completed => "mcp.oauth_completed",
@@ -4560,6 +4648,7 @@ pub const SessionEvent = union(enum) {
             .tool_execution_partial_result => "tool.execution_partial_result",
             .tool_execution_progress => "tool.execution_progress",
             .tool_execution_start => "tool.execution_start",
+            .tool_shell_output => "tool.shell_output",
             .tool_user_requested => "tool.user_requested",
             .tool_search_activated => "tool_search.activated",
             .ui_ephemeral_query => "ui.ephemeral_query",
@@ -4611,6 +4700,7 @@ pub const SessionEvent = union(enum) {
             .hook_end => |value| value.data_json,
             .hook_progress => |value| value.data_json,
             .hook_start => |value| value.data_json,
+            .human_response_recorded => |value| value.data_json,
             .mcp_headers_refresh_completed => |value| value.data_json,
             .mcp_headers_refresh_required => |value| value.data_json,
             .mcp_oauth_completed => |value| value.data_json,
@@ -4720,6 +4810,7 @@ pub const SessionEvent = union(enum) {
             .tool_execution_partial_result => |value| value.data_json,
             .tool_execution_progress => |value| value.data_json,
             .tool_execution_start => |value| value.data_json,
+            .tool_shell_output => |value| value.data_json,
             .tool_user_requested => |value| value.data_json,
             .tool_search_activated => |value| value.data_json,
             .ui_ephemeral_query => |value| value.data_json,
@@ -4771,6 +4862,7 @@ pub const SessionEvent = union(enum) {
             .hook_end => |*value| value.deinit(allocator),
             .hook_progress => |*value| value.deinit(allocator),
             .hook_start => |*value| value.deinit(allocator),
+            .human_response_recorded => |*value| value.deinit(allocator),
             .mcp_headers_refresh_completed => |*value| value.deinit(allocator),
             .mcp_headers_refresh_required => |*value| value.deinit(allocator),
             .mcp_oauth_completed => |*value| value.deinit(allocator),
@@ -4880,6 +4972,7 @@ pub const SessionEvent = union(enum) {
             .tool_execution_partial_result => |*value| value.deinit(allocator),
             .tool_execution_progress => |*value| value.deinit(allocator),
             .tool_execution_start => |*value| value.deinit(allocator),
+            .tool_shell_output => |*value| value.deinit(allocator),
             .tool_user_requested => |*value| value.deinit(allocator),
             .tool_search_activated => |*value| value.deinit(allocator),
             .ui_ephemeral_query => |*value| value.deinit(allocator),
@@ -4938,6 +5031,7 @@ pub const pinned_discriminators = [_]RegistryEntry{
     .{ .wire = "hook.end", .tag = .hook_end },
     .{ .wire = "hook.progress", .tag = .hook_progress },
     .{ .wire = "hook.start", .tag = .hook_start },
+    .{ .wire = "human_response.recorded", .tag = .human_response_recorded },
     .{ .wire = "mcp.headers_refresh_completed", .tag = .mcp_headers_refresh_completed },
     .{ .wire = "mcp.headers_refresh_required", .tag = .mcp_headers_refresh_required },
     .{ .wire = "mcp.oauth_completed", .tag = .mcp_oauth_completed },
@@ -5047,6 +5141,7 @@ pub const pinned_discriminators = [_]RegistryEntry{
     .{ .wire = "tool.execution_partial_result", .tag = .tool_execution_partial_result },
     .{ .wire = "tool.execution_progress", .tag = .tool_execution_progress },
     .{ .wire = "tool.execution_start", .tag = .tool_execution_start },
+    .{ .wire = "tool.shell_output", .tag = .tool_shell_output },
     .{ .wire = "tool.user_requested", .tag = .tool_user_requested },
     .{ .wire = "tool_search.activated", .tag = .tool_search_activated },
     .{ .wire = "ui.ephemeral_query", .tag = .ui_ephemeral_query },
@@ -5353,6 +5448,24 @@ fn parseAssistantMessageReasoningBlocksBlocksArray(allocator: std.mem.Allocator,
     return result;
 }
 
+fn parseAssistantMessageReasoningBlocksOrderedBlocksArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const std.json.Value {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc(std.json.Value, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeJsonValue(&item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try cloneJsonValue(allocator, item);
+        initialized += 1;
+    }
+    return result;
+}
+
 fn parseCitationSpanReferencesArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const CitationReference {
     const source = switch (value) {
         .array => |array| array.items,
@@ -5590,6 +5703,66 @@ fn parseElicitationRequestedSchemaRequiredArray(allocator: std.mem.Allocator, va
 }
 
 fn parseExitPlanModeRequestedDataActionsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const ExitPlanModeAction {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc(ExitPlanModeAction, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeExitPlanModeAction(&item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseExitPlanModeAction(allocator, item);
+        initialized += 1;
+    }
+    return result;
+}
+
+fn parseHumanResponseRecordedResponseVariant1ContentMap(allocator: std.mem.Allocator, value: std.json.Value) !std.json.ArrayHashMap(ElicitationCompletedContent) {
+    const source = try payloads.requiredObject(value);
+    var result: std.json.ArrayHashMap(ElicitationCompletedContent) = .{};
+    errdefer {
+        var cleanup_iterator = result.map.iterator();
+        while (cleanup_iterator.next()) |entry| {
+            wipeString(entry.key_ptr.*);
+            wipeElicitationCompletedContent(&entry.value_ptr.*);
+        }
+    }
+    var iterator = source.iterator();
+    while (iterator.next()) |entry| {
+        const key = try allocator.dupe(u8, entry.key_ptr.*);
+        errdefer wipeString(key);
+        const parsed_value = try parseElicitationCompletedContent(allocator, entry.value_ptr.*);
+        errdefer {
+            var cleanup_value = parsed_value;
+            wipeElicitationCompletedContent(&cleanup_value);
+        }
+        try result.map.put(allocator, key, parsed_value);
+    }
+    return result;
+}
+
+fn parseHumanResponseRecordedResponseVariant2ChoicesArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc([]const u8, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeString(item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseString(allocator, item, null, null);
+        initialized += 1;
+    }
+    return result;
+}
+
+fn parseHumanResponseRecordedResponseVariant3ActionsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const ExitPlanModeAction {
     const source = switch (value) {
         .array => |array| array.items,
         else => return error.InvalidSessionEvent,
@@ -6208,6 +6381,24 @@ fn parsePromptCacheBreakDataToolsRemovedRawArray(allocator: std.mem.Allocator, v
 }
 
 fn parsePromptCacheBreakDataToolsRedefinedRawArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc([]const u8, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeString(item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseString(allocator, item, null, null);
+        initialized += 1;
+    }
+    return result;
+}
+
+fn parsePromptCacheBreakDataToolsRedefinedPartsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
     const source = switch (value) {
         .array => |array| array.items,
         else => return error.InvalidSessionEvent,
@@ -7307,6 +7498,24 @@ fn parseToolExecutionCompleteDataToolTelemetryMap(allocator: std.mem.Allocator, 
     return result;
 }
 
+fn parseToolExecutionCompleteDataFileEditsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const ToolExecutionCompleteFileEdit {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc(ToolExecutionCompleteFileEdit, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeToolExecutionCompleteFileEdit(&item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseToolExecutionCompleteFileEdit(allocator, item);
+        initialized += 1;
+    }
+    return result;
+}
+
 fn parseToolExecutionStartShellToolInfoPossiblePathsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
     const source = switch (value) {
         .array => |array| array.items,
@@ -7444,6 +7653,7 @@ fn parseAbortReason(_: std.mem.Allocator, value: std.json.Value) !AbortReason {
 
 fn parseAbortData(allocator: std.mem.Allocator, value: std.json.Value) !AbortData {
     const object = try payloads.requiredObject(value);
+
     const parsed_reason = try parseAbortReason(allocator, object.get("reason") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_reason = parsed_reason;
@@ -7479,6 +7689,7 @@ fn parseAgentInterruptedCancelPhase(_: std.mem.Allocator, value: std.json.Value)
 
 fn parseAgentInterruptedData(allocator: std.mem.Allocator, value: std.json.Value) !AgentInterruptedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_activity = try parseAgentInterruptedActivity(allocator, object.get("activity") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_activity = parsed_activity;
@@ -7604,6 +7815,7 @@ fn parseFusionPhaseActivityKind(_: std.mem.Allocator, value: std.json.Value) !Fu
 
 fn parseFusionPhaseActivityData(allocator: std.mem.Allocator, value: std.json.Value) !FusionPhaseActivityData {
     const object = try payloads.requiredObject(value);
+
     const parsed_fusion_id = try parseString(allocator, object.get("fusionId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_fusion_id = parsed_fusion_id;
@@ -7670,6 +7882,7 @@ fn parseFusionPhaseStatus(_: std.mem.Allocator, value: std.json.Value) !FusionPh
 
 fn parseFusionPhaseUsage(_: std.mem.Allocator, value: std.json.Value) !FusionPhaseUsage {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_count = try parseInteger(u64, object.get("requestCount") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_input_tokens = try parseInteger(u64, object.get("inputTokens") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_output_tokens = try parseInteger(u64, object.get("outputTokens") orelse return error.InvalidSessionEvent, 0, null, null);
@@ -7696,6 +7909,7 @@ fn parseFusionProjectionMode(_: std.mem.Allocator, value: std.json.Value) !Fusio
 
 fn parseFusionStagedTerminal(allocator: std.mem.Allocator, value: std.json.Value) !FusionStagedTerminal {
     const object = try payloads.requiredObject(value);
+
     const parsed_assistant_message = try cloneJsonValue(allocator, object.get("assistantMessage") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_assistant_message = parsed_assistant_message;
@@ -7732,6 +7946,7 @@ fn parseFusionStagedTerminal(allocator: std.mem.Allocator, value: std.json.Value
 
 fn parseFusionPhaseCompletedData(allocator: std.mem.Allocator, value: std.json.Value) !FusionPhaseCompletedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_fusion_id = try parseString(allocator, object.get("fusionId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_fusion_id = parsed_fusion_id;
@@ -7834,6 +8049,7 @@ fn parseFusionPhaseCompletedData(allocator: std.mem.Allocator, value: std.json.V
 
 fn parseFusionPhaseFailedData(allocator: std.mem.Allocator, value: std.json.Value) !FusionPhaseFailedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_fusion_id = try parseString(allocator, object.get("fusionId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_fusion_id = parsed_fusion_id;
@@ -7920,6 +8136,7 @@ fn parseFusionPhaseFailedData(allocator: std.mem.Allocator, value: std.json.Valu
 
 fn parseFusionPhaseStartedData(allocator: std.mem.Allocator, value: std.json.Value) !FusionPhaseStartedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_fusion_id = try parseString(allocator, object.get("fusionId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_fusion_id = parsed_fusion_id;
@@ -7976,6 +8193,7 @@ fn parseFusionPhaseStartedData(allocator: std.mem.Allocator, value: std.json.Val
 
 fn parseAssistantIdleData(_: std.mem.Allocator, value: std.json.Value) !AssistantIdleData {
     const object = try payloads.requiredObject(value);
+
     const parsed_aborted = if (object.get("aborted")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .aborted = parsed_aborted,
@@ -7984,6 +8202,7 @@ fn parseAssistantIdleData(_: std.mem.Allocator, value: std.json.Value) !Assistan
 
 fn parseAssistantIntentData(allocator: std.mem.Allocator, value: std.json.Value) !AssistantIntentData {
     const object = try payloads.requiredObject(value);
+
     const parsed_intent = try parseString(allocator, object.get("intent") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_intent = parsed_intent;
@@ -8009,6 +8228,7 @@ fn parseAssistantMessageToolRequestCallerType(_: std.mem.Allocator, value: std.j
 
 fn parseAssistantMessageToolRequestCaller(allocator: std.mem.Allocator, value: std.json.Value) !AssistantMessageToolRequestCaller {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseAssistantMessageToolRequestCallerType(allocator, object.get("type") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_type = parsed_type;
@@ -8027,6 +8247,7 @@ fn parseAssistantMessageToolRequestCaller(allocator: std.mem.Allocator, value: s
 
 fn parseAssistantMessageToolRequest(allocator: std.mem.Allocator, value: std.json.Value) !AssistantMessageToolRequest {
     const object = try payloads.requiredObject(value);
+
     const parsed_tool_call_id = try parseString(allocator, object.get("toolCallId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_tool_call_id = parsed_tool_call_id;
@@ -8101,6 +8322,7 @@ fn parseAssistantMessageToolRequest(allocator: std.mem.Allocator, value: std.jso
 
 fn parseAssistantMessageServerTools(allocator: std.mem.Allocator, value: std.json.Value) !AssistantMessageServerTools {
     const object = try payloads.requiredObject(value);
+
     const parsed_provider = try parseString(allocator, object.get("provider") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_provider = parsed_provider;
@@ -8155,6 +8377,7 @@ fn parseAssistantMessageServerTools(allocator: std.mem.Allocator, value: std.jso
 
 fn parseAssistantMessageReasoningBlocks(allocator: std.mem.Allocator, value: std.json.Value) !AssistantMessageReasoningBlocks {
     const object = try payloads.requiredObject(value);
+    if (object.get("blocks") != null and object.get("orderedBlocks") != null) return error.InvalidSessionEvent;
     const parsed_provider = try parseString(allocator, object.get("provider") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_provider = parsed_provider;
@@ -8169,9 +8392,19 @@ fn parseAssistantMessageReasoningBlocks(allocator: std.mem.Allocator, value: std
             }
         }
     }
+    const parsed_ordered_blocks = if (object.get("orderedBlocks")) |field_value| if ((field_value) == .null) null else try parseAssistantMessageReasoningBlocksOrderedBlocksArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_ordered_blocks = parsed_ordered_blocks;
+        if (cleanup_ordered_blocks) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipeJsonValue(&item.*);
+            }
+        }
+    }
     return .{
         .provider = parsed_provider,
         .blocks = parsed_blocks,
+        .ordered_blocks = parsed_ordered_blocks,
     };
 }
 
@@ -8185,6 +8418,7 @@ fn parseCitationProvider(_: std.mem.Allocator, value: std.json.Value) !CitationP
 
 fn parseCitationSource(allocator: std.mem.Allocator, value: std.json.Value) !CitationSource {
     const object = try payloads.requiredObject(value);
+
     const parsed_id = try parseString(allocator, object.get("id") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_id = parsed_id;
@@ -8227,6 +8461,7 @@ fn parseCitationSource(allocator: std.mem.Allocator, value: std.json.Value) !Cit
 
 fn parseCitationLocationChar(allocator: std.mem.Allocator, value: std.json.Value) !CitationLocationChar {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "char");
     errdefer {
         const cleanup_type = parsed_type;
@@ -8243,6 +8478,7 @@ fn parseCitationLocationChar(allocator: std.mem.Allocator, value: std.json.Value
 
 fn parseCitationLocationPage(allocator: std.mem.Allocator, value: std.json.Value) !CitationLocationPage {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "page");
     errdefer {
         const cleanup_type = parsed_type;
@@ -8259,6 +8495,7 @@ fn parseCitationLocationPage(allocator: std.mem.Allocator, value: std.json.Value
 
 fn parseCitationLocationBlock(allocator: std.mem.Allocator, value: std.json.Value) !CitationLocationBlock {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "block");
     errdefer {
         const cleanup_type = parsed_type;
@@ -8284,6 +8521,7 @@ fn parseCitationLocation(allocator: std.mem.Allocator, value: std.json.Value) !C
 
 fn parseCitationReference(allocator: std.mem.Allocator, value: std.json.Value) !CitationReference {
     const object = try payloads.requiredObject(value);
+
     const parsed_source_id = try parseString(allocator, object.get("sourceId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_source_id = parsed_source_id;
@@ -8320,6 +8558,7 @@ fn parseCitationReference(allocator: std.mem.Allocator, value: std.json.Value) !
 
 fn parseCitationSpan(allocator: std.mem.Allocator, value: std.json.Value) !CitationSpan {
     const object = try payloads.requiredObject(value);
+
     const parsed_start_index = try parseInteger(u64, object.get("startIndex") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_end_index = try parseInteger(u64, object.get("endIndex") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_references = try parseCitationSpanReferencesArray(allocator, object.get("references") orelse return error.InvalidSessionEvent);
@@ -8338,6 +8577,7 @@ fn parseCitationSpan(allocator: std.mem.Allocator, value: std.json.Value) !Citat
 
 fn parseCitations(allocator: std.mem.Allocator, value: std.json.Value) !Citations {
     const object = try payloads.requiredObject(value);
+
     const parsed_sources = try parseCitationsSourcesArray(allocator, object.get("sources") orelse return error.InvalidSessionEvent);
     errdefer {
         const cleanup_sources = parsed_sources;
@@ -8360,6 +8600,7 @@ fn parseCitations(allocator: std.mem.Allocator, value: std.json.Value) !Citation
 
 fn parseFusionAttribution(allocator: std.mem.Allocator, value: std.json.Value) !FusionAttribution {
     const object = try payloads.requiredObject(value);
+
     const parsed_has_user_steering = if (object.get("hasUserSteering")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_fusion_id = try parseString(allocator, object.get("fusionId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
@@ -8448,6 +8689,7 @@ fn parseFusionAttribution(allocator: std.mem.Allocator, value: std.json.Value) !
 
 fn parseAssistantMessageData(allocator: std.mem.Allocator, value: std.json.Value) !AssistantMessageData {
     const object = try payloads.requiredObject(value);
+
     const parsed_message_id = try parseString(allocator, object.get("messageId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_message_id = parsed_message_id;
@@ -8628,6 +8870,7 @@ fn parseAssistantMessageData(allocator: std.mem.Allocator, value: std.json.Value
 
 fn parseAssistantMessageDeltaData(allocator: std.mem.Allocator, value: std.json.Value) !AssistantMessageDeltaData {
     const object = try payloads.requiredObject(value);
+
     const parsed_message_id = try parseString(allocator, object.get("messageId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_message_id = parsed_message_id;
@@ -8654,6 +8897,7 @@ fn parseAssistantMessageDeltaData(allocator: std.mem.Allocator, value: std.json.
 
 fn parseAssistantMessageStartData(allocator: std.mem.Allocator, value: std.json.Value) !AssistantMessageStartData {
     const object = try payloads.requiredObject(value);
+
     const parsed_message_id = try parseString(allocator, object.get("messageId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_message_id = parsed_message_id;
@@ -8674,6 +8918,7 @@ fn parseAssistantMessageStartData(allocator: std.mem.Allocator, value: std.json.
 
 fn parseAssistantReasoningData(allocator: std.mem.Allocator, value: std.json.Value) !AssistantReasoningData {
     const object = try payloads.requiredObject(value);
+
     const parsed_reasoning_id = try parseString(allocator, object.get("reasoningId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_reasoning_id = parsed_reasoning_id;
@@ -8694,6 +8939,7 @@ fn parseAssistantReasoningData(allocator: std.mem.Allocator, value: std.json.Val
 
 fn parseAssistantReasoningDeltaData(allocator: std.mem.Allocator, value: std.json.Value) !AssistantReasoningDeltaData {
     const object = try payloads.requiredObject(value);
+
     const parsed_reasoning_id = try parseString(allocator, object.get("reasoningId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_reasoning_id = parsed_reasoning_id;
@@ -8712,6 +8958,7 @@ fn parseAssistantReasoningDeltaData(allocator: std.mem.Allocator, value: std.jso
 
 fn parseAssistantServerToolProgressData(allocator: std.mem.Allocator, value: std.json.Value) !AssistantServerToolProgressData {
     const object = try payloads.requiredObject(value);
+
     const parsed_output_index = try parseInteger(i64, object.get("outputIndex") orelse return error.InvalidSessionEvent, null, null, null);
     const parsed_kind = try parseString(allocator, object.get("kind") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
@@ -8732,6 +8979,7 @@ fn parseAssistantServerToolProgressData(allocator: std.mem.Allocator, value: std
 
 fn parseAssistantStreamingDeltaData(_: std.mem.Allocator, value: std.json.Value) !AssistantStreamingDeltaData {
     const object = try payloads.requiredObject(value);
+
     const parsed_total_response_size_bytes = try parseInteger(u64, object.get("totalResponseSizeBytes") orelse return error.InvalidSessionEvent, 0, null, null);
     return .{
         .total_response_size_bytes = parsed_total_response_size_bytes,
@@ -8740,6 +8988,7 @@ fn parseAssistantStreamingDeltaData(_: std.mem.Allocator, value: std.json.Value)
 
 fn parseAssistantToolCallDeltaData(allocator: std.mem.Allocator, value: std.json.Value) !AssistantToolCallDeltaData {
     const object = try payloads.requiredObject(value);
+
     const parsed_tool_call_id = try parseString(allocator, object.get("toolCallId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_tool_call_id = parsed_tool_call_id;
@@ -8774,6 +9023,7 @@ fn parseAssistantToolCallDeltaData(allocator: std.mem.Allocator, value: std.json
 
 fn parseAssistantTurnEndData(allocator: std.mem.Allocator, value: std.json.Value) !AssistantTurnEndData {
     const object = try payloads.requiredObject(value);
+
     const parsed_turn_id = try parseString(allocator, object.get("turnId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_turn_id = parsed_turn_id;
@@ -8802,6 +9052,7 @@ fn parseAssistantTurnEndData(allocator: std.mem.Allocator, value: std.json.Value
 
 fn parseAssistantTurnRetryData(allocator: std.mem.Allocator, value: std.json.Value) !AssistantTurnRetryData {
     const object = try payloads.requiredObject(value);
+
     const parsed_turn_id = try parseString(allocator, object.get("turnId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_turn_id = parsed_turn_id;
@@ -8830,6 +9081,7 @@ fn parseAssistantTurnRetryData(allocator: std.mem.Allocator, value: std.json.Val
 
 fn parseAssistantTurnStartData(allocator: std.mem.Allocator, value: std.json.Value) !AssistantTurnStartData {
     const object = try payloads.requiredObject(value);
+
     const parsed_turn_id = try parseString(allocator, object.get("turnId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_turn_id = parsed_turn_id;
@@ -8882,6 +9134,7 @@ fn parseAssistantUsageApiEndpoint(_: std.mem.Allocator, value: std.json.Value) !
 
 fn parseAssistantUsageQuotaSnapshot(allocator: std.mem.Allocator, value: std.json.Value) !AssistantUsageQuotaSnapshot {
     const object = try payloads.requiredObject(value);
+
     const parsed_is_unlimited_entitlement = try parseBool(object.get("isUnlimitedEntitlement") orelse return error.InvalidSessionEvent);
     const parsed_entitlement_requests = try parseInteger(i64, object.get("entitlementRequests") orelse return error.InvalidSessionEvent, -1, null, null);
     const parsed_used_requests = try parseInteger(u64, object.get("usedRequests") orelse return error.InvalidSessionEvent, 0, null, null);
@@ -8916,6 +9169,7 @@ fn parseAssistantUsageQuotaSnapshot(allocator: std.mem.Allocator, value: std.jso
 
 fn parseAssistantUsageCopilotUsageTokenDetail(allocator: std.mem.Allocator, value: std.json.Value) !AssistantUsageCopilotUsageTokenDetail {
     const object = try payloads.requiredObject(value);
+
     const parsed_batch_size = try parseInteger(u64, object.get("batchSize") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_cost_per_batch = try parseInteger(u64, object.get("costPerBatch") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
@@ -8942,6 +9196,7 @@ fn parseAssistantUsageCopilotUsageTokenDetail(allocator: std.mem.Allocator, valu
 
 fn parseAssistantUsageCopilotUsage(allocator: std.mem.Allocator, value: std.json.Value) !AssistantUsageCopilotUsage {
     const object = try payloads.requiredObject(value);
+
     const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
@@ -8976,6 +9231,7 @@ fn parseReasoningSummary(_: std.mem.Allocator, value: std.json.Value) !Reasoning
 
 fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) !AssistantUsageData {
     const object = try payloads.requiredObject(value);
+
     const parsed_model = try parseString(allocator, object.get("model") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_model = parsed_model;
@@ -9023,6 +9279,20 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
         }
     }
     const parsed_is_byok = if (object.get("isByok")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_byok_kind = if (object.get("byokKind")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_byok_kind = parsed_byok_kind;
+        if (cleanup_byok_kind) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_model_provider = if (object.get("modelProvider")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_model_provider = parsed_model_provider;
+        if (cleanup_model_provider) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_is_auto = if (object.get("isAuto")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_max_prompt_tokens = if (object.get("maxPromptTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_max_output_tokens = if (object.get("maxOutputTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
@@ -9162,6 +9432,8 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
         .initiator = parsed_initiator,
         .interaction_type = parsed_interaction_type,
         .is_byok = parsed_is_byok,
+        .byok_kind = parsed_byok_kind,
+        .model_provider = parsed_model_provider,
         .is_auto = parsed_is_auto,
         .max_prompt_tokens = parsed_max_prompt_tokens,
         .max_output_tokens = parsed_max_output_tokens,
@@ -9201,6 +9473,7 @@ fn parseAutoModeSwitchResponse(_: std.mem.Allocator, value: std.json.Value) !Aut
 
 fn parseAutoModeSwitchCompletedData(allocator: std.mem.Allocator, value: std.json.Value) !AutoModeSwitchCompletedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -9219,6 +9492,7 @@ fn parseAutoModeSwitchCompletedData(allocator: std.mem.Allocator, value: std.jso
 
 fn parseAutoModeSwitchRequestedData(allocator: std.mem.Allocator, value: std.json.Value) !AutoModeSwitchRequestedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -9241,6 +9515,7 @@ fn parseAutoModeSwitchRequestedData(allocator: std.mem.Allocator, value: std.jso
 
 fn parseCapabilitiesChangedUI(_: std.mem.Allocator, value: std.json.Value) !CapabilitiesChangedUI {
     const object = try payloads.requiredObject(value);
+
     const parsed_elicitation = if (object.get("elicitation")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_mcp_apps = if (object.get("mcpApps")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_canvases = if (object.get("canvases")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
@@ -9253,6 +9528,7 @@ fn parseCapabilitiesChangedUI(_: std.mem.Allocator, value: std.json.Value) !Capa
 
 fn parseCapabilitiesChangedData(allocator: std.mem.Allocator, value: std.json.Value) !CapabilitiesChangedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_ui = if (object.get("ui")) |field_value| if ((field_value) == .null) null else try parseCapabilitiesChangedUI(allocator, field_value) else null;
     errdefer {
         var cleanup_ui = parsed_ui;
@@ -9267,6 +9543,7 @@ fn parseCapabilitiesChangedData(allocator: std.mem.Allocator, value: std.json.Va
 
 fn parseCommandCompletedData(allocator: std.mem.Allocator, value: std.json.Value) !CommandCompletedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -9279,6 +9556,7 @@ fn parseCommandCompletedData(allocator: std.mem.Allocator, value: std.json.Value
 
 fn parseCommandExecuteData(allocator: std.mem.Allocator, value: std.json.Value) !CommandExecuteData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -9309,6 +9587,7 @@ fn parseCommandExecuteData(allocator: std.mem.Allocator, value: std.json.Value) 
 
 fn parseCommandQueuedData(allocator: std.mem.Allocator, value: std.json.Value) !CommandQueuedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -9327,6 +9606,7 @@ fn parseCommandQueuedData(allocator: std.mem.Allocator, value: std.json.Value) !
 
 fn parseCommandsChangedCommand(allocator: std.mem.Allocator, value: std.json.Value) !CommandsChangedCommand {
     const object = try payloads.requiredObject(value);
+
     const parsed_name = try parseString(allocator, object.get("name") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_name = parsed_name;
@@ -9347,6 +9627,7 @@ fn parseCommandsChangedCommand(allocator: std.mem.Allocator, value: std.json.Val
 
 fn parseCommandsChangedData(allocator: std.mem.Allocator, value: std.json.Value) !CommandsChangedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_commands = try parseCommandsChangedDataCommandsArray(allocator, object.get("commands") orelse return error.InvalidSessionEvent);
     errdefer {
         const cleanup_commands = parsed_commands;
@@ -9373,6 +9654,7 @@ fn parseElicitationCompletedContent(allocator: std.mem.Allocator, value: std.jso
 
 fn parseElicitationCompletedData(allocator: std.mem.Allocator, value: std.json.Value) !ElicitationCompletedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -9414,6 +9696,7 @@ fn parseElicitationRequestedMode(_: std.mem.Allocator, value: std.json.Value) !E
 
 fn parseElicitationRequestedSchema(allocator: std.mem.Allocator, value: std.json.Value) !ElicitationRequestedSchema {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "object");
     errdefer {
         const cleanup_type = parsed_type;
@@ -9448,6 +9731,7 @@ fn parseElicitationRequestedSchema(allocator: std.mem.Allocator, value: std.json
 
 fn parseElicitationRequestedData(allocator: std.mem.Allocator, value: std.json.Value) !ElicitationRequestedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -9515,6 +9799,7 @@ fn parseExitPlanModeAction(_: std.mem.Allocator, value: std.json.Value) !ExitPla
 
 fn parseExitPlanModeCompletedData(allocator: std.mem.Allocator, value: std.json.Value) !ExitPlanModeCompletedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -9547,6 +9832,7 @@ fn parseExitPlanModeCompletedData(allocator: std.mem.Allocator, value: std.json.
 
 fn parseExitPlanModeRequestedData(allocator: std.mem.Allocator, value: std.json.Value) !ExitPlanModeRequestedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -9593,6 +9879,7 @@ fn parseExitPlanModeRequestedData(allocator: std.mem.Allocator, value: std.json.
 
 fn parseExternalToolCompletedData(allocator: std.mem.Allocator, value: std.json.Value) !ExternalToolCompletedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -9605,6 +9892,7 @@ fn parseExternalToolCompletedData(allocator: std.mem.Allocator, value: std.json.
 
 fn parseExternalToolRequestedData(allocator: std.mem.Allocator, value: std.json.Value) !ExternalToolRequestedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -9675,6 +9963,7 @@ fn parseExternalToolRequestedData(allocator: std.mem.Allocator, value: std.json.
 
 fn parseHookEndError(allocator: std.mem.Allocator, value: std.json.Value) !HookEndError {
     const object = try payloads.requiredObject(value);
+
     const parsed_message = try parseString(allocator, object.get("message") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_message = parsed_message;
@@ -9703,6 +9992,7 @@ fn parseHookEndError(allocator: std.mem.Allocator, value: std.json.Value) !HookE
 
 fn parseHookEndData(allocator: std.mem.Allocator, value: std.json.Value) !HookEndData {
     const object = try payloads.requiredObject(value);
+
     const parsed_hook_invocation_id = try parseString(allocator, object.get("hookInvocationId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_hook_invocation_id = parsed_hook_invocation_id;
@@ -9747,6 +10037,7 @@ fn parseHookEndData(allocator: std.mem.Allocator, value: std.json.Value) !HookEn
 
 fn parseHookProgressData(allocator: std.mem.Allocator, value: std.json.Value) !HookProgressData {
     const object = try payloads.requiredObject(value);
+
     const parsed_message = try parseString(allocator, object.get("message") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_message = parsed_message;
@@ -9761,6 +10052,7 @@ fn parseHookProgressData(allocator: std.mem.Allocator, value: std.json.Value) !H
 
 fn parseHookStartData(allocator: std.mem.Allocator, value: std.json.Value) !HookStartData {
     const object = try payloads.requiredObject(value);
+
     const parsed_hook_invocation_id = try parseString(allocator, object.get("hookInvocationId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_hook_invocation_id = parsed_hook_invocation_id;
@@ -9793,6 +10085,191 @@ fn parseHookStartData(allocator: std.mem.Allocator, value: std.json.Value) !Hook
     };
 }
 
+fn parseHumanResponseActor(_: std.mem.Allocator, value: std.json.Value) !HumanResponseActor {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "human_response")) return .human_response;
+    if (std.mem.eql(u8, wire, "host_automation")) return .host_automation;
+    if (std.mem.eql(u8, wire, "unknown")) return .unknown;
+    return error.InvalidSessionEvent;
+}
+
+fn parseHumanResponseRecordedResponseVariant1(allocator: std.mem.Allocator, value: std.json.Value) !HumanResponseRecordedResponseVariant1 {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_content = try parseHumanResponseRecordedResponseVariant1ContentMap(allocator, object.get("content") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_content = parsed_content;
+        {
+            var iterator = cleanup_content.map.iterator();
+            while (iterator.next()) |entry| {
+                wipeString(entry.key_ptr.*);
+                wipeElicitationCompletedContent(&entry.value_ptr.*);
+            }
+        }
+    }
+    const parsed_message = try parseString(allocator, object.get("message") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_message = parsed_message;
+        wipeString(cleanup_message);
+    }
+    const parsed_requested_schema = try parseElicitationRequestedSchema(allocator, object.get("requestedSchema") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_requested_schema = parsed_requested_schema;
+        wipeElicitationRequestedSchema(&cleanup_requested_schema);
+    }
+    const parsed_response_kind = try parseConstant(allocator, object.get("responseKind") orelse return error.InvalidSessionEvent, "ask_user");
+    errdefer {
+        const cleanup_response_kind = parsed_response_kind;
+        wipeString(cleanup_response_kind);
+    }
+    return .{
+        .content = parsed_content,
+        .message = parsed_message,
+        .requested_schema = parsed_requested_schema,
+        .response_kind = parsed_response_kind,
+    };
+}
+
+fn parseHumanResponseRecordedResponseVariant2(allocator: std.mem.Allocator, value: std.json.Value) !HumanResponseRecordedResponseVariant2 {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_question = try parseString(allocator, object.get("question") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_question = parsed_question;
+        wipeString(cleanup_question);
+    }
+    const parsed_choices = if (object.get("choices")) |field_value| if ((field_value) == .null) null else try parseHumanResponseRecordedResponseVariant2ChoicesArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_choices = parsed_choices;
+        if (cleanup_choices) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipeString(item.*);
+            }
+        }
+    }
+    const parsed_allow_freeform = if (object.get("allowFreeform")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_answer = try parseString(allocator, object.get("answer") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_answer = parsed_answer;
+        wipeString(cleanup_answer);
+    }
+    const parsed_was_freeform = try parseBool(object.get("wasFreeform") orelse return error.InvalidSessionEvent);
+    const parsed_response_kind = try parseConstant(allocator, object.get("responseKind") orelse return error.InvalidSessionEvent, "user_input");
+    errdefer {
+        const cleanup_response_kind = parsed_response_kind;
+        wipeString(cleanup_response_kind);
+    }
+    return .{
+        .question = parsed_question,
+        .choices = parsed_choices,
+        .allow_freeform = parsed_allow_freeform,
+        .answer = parsed_answer,
+        .was_freeform = parsed_was_freeform,
+        .response_kind = parsed_response_kind,
+    };
+}
+
+fn parseHumanResponseRecordedResponseVariant3(allocator: std.mem.Allocator, value: std.json.Value) !HumanResponseRecordedResponseVariant3 {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_summary = try parseString(allocator, object.get("summary") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_summary = parsed_summary;
+        wipeString(cleanup_summary);
+    }
+    const parsed_plan_content = try parseString(allocator, object.get("planContent") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_plan_content = parsed_plan_content;
+        wipeString(cleanup_plan_content);
+    }
+    const parsed_actions = try parseHumanResponseRecordedResponseVariant3ActionsArray(allocator, object.get("actions") orelse return error.InvalidSessionEvent);
+    errdefer {
+        const cleanup_actions = parsed_actions;
+        for (@constCast(cleanup_actions)) |*item| {
+            wipeExitPlanModeAction(&item.*);
+        }
+    }
+    const parsed_recommended_action = try parseExitPlanModeAction(allocator, object.get("recommendedAction") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_recommended_action = parsed_recommended_action;
+        wipeExitPlanModeAction(&cleanup_recommended_action);
+    }
+    const parsed_approved = try parseBool(object.get("approved") orelse return error.InvalidSessionEvent);
+    const parsed_selected_action = if (object.get("selectedAction")) |field_value| if ((field_value) == .null) null else try parseExitPlanModeAction(allocator, field_value) else null;
+    errdefer {
+        var cleanup_selected_action = parsed_selected_action;
+        if (cleanup_selected_action) |*present| {
+            wipeExitPlanModeAction(&present.*);
+        }
+    }
+    const parsed_auto_approve_edits = if (object.get("autoApproveEdits")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_feedback = if (object.get("feedback")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_feedback = parsed_feedback;
+        if (cleanup_feedback) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_response_kind = try parseConstant(allocator, object.get("responseKind") orelse return error.InvalidSessionEvent, "exit_plan_mode");
+    errdefer {
+        const cleanup_response_kind = parsed_response_kind;
+        wipeString(cleanup_response_kind);
+    }
+    return .{
+        .summary = parsed_summary,
+        .plan_content = parsed_plan_content,
+        .actions = parsed_actions,
+        .recommended_action = parsed_recommended_action,
+        .approved = parsed_approved,
+        .selected_action = parsed_selected_action,
+        .auto_approve_edits = parsed_auto_approve_edits,
+        .feedback = parsed_feedback,
+        .response_kind = parsed_response_kind,
+    };
+}
+
+fn parseHumanResponseRecordedResponse(allocator: std.mem.Allocator, value: std.json.Value) !HumanResponseRecordedResponse {
+    const object = try payloads.requiredObject(value);
+    const discriminator = try payloads.requiredString(object, "responseKind");
+    if (std.mem.eql(u8, discriminator, "ask_user")) return .{ .ask_user = try parseHumanResponseRecordedResponseVariant1(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "user_input")) return .{ .user_input = try parseHumanResponseRecordedResponseVariant2(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "exit_plan_mode")) return .{ .exit_plan_mode = try parseHumanResponseRecordedResponseVariant3(allocator, value) };
+    return error.InvalidSessionEvent;
+}
+
+fn parseHumanResponseRecordedData(allocator: std.mem.Allocator, value: std.json.Value) !HumanResponseRecordedData {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_request_id = parsed_request_id;
+        wipeString(cleanup_request_id);
+    }
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_tool_call_id = parsed_tool_call_id;
+        if (cleanup_tool_call_id) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_actor = try parseHumanResponseActor(allocator, object.get("actor") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_actor = parsed_actor;
+        wipeHumanResponseActor(&cleanup_actor);
+    }
+    const parsed_response = try parseHumanResponseRecordedResponse(allocator, object.get("response") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_response = parsed_response;
+        wipeHumanResponseRecordedResponse(&cleanup_response);
+    }
+    return .{
+        .request_id = parsed_request_id,
+        .tool_call_id = parsed_tool_call_id,
+        .actor = parsed_actor,
+        .response = parsed_response,
+    };
+}
+
 fn parseMcpHeadersRefreshCompletedOutcome(_: std.mem.Allocator, value: std.json.Value) !McpHeadersRefreshCompletedOutcome {
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "headers")) return .headers;
@@ -9804,6 +10281,7 @@ fn parseMcpHeadersRefreshCompletedOutcome(_: std.mem.Allocator, value: std.json.
 
 fn parseMcpHeadersRefreshCompletedData(allocator: std.mem.Allocator, value: std.json.Value) !McpHeadersRefreshCompletedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -9830,6 +10308,7 @@ fn parseMcpHeadersRefreshRequiredReason(_: std.mem.Allocator, value: std.json.Va
 
 fn parseMcpHeadersRefreshRequiredData(allocator: std.mem.Allocator, value: std.json.Value) !McpHeadersRefreshRequiredData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -9867,6 +10346,7 @@ fn parseMcpOauthCompletionOutcome(_: std.mem.Allocator, value: std.json.Value) !
 
 fn parseMcpOauthCompletedData(allocator: std.mem.Allocator, value: std.json.Value) !McpOauthCompletedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -9885,6 +10365,7 @@ fn parseMcpOauthCompletedData(allocator: std.mem.Allocator, value: std.json.Valu
 
 fn parseMcpOauthRequiredStaticClientConfig(allocator: std.mem.Allocator, value: std.json.Value) !McpOauthRequiredStaticClientConfig {
     const object = try payloads.requiredObject(value);
+
     const parsed_client_id = try parseString(allocator, object.get("clientId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_client_id = parsed_client_id;
@@ -9923,6 +10404,7 @@ fn parseMcpOauthRequiredStaticClientConfig(allocator: std.mem.Allocator, value: 
 
 fn parseMcpOauthWWWAuthenticateParams(allocator: std.mem.Allocator, value: std.json.Value) !McpOauthWWWAuthenticateParams {
     const object = try payloads.requiredObject(value);
+
     const parsed_resource_metadata_url = if (object.get("resourceMetadataUrl")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_resource_metadata_url = parsed_resource_metadata_url;
@@ -9953,6 +10435,7 @@ fn parseMcpOauthWWWAuthenticateParams(allocator: std.mem.Allocator, value: std.j
 
 fn parseHeaderEntry(allocator: std.mem.Allocator, value: std.json.Value) !HeaderEntry {
     const object = try payloads.requiredObject(value);
+
     const parsed_name = try parseString(allocator, object.get("name") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_name = parsed_name;
@@ -9971,6 +10454,7 @@ fn parseHeaderEntry(allocator: std.mem.Allocator, value: std.json.Value) !Header
 
 fn parseMcpOauthHttpResponse(allocator: std.mem.Allocator, value: std.json.Value) !McpOauthHttpResponse {
     const object = try payloads.requiredObject(value);
+
     const parsed_status_code = try parseInteger(u64, object.get("statusCode") orelse return error.InvalidSessionEvent, 100, null, 999);
     const parsed_headers = try parseMcpOauthHttpResponseHeadersArray(allocator, object.get("headers") orelse return error.InvalidSessionEvent);
     errdefer {
@@ -10004,6 +10488,7 @@ fn parseMcpOauthRequestReason(_: std.mem.Allocator, value: std.json.Value) !McpO
 
 fn parseMcpOauthRequiredData(allocator: std.mem.Allocator, value: std.json.Value) !McpOauthRequiredData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -10066,6 +10551,7 @@ fn parseMcpOauthRequiredData(allocator: std.mem.Allocator, value: std.json.Value
 
 fn parseMcpListChangedData(allocator: std.mem.Allocator, value: std.json.Value) !McpListChangedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_server_name = try parseString(allocator, object.get("serverName") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_server_name = parsed_server_name;
@@ -10078,6 +10564,7 @@ fn parseMcpListChangedData(allocator: std.mem.Allocator, value: std.json.Value) 
 
 fn parseMcpAppToolCallCompleteError(allocator: std.mem.Allocator, value: std.json.Value) !McpAppToolCallCompleteError {
     const object = try payloads.requiredObject(value);
+
     const parsed_message = try parseString(allocator, object.get("message") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_message = parsed_message;
@@ -10090,6 +10577,7 @@ fn parseMcpAppToolCallCompleteError(allocator: std.mem.Allocator, value: std.jso
 
 fn parseMcpAppToolCallCompleteToolMetaUI(allocator: std.mem.Allocator, value: std.json.Value) !McpAppToolCallCompleteToolMetaUI {
     const object = try payloads.requiredObject(value);
+
     const parsed_resource_uri = if (object.get("resourceUri")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_resource_uri = parsed_resource_uri;
@@ -10114,6 +10602,7 @@ fn parseMcpAppToolCallCompleteToolMetaUI(allocator: std.mem.Allocator, value: st
 
 fn parseMcpAppToolCallCompleteToolMeta(allocator: std.mem.Allocator, value: std.json.Value) !McpAppToolCallCompleteToolMeta {
     const object = try payloads.requiredObject(value);
+
     const parsed_ui = if (object.get("ui")) |field_value| if ((field_value) == .null) null else try parseMcpAppToolCallCompleteToolMetaUI(allocator, field_value) else null;
     errdefer {
         var cleanup_ui = parsed_ui;
@@ -10128,6 +10617,7 @@ fn parseMcpAppToolCallCompleteToolMeta(allocator: std.mem.Allocator, value: std.
 
 fn parseMcpAppToolCallCompleteData(allocator: std.mem.Allocator, value: std.json.Value) !McpAppToolCallCompleteData {
     const object = try payloads.requiredObject(value);
+
     const parsed_server_name = try parseString(allocator, object.get("serverName") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_server_name = parsed_server_name;
@@ -10216,6 +10706,7 @@ fn parseModelCallFailureBadRequestKind(_: std.mem.Allocator, value: std.json.Val
 
 fn parseModelCallFailureRequestFingerprint(allocator: std.mem.Allocator, value: std.json.Value) !ModelCallFailureRequestFingerprint {
     const object = try payloads.requiredObject(value);
+
     const parsed_message_count = try parseInteger(u64, object.get("messageCount") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_tool_result_message_count = try parseInteger(u64, object.get("toolResultMessageCount") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_tool_call_count = try parseInteger(u64, object.get("toolCallCount") orelse return error.InvalidSessionEvent, 0, null, null);
@@ -10242,6 +10733,7 @@ fn parseModelCallFailureRequestFingerprint(allocator: std.mem.Allocator, value: 
 
 fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value) !ModelCallFailureData {
     const object = try payloads.requiredObject(value);
+
     const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
@@ -10311,6 +10803,20 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
     const parsed_max_prompt_tokens = if (object.get("maxPromptTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_max_output_tokens = if (object.get("maxOutputTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_is_byok = if (object.get("isByok")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_byok_kind = if (object.get("byokKind")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_byok_kind = parsed_byok_kind;
+        if (cleanup_byok_kind) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_model_provider = if (object.get("modelProvider")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_model_provider = parsed_model_provider;
+        if (cleanup_model_provider) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_is_auto = if (object.get("isAuto")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
@@ -10402,6 +10908,8 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
         .max_prompt_tokens = parsed_max_prompt_tokens,
         .max_output_tokens = parsed_max_output_tokens,
         .is_byok = parsed_is_byok,
+        .byok_kind = parsed_byok_kind,
+        .model_provider = parsed_model_provider,
         .is_auto = parsed_is_auto,
         .reasoning_effort = parsed_reasoning_effort,
         .interaction_type = parsed_interaction_type,
@@ -10431,6 +10939,7 @@ fn parseModelCallFinalResult(_: std.mem.Allocator, value: std.json.Value) !Model
 
 fn parseModelCallFinalResultData(allocator: std.mem.Allocator, value: std.json.Value) !ModelCallFinalResultData {
     const object = try payloads.requiredObject(value);
+
     const parsed_model = try parseString(allocator, object.get("model") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_model = parsed_model;
@@ -10460,6 +10969,7 @@ fn parseModelCallFinishedOutcome(_: std.mem.Allocator, value: std.json.Value) !M
 
 fn parseModelCallFinishedData(allocator: std.mem.Allocator, value: std.json.Value) !ModelCallFinishedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_turn_id = try parseString(allocator, object.get("turnId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_turn_id = parsed_turn_id;
@@ -10492,6 +11002,7 @@ fn parseModelCallFinishedData(allocator: std.mem.Allocator, value: std.json.Valu
 
 fn parseModelCallStartData(allocator: std.mem.Allocator, value: std.json.Value) !ModelCallStartData {
     const object = try payloads.requiredObject(value);
+
     const parsed_turn_id = try parseString(allocator, object.get("turnId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_turn_id = parsed_turn_id;
@@ -10542,6 +11053,7 @@ fn parsePendingMessagesModifiedData(_: std.mem.Allocator, value: std.json.Value)
 
 fn parsePermissionAssentDetectedData(allocator: std.mem.Allocator, value: std.json.Value) !PermissionAssentDetectedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -10566,6 +11078,7 @@ fn parsePermissionDecisionSource(_: std.mem.Allocator, value: std.json.Value) !P
 
 fn parsePermissionCarriedForwardData(allocator: std.mem.Allocator, value: std.json.Value) !PermissionCarriedForwardData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -10661,6 +11174,7 @@ fn parsePermissionRecoveryAttemptReason(_: std.mem.Allocator, value: std.json.Va
 
 fn parsePermissionRecoveryAttempt(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRecoveryAttempt {
     const object = try payloads.requiredObject(value);
+
     const parsed_attempt_id = try parseString(allocator, object.get("attemptId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_attempt_id = parsed_attempt_id;
@@ -10713,6 +11227,7 @@ fn parsePermissionRecoveryAttempt(allocator: std.mem.Allocator, value: std.json.
 
 fn parsePermissionRecoveryData(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRecoveryData {
     const object = try payloads.requiredObject(value);
+
     const parsed_episode_id = try parseString(allocator, object.get("episodeId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_episode_id = parsed_episode_id;
@@ -10753,6 +11268,7 @@ fn parsePermissionRecoveryData(allocator: std.mem.Allocator, value: std.json.Val
 
 fn parseTaskBlocker(allocator: std.mem.Allocator, value: std.json.Value) !TaskBlocker {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseTaskBlockerKind(allocator, object.get("kind") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_kind = parsed_kind;
@@ -10779,6 +11295,7 @@ fn parseTaskBlocker(allocator: std.mem.Allocator, value: std.json.Value) !TaskBl
 
 fn parsePermissionApproved(allocator: std.mem.Allocator, value: std.json.Value) !PermissionApproved {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "approved");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -10793,6 +11310,7 @@ fn parsePermissionApproved(allocator: std.mem.Allocator, value: std.json.Value) 
 
 fn parsePermissionApprovedReadOnlyForSession(allocator: std.mem.Allocator, value: std.json.Value) !PermissionApprovedReadOnlyForSession {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "approved-read-only-for-session");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -10813,6 +11331,7 @@ fn parsePermissionApprovedReadOnlyForSession(allocator: std.mem.Allocator, value
 
 fn parseUserToolSessionApprovalCommands(allocator: std.mem.Allocator, value: std.json.Value) !UserToolSessionApprovalCommands {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "commands");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -10833,6 +11352,7 @@ fn parseUserToolSessionApprovalCommands(allocator: std.mem.Allocator, value: std
 
 fn parseUserToolSessionApprovalRead(allocator: std.mem.Allocator, value: std.json.Value) !UserToolSessionApprovalRead {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "read");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -10845,6 +11365,7 @@ fn parseUserToolSessionApprovalRead(allocator: std.mem.Allocator, value: std.jso
 
 fn parseUserToolSessionApprovalWrite(allocator: std.mem.Allocator, value: std.json.Value) !UserToolSessionApprovalWrite {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "write");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -10857,6 +11378,7 @@ fn parseUserToolSessionApprovalWrite(allocator: std.mem.Allocator, value: std.js
 
 fn parseUserToolSessionApprovalMcp(allocator: std.mem.Allocator, value: std.json.Value) !UserToolSessionApprovalMcp {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "mcp");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -10883,6 +11405,7 @@ fn parseUserToolSessionApprovalMcp(allocator: std.mem.Allocator, value: std.json
 
 fn parseUserToolSessionApprovalMemory(allocator: std.mem.Allocator, value: std.json.Value) !UserToolSessionApprovalMemory {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "memory");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -10895,6 +11418,7 @@ fn parseUserToolSessionApprovalMemory(allocator: std.mem.Allocator, value: std.j
 
 fn parseUserToolSessionApprovalCustomTool(allocator: std.mem.Allocator, value: std.json.Value) !UserToolSessionApprovalCustomTool {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "custom-tool");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -10913,6 +11437,7 @@ fn parseUserToolSessionApprovalCustomTool(allocator: std.mem.Allocator, value: s
 
 fn parseUserToolSessionApprovalExtensionManagement(allocator: std.mem.Allocator, value: std.json.Value) !UserToolSessionApprovalExtensionManagement {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "extension-management");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -10933,6 +11458,7 @@ fn parseUserToolSessionApprovalExtensionManagement(allocator: std.mem.Allocator,
 
 fn parseUserToolSessionApprovalWorkflow(allocator: std.mem.Allocator, value: std.json.Value) !UserToolSessionApprovalWorkflow {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "workflow");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -10953,6 +11479,7 @@ fn parseUserToolSessionApprovalWorkflow(allocator: std.mem.Allocator, value: std
 
 fn parseUserToolSessionApprovalExtensionPermissionAccess(allocator: std.mem.Allocator, value: std.json.Value) !UserToolSessionApprovalExtensionPermissionAccess {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "extension-permission-access");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -10971,6 +11498,7 @@ fn parseUserToolSessionApprovalExtensionPermissionAccess(allocator: std.mem.Allo
 
 fn parseUserToolSessionApprovalExtensionEnvAccess(allocator: std.mem.Allocator, value: std.json.Value) !UserToolSessionApprovalExtensionEnvAccess {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "extension-env-access");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -11013,6 +11541,7 @@ fn parseUserToolSessionApproval(allocator: std.mem.Allocator, value: std.json.Va
 
 fn parsePermissionApprovedForSession(allocator: std.mem.Allocator, value: std.json.Value) !PermissionApprovedForSession {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "approved-for-session");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -11033,6 +11562,7 @@ fn parsePermissionApprovedForSession(allocator: std.mem.Allocator, value: std.js
 
 fn parsePermissionApprovedForLocation(allocator: std.mem.Allocator, value: std.json.Value) !PermissionApprovedForLocation {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "approved-for-location");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -11059,6 +11589,7 @@ fn parsePermissionApprovedForLocation(allocator: std.mem.Allocator, value: std.j
 
 fn parsePermissionCancelled(allocator: std.mem.Allocator, value: std.json.Value) !PermissionCancelled {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "cancelled");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -11079,6 +11610,7 @@ fn parsePermissionCancelled(allocator: std.mem.Allocator, value: std.json.Value)
 
 fn parsePermissionRule(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRule {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseString(allocator, object.get("kind") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -11099,6 +11631,7 @@ fn parsePermissionRule(allocator: std.mem.Allocator, value: std.json.Value) !Per
 
 fn parsePermissionDeniedByRules(allocator: std.mem.Allocator, value: std.json.Value) !PermissionDeniedByRules {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "denied-by-rules");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -11119,6 +11652,7 @@ fn parsePermissionDeniedByRules(allocator: std.mem.Allocator, value: std.json.Va
 
 fn parsePermissionDeniedNoApprovalRuleAndCouldNotRequestFromUser(allocator: std.mem.Allocator, value: std.json.Value) !PermissionDeniedNoApprovalRuleAndCouldNotRequestFromUser {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "denied-no-approval-rule-and-could-not-request-from-user");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -11131,6 +11665,7 @@ fn parsePermissionDeniedNoApprovalRuleAndCouldNotRequestFromUser(allocator: std.
 
 fn parsePermissionDeniedInteractivelyByUser(allocator: std.mem.Allocator, value: std.json.Value) !PermissionDeniedInteractivelyByUser {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "denied-interactively-by-user");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -11153,6 +11688,7 @@ fn parsePermissionDeniedInteractivelyByUser(allocator: std.mem.Allocator, value:
 
 fn parsePermissionDeniedByContentExclusionPolicy(allocator: std.mem.Allocator, value: std.json.Value) !PermissionDeniedByContentExclusionPolicy {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "denied-by-content-exclusion-policy");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -11177,6 +11713,7 @@ fn parsePermissionDeniedByContentExclusionPolicy(allocator: std.mem.Allocator, v
 
 fn parsePermissionDeniedByPermissionRequestHook(allocator: std.mem.Allocator, value: std.json.Value) !PermissionDeniedByPermissionRequestHook {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "denied-by-permission-request-hook");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -11215,6 +11752,7 @@ fn parsePermissionResult(allocator: std.mem.Allocator, value: std.json.Value) !P
 
 fn parsePermissionCompletedData(allocator: std.mem.Allocator, value: std.json.Value) !PermissionCompletedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -11272,6 +11810,7 @@ fn parsePermissionMessageAuthorizationPolarity(_: std.mem.Allocator, value: std.
 
 fn parsePermissionContextualAuthorizationData(allocator: std.mem.Allocator, value: std.json.Value) !PermissionContextualAuthorizationData {
     const object = try payloads.requiredObject(value);
+
     const parsed_record_id = try parseString(allocator, object.get("recordId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_record_id = parsed_record_id;
@@ -11302,6 +11841,7 @@ fn parsePermissionContextualAuthorizationData(allocator: std.mem.Allocator, valu
 
 fn parsePermissionMessageAuthorizationData(allocator: std.mem.Allocator, value: std.json.Value) !PermissionMessageAuthorizationData {
     const object = try payloads.requiredObject(value);
+
     const parsed_record_id = try parseString(allocator, object.get("recordId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_record_id = parsed_record_id;
@@ -11358,6 +11898,7 @@ fn parsePermissionMessageAuthorizationData(allocator: std.mem.Allocator, value: 
 
 fn parsePermissionMessageAuthorizationDegradedData(_: std.mem.Allocator, value: std.json.Value) !PermissionMessageAuthorizationDegradedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_turn_index = try parseInteger(u64, object.get("turnIndex") orelse return error.InvalidSessionEvent, 0, null, null);
     return .{
         .turn_index = parsed_turn_index,
@@ -11366,6 +11907,7 @@ fn parsePermissionMessageAuthorizationDegradedData(_: std.mem.Allocator, value: 
 
 fn parsePermissionMessageAuthorizationReadData(_: std.mem.Allocator, value: std.json.Value) !PermissionMessageAuthorizationReadData {
     const object = try payloads.requiredObject(value);
+
     const parsed_turn_index = try parseInteger(u64, object.get("turnIndex") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_activates_extraction = if (object.get("activatesExtraction")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
@@ -11376,6 +11918,7 @@ fn parsePermissionMessageAuthorizationReadData(_: std.mem.Allocator, value: std.
 
 fn parsePermissionRequestShellCommand(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRequestShellCommand {
     const object = try payloads.requiredObject(value);
+
     const parsed_identifier = try parseString(allocator, object.get("identifier") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_identifier = parsed_identifier;
@@ -11390,6 +11933,7 @@ fn parsePermissionRequestShellCommand(allocator: std.mem.Allocator, value: std.j
 
 fn parsePermissionRequestShellCommandSegment(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRequestShellCommandSegment {
     const object = try payloads.requiredObject(value);
+
     const parsed_identifier = try parseString(allocator, object.get("identifier") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_identifier = parsed_identifier;
@@ -11408,6 +11952,7 @@ fn parsePermissionRequestShellCommandSegment(allocator: std.mem.Allocator, value
 
 fn parsePermissionRequestShellPossibleUrl(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRequestShellPossibleUrl {
     const object = try payloads.requiredObject(value);
+
     const parsed_url = try parseString(allocator, object.get("url") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_url = parsed_url;
@@ -11427,6 +11972,7 @@ fn parsePermissionSandboxPathGrantAccess(_: std.mem.Allocator, value: std.json.V
 
 fn parsePermissionSandboxPathGrant(allocator: std.mem.Allocator, value: std.json.Value) !PermissionSandboxPathGrant {
     const object = try payloads.requiredObject(value);
+
     const parsed_path = try parseString(allocator, object.get("path") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_path = parsed_path;
@@ -11463,6 +12009,7 @@ fn parsePermissionSandboxPathGrant(allocator: std.mem.Allocator, value: std.json
 
 fn parsePermissionRequestShell(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRequestShell {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "shell");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -11585,6 +12132,7 @@ fn parsePermissionRequestShell(allocator: std.mem.Allocator, value: std.json.Val
 
 fn parsePermissionRequestWrite(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRequestWrite {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "write");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -11661,6 +12209,7 @@ fn parsePermissionRequestWrite(allocator: std.mem.Allocator, value: std.json.Val
 
 fn parsePermissionRequestRead(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRequestRead {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "read");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -11727,6 +12276,7 @@ fn parsePermissionRecommendation(_: std.mem.Allocator, value: std.json.Value) !P
 
 fn parsePermissionRequestMcp(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRequestMcp {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "mcp");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -11783,6 +12333,7 @@ fn parsePermissionRequestMcp(allocator: std.mem.Allocator, value: std.json.Value
 
 fn parsePermissionRequestUrl(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRequestUrl {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "url");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -11908,6 +12459,7 @@ fn parsePermissionApprovalEvaluationEvaluationStage(_: std.mem.Allocator, value:
 
 fn parsePermissionApprovalEvaluation(allocator: std.mem.Allocator, value: std.json.Value) !PermissionApprovalEvaluation {
     const object = try payloads.requiredObject(value);
+
     const parsed_reason_code = try parsePermissionApprovalEvaluationReasonCode(allocator, object.get("reasonCode") orelse return error.InvalidSessionEvent);
     const parsed_judge_status = try parsePermissionApprovalEvaluationJudgeStatus(allocator, object.get("judgeStatus") orelse return error.InvalidSessionEvent);
     const parsed_evaluation_stage = try parsePermissionApprovalEvaluationEvaluationStage(allocator, object.get("evaluationStage") orelse return error.InvalidSessionEvent);
@@ -11941,6 +12493,7 @@ fn parseAssistedApprovalJudgeFailureReason(_: std.mem.Allocator, value: std.json
 
 fn parsePermissionAssistedApproval(allocator: std.mem.Allocator, value: std.json.Value) !PermissionAssistedApproval {
     const object = try payloads.requiredObject(value);
+
     const parsed_evaluation = if (object.get("evaluation")) |field_value| if ((field_value) == .null) null else try parsePermissionApprovalEvaluation(allocator, field_value) else null;
     errdefer {
         var cleanup_evaluation = parsed_evaluation;
@@ -11985,6 +12538,7 @@ fn parsePermissionAssistedApproval(allocator: std.mem.Allocator, value: std.json
 
 fn parsePermissionRequestMemory(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRequestMemory {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "memory");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -12075,6 +12629,7 @@ fn parsePermissionRequestMemory(allocator: std.mem.Allocator, value: std.json.Va
 
 fn parsePermissionRequestCustomTool(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRequestCustomTool {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "custom-tool");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -12117,6 +12672,7 @@ fn parsePermissionRequestCustomTool(allocator: std.mem.Allocator, value: std.jso
 
 fn parsePermissionRequestHook(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRequestHook {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "hook");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -12159,6 +12715,7 @@ fn parsePermissionRequestHook(allocator: std.mem.Allocator, value: std.json.Valu
 
 fn parsePermissionRequestExtensionManagement(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRequestExtensionManagement {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "extension-management");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -12200,6 +12757,7 @@ fn parseWorkflowPermissionOperation(_: std.mem.Allocator, value: std.json.Value)
 
 fn parseWorkflowPermissionPhase(allocator: std.mem.Allocator, value: std.json.Value) !WorkflowPermissionPhase {
     const object = try payloads.requiredObject(value);
+
     const parsed_title = try parseString(allocator, object.get("title") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_title = parsed_title;
@@ -12220,6 +12778,7 @@ fn parseWorkflowPermissionPhase(allocator: std.mem.Allocator, value: std.json.Va
 
 fn parsePermissionRequestWorkflow(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRequestWorkflow {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "workflow");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -12292,6 +12851,7 @@ fn parsePermissionRequestWorkflow(allocator: std.mem.Allocator, value: std.json.
 
 fn parsePermissionRequestExtensionPermissionAccess(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRequestExtensionPermissionAccess {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "extension-permission-access");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -12326,6 +12886,7 @@ fn parsePermissionRequestExtensionPermissionAccess(allocator: std.mem.Allocator,
 
 fn parsePermissionRequestExtensionEnvAccess(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRequestExtensionEnvAccess {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "extension-env-access");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -12378,6 +12939,7 @@ fn parsePermissionRequest(allocator: std.mem.Allocator, value: std.json.Value) !
 
 fn parsePermissionPromptRequestCommands(allocator: std.mem.Allocator, value: std.json.Value) !PermissionPromptRequestCommands {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "commands");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -12458,6 +13020,7 @@ fn parsePermissionPromptRequestCommands(allocator: std.mem.Allocator, value: std
 
 fn parsePermissionPromptRequestWrite(allocator: std.mem.Allocator, value: std.json.Value) !PermissionPromptRequestWrite {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "write");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -12524,6 +13087,7 @@ fn parsePermissionPromptRequestWrite(allocator: std.mem.Allocator, value: std.js
 
 fn parsePermissionPromptRequestRead(allocator: std.mem.Allocator, value: std.json.Value) !PermissionPromptRequestRead {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "read");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -12574,6 +13138,7 @@ fn parsePermissionPromptRequestRead(allocator: std.mem.Allocator, value: std.jso
 
 fn parsePermissionPromptRequestMcp(allocator: std.mem.Allocator, value: std.json.Value) !PermissionPromptRequestMcp {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "mcp");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -12638,6 +13203,7 @@ fn parsePermissionPromptRequestMcp(allocator: std.mem.Allocator, value: std.json
 
 fn parsePermissionPromptRequestUrl(allocator: std.mem.Allocator, value: std.json.Value) !PermissionPromptRequestUrl {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "url");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -12698,6 +13264,7 @@ fn parsePermissionPromptRequestUrl(allocator: std.mem.Allocator, value: std.json
 
 fn parsePermissionPromptRequestMemory(allocator: std.mem.Allocator, value: std.json.Value) !PermissionPromptRequestMemory {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "memory");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -12772,6 +13339,7 @@ fn parsePermissionPromptRequestMemory(allocator: std.mem.Allocator, value: std.j
 
 fn parsePermissionPromptRequestCustomTool(allocator: std.mem.Allocator, value: std.json.Value) !PermissionPromptRequestCustomTool {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "custom-tool");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -12828,6 +13396,7 @@ fn parsePermissionPromptRequestPathAccessKind(_: std.mem.Allocator, value: std.j
 
 fn parsePermissionPromptRequestPath(allocator: std.mem.Allocator, value: std.json.Value) !PermissionPromptRequestPath {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "path");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -12880,6 +13449,7 @@ fn parsePermissionPromptRequestPath(allocator: std.mem.Allocator, value: std.jso
 
 fn parsePermissionPromptRequestHook(allocator: std.mem.Allocator, value: std.json.Value) !PermissionPromptRequestHook {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "hook");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -12930,6 +13500,7 @@ fn parsePermissionPromptRequestHook(allocator: std.mem.Allocator, value: std.jso
 
 fn parsePermissionPromptRequestExtensionManagement(allocator: std.mem.Allocator, value: std.json.Value) !PermissionPromptRequestExtensionManagement {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "extension-management");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -12972,6 +13543,7 @@ fn parsePermissionPromptRequestExtensionManagement(allocator: std.mem.Allocator,
 
 fn parsePermissionPromptRequestWorkflow(allocator: std.mem.Allocator, value: std.json.Value) !PermissionPromptRequestWorkflow {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "workflow");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -13052,6 +13624,7 @@ fn parsePermissionPromptRequestWorkflow(allocator: std.mem.Allocator, value: std
 
 fn parsePermissionPromptRequestExtensionPermissionAccess(allocator: std.mem.Allocator, value: std.json.Value) !PermissionPromptRequestExtensionPermissionAccess {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "extension-permission-access");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -13094,6 +13667,7 @@ fn parsePermissionPromptRequestExtensionPermissionAccess(allocator: std.mem.Allo
 
 fn parsePermissionPromptRequestExtensionEnvAccess(allocator: std.mem.Allocator, value: std.json.Value) !PermissionPromptRequestExtensionEnvAccess {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseConstant(allocator, object.get("kind") orelse return error.InvalidSessionEvent, "extension-env-access");
     errdefer {
         const cleanup_kind = parsed_kind;
@@ -13171,6 +13745,7 @@ fn parseSessionMode(_: std.mem.Allocator, value: std.json.Value) !SessionMode {
 
 fn parsePermissionRequestedData(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRequestedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -13231,6 +13806,7 @@ fn parsePermissionRequestedData(allocator: std.mem.Allocator, value: std.json.Va
 
 fn parsePromptCacheBreakData(allocator: std.mem.Allocator, value: std.json.Value) !PromptCacheBreakData {
     const object = try payloads.requiredObject(value);
+
     const parsed_primary_reason = try parseString(allocator, object.get("primaryReason") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_primary_reason = parsed_primary_reason;
@@ -13329,6 +13905,15 @@ fn parsePromptCacheBreakData(allocator: std.mem.Allocator, value: std.json.Value
             }
         }
     }
+    const parsed_tools_redefined_parts = if (object.get("toolsRedefinedParts")) |field_value| if ((field_value) == .null) null else try parsePromptCacheBreakDataToolsRedefinedPartsArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_tools_redefined_parts = parsed_tools_redefined_parts;
+        if (cleanup_tools_redefined_parts) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipeString(item.*);
+            }
+        }
+    }
     const parsed_tools_reordered = if (object.get("toolsReordered")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_system_segments_changed = if (object.get("systemSegmentsChanged")) |field_value| if ((field_value) == .null) null else try parsePromptCacheBreakDataSystemSegmentsChangedArray(allocator, field_value) else null;
     errdefer {
@@ -13389,6 +13974,7 @@ fn parsePromptCacheBreakData(allocator: std.mem.Allocator, value: std.json.Value
         .tools_added_raw = parsed_tools_added_raw,
         .tools_removed_raw = parsed_tools_removed_raw,
         .tools_redefined_raw = parsed_tools_redefined_raw,
+        .tools_redefined_parts = parsed_tools_redefined_parts,
         .tools_reordered = parsed_tools_reordered,
         .system_segments_changed = parsed_system_segments_changed,
         .cache_config_changed_fields = parsed_cache_config_changed_fields,
@@ -13401,6 +13987,7 @@ fn parsePromptCacheBreakData(allocator: std.mem.Allocator, value: std.json.Value
 
 fn parseSamplingCompletedData(allocator: std.mem.Allocator, value: std.json.Value) !SamplingCompletedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -13413,6 +14000,7 @@ fn parseSamplingCompletedData(allocator: std.mem.Allocator, value: std.json.Valu
 
 fn parseSamplingRequestedData(allocator: std.mem.Allocator, value: std.json.Value) !SamplingRequestedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -13508,6 +14096,7 @@ fn parseSandboxProxyMode(_: std.mem.Allocator, value: std.json.Value) !SandboxPr
 
 fn parseSandboxFilesystemPolicyDetails(allocator: std.mem.Allocator, value: std.json.Value) !SandboxFilesystemPolicyDetails {
     const object = try payloads.requiredObject(value);
+
     const parsed_readwrite_paths = try parseSandboxFilesystemPolicyDetailsReadwritePathsArray(allocator, object.get("readwritePaths") orelse return error.InvalidSessionEvent);
     errdefer {
         const cleanup_readwrite_paths = parsed_readwrite_paths;
@@ -13545,6 +14134,7 @@ fn parseSandboxDegradationReason(_: std.mem.Allocator, value: std.json.Value) !S
 
 fn parseSandboxDecisionDataVariant1(allocator: std.mem.Allocator, value: std.json.Value) !SandboxDecisionDataVariant1 {
     const object = try payloads.requiredObject(value);
+
     const parsed_control = try parseSandboxControl(allocator, object.get("control") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_control = parsed_control;
@@ -13643,6 +14233,7 @@ fn parseSandboxDecisionDataVariant1(allocator: std.mem.Allocator, value: std.jso
 
 fn parseSandboxDecisionDataVariant2(allocator: std.mem.Allocator, value: std.json.Value) !SandboxDecisionDataVariant2 {
     const object = try payloads.requiredObject(value);
+
     const parsed_control = try parseSandboxControl(allocator, object.get("control") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_control = parsed_control;
@@ -13711,6 +14302,7 @@ fn parseSandboxAttestation(_: std.mem.Allocator, value: std.json.Value) !Sandbox
 
 fn parseSandboxDecisionDataVariant3(allocator: std.mem.Allocator, value: std.json.Value) !SandboxDecisionDataVariant3 {
     const object = try payloads.requiredObject(value);
+
     const parsed_control = try parseSandboxControl(allocator, object.get("control") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_control = parsed_control;
@@ -13804,6 +14396,7 @@ fn parseSandboxDenialConfidence(_: std.mem.Allocator, value: std.json.Value) !Sa
 
 fn parseSandboxDecisionDataVariant4(allocator: std.mem.Allocator, value: std.json.Value) !SandboxDecisionDataVariant4 {
     const object = try payloads.requiredObject(value);
+
     const parsed_control = try parseSandboxControl(allocator, object.get("control") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_control = parsed_control;
@@ -13899,6 +14492,7 @@ fn parseSandboxPermissiveSource(_: std.mem.Allocator, value: std.json.Value) !Sa
 
 fn parseSandboxDecisionDataVariant5(allocator: std.mem.Allocator, value: std.json.Value) !SandboxDecisionDataVariant5 {
     const object = try payloads.requiredObject(value);
+
     const parsed_control = try parseSandboxControl(allocator, object.get("control") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_control = parsed_control;
@@ -13979,6 +14573,7 @@ fn parseSandboxBypassSource(_: std.mem.Allocator, value: std.json.Value) !Sandbo
 
 fn parseSandboxDecisionDataVariant6(allocator: std.mem.Allocator, value: std.json.Value) !SandboxDecisionDataVariant6 {
     const object = try payloads.requiredObject(value);
+
     const parsed_control = try parseSandboxControl(allocator, object.get("control") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_control = parsed_control;
@@ -14069,6 +14664,7 @@ fn parseSandboxDecisionDataVariant6(allocator: std.mem.Allocator, value: std.jso
 
 fn parseSandboxDecisionDataVariant7(allocator: std.mem.Allocator, value: std.json.Value) !SandboxDecisionDataVariant7 {
     const object = try payloads.requiredObject(value);
+
     const parsed_control = try parseSandboxControl(allocator, object.get("control") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_control = parsed_control;
@@ -14159,6 +14755,7 @@ fn parseSandboxDecisionDataVariant7(allocator: std.mem.Allocator, value: std.jso
 
 fn parseSandboxDecisionDataVariant8(allocator: std.mem.Allocator, value: std.json.Value) !SandboxDecisionDataVariant8 {
     const object = try payloads.requiredObject(value);
+
     const parsed_control = try parseSandboxControl(allocator, object.get("control") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_control = parsed_control;
@@ -14265,6 +14862,7 @@ fn parseAutoModeResolvedReasoningBucket(_: std.mem.Allocator, value: std.json.Va
 
 fn parseAutoModeResolvedData(allocator: std.mem.Allocator, value: std.json.Value) !AutoModeResolvedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_chosen_model = try parseString(allocator, object.get("chosenModel") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_chosen_model = parsed_chosen_model;
@@ -14330,6 +14928,13 @@ fn parseAutoModeResolvedData(allocator: std.mem.Allocator, value: std.json.Value
             wipeString(present.*);
         }
     }
+    const parsed_selection_reason = if (object.get("selectionReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_selection_reason = parsed_selection_reason;
+        if (cleanup_selection_reason) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_sticky_override = if (object.get("stickyOverride")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_router_latency_ms = if (object.get("routerLatencyMs")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
     const parsed_end_to_end_latency_ms = if (object.get("endToEndLatencyMs")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
@@ -14346,6 +14951,7 @@ fn parseAutoModeResolvedData(allocator: std.mem.Allocator, value: std.json.Value
         .available_models = parsed_available_models,
         .fallback = parsed_fallback,
         .fallback_reason = parsed_fallback_reason,
+        .selection_reason = parsed_selection_reason,
         .sticky_override = parsed_sticky_override,
         .router_latency_ms = parsed_router_latency_ms,
         .end_to_end_latency_ms = parsed_end_to_end_latency_ms,
@@ -14364,6 +14970,7 @@ fn parseRecommendedAutoTier(_: std.mem.Allocator, value: std.json.Value) !Recomm
 
 fn parseAutoTierRecommendationData(allocator: std.mem.Allocator, value: std.json.Value) !AutoTierRecommendationData {
     const object = try payloads.requiredObject(value);
+
     const parsed_recommended_auto_tier = try parseRecommendedAutoTier(allocator, object.get("recommendedAutoTier") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_recommended_auto_tier = parsed_recommended_auto_tier;
@@ -14394,6 +15001,7 @@ fn parseAutoTierSwitchFailureReason(_: std.mem.Allocator, value: std.json.Value)
 
 fn parseAutoTierSwitchFailedData(allocator: std.mem.Allocator, value: std.json.Value) !AutoTierSwitchFailedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_effective_auto_tier = if (object.get("effectiveAutoTier")) |field_value| if ((field_value) == .null) null else try parseAutoTier(allocator, field_value) else null;
     errdefer {
         var cleanup_effective_auto_tier = parsed_effective_auto_tier;
@@ -14439,6 +15047,7 @@ fn parseAutopilotObjectiveChangedStatus(_: std.mem.Allocator, value: std.json.Va
 
 fn parseAutopilotObjectiveChangedData(allocator: std.mem.Allocator, value: std.json.Value) !AutopilotObjectiveChangedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_operation = try parseAutopilotObjectiveChangedOperation(allocator, object.get("operation") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_operation = parsed_operation;
@@ -14474,6 +15083,7 @@ fn parseBinaryAssetType(_: std.mem.Allocator, value: std.json.Value) !BinaryAsse
 
 fn parseBinaryAssetData(allocator: std.mem.Allocator, value: std.json.Value) !BinaryAssetData {
     const object = try payloads.requiredObject(value);
+
     const parsed_asset_id = try parseString(allocator, object.get("assetId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_asset_id = parsed_asset_id;
@@ -14528,6 +15138,7 @@ fn parseBinaryAssetData(allocator: std.mem.Allocator, value: std.json.Value) !Bi
 
 fn parseCanvasClosedData(allocator: std.mem.Allocator, value: std.json.Value) !CanvasClosedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_instance_id = try parseString(allocator, object.get("instanceId") orelse return error.InvalidSessionEvent, 1, null);
     errdefer {
         const cleanup_instance_id = parsed_instance_id;
@@ -14552,6 +15163,7 @@ fn parseCanvasClosedData(allocator: std.mem.Allocator, value: std.json.Value) !C
 
 fn parseCanvasOpenedData(allocator: std.mem.Allocator, value: std.json.Value) !CanvasOpenedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_instance_id = try parseString(allocator, object.get("instanceId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_instance_id = parsed_instance_id;
@@ -14624,6 +15236,7 @@ fn parseCanvasOpenedData(allocator: std.mem.Allocator, value: std.json.Value) !C
 
 fn parseCanvasRecordedData(allocator: std.mem.Allocator, value: std.json.Value) !CanvasRecordedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_instance_id = try parseString(allocator, object.get("instanceId") orelse return error.InvalidSessionEvent, 1, null);
     errdefer {
         const cleanup_instance_id = parsed_instance_id;
@@ -14664,6 +15277,7 @@ fn parseCanvasRecordedData(allocator: std.mem.Allocator, value: std.json.Value) 
 
 fn parseCanvasRegistryChangedCanvasAction(allocator: std.mem.Allocator, value: std.json.Value) !CanvasRegistryChangedCanvasAction {
     const object = try payloads.requiredObject(value);
+
     const parsed_name = try parseString(allocator, object.get("name") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_name = parsed_name;
@@ -14692,6 +15306,7 @@ fn parseCanvasRegistryChangedCanvasAction(allocator: std.mem.Allocator, value: s
 
 fn parseCanvasRegistryChangedCanvas(allocator: std.mem.Allocator, value: std.json.Value) !CanvasRegistryChangedCanvas {
     const object = try payloads.requiredObject(value);
+
     const parsed_extension_id = try parseString(allocator, object.get("extensionId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_extension_id = parsed_extension_id;
@@ -14756,6 +15371,7 @@ fn parseCanvasRegistryChangedCanvas(allocator: std.mem.Allocator, value: std.jso
 
 fn parseCanvasRegistryChangedData(allocator: std.mem.Allocator, value: std.json.Value) !CanvasRegistryChangedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_canvases = try parseCanvasRegistryChangedDataCanvasesArray(allocator, object.get("canvases") orelse return error.InvalidSessionEvent);
     errdefer {
         const cleanup_canvases = parsed_canvases;
@@ -14770,6 +15386,7 @@ fn parseCanvasRegistryChangedData(allocator: std.mem.Allocator, value: std.json.
 
 fn parseCanvasRemovedData(allocator: std.mem.Allocator, value: std.json.Value) !CanvasRemovedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_instance_id = try parseString(allocator, object.get("instanceId") orelse return error.InvalidSessionEvent, 1, null);
     errdefer {
         const cleanup_instance_id = parsed_instance_id;
@@ -14794,6 +15411,7 @@ fn parseCanvasRemovedData(allocator: std.mem.Allocator, value: std.json.Value) !
 
 fn parseCanvasUnavailableData(allocator: std.mem.Allocator, value: std.json.Value) !CanvasUnavailableData {
     const object = try payloads.requiredObject(value);
+
     const parsed_instance_id = try parseString(allocator, object.get("instanceId") orelse return error.InvalidSessionEvent, 1, null);
     errdefer {
         const cleanup_instance_id = parsed_instance_id;
@@ -14818,6 +15436,7 @@ fn parseCanvasUnavailableData(allocator: std.mem.Allocator, value: std.json.Valu
 
 fn parseResponsesReasoning(allocator: std.mem.Allocator, value: std.json.Value) !ResponsesReasoning {
     const object = try payloads.requiredObject(value);
+
     const parsed_model = try parseString(allocator, object.get("model") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_model = parsed_model;
@@ -14842,6 +15461,7 @@ fn parseResponsesReasoning(allocator: std.mem.Allocator, value: std.json.Value) 
 
 fn parseCompactionCompleteCompactionTokensUsedCopilotUsageTokenDetail(allocator: std.mem.Allocator, value: std.json.Value) !CompactionCompleteCompactionTokensUsedCopilotUsageTokenDetail {
     const object = try payloads.requiredObject(value);
+
     const parsed_batch_size = try parseInteger(u64, object.get("batchSize") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_cost_per_batch = try parseInteger(u64, object.get("costPerBatch") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
@@ -14868,6 +15488,7 @@ fn parseCompactionCompleteCompactionTokensUsedCopilotUsageTokenDetail(allocator:
 
 fn parseCompactionCompleteCompactionTokensUsedCopilotUsage(allocator: std.mem.Allocator, value: std.json.Value) !CompactionCompleteCompactionTokensUsedCopilotUsage {
     const object = try payloads.requiredObject(value);
+
     const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
@@ -14894,6 +15515,7 @@ fn parseCompactionCompleteCompactionTokensUsedCopilotUsage(allocator: std.mem.Al
 
 fn parseCompactionCompleteCompactionTokensUsed(allocator: std.mem.Allocator, value: std.json.Value) !CompactionCompleteCompactionTokensUsed {
     const object = try payloads.requiredObject(value);
+
     const parsed_input_tokens = if (object.get("inputTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_output_tokens = if (object.get("outputTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_cache_read_tokens = if (object.get("cacheReadTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
@@ -14936,6 +15558,7 @@ fn parseCompactionTrigger(_: std.mem.Allocator, value: std.json.Value) !Compacti
 
 fn parseCompactionCompleteData(allocator: std.mem.Allocator, value: std.json.Value) !CompactionCompleteData {
     const object = try payloads.requiredObject(value);
+
     const parsed_success = try parseBool(object.get("success") orelse return error.InvalidSessionEvent);
     const parsed_error_ = if (object.get("error")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
@@ -15062,6 +15685,7 @@ fn parseCompactionCompleteData(allocator: std.mem.Allocator, value: std.json.Val
 
 fn parseCompactionStartData(allocator: std.mem.Allocator, value: std.json.Value) !CompactionStartData {
     const object = try payloads.requiredObject(value);
+
     const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
@@ -15094,6 +15718,7 @@ fn parseCompactionStartData(allocator: std.mem.Allocator, value: std.json.Value)
 
 fn parseCompletionReceiptEventRange(allocator: std.mem.Allocator, value: std.json.Value) !CompletionReceiptEventRange {
     const object = try payloads.requiredObject(value);
+
     const parsed_start_event_id = try parseString(allocator, object.get("startEventId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_start_event_id = parsed_start_event_id;
@@ -15130,6 +15755,7 @@ fn parseCompletionReceiptToolStatus(_: std.mem.Allocator, value: std.json.Value)
 
 fn parseCompletionReceiptFinalTool(allocator: std.mem.Allocator, value: std.json.Value) !CompletionReceiptFinalTool {
     const object = try payloads.requiredObject(value);
+
     const parsed_tool_call_id = try parseString(allocator, object.get("toolCallId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_tool_call_id = parsed_tool_call_id;
@@ -15158,6 +15784,7 @@ fn parseCompletionReceiptFinalTool(allocator: std.mem.Allocator, value: std.json
 
 fn parseCompletionReceiptData(allocator: std.mem.Allocator, value: std.json.Value) !CompletionReceiptData {
     const object = try payloads.requiredObject(value);
+
     const parsed_schema_version = try parseInteger(u64, object.get("schemaVersion") orelse return error.InvalidSessionEvent, 1, null, null);
     const parsed_attempt = try parseInteger(u64, object.get("attempt") orelse return error.InvalidSessionEvent, 1, null, null);
     const parsed_source_event_id = try parseString(allocator, object.get("sourceEventId") orelse return error.InvalidSessionEvent, null, null);
@@ -15205,6 +15832,7 @@ fn parseWorkingDirectoryContextHostType(_: std.mem.Allocator, value: std.json.Va
 
 fn parseWorkingDirectoryContext(allocator: std.mem.Allocator, value: std.json.Value) !WorkingDirectoryContext {
     const object = try payloads.requiredObject(value);
+
     const parsed_cwd = try parseString(allocator, object.get("cwd") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_cwd = parsed_cwd;
@@ -15275,6 +15903,7 @@ fn parseWorkingDirectoryContext(allocator: std.mem.Allocator, value: std.json.Va
 
 fn parseContextClearedData(allocator: std.mem.Allocator, value: std.json.Value) !ContextClearedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_initial_message = if (object.get("initialMessage")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_initial_message = parsed_initial_message;
@@ -15298,6 +15927,7 @@ fn parseAgentModelPolicy(_: std.mem.Allocator, value: std.json.Value) !AgentMode
 
 fn parseCustomAgentsUpdatedAgent(allocator: std.mem.Allocator, value: std.json.Value) !CustomAgentsUpdatedAgent {
     const object = try payloads.requiredObject(value);
+
     const parsed_id = try parseString(allocator, object.get("id") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_id = parsed_id;
@@ -15374,6 +16004,7 @@ fn parseCustomAgentsUpdatedAgent(allocator: std.mem.Allocator, value: std.json.V
 
 fn parseCustomAgentsUpdatedData(allocator: std.mem.Allocator, value: std.json.Value) !CustomAgentsUpdatedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_agents = try parseCustomAgentsUpdatedDataAgentsArray(allocator, object.get("agents") orelse return error.InvalidSessionEvent);
     errdefer {
         const cleanup_agents = parsed_agents;
@@ -15412,6 +16043,7 @@ fn parseCustomNotificationPayload(allocator: std.mem.Allocator, value: std.json.
 
 fn parseCustomNotificationData(allocator: std.mem.Allocator, value: std.json.Value) !CustomNotificationData {
     const object = try payloads.requiredObject(value);
+
     const parsed_source = try parseString(allocator, object.get("source") orelse return error.InvalidSessionEvent, 1, null);
     errdefer {
         const cleanup_source = parsed_source;
@@ -15456,6 +16088,7 @@ fn parseRemediationAction(_: std.mem.Allocator, value: std.json.Value) !Remediat
 
 fn parseErrorData(allocator: std.mem.Allocator, value: std.json.Value) !ErrorData {
     const object = try payloads.requiredObject(value);
+
     const parsed_error_type = try parseString(allocator, object.get("errorType") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_error_type = parsed_error_type;
@@ -15526,6 +16159,7 @@ fn parseErrorData(allocator: std.mem.Allocator, value: std.json.Value) !ErrorDat
 
 fn parseAttachmentFileLineRange(_: std.mem.Allocator, value: std.json.Value) !AttachmentFileLineRange {
     const object = try payloads.requiredObject(value);
+
     const parsed_start = try parseInteger(u64, object.get("start") orelse return error.InvalidSessionEvent, null, 0, null);
     const parsed_end = try parseInteger(u64, object.get("end") orelse return error.InvalidSessionEvent, null, 0, null);
     return .{
@@ -15543,6 +16177,7 @@ fn parseOmittedBinaryOmittedReason(_: std.mem.Allocator, value: std.json.Value) 
 
 fn parseAttachmentFile(allocator: std.mem.Allocator, value: std.json.Value) !AttachmentFile {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "file");
     errdefer {
         const cleanup_type = parsed_type;
@@ -15609,6 +16244,7 @@ fn parseAttachmentFile(allocator: std.mem.Allocator, value: std.json.Value) !Att
 
 fn parseAttachmentDirectory(allocator: std.mem.Allocator, value: std.json.Value) !AttachmentDirectory {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "directory");
     errdefer {
         const cleanup_type = parsed_type;
@@ -15641,6 +16277,7 @@ fn parseAttachmentDirectory(allocator: std.mem.Allocator, value: std.json.Value)
 
 fn parseAttachmentSelectionDetailsStart(_: std.mem.Allocator, value: std.json.Value) !AttachmentSelectionDetailsStart {
     const object = try payloads.requiredObject(value);
+
     const parsed_line = try parseInteger(u64, object.get("line") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_character = try parseInteger(u64, object.get("character") orelse return error.InvalidSessionEvent, 0, null, null);
     return .{
@@ -15651,6 +16288,7 @@ fn parseAttachmentSelectionDetailsStart(_: std.mem.Allocator, value: std.json.Va
 
 fn parseAttachmentSelectionDetailsEnd(_: std.mem.Allocator, value: std.json.Value) !AttachmentSelectionDetailsEnd {
     const object = try payloads.requiredObject(value);
+
     const parsed_line = try parseInteger(u64, object.get("line") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_character = try parseInteger(u64, object.get("character") orelse return error.InvalidSessionEvent, 0, null, null);
     return .{
@@ -15661,6 +16299,7 @@ fn parseAttachmentSelectionDetailsEnd(_: std.mem.Allocator, value: std.json.Valu
 
 fn parseAttachmentSelectionDetails(allocator: std.mem.Allocator, value: std.json.Value) !AttachmentSelectionDetails {
     const object = try payloads.requiredObject(value);
+
     const parsed_start = try parseAttachmentSelectionDetailsStart(allocator, object.get("start") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_start = parsed_start;
@@ -15679,6 +16318,7 @@ fn parseAttachmentSelectionDetails(allocator: std.mem.Allocator, value: std.json
 
 fn parseAttachmentSelection(allocator: std.mem.Allocator, value: std.json.Value) !AttachmentSelection {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "selection");
     errdefer {
         const cleanup_type = parsed_type;
@@ -15723,6 +16363,7 @@ fn parseAttachmentGitHubReferenceType(_: std.mem.Allocator, value: std.json.Valu
 
 fn parseAttachmentGitHubReference(allocator: std.mem.Allocator, value: std.json.Value) !AttachmentGitHubReference {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "github_reference");
     errdefer {
         const cleanup_type = parsed_type;
@@ -15761,6 +16402,7 @@ fn parseAttachmentGitHubReference(allocator: std.mem.Allocator, value: std.json.
 
 fn parseGitHubRepoRef(allocator: std.mem.Allocator, value: std.json.Value) !GitHubRepoRef {
     const object = try payloads.requiredObject(value);
+
     const parsed_id = if (object.get("id")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, null, 0, null) else null;
     const parsed_name = try parseString(allocator, object.get("name") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
@@ -15781,6 +16423,7 @@ fn parseGitHubRepoRef(allocator: std.mem.Allocator, value: std.json.Value) !GitH
 
 fn parseAttachmentGitHubCommit(allocator: std.mem.Allocator, value: std.json.Value) !AttachmentGitHubCommit {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "github_commit");
     errdefer {
         const cleanup_type = parsed_type;
@@ -15817,6 +16460,7 @@ fn parseAttachmentGitHubCommit(allocator: std.mem.Allocator, value: std.json.Val
 
 fn parseAttachmentGitHubRelease(allocator: std.mem.Allocator, value: std.json.Value) !AttachmentGitHubRelease {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "github_release");
     errdefer {
         const cleanup_type = parsed_type;
@@ -15853,6 +16497,7 @@ fn parseAttachmentGitHubRelease(allocator: std.mem.Allocator, value: std.json.Va
 
 fn parseAttachmentGitHubActionsJob(allocator: std.mem.Allocator, value: std.json.Value) !AttachmentGitHubActionsJob {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "github_actions_job");
     errdefer {
         const cleanup_type = parsed_type;
@@ -15899,6 +16544,7 @@ fn parseAttachmentGitHubActionsJob(allocator: std.mem.Allocator, value: std.json
 
 fn parseAttachmentGitHubRepository(allocator: std.mem.Allocator, value: std.json.Value) !AttachmentGitHubRepository {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "github_repository");
     errdefer {
         const cleanup_type = parsed_type;
@@ -15939,6 +16585,7 @@ fn parseAttachmentGitHubRepository(allocator: std.mem.Allocator, value: std.json
 
 fn parseAttachmentGitHubFileDiffSide(allocator: std.mem.Allocator, value: std.json.Value) !AttachmentGitHubFileDiffSide {
     const object = try payloads.requiredObject(value);
+
     const parsed_repo = try parseGitHubRepoRef(allocator, object.get("repo") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_repo = parsed_repo;
@@ -15963,6 +16610,7 @@ fn parseAttachmentGitHubFileDiffSide(allocator: std.mem.Allocator, value: std.js
 
 fn parseAttachmentGitHubFileDiff(allocator: std.mem.Allocator, value: std.json.Value) !AttachmentGitHubFileDiff {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "github_file_diff");
     errdefer {
         const cleanup_type = parsed_type;
@@ -15997,6 +16645,7 @@ fn parseAttachmentGitHubFileDiff(allocator: std.mem.Allocator, value: std.json.V
 
 fn parseAttachmentGitHubTreeComparisonSide(allocator: std.mem.Allocator, value: std.json.Value) !AttachmentGitHubTreeComparisonSide {
     const object = try payloads.requiredObject(value);
+
     const parsed_repo = try parseGitHubRepoRef(allocator, object.get("repo") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_repo = parsed_repo;
@@ -16015,6 +16664,7 @@ fn parseAttachmentGitHubTreeComparisonSide(allocator: std.mem.Allocator, value: 
 
 fn parseAttachmentGitHubTreeComparison(allocator: std.mem.Allocator, value: std.json.Value) !AttachmentGitHubTreeComparison {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "github_tree_comparison");
     errdefer {
         const cleanup_type = parsed_type;
@@ -16045,6 +16695,7 @@ fn parseAttachmentGitHubTreeComparison(allocator: std.mem.Allocator, value: std.
 
 fn parseAttachmentGitHubUrl(allocator: std.mem.Allocator, value: std.json.Value) !AttachmentGitHubUrl {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "github_url");
     errdefer {
         const cleanup_type = parsed_type;
@@ -16063,6 +16714,7 @@ fn parseAttachmentGitHubUrl(allocator: std.mem.Allocator, value: std.json.Value)
 
 fn parseAttachmentGitHubFile(allocator: std.mem.Allocator, value: std.json.Value) !AttachmentGitHubFile {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "github_file");
     errdefer {
         const cleanup_type = parsed_type;
@@ -16099,6 +16751,7 @@ fn parseAttachmentGitHubFile(allocator: std.mem.Allocator, value: std.json.Value
 
 fn parseAttachmentGitHubSnippet(allocator: std.mem.Allocator, value: std.json.Value) !AttachmentGitHubSnippet {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "github_snippet");
     errdefer {
         const cleanup_type = parsed_type;
@@ -16141,6 +16794,7 @@ fn parseAttachmentGitHubSnippet(allocator: std.mem.Allocator, value: std.json.Va
 
 fn parseAttachmentBlob(allocator: std.mem.Allocator, value: std.json.Value) !AttachmentBlob {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "blob");
     errdefer {
         const cleanup_type = parsed_type;
@@ -16193,6 +16847,7 @@ fn parseAttachmentBlob(allocator: std.mem.Allocator, value: std.json.Value) !Att
 
 fn parseAttachmentExtensionContext(allocator: std.mem.Allocator, value: std.json.Value) !AttachmentExtensionContext {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "extension_context");
     errdefer {
         const cleanup_type = parsed_type;
@@ -16268,6 +16923,7 @@ fn parseAttachment(allocator: std.mem.Allocator, value: std.json.Value) !Attachm
 
 fn parseExtensionsAttachmentsPushedData(allocator: std.mem.Allocator, value: std.json.Value) !ExtensionsAttachmentsPushedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_attachments = try parseExtensionsAttachmentsPushedDataAttachmentsArray(allocator, object.get("attachments") orelse return error.InvalidSessionEvent);
     errdefer {
         const cleanup_attachments = parsed_attachments;
@@ -16300,6 +16956,7 @@ fn parseExtensionsLoadedExtensionStatus(_: std.mem.Allocator, value: std.json.Va
 
 fn parseExtensionsLoadedExtension(allocator: std.mem.Allocator, value: std.json.Value) !ExtensionsLoadedExtension {
     const object = try payloads.requiredObject(value);
+
     const parsed_id = try parseString(allocator, object.get("id") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_id = parsed_id;
@@ -16330,6 +16987,7 @@ fn parseExtensionsLoadedExtension(allocator: std.mem.Allocator, value: std.json.
 
 fn parseExtensionsLoadedData(allocator: std.mem.Allocator, value: std.json.Value) !ExtensionsLoadedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_extensions = try parseExtensionsLoadedDataExtensionsArray(allocator, object.get("extensions") orelse return error.InvalidSessionEvent);
     errdefer {
         const cleanup_extensions = parsed_extensions;
@@ -16344,6 +17002,7 @@ fn parseExtensionsLoadedData(allocator: std.mem.Allocator, value: std.json.Value
 
 fn parseShutdownCodeChanges(allocator: std.mem.Allocator, value: std.json.Value) !ShutdownCodeChanges {
     const object = try payloads.requiredObject(value);
+
     const parsed_lines_added = try parseInteger(u64, object.get("linesAdded") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_lines_removed = try parseInteger(u64, object.get("linesRemoved") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_files_modified = try parseShutdownCodeChangesFilesModifiedArray(allocator, object.get("filesModified") orelse return error.InvalidSessionEvent);
@@ -16362,6 +17021,7 @@ fn parseShutdownCodeChanges(allocator: std.mem.Allocator, value: std.json.Value)
 
 fn parseFusionChangeCheckpointData(allocator: std.mem.Allocator, value: std.json.Value) !FusionChangeCheckpointData {
     const object = try payloads.requiredObject(value);
+
     const parsed_code_changes = try parseShutdownCodeChanges(allocator, object.get("codeChanges") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_code_changes = parsed_code_changes;
@@ -16381,6 +17041,7 @@ fn parseFusionCommitKind(_: std.mem.Allocator, value: std.json.Value) !FusionCom
 
 fn parseFusionCommitStartedData(allocator: std.mem.Allocator, value: std.json.Value) !FusionCommitStartedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_fusion_id = try parseString(allocator, object.get("fusionId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_fusion_id = parsed_fusion_id;
@@ -16425,6 +17086,7 @@ fn parseFusionCommitStartedData(allocator: std.mem.Allocator, value: std.json.Va
 
 fn parseFusionCompletedData(allocator: std.mem.Allocator, value: std.json.Value) !FusionCompletedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_fusion_id = try parseString(allocator, object.get("fusionId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_fusion_id = parsed_fusion_id;
@@ -16513,6 +17175,7 @@ fn parseFusionCompletedData(allocator: std.mem.Allocator, value: std.json.Value)
 
 fn parseFusionHandoffData(allocator: std.mem.Allocator, value: std.json.Value) !FusionHandoffData {
     const object = try payloads.requiredObject(value);
+
     const parsed_fusion_id = try parseString(allocator, object.get("fusionId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_fusion_id = parsed_fusion_id;
@@ -16549,6 +17212,7 @@ fn parseFusionHandoffData(allocator: std.mem.Allocator, value: std.json.Value) !
 
 fn parseFusionScores(_: std.mem.Allocator, value: std.json.Value) !FusionScores {
     const object = try payloads.requiredObject(value);
+
     const parsed_reasoning = try parseNumber(object.get("reasoning") orelse return error.InvalidSessionEvent, 0, null, 1);
     const parsed_code_gen = try parseNumber(object.get("codeGen") orelse return error.InvalidSessionEvent, 0, null, 1);
     const parsed_debugging = try parseNumber(object.get("debugging") orelse return error.InvalidSessionEvent, 0, null, 1);
@@ -16563,6 +17227,7 @@ fn parseFusionScores(_: std.mem.Allocator, value: std.json.Value) !FusionScores 
 
 fn parseFusionPhasePlanStep(allocator: std.mem.Allocator, value: std.json.Value) !FusionPhasePlanStep {
     const object = try payloads.requiredObject(value);
+
     const parsed_kind = try parseFusionPhaseKind(allocator, object.get("kind") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_kind = parsed_kind;
@@ -16589,6 +17254,7 @@ fn parseFusionPhasePlanStep(allocator: std.mem.Allocator, value: std.json.Value)
 
 fn parseFusionCritic(allocator: std.mem.Allocator, value: std.json.Value) !FusionCritic {
     const object = try payloads.requiredObject(value);
+
     const parsed_phase_id = try parseString(allocator, object.get("phaseId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_phase_id = parsed_phase_id;
@@ -16622,6 +17288,7 @@ fn parseFusionFollowUpAction(_: std.mem.Allocator, value: std.json.Value) !Fusio
 
 fn parseFusionFollowUpRecommendation(allocator: std.mem.Allocator, value: std.json.Value) !FusionFollowUpRecommendation {
     const object = try payloads.requiredObject(value);
+
     const parsed_user_turn = try parseFusionFollowUpAction(allocator, object.get("userTurn") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_user_turn = parsed_user_turn;
@@ -16640,6 +17307,7 @@ fn parseFusionFollowUpRecommendation(allocator: std.mem.Allocator, value: std.js
 
 fn parseFusionResolvedData(allocator: std.mem.Allocator, value: std.json.Value) !FusionResolvedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_fusion_id = try parseString(allocator, object.get("fusionId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_fusion_id = parsed_fusion_id;
@@ -16816,6 +17484,7 @@ fn parseFusionResolvedData(allocator: std.mem.Allocator, value: std.json.Value) 
 
 fn parseFusionRouteFailedData(allocator: std.mem.Allocator, value: std.json.Value) !FusionRouteFailedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_attempt_id = try parseString(allocator, object.get("attemptId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_attempt_id = parsed_attempt_id;
@@ -16869,6 +17538,7 @@ fn parseFusionTurnKind(_: std.mem.Allocator, value: std.json.Value) !FusionTurnK
 
 fn parseFusionRouteStartedData(allocator: std.mem.Allocator, value: std.json.Value) !FusionRouteStartedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_attempt_id = try parseString(allocator, object.get("attemptId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_attempt_id = parsed_attempt_id;
@@ -16910,6 +17580,7 @@ fn parseHandoffSourceType(_: std.mem.Allocator, value: std.json.Value) !HandoffS
 
 fn parseHandoffRepository(allocator: std.mem.Allocator, value: std.json.Value) !HandoffRepository {
     const object = try payloads.requiredObject(value);
+
     const parsed_owner = try parseString(allocator, object.get("owner") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_owner = parsed_owner;
@@ -16936,6 +17607,7 @@ fn parseHandoffRepository(allocator: std.mem.Allocator, value: std.json.Value) !
 
 fn parseHandoffData(allocator: std.mem.Allocator, value: std.json.Value) !HandoffData {
     const object = try payloads.requiredObject(value);
+
     const parsed_handoff_time = try parseString(allocator, object.get("handoffTime") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_handoff_time = parsed_handoff_time;
@@ -16994,6 +17666,7 @@ fn parseHandoffData(allocator: std.mem.Allocator, value: std.json.Value) !Handof
 
 fn parseIdleData(allocator: std.mem.Allocator, value: std.json.Value) !IdleData {
     const object = try payloads.requiredObject(value);
+
     const parsed_aborted = if (object.get("aborted")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_mode = if (object.get("mode")) |field_value| if ((field_value) == .null) null else try parseSessionMode(allocator, field_value) else null;
     errdefer {
@@ -17020,6 +17693,7 @@ fn parseIndexedSearchState(_: std.mem.Allocator, value: std.json.Value) !Indexed
 
 fn parseIndexedSearchDataVariant1(allocator: std.mem.Allocator, value: std.json.Value) !IndexedSearchDataVariant1 {
     const object = try payloads.requiredObject(value);
+
     const parsed_state = try parseIndexedSearchState(allocator, object.get("state") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_state = parsed_state;
@@ -17063,6 +17737,7 @@ fn parseIndexedSearchDisabledReason(_: std.mem.Allocator, value: std.json.Value)
 
 fn parseIndexedSearchDataVariant2(allocator: std.mem.Allocator, value: std.json.Value) !IndexedSearchDataVariant2 {
     const object = try payloads.requiredObject(value);
+
     const parsed_outcome = try parseIndexedSearchOutcome(allocator, object.get("outcome") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_outcome = parsed_outcome;
@@ -17115,6 +17790,7 @@ fn parseIndexedSearchErrorType(_: std.mem.Allocator, value: std.json.Value) !Ind
 
 fn parseIndexedSearchDataVariant3(allocator: std.mem.Allocator, value: std.json.Value) !IndexedSearchDataVariant3 {
     const object = try payloads.requiredObject(value);
+
     const parsed_error_type = try parseIndexedSearchErrorType(allocator, object.get("errorType") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_error_type = parsed_error_type;
@@ -17150,6 +17826,7 @@ fn parseIndexedSearchIncrementalPhase(_: std.mem.Allocator, value: std.json.Valu
 
 fn parseIndexedSearchDataVariant4(allocator: std.mem.Allocator, value: std.json.Value) !IndexedSearchDataVariant4 {
     const object = try payloads.requiredObject(value);
+
     const parsed_phase = try parseIndexedSearchIncrementalPhase(allocator, object.get("phase") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_phase = parsed_phase;
@@ -17192,6 +17869,7 @@ fn parseIndexedSearchData(allocator: std.mem.Allocator, value: std.json.Value) !
 
 fn parseInfoData(allocator: std.mem.Allocator, value: std.json.Value) !InfoData {
     const object = try payloads.requiredObject(value);
+
     const parsed_info_type = try parseString(allocator, object.get("infoType") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_info_type = parsed_info_type;
@@ -17243,6 +17921,7 @@ fn parseManagedSettingsEnforcedEscalation(_: std.mem.Allocator, value: std.json.
 
 fn parseManagedSettingsEnforcedData(allocator: std.mem.Allocator, value: std.json.Value) !ManagedSettingsEnforcedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_action = try parseManagedSettingsEnforcedAction(allocator, object.get("action") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_action = parsed_action;
@@ -17288,6 +17967,7 @@ fn parseManagedSettingsResolvedSource(_: std.mem.Allocator, value: std.json.Valu
 
 fn parseManagedSettingsResolvedData(allocator: std.mem.Allocator, value: std.json.Value) !ManagedSettingsResolvedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_source = try parseManagedSettingsResolvedSource(allocator, object.get("source") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_source = parsed_source;
@@ -17332,6 +18012,7 @@ fn parseManagedSettingsResolvedData(allocator: std.mem.Allocator, value: std.jso
 
 fn parseMcpServerNeedsReconnectData(allocator: std.mem.Allocator, value: std.json.Value) !McpServerNeedsReconnectData {
     const object = try payloads.requiredObject(value);
+
     const parsed_server_name = try parseString(allocator, object.get("serverName") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_server_name = parsed_server_name;
@@ -17344,6 +18025,7 @@ fn parseMcpServerNeedsReconnectData(allocator: std.mem.Allocator, value: std.jso
 
 fn parseMcpServerRemovedData(allocator: std.mem.Allocator, value: std.json.Value) !McpServerRemovedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_server_name = try parseString(allocator, object.get("serverName") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_server_name = parsed_server_name;
@@ -17368,6 +18050,7 @@ fn parseMcpServerStatus(_: std.mem.Allocator, value: std.json.Value) !McpServerS
 
 fn parseMcpServerStatusChangedData(allocator: std.mem.Allocator, value: std.json.Value) !McpServerStatusChangedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_server_name = try parseString(allocator, object.get("serverName") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_server_name = parsed_server_name;
@@ -17420,6 +18103,7 @@ fn parseMcpServerSource(_: std.mem.Allocator, value: std.json.Value) !McpServerS
 
 fn parseMcpServerMetadata(allocator: std.mem.Allocator, value: std.json.Value) !McpServerMetadata {
     const object = try payloads.requiredObject(value);
+
     const parsed_instructions = if ((object.get("instructions") orelse return error.InvalidSessionEvent) == .null) null else try parseString(allocator, object.get("instructions") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         var cleanup_instructions = parsed_instructions;
@@ -17443,6 +18127,7 @@ fn parseMcpServerTransport(_: std.mem.Allocator, value: std.json.Value) !McpServ
 
 fn parseMcpServersLoadedServer(allocator: std.mem.Allocator, value: std.json.Value) !McpServersLoadedServer {
     const object = try payloads.requiredObject(value);
+
     const parsed_name = try parseString(allocator, object.get("name") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_name = parsed_name;
@@ -17517,6 +18202,7 @@ fn parseMcpServersLoadedServer(allocator: std.mem.Allocator, value: std.json.Val
 
 fn parseMcpServersLoadedData(allocator: std.mem.Allocator, value: std.json.Value) !McpServersLoadedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_servers = try parseMcpServersLoadedDataServersArray(allocator, object.get("servers") orelse return error.InvalidSessionEvent);
     errdefer {
         const cleanup_servers = parsed_servers;
@@ -17537,6 +18223,7 @@ fn parseMemoryChangedData(_: std.mem.Allocator, value: std.json.Value) !MemoryCh
 
 fn parseModeChangedData(allocator: std.mem.Allocator, value: std.json.Value) !ModeChangedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_previous_mode = try parseSessionMode(allocator, object.get("previousMode") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_previous_mode = parsed_previous_mode;
@@ -17555,6 +18242,7 @@ fn parseModeChangedData(allocator: std.mem.Allocator, value: std.json.Value) !Mo
 
 fn parseModeNoticeDeliveredData(allocator: std.mem.Allocator, value: std.json.Value) !ModeNoticeDeliveredData {
     const object = try payloads.requiredObject(value);
+
     const parsed_mode = try parseSessionMode(allocator, object.get("mode") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_mode = parsed_mode;
@@ -17608,6 +18296,7 @@ fn parseModelChangeSource(_: std.mem.Allocator, value: std.json.Value) !ModelCha
 
 fn parseModelChangeData(allocator: std.mem.Allocator, value: std.json.Value) !ModelChangeData {
     const object = try payloads.requiredObject(value);
+
     const parsed_previous_model = if (object.get("previousModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_previous_model = parsed_previous_model;
@@ -17631,6 +18320,13 @@ fn parseModelChangeData(allocator: std.mem.Allocator, value: std.json.Value) !Mo
     errdefer {
         var cleanup_reasoning_effort = parsed_reasoning_effort;
         if (cleanup_reasoning_effort) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_reasoning_effort_model = if (object.get("reasoningEffortModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_reasoning_effort_model = parsed_reasoning_effort_model;
+        if (cleanup_reasoning_effort_model) |*present| {
             wipeString(present.*);
         }
     }
@@ -17702,6 +18398,7 @@ fn parseModelChangeData(allocator: std.mem.Allocator, value: std.json.Value) !Mo
         .new_model = parsed_new_model,
         .previous_reasoning_effort = parsed_previous_reasoning_effort,
         .reasoning_effort = parsed_reasoning_effort,
+        .reasoning_effort_model = parsed_reasoning_effort_model,
         .previous_reasoning_summary = parsed_previous_reasoning_summary,
         .reasoning_summary = parsed_reasoning_summary,
         .previous_verbosity = parsed_previous_verbosity,
@@ -17722,6 +18419,7 @@ fn parseModelDeselectedReason(_: std.mem.Allocator, value: std.json.Value) !Mode
 
 fn parseModelDeselectedData(allocator: std.mem.Allocator, value: std.json.Value) !ModelDeselectedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_previous_model = try parseString(allocator, object.get("previousModel") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_previous_model = parsed_previous_model;
@@ -17740,6 +18438,7 @@ fn parseModelDeselectedData(allocator: std.mem.Allocator, value: std.json.Value)
 
 fn parsePermissionsChangedData(allocator: std.mem.Allocator, value: std.json.Value) !PermissionsChangedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_previous_mode = if (object.get("previousMode")) |field_value| if ((field_value) == .null) null else try parsePermissionMode(allocator, field_value) else null;
     errdefer {
         var cleanup_previous_mode = parsed_previous_mode;
@@ -17778,6 +18477,7 @@ fn parsePlanChangedOperation(_: std.mem.Allocator, value: std.json.Value) !PlanC
 
 fn parsePlanChangedData(allocator: std.mem.Allocator, value: std.json.Value) !PlanChangedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_operation = try parsePlanChangedOperation(allocator, object.get("operation") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_operation = parsed_operation;
@@ -17790,6 +18490,7 @@ fn parsePlanChangedData(allocator: std.mem.Allocator, value: std.json.Value) !Pl
 
 fn parseRemoteSteerableChangedData(_: std.mem.Allocator, value: std.json.Value) !RemoteSteerableChangedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_remote_steerable = try parseBool(object.get("remoteSteerable") orelse return error.InvalidSessionEvent);
     return .{
         .remote_steerable = parsed_remote_steerable,
@@ -17798,6 +18499,7 @@ fn parseRemoteSteerableChangedData(_: std.mem.Allocator, value: std.json.Value) 
 
 fn parseSessionLimitsConfig(_: std.mem.Allocator, value: std.json.Value) !SessionLimitsConfig {
     const object = try payloads.requiredObject(value);
+
     const parsed_max_ai_credits = if (object.get("maxAiCredits")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, 0, null) else null;
     return .{
         .max_ai_credits = parsed_max_ai_credits,
@@ -17806,6 +18508,7 @@ fn parseSessionLimitsConfig(_: std.mem.Allocator, value: std.json.Value) !Sessio
 
 fn parseResumeData(allocator: std.mem.Allocator, value: std.json.Value) !ResumeData {
     const object = try payloads.requiredObject(value);
+
     const parsed_resume_time = try parseString(allocator, object.get("resumeTime") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_resume_time = parsed_resume_time;
@@ -17824,6 +18527,13 @@ fn parseResumeData(allocator: std.mem.Allocator, value: std.json.Value) !ResumeD
     errdefer {
         var cleanup_reasoning_effort = parsed_reasoning_effort;
         if (cleanup_reasoning_effort) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_reasoning_effort_model = if (object.get("reasoningEffortModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_reasoning_effort_model = parsed_reasoning_effort_model;
+        if (cleanup_reasoning_effort_model) |*present| {
             wipeString(present.*);
         }
     }
@@ -17879,6 +18589,7 @@ fn parseResumeData(allocator: std.mem.Allocator, value: std.json.Value) !ResumeD
         .events_file_size_bytes = parsed_events_file_size_bytes,
         .selected_model = parsed_selected_model,
         .reasoning_effort = parsed_reasoning_effort,
+        .reasoning_effort_model = parsed_reasoning_effort_model,
         .reasoning_summary = parsed_reasoning_summary,
         .verbosity = parsed_verbosity,
         .context_tier = parsed_context_tier,
@@ -17894,6 +18605,7 @@ fn parseResumeData(allocator: std.mem.Allocator, value: std.json.Value) !ResumeD
 
 fn parseScheduleCancelledData(_: std.mem.Allocator, value: std.json.Value) !ScheduleCancelledData {
     const object = try payloads.requiredObject(value);
+
     const parsed_id = try parseInteger(u64, object.get("id") orelse return error.InvalidSessionEvent, null, 0, null);
     return .{
         .id = parsed_id,
@@ -17909,6 +18621,7 @@ fn parseScheduleOrigin(_: std.mem.Allocator, value: std.json.Value) !ScheduleOri
 
 fn parseScheduleCreatedData(allocator: std.mem.Allocator, value: std.json.Value) !ScheduleCreatedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_id = try parseInteger(u64, object.get("id") orelse return error.InvalidSessionEvent, null, 0, null);
     const parsed_interval_ms = if (object.get("intervalMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, null, 0, null) else null;
     const parsed_cron = if (object.get("cron")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
@@ -17963,6 +18676,7 @@ fn parseScheduleCreatedData(allocator: std.mem.Allocator, value: std.json.Value)
 
 fn parseScheduleRearmedData(_: std.mem.Allocator, value: std.json.Value) !ScheduleRearmedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_id = try parseInteger(u64, object.get("id") orelse return error.InvalidSessionEvent, null, 0, null);
     const parsed_next_run_at = try parseInteger(u64, object.get("nextRunAt") orelse return error.InvalidSessionEvent, null, 0, null);
     return .{
@@ -17973,6 +18687,7 @@ fn parseScheduleRearmedData(_: std.mem.Allocator, value: std.json.Value) !Schedu
 
 fn parseSessionLimitsChangedData(allocator: std.mem.Allocator, value: std.json.Value) !SessionLimitsChangedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_session_limits = if ((object.get("sessionLimits") orelse return error.InvalidSessionEvent) == .null) null else try parseSessionLimitsConfig(allocator, object.get("sessionLimits") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_session_limits = parsed_session_limits;
@@ -17994,6 +18709,7 @@ fn parseShutdownType(_: std.mem.Allocator, value: std.json.Value) !ShutdownType 
 
 fn parseShutdownTokenDetail(_: std.mem.Allocator, value: std.json.Value) !ShutdownTokenDetail {
     const object = try payloads.requiredObject(value);
+
     const parsed_token_count = try parseInteger(u64, object.get("tokenCount") orelse return error.InvalidSessionEvent, 0, null, null);
     return .{
         .token_count = parsed_token_count,
@@ -18002,6 +18718,7 @@ fn parseShutdownTokenDetail(_: std.mem.Allocator, value: std.json.Value) !Shutdo
 
 fn parseShutdownModelMetricRequests(_: std.mem.Allocator, value: std.json.Value) !ShutdownModelMetricRequests {
     const object = try payloads.requiredObject(value);
+
     const parsed_count = if (object.get("count")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_cost = if (object.get("cost")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, null, null) else null;
     return .{
@@ -18012,6 +18729,7 @@ fn parseShutdownModelMetricRequests(_: std.mem.Allocator, value: std.json.Value)
 
 fn parseShutdownModelMetricUsage(_: std.mem.Allocator, value: std.json.Value) !ShutdownModelMetricUsage {
     const object = try payloads.requiredObject(value);
+
     const parsed_input_tokens = try parseInteger(u64, object.get("inputTokens") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_output_tokens = try parseInteger(u64, object.get("outputTokens") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_cache_read_tokens = try parseInteger(u64, object.get("cacheReadTokens") orelse return error.InvalidSessionEvent, 0, null, null);
@@ -18028,6 +18746,7 @@ fn parseShutdownModelMetricUsage(_: std.mem.Allocator, value: std.json.Value) !S
 
 fn parseShutdownModelMetricTokenDetail(_: std.mem.Allocator, value: std.json.Value) !ShutdownModelMetricTokenDetail {
     const object = try payloads.requiredObject(value);
+
     const parsed_token_count = try parseInteger(u64, object.get("tokenCount") orelse return error.InvalidSessionEvent, 0, null, null);
     return .{
         .token_count = parsed_token_count,
@@ -18036,6 +18755,7 @@ fn parseShutdownModelMetricTokenDetail(_: std.mem.Allocator, value: std.json.Val
 
 fn parseShutdownModelMetric(allocator: std.mem.Allocator, value: std.json.Value) !ShutdownModelMetric {
     const object = try payloads.requiredObject(value);
+
     const parsed_requests = try parseShutdownModelMetricRequests(allocator, object.get("requests") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_requests = parsed_requests;
@@ -18070,6 +18790,7 @@ fn parseShutdownModelMetric(allocator: std.mem.Allocator, value: std.json.Value)
 
 fn parseShutdownAgentMetric(allocator: std.mem.Allocator, value: std.json.Value) !ShutdownAgentMetric {
     const object = try payloads.requiredObject(value);
+
     const parsed_agent_name = if (object.get("agentName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_agent_name = parsed_agent_name;
@@ -18108,6 +18829,7 @@ fn parseShutdownAgentMetric(allocator: std.mem.Allocator, value: std.json.Value)
 
 fn parseShutdownData(allocator: std.mem.Allocator, value: std.json.Value) !ShutdownData {
     const object = try payloads.requiredObject(value);
+
     const parsed_shutdown_type = try parseShutdownType(allocator, object.get("shutdownType") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_shutdown_type = parsed_shutdown_type;
@@ -18213,6 +18935,7 @@ fn parseSkillSource(_: std.mem.Allocator, value: std.json.Value) !SkillSource {
 
 fn parseSkillsLoadedSkill(allocator: std.mem.Allocator, value: std.json.Value) !SkillsLoadedSkill {
     const object = try payloads.requiredObject(value);
+
     const parsed_name = try parseString(allocator, object.get("name") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_name = parsed_name;
@@ -18265,6 +18988,7 @@ fn parseSkillsLoadedSkill(allocator: std.mem.Allocator, value: std.json.Value) !
 
 fn parseSkillsLoadedData(allocator: std.mem.Allocator, value: std.json.Value) !SkillsLoadedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_skills = try parseSkillsLoadedDataSkillsArray(allocator, object.get("skills") orelse return error.InvalidSessionEvent);
     errdefer {
         const cleanup_skills = parsed_skills;
@@ -18279,6 +19003,7 @@ fn parseSkillsLoadedData(allocator: std.mem.Allocator, value: std.json.Value) !S
 
 fn parseSnapshotRewindData(allocator: std.mem.Allocator, value: std.json.Value) !SnapshotRewindData {
     const object = try payloads.requiredObject(value);
+
     const parsed_up_to_event_id = try parseString(allocator, object.get("upToEventId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_up_to_event_id = parsed_up_to_event_id;
@@ -18303,6 +19028,7 @@ fn parseSnapshotRewindData(allocator: std.mem.Allocator, value: std.json.Value) 
 
 fn parseGitHubMcpToolConfig(allocator: std.mem.Allocator, value: std.json.Value) !GitHubMcpToolConfig {
     const object = try payloads.requiredObject(value);
+
     const parsed_enable_all_tools = if (object.get("enableAllTools")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_additional_toolsets = if (object.get("additionalToolsets")) |field_value| if ((field_value) == .null) null else try parseGitHubMcpToolConfigAdditionalToolsetsArray(allocator, field_value) else null;
     errdefer {
@@ -18333,6 +19059,7 @@ fn parseGitHubMcpToolConfig(allocator: std.mem.Allocator, value: std.json.Value)
 
 fn parseStartData(allocator: std.mem.Allocator, value: std.json.Value) !StartData {
     const object = try payloads.requiredObject(value);
+
     const parsed_session_id = try parseString(allocator, object.get("sessionId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_session_id = parsed_session_id;
@@ -18365,6 +19092,13 @@ fn parseStartData(allocator: std.mem.Allocator, value: std.json.Value) !StartDat
     errdefer {
         var cleanup_reasoning_effort = parsed_reasoning_effort;
         if (cleanup_reasoning_effort) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_reasoning_effort_model = if (object.get("reasoningEffortModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_reasoning_effort_model = parsed_reasoning_effort_model;
+        if (cleanup_reasoning_effort_model) |*present| {
             wipeString(present.*);
         }
     }
@@ -18434,6 +19168,7 @@ fn parseStartData(allocator: std.mem.Allocator, value: std.json.Value) !StartDat
         .start_time = parsed_start_time,
         .selected_model = parsed_selected_model,
         .reasoning_effort = parsed_reasoning_effort,
+        .reasoning_effort_model = parsed_reasoning_effort_model,
         .reasoning_summary = parsed_reasoning_summary,
         .verbosity = parsed_verbosity,
         .context_tier = parsed_context_tier,
@@ -18457,6 +19192,7 @@ fn parseTaskCompletionOutcome(_: std.mem.Allocator, value: std.json.Value) !Task
 
 fn parseTaskCompleteData(allocator: std.mem.Allocator, value: std.json.Value) !TaskCompleteData {
     const object = try payloads.requiredObject(value);
+
     const parsed_summary = if (object.get("summary")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_summary = parsed_summary;
@@ -18499,6 +19235,7 @@ fn parseTaskCompleteData(allocator: std.mem.Allocator, value: std.json.Value) !T
 
 fn parseTitleChangedData(allocator: std.mem.Allocator, value: std.json.Value) !TitleChangedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_title = try parseString(allocator, object.get("title") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_title = parsed_title;
@@ -18517,6 +19254,7 @@ fn parseTodosChangedData(_: std.mem.Allocator, value: std.json.Value) !TodosChan
 
 fn parseToolsUpdatedData(allocator: std.mem.Allocator, value: std.json.Value) !ToolsUpdatedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_model = try parseString(allocator, object.get("model") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_model = parsed_model;
@@ -18529,6 +19267,7 @@ fn parseToolsUpdatedData(allocator: std.mem.Allocator, value: std.json.Value) !T
 
 fn parseTruncationData(allocator: std.mem.Allocator, value: std.json.Value) !TruncationData {
     const object = try payloads.requiredObject(value);
+
     const parsed_token_limit = try parseInteger(u64, object.get("tokenLimit") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_pre_truncation_tokens_in_messages = try parseInteger(u64, object.get("preTruncationTokensInMessages") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_pre_truncation_messages_length = try parseInteger(u64, object.get("preTruncationMessagesLength") orelse return error.InvalidSessionEvent, 0, null, null);
@@ -18555,6 +19294,7 @@ fn parseTruncationData(allocator: std.mem.Allocator, value: std.json.Value) !Tru
 
 fn parseUsageCheckpointModelCacheState(allocator: std.mem.Allocator, value: std.json.Value) !UsageCheckpointModelCacheState {
     const object = try payloads.requiredObject(value);
+
     const parsed_model_id = try parseString(allocator, object.get("modelId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_model_id = parsed_model_id;
@@ -18575,6 +19315,7 @@ fn parseUsageCheckpointModelCacheState(allocator: std.mem.Allocator, value: std.
 
 fn parseUsageCheckpointData(allocator: std.mem.Allocator, value: std.json.Value) !UsageCheckpointData {
     const object = try payloads.requiredObject(value);
+
     const parsed_total_nano_aiu = try parseNumber(object.get("totalNanoAiu") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_total_premium_requests = if (object.get("totalPremiumRequests")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
     const parsed_model_cache_state = if (object.get("modelCacheState")) |field_value| if ((field_value) == .null) null else try parseUsageCheckpointDataModelCacheStateArray(allocator, field_value) else null;
@@ -18605,6 +19346,7 @@ fn parseUsageCheckpointData(allocator: std.mem.Allocator, value: std.json.Value)
 
 fn parseUsageInfoData(_: std.mem.Allocator, value: std.json.Value) !UsageInfoData {
     const object = try payloads.requiredObject(value);
+
     const parsed_token_limit = try parseInteger(u64, object.get("tokenLimit") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_current_tokens = try parseInteger(u64, object.get("currentTokens") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_messages_length = try parseInteger(u64, object.get("messagesLength") orelse return error.InvalidSessionEvent, 0, null, null);
@@ -18625,6 +19367,7 @@ fn parseUsageInfoData(_: std.mem.Allocator, value: std.json.Value) !UsageInfoDat
 
 fn parseWarningData(allocator: std.mem.Allocator, value: std.json.Value) !WarningData {
     const object = try payloads.requiredObject(value);
+
     const parsed_warning_type = try parseString(allocator, object.get("warningType") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_warning_type = parsed_warning_type;
@@ -18666,6 +19409,7 @@ fn parseWorkspaceFileChangedOperation(_: std.mem.Allocator, value: std.json.Valu
 
 fn parseWorkspaceFileChangedData(allocator: std.mem.Allocator, value: std.json.Value) !WorkspaceFileChangedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_path = try parseString(allocator, object.get("path") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_path = parsed_path;
@@ -18693,6 +19437,7 @@ fn parseSessionLimitsExhaustedResponseAction(_: std.mem.Allocator, value: std.js
 
 fn parseSessionLimitsExhaustedResponse(allocator: std.mem.Allocator, value: std.json.Value) !SessionLimitsExhaustedResponse {
     const object = try payloads.requiredObject(value);
+
     const parsed_action = try parseSessionLimitsExhaustedResponseAction(allocator, object.get("action") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_action = parsed_action;
@@ -18709,6 +19454,7 @@ fn parseSessionLimitsExhaustedResponse(allocator: std.mem.Allocator, value: std.
 
 fn parseSessionLimitsExhaustedCompletedData(allocator: std.mem.Allocator, value: std.json.Value) !SessionLimitsExhaustedCompletedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -18727,6 +19473,7 @@ fn parseSessionLimitsExhaustedCompletedData(allocator: std.mem.Allocator, value:
 
 fn parseSessionLimitsExhaustedRequestedData(allocator: std.mem.Allocator, value: std.json.Value) !SessionLimitsExhaustedRequestedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -18743,6 +19490,7 @@ fn parseSessionLimitsExhaustedRequestedData(allocator: std.mem.Allocator, value:
 
 fn parseSkillContextDeliveredData(allocator: std.mem.Allocator, value: std.json.Value) !SkillContextDeliveredData {
     const object = try payloads.requiredObject(value);
+
     const parsed_content = try parseString(allocator, object.get("content") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_content = parsed_content;
@@ -18769,6 +19517,7 @@ fn parseSkillContextDeliveredData(allocator: std.mem.Allocator, value: std.json.
 
 fn parseSkillContextDeliveredRefData(allocator: std.mem.Allocator, value: std.json.Value) !SkillContextDeliveredRefData {
     const object = try payloads.requiredObject(value);
+
     const parsed_content_id = try parseString(allocator, object.get("contentId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_content_id = parsed_content_id;
@@ -18819,6 +19568,7 @@ fn parseSkillInvokedTrigger(_: std.mem.Allocator, value: std.json.Value) !SkillI
 
 fn parseSkillInvokedData(allocator: std.mem.Allocator, value: std.json.Value) !SkillInvokedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_name = try parseString(allocator, object.get("name") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_name = parsed_name;
@@ -18905,6 +19655,7 @@ fn parseSkillInvokedData(allocator: std.mem.Allocator, value: std.json.Value) !S
 
 fn parseSkillInvokedRefData(allocator: std.mem.Allocator, value: std.json.Value) !SkillInvokedRefData {
     const object = try payloads.requiredObject(value);
+
     const parsed_name = try parseString(allocator, object.get("name") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_name = parsed_name;
@@ -19005,6 +19756,7 @@ fn parseSubagentModelSelectionSource(_: std.mem.Allocator, value: std.json.Value
 
 fn parseSubagentCompletedData(allocator: std.mem.Allocator, value: std.json.Value) !SubagentCompletedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_tool_call_id = try parseString(allocator, object.get("toolCallId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_tool_call_id = parsed_tool_call_id;
@@ -19089,6 +19841,7 @@ fn parseSubagentCompletedData(allocator: std.mem.Allocator, value: std.json.Valu
 
 fn parseSubagentConfiguredData(allocator: std.mem.Allocator, value: std.json.Value) !SubagentConfiguredData {
     const object = try payloads.requiredObject(value);
+
     const parsed_model = try parseString(allocator, object.get("model") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_model = parsed_model;
@@ -19125,6 +19878,7 @@ fn parseSubagentDeselectedData(_: std.mem.Allocator, value: std.json.Value) !Sub
 
 fn parseSubagentFailedData(allocator: std.mem.Allocator, value: std.json.Value) !SubagentFailedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_tool_call_id = try parseString(allocator, object.get("toolCallId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_tool_call_id = parsed_tool_call_id;
@@ -19213,6 +19967,7 @@ fn parseSubagentFailedData(allocator: std.mem.Allocator, value: std.json.Value) 
 
 fn parseSubagentSelectedData(allocator: std.mem.Allocator, value: std.json.Value) !SubagentSelectedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_agent_name = try parseString(allocator, object.get("agentName") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_agent_name = parsed_agent_name;
@@ -19250,6 +20005,7 @@ fn parseSubagentTaskModelSource(_: std.mem.Allocator, value: std.json.Value) !Su
 
 fn parseSubagentStartedData(allocator: std.mem.Allocator, value: std.json.Value) !SubagentStartedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_tool_call_id = try parseString(allocator, object.get("toolCallId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_tool_call_id = parsed_tool_call_id;
@@ -19346,6 +20102,7 @@ fn parseSubagentStartedData(allocator: std.mem.Allocator, value: std.json.Value)
 
 fn parseSystemMessageContentBlock(allocator: std.mem.Allocator, value: std.json.Value) !SystemMessageContentBlock {
     const object = try payloads.requiredObject(value);
+
     const parsed_content = try parseString(allocator, object.get("content") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_content = parsed_content;
@@ -19369,6 +20126,7 @@ fn parseSystemMessageRole(_: std.mem.Allocator, value: std.json.Value) !SystemMe
 
 fn parseSystemMessageMetadata(allocator: std.mem.Allocator, value: std.json.Value) !SystemMessageMetadata {
     const object = try payloads.requiredObject(value);
+
     const parsed_prompt_version = if (object.get("promptVersion")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_prompt_version = parsed_prompt_version;
@@ -19397,6 +20155,7 @@ fn parseSystemMessageMetadata(allocator: std.mem.Allocator, value: std.json.Valu
 
 fn parseSystemMessageData(allocator: std.mem.Allocator, value: std.json.Value) !SystemMessageData {
     const object = try payloads.requiredObject(value);
+
     const parsed_content = try parseString(allocator, object.get("content") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_content = parsed_content;
@@ -19456,6 +20215,7 @@ fn parseSystemNotificationAgentCompletedStatus(_: std.mem.Allocator, value: std.
 
 fn parseSystemNotificationAgentCompleted(allocator: std.mem.Allocator, value: std.json.Value) !SystemNotificationAgentCompleted {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "agent_completed");
     errdefer {
         const cleanup_type = parsed_type;
@@ -19510,6 +20270,7 @@ fn parseSystemNotificationAgentCompleted(allocator: std.mem.Allocator, value: st
 
 fn parseSystemNotificationAgentIdle(allocator: std.mem.Allocator, value: std.json.Value) !SystemNotificationAgentIdle {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "agent_idle");
     errdefer {
         const cleanup_type = parsed_type;
@@ -19550,6 +20311,7 @@ fn parseSystemNotificationAgentIdle(allocator: std.mem.Allocator, value: std.jso
 
 fn parseSystemNotificationNewInboxMessage(allocator: std.mem.Allocator, value: std.json.Value) !SystemNotificationNewInboxMessage {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "new_inbox_message");
     errdefer {
         const cleanup_type = parsed_type;
@@ -19586,6 +20348,7 @@ fn parseSystemNotificationNewInboxMessage(allocator: std.mem.Allocator, value: s
 
 fn parseSystemNotificationShellCompleted(allocator: std.mem.Allocator, value: std.json.Value) !SystemNotificationShellCompleted {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "shell_completed");
     errdefer {
         const cleanup_type = parsed_type;
@@ -19614,6 +20377,7 @@ fn parseSystemNotificationShellCompleted(allocator: std.mem.Allocator, value: st
 
 fn parseSystemNotificationShellDetachedCompleted(allocator: std.mem.Allocator, value: std.json.Value) !SystemNotificationShellDetachedCompleted {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "shell_detached_completed");
     errdefer {
         const cleanup_type = parsed_type;
@@ -19640,6 +20404,7 @@ fn parseSystemNotificationShellDetachedCompleted(allocator: std.mem.Allocator, v
 
 fn parseSystemNotificationInstructionDiscovered(allocator: std.mem.Allocator, value: std.json.Value) !SystemNotificationInstructionDiscovered {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "instruction_discovered");
     errdefer {
         const cleanup_type = parsed_type;
@@ -19688,6 +20453,7 @@ fn parseSystemNotificationWorkflowCompletedStatus(_: std.mem.Allocator, value: s
 
 fn parseSystemNotificationWorkflowPauseInfoVariant1(allocator: std.mem.Allocator, value: std.json.Value) !SystemNotificationWorkflowPauseInfoVariant1 {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "user");
     errdefer {
         const cleanup_type = parsed_type;
@@ -19700,6 +20466,7 @@ fn parseSystemNotificationWorkflowPauseInfoVariant1(allocator: std.mem.Allocator
 
 fn parseSystemNotificationWorkflowPauseInfoVariant2(allocator: std.mem.Allocator, value: std.json.Value) !SystemNotificationWorkflowPauseInfoVariant2 {
     const object = try payloads.requiredObject(value);
+
     const parsed_key = try parseString(allocator, object.get("key") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_key = parsed_key;
@@ -19726,6 +20493,7 @@ fn parseSystemNotificationWorkflowPauseInfo(allocator: std.mem.Allocator, value:
 
 fn parseSystemNotificationWorkflowCompleted(allocator: std.mem.Allocator, value: std.json.Value) !SystemNotificationWorkflowCompleted {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "workflow_completed");
     errdefer {
         const cleanup_type = parsed_type;
@@ -19796,6 +20564,7 @@ fn parseSystemNotificationWorkflowCompleted(allocator: std.mem.Allocator, value:
 
 fn parseSystemNotificationUnclassified(allocator: std.mem.Allocator, value: std.json.Value) !SystemNotificationUnclassified {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "unclassified");
     errdefer {
         const cleanup_type = parsed_type;
@@ -19830,6 +20599,7 @@ fn parseSystemNotification(allocator: std.mem.Allocator, value: std.json.Value) 
 
 fn parseSystemNotificationData(allocator: std.mem.Allocator, value: std.json.Value) !SystemNotificationData {
     const object = try payloads.requiredObject(value);
+
     const parsed_content = try parseString(allocator, object.get("content") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_content = parsed_content;
@@ -19856,6 +20626,7 @@ fn parseSystemNotificationData(allocator: std.mem.Allocator, value: std.json.Val
 
 fn parseToolExecutionCompleteContentText(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteContentText {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "text");
     errdefer {
         const cleanup_type = parsed_type;
@@ -19874,6 +20645,7 @@ fn parseToolExecutionCompleteContentText(allocator: std.mem.Allocator, value: st
 
 fn parseToolExecutionCompleteContentTerminal(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteContentTerminal {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "terminal");
     errdefer {
         const cleanup_type = parsed_type;
@@ -19902,6 +20674,7 @@ fn parseToolExecutionCompleteContentTerminal(allocator: std.mem.Allocator, value
 
 fn parseToolExecutionCompleteContentShellExit(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteContentShellExit {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "shell_exit");
     errdefer {
         const cleanup_type = parsed_type;
@@ -19948,6 +20721,7 @@ fn parseToolExecutionCompleteContentShellExit(allocator: std.mem.Allocator, valu
 
 fn parseToolExecutionCompleteContentImage(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteContentImage {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "image");
     errdefer {
         const cleanup_type = parsed_type;
@@ -19972,6 +20746,7 @@ fn parseToolExecutionCompleteContentImage(allocator: std.mem.Allocator, value: s
 
 fn parseToolExecutionCompleteContentAudio(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteContentAudio {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "audio");
     errdefer {
         const cleanup_type = parsed_type;
@@ -20003,6 +20778,7 @@ fn parseToolExecutionCompleteContentResourceLinkIconTheme(_: std.mem.Allocator, 
 
 fn parseToolExecutionCompleteContentResourceLinkIcon(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteContentResourceLinkIcon {
     const object = try payloads.requiredObject(value);
+
     const parsed_src = try parseString(allocator, object.get("src") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_src = parsed_src;
@@ -20041,6 +20817,7 @@ fn parseToolExecutionCompleteContentResourceLinkIcon(allocator: std.mem.Allocato
 
 fn parseToolExecutionCompleteContentResourceLink(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteContentResourceLink {
     const object = try payloads.requiredObject(value);
+
     const parsed_icons = if (object.get("icons")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteContentResourceLinkIconsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_icons = parsed_icons;
@@ -20101,6 +20878,7 @@ fn parseToolExecutionCompleteContentResourceLink(allocator: std.mem.Allocator, v
 
 fn parseEmbeddedTextResourceContents(allocator: std.mem.Allocator, value: std.json.Value) !EmbeddedTextResourceContents {
     const object = try payloads.requiredObject(value);
+
     const parsed_uri = try parseString(allocator, object.get("uri") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_uri = parsed_uri;
@@ -20127,6 +20905,7 @@ fn parseEmbeddedTextResourceContents(allocator: std.mem.Allocator, value: std.js
 
 fn parseEmbeddedBlobResourceContents(allocator: std.mem.Allocator, value: std.json.Value) !EmbeddedBlobResourceContents {
     const object = try payloads.requiredObject(value);
+
     const parsed_uri = try parseString(allocator, object.get("uri") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_uri = parsed_uri;
@@ -20164,6 +20943,7 @@ fn parseToolExecutionCompleteContentResourceDetails(allocator: std.mem.Allocator
 
 fn parseToolExecutionCompleteContentResource(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteContentResource {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseConstant(allocator, object.get("type") orelse return error.InvalidSessionEvent, "resource");
     errdefer {
         const cleanup_type = parsed_type;
@@ -20202,6 +20982,7 @@ fn parsePersistedBinaryImageType(_: std.mem.Allocator, value: std.json.Value) !P
 
 fn parsePersistedBinaryImage(allocator: std.mem.Allocator, value: std.json.Value) !PersistedBinaryImage {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parsePersistedBinaryImageType(allocator, object.get("type") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_type = parsed_type;
@@ -20255,6 +21036,7 @@ fn parseOmittedBinaryType(_: std.mem.Allocator, value: std.json.Value) !OmittedB
 
 fn parseOmittedBinaryResult(allocator: std.mem.Allocator, value: std.json.Value) !OmittedBinaryResult {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseOmittedBinaryType(allocator, object.get("type") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_type = parsed_type;
@@ -20310,6 +21092,7 @@ fn parseBinaryAssetReferenceType(_: std.mem.Allocator, value: std.json.Value) !B
 
 fn parseBinaryAssetReference(allocator: std.mem.Allocator, value: std.json.Value) !BinaryAssetReference {
     const object = try payloads.requiredObject(value);
+
     const parsed_type = try parseBinaryAssetReferenceType(allocator, object.get("type") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_type = parsed_type;
@@ -20371,6 +21154,7 @@ fn parsePersistedBinaryResult(allocator: std.mem.Allocator, value: std.json.Valu
 
 fn parseToolExecutionCompleteUIResourceMetaUICsp(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteUIResourceMetaUICsp {
     const object = try payloads.requiredObject(value);
+
     const parsed_connect_domains = if (object.get("connectDomains")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteUIResourceMetaUICspConnectDomainsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_connect_domains = parsed_connect_domains;
@@ -20441,6 +21225,7 @@ fn parseToolExecutionCompleteUIResourceMetaUIPermissionsClipboardWrite(_: std.me
 
 fn parseToolExecutionCompleteUIResourceMetaUIPermissions(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteUIResourceMetaUIPermissions {
     const object = try payloads.requiredObject(value);
+
     const parsed_camera = if (object.get("camera")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteUIResourceMetaUIPermissionsCamera(allocator, field_value) else null;
     errdefer {
         var cleanup_camera = parsed_camera;
@@ -20479,6 +21264,7 @@ fn parseToolExecutionCompleteUIResourceMetaUIPermissions(allocator: std.mem.Allo
 
 fn parseToolExecutionCompleteUIResourceMetaUI(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteUIResourceMetaUI {
     const object = try payloads.requiredObject(value);
+
     const parsed_csp = if (object.get("csp")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteUIResourceMetaUICsp(allocator, field_value) else null;
     errdefer {
         var cleanup_csp = parsed_csp;
@@ -20511,6 +21297,7 @@ fn parseToolExecutionCompleteUIResourceMetaUI(allocator: std.mem.Allocator, valu
 
 fn parseToolExecutionCompleteUIResourceMeta(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteUIResourceMeta {
     const object = try payloads.requiredObject(value);
+
     const parsed_ui = if (object.get("ui")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteUIResourceMetaUI(allocator, field_value) else null;
     errdefer {
         var cleanup_ui = parsed_ui;
@@ -20525,6 +21312,7 @@ fn parseToolExecutionCompleteUIResourceMeta(allocator: std.mem.Allocator, value:
 
 fn parseToolExecutionCompleteUIResource(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteUIResource {
     const object = try payloads.requiredObject(value);
+
     const parsed_uri = try parseString(allocator, object.get("uri") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_uri = parsed_uri;
@@ -20567,6 +21355,7 @@ fn parseToolExecutionCompleteUIResource(allocator: std.mem.Allocator, value: std
 
 fn parseCitableSource(allocator: std.mem.Allocator, value: std.json.Value) !CitableSource {
     const object = try payloads.requiredObject(value);
+
     const parsed_id = try parseString(allocator, object.get("id") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_id = parsed_id;
@@ -20609,6 +21398,7 @@ fn parseCitableSource(allocator: std.mem.Allocator, value: std.json.Value) !Cita
 
 fn parseToolExecutionCompleteResult(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteResult {
     const object = try payloads.requiredObject(value);
+
     const parsed_content = try parseString(allocator, object.get("content") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_content = parsed_content;
@@ -20683,6 +21473,7 @@ fn parseToolExecutionCompleteResult(allocator: std.mem.Allocator, value: std.jso
 
 fn parseToolExecutionCompleteError(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteError {
     const object = try payloads.requiredObject(value);
+
     const parsed_message = try parseString(allocator, object.get("message") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_message = parsed_message;
@@ -20718,6 +21509,7 @@ fn parseToolExecutionCompleteToolDescriptionMetaUIVisibility(_: std.mem.Allocato
 
 fn parseToolExecutionCompleteToolDescriptionMetaUI(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteToolDescriptionMetaUI {
     const object = try payloads.requiredObject(value);
+
     const parsed_resource_uri = if (object.get("resourceUri")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_resource_uri = parsed_resource_uri;
@@ -20742,6 +21534,7 @@ fn parseToolExecutionCompleteToolDescriptionMetaUI(allocator: std.mem.Allocator,
 
 fn parseToolExecutionCompleteToolDescriptionMeta(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteToolDescriptionMeta {
     const object = try payloads.requiredObject(value);
+
     const parsed_ui = if (object.get("ui")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteToolDescriptionMetaUI(allocator, field_value) else null;
     errdefer {
         var cleanup_ui = parsed_ui;
@@ -20756,6 +21549,7 @@ fn parseToolExecutionCompleteToolDescriptionMeta(allocator: std.mem.Allocator, v
 
 fn parseToolExecutionCompleteToolDescription(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteToolDescription {
     const object = try payloads.requiredObject(value);
+
     const parsed_name = try parseString(allocator, object.get("name") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_name = parsed_name;
@@ -20784,14 +21578,43 @@ fn parseToolExecutionCompleteToolDescription(allocator: std.mem.Allocator, value
 
 fn parseToolExecutionCompleteShellExecution(_: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteShellExecution {
     const object = try payloads.requiredObject(value);
+
     const parsed_exit_code = try parseInteger(i64, object.get("exitCode") orelse return error.InvalidSessionEvent, null, null, null);
     return .{
         .exit_code = parsed_exit_code,
     };
 }
 
+fn parseToolExecutionCompleteFileEditKind(_: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteFileEditKind {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "create")) return .create;
+    if (std.mem.eql(u8, wire, "edit")) return .edit;
+    if (std.mem.eql(u8, wire, "delete")) return .delete;
+    return error.InvalidSessionEvent;
+}
+
+fn parseToolExecutionCompleteFileEdit(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteFileEdit {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_path = try parseString(allocator, object.get("path") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_path = parsed_path;
+        wipeString(cleanup_path);
+    }
+    const parsed_kind = try parseToolExecutionCompleteFileEditKind(allocator, object.get("kind") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_kind = parsed_kind;
+        wipeToolExecutionCompleteFileEditKind(&cleanup_kind);
+    }
+    return .{
+        .path = parsed_path,
+        .kind = parsed_kind,
+    };
+}
+
 fn parseToolExecutionCompleteData(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionCompleteData {
     const object = try payloads.requiredObject(value);
+
     const parsed_tool_call_id = try parseString(allocator, object.get("toolCallId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_tool_call_id = parsed_tool_call_id;
@@ -20870,6 +21693,15 @@ fn parseToolExecutionCompleteData(allocator: std.mem.Allocator, value: std.json.
             wipeToolExecutionCompleteShellExecution(&present.*);
         }
     }
+    const parsed_file_edits = if (object.get("fileEdits")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteDataFileEditsArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_file_edits = parsed_file_edits;
+        if (cleanup_file_edits) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipeToolExecutionCompleteFileEdit(&item.*);
+            }
+        }
+    }
     const parsed_parent_tool_call_id = if (object.get("parentToolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_parent_tool_call_id = parsed_parent_tool_call_id;
@@ -20899,6 +21731,7 @@ fn parseToolExecutionCompleteData(allocator: std.mem.Allocator, value: std.json.
         .tool_description = parsed_tool_description,
         .sandboxed = parsed_sandboxed,
         .shell_execution = parsed_shell_execution,
+        .file_edits = parsed_file_edits,
         .parent_tool_call_id = parsed_parent_tool_call_id,
         .fusion = parsed_fusion,
     };
@@ -20906,6 +21739,7 @@ fn parseToolExecutionCompleteData(allocator: std.mem.Allocator, value: std.json.
 
 fn parseToolExecutionPartialData(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionPartialData {
     const object = try payloads.requiredObject(value);
+
     const parsed_tool_call_id = try parseString(allocator, object.get("toolCallId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_tool_call_id = parsed_tool_call_id;
@@ -20924,6 +21758,7 @@ fn parseToolExecutionPartialData(allocator: std.mem.Allocator, value: std.json.V
 
 fn parseToolExecutionProgressData(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionProgressData {
     const object = try payloads.requiredObject(value);
+
     const parsed_tool_call_id = try parseString(allocator, object.get("toolCallId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_tool_call_id = parsed_tool_call_id;
@@ -20934,14 +21769,23 @@ fn parseToolExecutionProgressData(allocator: std.mem.Allocator, value: std.json.
         const cleanup_progress_message = parsed_progress_message;
         wipeString(cleanup_progress_message);
     }
+    const parsed_structured_content = if (object.get("structuredContent")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
+    errdefer {
+        var cleanup_structured_content = parsed_structured_content;
+        if (cleanup_structured_content) |*present| {
+            wipeJsonValue(&present.*);
+        }
+    }
     return .{
         .tool_call_id = parsed_tool_call_id,
         .progress_message = parsed_progress_message,
+        .structured_content = parsed_structured_content,
     };
 }
 
 fn parseToolExecutionStartShellToolInfo(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionStartShellToolInfo {
     const object = try payloads.requiredObject(value);
+
     const parsed_possible_paths = try parseToolExecutionStartShellToolInfoPossiblePathsArray(allocator, object.get("possiblePaths") orelse return error.InvalidSessionEvent);
     errdefer {
         const cleanup_possible_paths = parsed_possible_paths;
@@ -20973,6 +21817,7 @@ fn parseToolExecutionStartToolDescriptionMetaUIVisibility(_: std.mem.Allocator, 
 
 fn parseToolExecutionStartToolDescriptionMetaUI(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionStartToolDescriptionMetaUI {
     const object = try payloads.requiredObject(value);
+
     const parsed_resource_uri = if (object.get("resourceUri")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_resource_uri = parsed_resource_uri;
@@ -20997,6 +21842,7 @@ fn parseToolExecutionStartToolDescriptionMetaUI(allocator: std.mem.Allocator, va
 
 fn parseToolExecutionStartToolDescriptionMeta(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionStartToolDescriptionMeta {
     const object = try payloads.requiredObject(value);
+
     const parsed_ui = if (object.get("ui")) |field_value| if ((field_value) == .null) null else try parseToolExecutionStartToolDescriptionMetaUI(allocator, field_value) else null;
     errdefer {
         var cleanup_ui = parsed_ui;
@@ -21011,6 +21857,7 @@ fn parseToolExecutionStartToolDescriptionMeta(allocator: std.mem.Allocator, valu
 
 fn parseToolExecutionStartToolDescription(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionStartToolDescription {
     const object = try payloads.requiredObject(value);
+
     const parsed_name = try parseString(allocator, object.get("name") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_name = parsed_name;
@@ -21039,6 +21886,7 @@ fn parseToolExecutionStartToolDescription(allocator: std.mem.Allocator, value: s
 
 fn parseToolExecutionStartData(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionStartData {
     const object = try payloads.requiredObject(value);
+
     const parsed_tool_call_id = try parseString(allocator, object.get("toolCallId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_tool_call_id = parsed_tool_call_id;
@@ -21163,8 +22011,46 @@ fn parseToolExecutionStartData(allocator: std.mem.Allocator, value: std.json.Val
     };
 }
 
+fn parseToolShellOutputStream(_: std.mem.Allocator, value: std.json.Value) !ToolShellOutputStream {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "stdout")) return .stdout;
+    if (std.mem.eql(u8, wire, "stderr")) return .stderr;
+    if (std.mem.eql(u8, wire, "terminal")) return .terminal;
+    return error.InvalidSessionEvent;
+}
+
+fn parseToolShellOutputData(allocator: std.mem.Allocator, value: std.json.Value) !ToolShellOutputData {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_tool_call_id = try parseString(allocator, object.get("toolCallId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_tool_call_id = parsed_tool_call_id;
+        wipeString(cleanup_tool_call_id);
+    }
+    const parsed_stream = if (object.get("stream")) |field_value| if ((field_value) == .null) null else try parseToolShellOutputStream(allocator, field_value) else null;
+    errdefer {
+        var cleanup_stream = parsed_stream;
+        if (cleanup_stream) |*present| {
+            wipeToolShellOutputStream(&present.*);
+        }
+    }
+    const parsed_text = try parseString(allocator, object.get("text") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_text = parsed_text;
+        wipeString(cleanup_text);
+    }
+    const parsed_sequence = try parseInteger(u64, object.get("sequence") orelse return error.InvalidSessionEvent, 0, null, null);
+    return .{
+        .tool_call_id = parsed_tool_call_id,
+        .stream = parsed_stream,
+        .text = parsed_text,
+        .sequence = parsed_sequence,
+    };
+}
+
 fn parseToolUserRequestedData(allocator: std.mem.Allocator, value: std.json.Value) !ToolUserRequestedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_tool_call_id = try parseString(allocator, object.get("toolCallId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_tool_call_id = parsed_tool_call_id;
@@ -21191,6 +22077,7 @@ fn parseToolUserRequestedData(allocator: std.mem.Allocator, value: std.json.Valu
 
 fn parseToolSearchActivatedData(allocator: std.mem.Allocator, value: std.json.Value) !ToolSearchActivatedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_strategy = try parseString(allocator, object.get("strategy") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_strategy = parsed_strategy;
@@ -21221,6 +22108,7 @@ fn parseUIEphemeralQueryPhase(_: std.mem.Allocator, value: std.json.Value) !UIEp
 
 fn parseUIEphemeralQueryData(allocator: std.mem.Allocator, value: std.json.Value) !UIEphemeralQueryData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -21280,6 +22168,7 @@ fn parseUserMessageAgentMode(_: std.mem.Allocator, value: std.json.Value) !UserM
 
 fn parseUserMessageData(allocator: std.mem.Allocator, value: std.json.Value) !UserMessageData {
     const object = try payloads.requiredObject(value);
+
     const parsed_content = try parseString(allocator, object.get("content") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_content = parsed_content;
@@ -21396,6 +22285,7 @@ fn parseUserMessageData(allocator: std.mem.Allocator, value: std.json.Value) !Us
 
 fn parseUserInputCompletedData(allocator: std.mem.Allocator, value: std.json.Value) !UserInputCompletedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -21418,6 +22308,7 @@ fn parseUserInputCompletedData(allocator: std.mem.Allocator, value: std.json.Val
 
 fn parseUserInputRequestedData(allocator: std.mem.Allocator, value: std.json.Value) !UserInputRequestedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_request_id = parsed_request_id;
@@ -21466,6 +22357,7 @@ fn parseWorkflowRunSettledStatus(_: std.mem.Allocator, value: std.json.Value) !W
 
 fn parseWorkflowRunSettledData(allocator: std.mem.Allocator, value: std.json.Value) !WorkflowRunSettledData {
     const object = try payloads.requiredObject(value);
+
     const parsed_run_id = try parseString(allocator, object.get("runId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_run_id = parsed_run_id;
@@ -21498,6 +22390,7 @@ fn parseWorkflowRunSettledData(allocator: std.mem.Allocator, value: std.json.Val
 
 fn parseWorkflowRunStartedData(allocator: std.mem.Allocator, value: std.json.Value) !WorkflowRunStartedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_run_id = try parseString(allocator, object.get("runId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_run_id = parsed_run_id;
@@ -21518,6 +22411,7 @@ fn parseWorkflowRunStartedData(allocator: std.mem.Allocator, value: std.json.Val
 
 fn parseWorkflowRunUpdatedData(allocator: std.mem.Allocator, value: std.json.Value) !WorkflowRunUpdatedData {
     const object = try payloads.requiredObject(value);
+
     const parsed_run_id = try parseString(allocator, object.get("runId") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_run_id = parsed_run_id;
@@ -21770,6 +22664,11 @@ fn wipeAssistantMessageServerTools(value: *AssistantMessageServerTools) void {
 fn wipeAssistantMessageReasoningBlocks(value: *AssistantMessageReasoningBlocks) void {
     wipeString(value.provider);
     if (value.blocks) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeJsonValue(&item.*);
+        }
+    }
+    if (value.ordered_blocks) |*present| {
         for (@constCast(present.*)) |*item| {
             wipeJsonValue(&item.*);
         }
@@ -22070,6 +22969,12 @@ fn wipeAssistantUsageData(value: *AssistantUsageData) void {
     if (value.interaction_type) |*present| {
         wipeString(present.*);
     }
+    if (value.byok_kind) |*present| {
+        wipeString(present.*);
+    }
+    if (value.model_provider) |*present| {
+        wipeString(present.*);
+    }
     if (value.transport) |*present| {
         wipeAssistantUsageTransport(&present.*);
     }
@@ -22336,6 +23241,73 @@ fn wipeHookStartData(value: *HookStartData) void {
     }
 }
 
+fn wipeHumanResponseActor(value: *HumanResponseActor) void {
+    _ = value;
+}
+
+fn wipeHumanResponseRecordedResponseVariant1(value: *HumanResponseRecordedResponseVariant1) void {
+    {
+        var iterator = value.content.map.iterator();
+        while (iterator.next()) |entry| {
+            wipeString(entry.key_ptr.*);
+            wipeElicitationCompletedContent(&entry.value_ptr.*);
+        }
+    }
+    wipeString(value.message);
+    wipeElicitationRequestedSchema(&value.requested_schema);
+    wipeString(value.response_kind);
+}
+
+fn wipeHumanResponseRecordedResponseVariant2(value: *HumanResponseRecordedResponseVariant2) void {
+    wipeString(value.question);
+    if (value.choices) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+        }
+    }
+    wipeString(value.answer);
+    wipeString(value.response_kind);
+}
+
+fn wipeHumanResponseRecordedResponseVariant3(value: *HumanResponseRecordedResponseVariant3) void {
+    wipeString(value.summary);
+    wipeString(value.plan_content);
+    for (@constCast(value.actions)) |*item| {
+        wipeExitPlanModeAction(&item.*);
+    }
+    wipeExitPlanModeAction(&value.recommended_action);
+    if (value.selected_action) |*present| {
+        wipeExitPlanModeAction(&present.*);
+    }
+    if (value.feedback) |*present| {
+        wipeString(present.*);
+    }
+    wipeString(value.response_kind);
+}
+
+fn wipeHumanResponseRecordedResponse(value: *HumanResponseRecordedResponse) void {
+    switch (value.*) {
+        .ask_user => |*payload| {
+            wipeHumanResponseRecordedResponseVariant1(&payload.*);
+        },
+        .user_input => |*payload| {
+            wipeHumanResponseRecordedResponseVariant2(&payload.*);
+        },
+        .exit_plan_mode => |*payload| {
+            wipeHumanResponseRecordedResponseVariant3(&payload.*);
+        },
+    }
+}
+
+fn wipeHumanResponseRecordedData(value: *HumanResponseRecordedData) void {
+    wipeString(value.request_id);
+    if (value.tool_call_id) |*present| {
+        wipeString(present.*);
+    }
+    wipeHumanResponseActor(&value.actor);
+    wipeHumanResponseRecordedResponse(&value.response);
+}
+
 fn wipeMcpHeadersRefreshCompletedOutcome(value: *McpHeadersRefreshCompletedOutcome) void {
     _ = value;
 }
@@ -22526,6 +23498,12 @@ fn wipeModelCallFailureData(value: *ModelCallFailureData) void {
     }
     if (value.failure_kind) |*present| {
         wipeModelCallFailureKind(&present.*);
+    }
+    if (value.byok_kind) |*present| {
+        wipeString(present.*);
+    }
+    if (value.model_provider) |*present| {
+        wipeString(present.*);
     }
     if (value.reasoning_effort) |*present| {
         wipeString(present.*);
@@ -23635,6 +24613,11 @@ fn wipePromptCacheBreakData(value: *PromptCacheBreakData) void {
             wipeString(item.*);
         }
     }
+    if (value.tools_redefined_parts) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+        }
+    }
     if (value.system_segments_changed) |*present| {
         for (@constCast(present.*)) |*item| {
             wipeString(item.*);
@@ -23972,6 +24955,9 @@ fn wipeAutoModeResolvedData(value: *AutoModeResolvedData) void {
         }
     }
     if (value.fallback_reason) |*present| {
+        wipeString(present.*);
+    }
+    if (value.selection_reason) |*present| {
         wipeString(present.*);
     }
 }
@@ -25070,6 +26056,9 @@ fn wipeModelChangeData(value: *ModelChangeData) void {
     if (value.reasoning_effort) |*present| {
         wipeString(present.*);
     }
+    if (value.reasoning_effort_model) |*present| {
+        wipeString(present.*);
+    }
     if (value.previous_reasoning_summary) |*present| {
         wipeReasoningSummary(&present.*);
     }
@@ -25142,6 +26131,9 @@ fn wipeResumeData(value: *ResumeData) void {
         wipeString(present.*);
     }
     if (value.reasoning_effort) |*present| {
+        wipeString(present.*);
+    }
+    if (value.reasoning_effort_model) |*present| {
         wipeString(present.*);
     }
     if (value.reasoning_summary) |*present| {
@@ -25340,6 +26332,9 @@ fn wipeStartData(value: *StartData) void {
         wipeString(present.*);
     }
     if (value.reasoning_effort) |*present| {
+        wipeString(present.*);
+    }
+    if (value.reasoning_effort_model) |*present| {
         wipeString(present.*);
     }
     if (value.reasoning_summary) |*present| {
@@ -26245,6 +27240,15 @@ fn wipeToolExecutionCompleteShellExecution(value: *ToolExecutionCompleteShellExe
     _ = value;
 }
 
+fn wipeToolExecutionCompleteFileEditKind(value: *ToolExecutionCompleteFileEditKind) void {
+    _ = value;
+}
+
+fn wipeToolExecutionCompleteFileEdit(value: *ToolExecutionCompleteFileEdit) void {
+    wipeString(value.path);
+    wipeToolExecutionCompleteFileEditKind(&value.kind);
+}
+
 fn wipeToolExecutionCompleteData(value: *ToolExecutionCompleteData) void {
     wipeString(value.tool_call_id);
     if (value.model) |*present| {
@@ -26280,6 +27284,11 @@ fn wipeToolExecutionCompleteData(value: *ToolExecutionCompleteData) void {
     if (value.shell_execution) |*present| {
         wipeToolExecutionCompleteShellExecution(&present.*);
     }
+    if (value.file_edits) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeToolExecutionCompleteFileEdit(&item.*);
+        }
+    }
     if (value.parent_tool_call_id) |*present| {
         wipeString(present.*);
     }
@@ -26296,6 +27305,9 @@ fn wipeToolExecutionPartialData(value: *ToolExecutionPartialData) void {
 fn wipeToolExecutionProgressData(value: *ToolExecutionProgressData) void {
     wipeString(value.tool_call_id);
     wipeString(value.progress_message);
+    if (value.structured_content) |*present| {
+        wipeJsonValue(&present.*);
+    }
 }
 
 fn wipeToolExecutionStartShellToolInfo(value: *ToolExecutionStartShellToolInfo) void {
@@ -26380,6 +27392,18 @@ fn wipeToolExecutionStartData(value: *ToolExecutionStartData) void {
     if (value.fusion) |*present| {
         wipeFusionAttribution(&present.*);
     }
+}
+
+fn wipeToolShellOutputStream(value: *ToolShellOutputStream) void {
+    _ = value;
+}
+
+fn wipeToolShellOutputData(value: *ToolShellOutputData) void {
+    wipeString(value.tool_call_id);
+    if (value.stream) |*present| {
+        wipeToolShellOutputStream(&present.*);
+    }
+    wipeString(value.text);
 }
 
 fn wipeToolUserRequestedData(value: *ToolUserRequestedData) void {
@@ -26810,6 +27834,12 @@ fn freeAssistantMessageReasoningBlocks(value: *AssistantMessageReasoningBlocks, 
         }
         allocator.free(@constCast(present.*));
     }
+    if (value.ordered_blocks) |*present| {
+        for (@constCast(present.*)) |*item| {
+            freeJsonValue(&item.*, allocator);
+        }
+        allocator.free(@constCast(present.*));
+    }
 }
 
 fn freeCitationProvider(value: *CitationProvider, _: std.mem.Allocator) void {
@@ -27182,6 +28212,14 @@ fn freeAssistantUsageData(value: *AssistantUsageData, allocator: std.mem.Allocat
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.byok_kind) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.model_provider) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.transport) |*present| {
         freeAssistantUsageTransport(&present.*, allocator);
     }
@@ -27512,6 +28550,89 @@ fn freeHookStartData(value: *HookStartData, allocator: std.mem.Allocator) void {
     }
 }
 
+fn freeHumanResponseActor(value: *HumanResponseActor, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeHumanResponseRecordedResponseVariant1(value: *HumanResponseRecordedResponseVariant1, allocator: std.mem.Allocator) void {
+    {
+        var iterator = value.content.map.iterator();
+        while (iterator.next()) |entry| {
+            wipeString(entry.key_ptr.*);
+            allocator.free(@constCast(entry.key_ptr.*));
+            freeElicitationCompletedContent(&entry.value_ptr.*, allocator);
+        }
+        value.content.deinit(allocator);
+    }
+    wipeString(value.message);
+    allocator.free(@constCast(value.message));
+    freeElicitationRequestedSchema(&value.requested_schema, allocator);
+    wipeString(value.response_kind);
+    allocator.free(@constCast(value.response_kind));
+}
+
+fn freeHumanResponseRecordedResponseVariant2(value: *HumanResponseRecordedResponseVariant2, allocator: std.mem.Allocator) void {
+    wipeString(value.question);
+    allocator.free(@constCast(value.question));
+    if (value.choices) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+            allocator.free(@constCast(item.*));
+        }
+        allocator.free(@constCast(present.*));
+    }
+    wipeString(value.answer);
+    allocator.free(@constCast(value.answer));
+    wipeString(value.response_kind);
+    allocator.free(@constCast(value.response_kind));
+}
+
+fn freeHumanResponseRecordedResponseVariant3(value: *HumanResponseRecordedResponseVariant3, allocator: std.mem.Allocator) void {
+    wipeString(value.summary);
+    allocator.free(@constCast(value.summary));
+    wipeString(value.plan_content);
+    allocator.free(@constCast(value.plan_content));
+    for (@constCast(value.actions)) |*item| {
+        freeExitPlanModeAction(&item.*, allocator);
+    }
+    allocator.free(@constCast(value.actions));
+    freeExitPlanModeAction(&value.recommended_action, allocator);
+    if (value.selected_action) |*present| {
+        freeExitPlanModeAction(&present.*, allocator);
+    }
+    if (value.feedback) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    wipeString(value.response_kind);
+    allocator.free(@constCast(value.response_kind));
+}
+
+fn freeHumanResponseRecordedResponse(value: *HumanResponseRecordedResponse, allocator: std.mem.Allocator) void {
+    switch (value.*) {
+        .ask_user => |*payload| {
+            freeHumanResponseRecordedResponseVariant1(&payload.*, allocator);
+        },
+        .user_input => |*payload| {
+            freeHumanResponseRecordedResponseVariant2(&payload.*, allocator);
+        },
+        .exit_plan_mode => |*payload| {
+            freeHumanResponseRecordedResponseVariant3(&payload.*, allocator);
+        },
+    }
+}
+
+fn freeHumanResponseRecordedData(value: *HumanResponseRecordedData, allocator: std.mem.Allocator) void {
+    wipeString(value.request_id);
+    allocator.free(@constCast(value.request_id));
+    if (value.tool_call_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    freeHumanResponseActor(&value.actor, allocator);
+    freeHumanResponseRecordedResponse(&value.response, allocator);
+}
+
 fn freeMcpHeadersRefreshCompletedOutcome(value: *McpHeadersRefreshCompletedOutcome, _: std.mem.Allocator) void {
     _ = value;
 }
@@ -27740,6 +28861,14 @@ fn freeModelCallFailureData(value: *ModelCallFailureData, allocator: std.mem.All
     }
     if (value.failure_kind) |*present| {
         freeModelCallFailureKind(&present.*, allocator);
+    }
+    if (value.byok_kind) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.model_provider) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
     }
     if (value.reasoning_effort) |*present| {
         wipeString(present.*);
@@ -29106,6 +30235,13 @@ fn freePromptCacheBreakData(value: *PromptCacheBreakData, allocator: std.mem.All
         }
         allocator.free(@constCast(present.*));
     }
+    if (value.tools_redefined_parts) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+            allocator.free(@constCast(item.*));
+        }
+        allocator.free(@constCast(present.*));
+    }
     if (value.system_segments_changed) |*present| {
         for (@constCast(present.*)) |*item| {
             wipeString(item.*);
@@ -29500,6 +30636,10 @@ fn freeAutoModeResolvedData(value: *AutoModeResolvedData, allocator: std.mem.All
         allocator.free(@constCast(present.*));
     }
     if (value.fallback_reason) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.selection_reason) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
@@ -30861,6 +32001,10 @@ fn freeModelChangeData(value: *ModelChangeData, allocator: std.mem.Allocator) vo
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.reasoning_effort_model) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.previous_reasoning_summary) |*present| {
         freeReasoningSummary(&present.*, allocator);
     }
@@ -30940,6 +32084,10 @@ fn freeResumeData(value: *ResumeData, allocator: std.mem.Allocator) void {
         allocator.free(@constCast(present.*));
     }
     if (value.reasoning_effort) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.reasoning_effort_model) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
@@ -31181,6 +32329,10 @@ fn freeStartData(value: *StartData, allocator: std.mem.Allocator) void {
         allocator.free(@constCast(present.*));
     }
     if (value.reasoning_effort) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.reasoning_effort_model) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
@@ -32295,6 +33447,16 @@ fn freeToolExecutionCompleteShellExecution(value: *ToolExecutionCompleteShellExe
     _ = allocator;
 }
 
+fn freeToolExecutionCompleteFileEditKind(value: *ToolExecutionCompleteFileEditKind, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeToolExecutionCompleteFileEdit(value: *ToolExecutionCompleteFileEdit, allocator: std.mem.Allocator) void {
+    wipeString(value.path);
+    allocator.free(@constCast(value.path));
+    freeToolExecutionCompleteFileEditKind(&value.kind, allocator);
+}
+
 fn freeToolExecutionCompleteData(value: *ToolExecutionCompleteData, allocator: std.mem.Allocator) void {
     wipeString(value.tool_call_id);
     allocator.free(@constCast(value.tool_call_id));
@@ -32336,6 +33498,12 @@ fn freeToolExecutionCompleteData(value: *ToolExecutionCompleteData, allocator: s
     if (value.shell_execution) |*present| {
         freeToolExecutionCompleteShellExecution(&present.*, allocator);
     }
+    if (value.file_edits) |*present| {
+        for (@constCast(present.*)) |*item| {
+            freeToolExecutionCompleteFileEdit(&item.*, allocator);
+        }
+        allocator.free(@constCast(present.*));
+    }
     if (value.parent_tool_call_id) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
@@ -32357,6 +33525,9 @@ fn freeToolExecutionProgressData(value: *ToolExecutionProgressData, allocator: s
     allocator.free(@constCast(value.tool_call_id));
     wipeString(value.progress_message);
     allocator.free(@constCast(value.progress_message));
+    if (value.structured_content) |*present| {
+        freeJsonValue(&present.*, allocator);
+    }
 }
 
 fn freeToolExecutionStartShellToolInfo(value: *ToolExecutionStartShellToolInfo, allocator: std.mem.Allocator) void {
@@ -32457,6 +33628,20 @@ fn freeToolExecutionStartData(value: *ToolExecutionStartData, allocator: std.mem
     if (value.fusion) |*present| {
         freeFusionAttribution(&present.*, allocator);
     }
+}
+
+fn freeToolShellOutputStream(value: *ToolShellOutputStream, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeToolShellOutputData(value: *ToolShellOutputData, allocator: std.mem.Allocator) void {
+    wipeString(value.tool_call_id);
+    allocator.free(@constCast(value.tool_call_id));
+    if (value.stream) |*present| {
+        freeToolShellOutputStream(&present.*, allocator);
+    }
+    wipeString(value.text);
+    allocator.free(@constCast(value.text));
 }
 
 fn freeToolUserRequestedData(value: *ToolUserRequestedData, allocator: std.mem.Allocator) void {
@@ -33494,6 +34679,7 @@ fn tagFromDiscriminator(wire: []const u8) ?SessionEventTag {
     if (std.mem.eql(u8, wire, "hook.end")) return .hook_end;
     if (std.mem.eql(u8, wire, "hook.progress")) return .hook_progress;
     if (std.mem.eql(u8, wire, "hook.start")) return .hook_start;
+    if (std.mem.eql(u8, wire, "human_response.recorded")) return .human_response_recorded;
     if (std.mem.eql(u8, wire, "mcp.headers_refresh_completed")) return .mcp_headers_refresh_completed;
     if (std.mem.eql(u8, wire, "mcp.headers_refresh_required")) return .mcp_headers_refresh_required;
     if (std.mem.eql(u8, wire, "mcp.oauth_completed")) return .mcp_oauth_completed;
@@ -33603,6 +34789,7 @@ fn tagFromDiscriminator(wire: []const u8) ?SessionEventTag {
     if (std.mem.eql(u8, wire, "tool.execution_partial_result")) return .tool_execution_partial_result;
     if (std.mem.eql(u8, wire, "tool.execution_progress")) return .tool_execution_progress;
     if (std.mem.eql(u8, wire, "tool.execution_start")) return .tool_execution_start;
+    if (std.mem.eql(u8, wire, "tool.shell_output")) return .tool_shell_output;
     if (std.mem.eql(u8, wire, "tool.user_requested")) return .tool_user_requested;
     if (std.mem.eql(u8, wire, "tool_search.activated")) return .tool_search_activated;
     if (std.mem.eql(u8, wire, "ui.ephemeral_query")) return .ui_ephemeral_query;
@@ -33927,6 +35114,16 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
             errdefer arena.deinit();
             const typed = try parseHookStartData(arena.allocator(), data_value);
             return .{ .hook_start = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
+        .human_response_recorded => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseHumanResponseRecordedData(arena.allocator(), data_value);
+            return .{ .human_response_recorded = .{
                 .data = typed,
                 .data_json = raw.takeData(),
                 .arena = arena,
@@ -34986,6 +36183,16 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
                 .arena = arena,
             } };
         },
+        .tool_shell_output => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseToolShellOutputData(arena.allocator(), data_value);
+            return .{ .tool_shell_output = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
         .tool_user_requested => {
             var arena = std.heap.ArenaAllocator.init(allocator);
             errdefer arena.deinit();
@@ -35122,6 +36329,7 @@ const pinned_event_samples = [_]EventSample{
     .{ .json = "{\"type\":\"hook.end\",\"data\":{\"hookInvocationId\":\"\",\"hookType\":\"\",\"success\":false}}", .tag = .hook_end },
     .{ .json = "{\"type\":\"hook.progress\",\"data\":{\"message\":\"\"}}", .tag = .hook_progress },
     .{ .json = "{\"type\":\"hook.start\",\"data\":{\"hookInvocationId\":\"\",\"hookType\":\"\"}}", .tag = .hook_start },
+    .{ .json = "{\"type\":\"human_response.recorded\",\"data\":{\"requestId\":\"\",\"actor\":\"human_response\",\"response\":{\"responseKind\":\"ask_user\",\"content\":{},\"message\":\"\",\"requestedSchema\":{\"type\":\"object\",\"properties\":{}}}}}", .tag = .human_response_recorded },
     .{ .json = "{\"type\":\"mcp.headers_refresh_completed\",\"data\":{\"requestId\":\"\",\"outcome\":\"headers\"}}", .tag = .mcp_headers_refresh_completed },
     .{ .json = "{\"type\":\"mcp.headers_refresh_required\",\"data\":{\"requestId\":\"\",\"serverName\":\"\",\"serverUrl\":\"\",\"reason\":\"startup\"}}", .tag = .mcp_headers_refresh_required },
     .{ .json = "{\"type\":\"mcp.oauth_completed\",\"data\":{\"requestId\":\"\",\"outcome\":\"token\"}}", .tag = .mcp_oauth_completed },
@@ -35231,6 +36439,7 @@ const pinned_event_samples = [_]EventSample{
     .{ .json = "{\"type\":\"tool.execution_partial_result\",\"data\":{\"toolCallId\":\"\",\"partialOutput\":\"\"}}", .tag = .tool_execution_partial_result },
     .{ .json = "{\"type\":\"tool.execution_progress\",\"data\":{\"toolCallId\":\"\",\"progressMessage\":\"\"}}", .tag = .tool_execution_progress },
     .{ .json = "{\"type\":\"tool.execution_start\",\"data\":{\"toolCallId\":\"\",\"toolName\":\"\"}}", .tag = .tool_execution_start },
+    .{ .json = "{\"type\":\"tool.shell_output\",\"data\":{\"toolCallId\":\"\",\"text\":\"\",\"sequence\":0}}", .tag = .tool_shell_output },
     .{ .json = "{\"type\":\"tool.user_requested\",\"data\":{\"toolCallId\":\"\",\"toolName\":\"\"}}", .tag = .tool_user_requested },
     .{ .json = "{\"type\":\"tool_search.activated\",\"data\":{\"strategy\":\"\",\"toolNames\":[]}}", .tag = .tool_search_activated },
     .{ .json = "{\"type\":\"ui.ephemeral_query\",\"data\":{\"requestId\":\"\",\"phase\":\"started\"}}", .tag = .ui_ephemeral_query },
@@ -35309,6 +36518,7 @@ const malformed_event_samples = [_][]const u8{
     "{\"type\":\"hook.end\",\"data\":{\"hookType\":\"\",\"success\":false}}",
     "{\"type\":\"hook.progress\",\"data\":{}}",
     "{\"type\":\"hook.start\",\"data\":{\"hookType\":\"\"}}",
+    "{\"type\":\"human_response.recorded\",\"data\":{\"actor\":\"human_response\",\"response\":{\"responseKind\":\"ask_user\",\"content\":{},\"message\":\"\",\"requestedSchema\":{\"type\":\"object\",\"properties\":{}}}}}",
     "{\"type\":\"mcp.headers_refresh_completed\",\"data\":{\"outcome\":\"headers\"}}",
     "{\"type\":\"mcp.headers_refresh_required\",\"data\":{\"serverName\":\"\",\"serverUrl\":\"\",\"reason\":\"startup\"}}",
     "{\"type\":\"mcp.oauth_completed\",\"data\":{\"outcome\":\"token\"}}",
@@ -35407,6 +36617,7 @@ const malformed_event_samples = [_][]const u8{
     "{\"type\":\"tool.execution_partial_result\",\"data\":{\"partialOutput\":\"\"}}",
     "{\"type\":\"tool.execution_progress\",\"data\":{\"progressMessage\":\"\"}}",
     "{\"type\":\"tool.execution_start\",\"data\":{\"toolName\":\"\"}}",
+    "{\"type\":\"tool.shell_output\",\"data\":{\"text\":\"\",\"sequence\":0}}",
     "{\"type\":\"tool.user_requested\",\"data\":{\"toolName\":\"\"}}",
     "{\"type\":\"tool_search.activated\",\"data\":{\"toolNames\":[]}}",
     "{\"type\":\"ui.ephemeral_query\",\"data\":{\"phase\":\"started\"}}",

@@ -368,6 +368,8 @@ function expectedExtensibilityContract(upstreamCommit) {
           onSessionEnd: "SessionEndHandler",
           onErrorOccurred: "ErrorOccurredHandler",
           onAgentStop: "AgentStopHandler",
+          onSubagentStart: "SubagentStartHandler",
+          onSubagentStop: "SubagentStopHandler",
         },
       },
       canvasProvider: {
@@ -1986,10 +1988,15 @@ function expectedModelCompatibility(apiSchema) {
 
 function writeCompatibility() {
   const compatibility = parseJson(compatibilityPath);
+  const apiSchema = parseJson(join(schemaDirectory, "api.schema.json"));
   Object.assign(
     compatibility,
-    expectedModelCompatibility(parseJson(join(schemaDirectory, "api.schema.json"))),
+    expectedModelCompatibility(apiSchema),
   );
+  compatibility.providerConfig.properties.modelProvider = {
+    status: "supported",
+    contract: schemaContract(apiSchema.definitions.ProviderConfig.properties.modelProvider),
+  };
   writeFileSync(compatibilityPath, `${JSON.stringify(compatibility, null, 2)}\n`);
 }
 
@@ -2245,6 +2252,11 @@ function verifyCompatibility(apiSchema, eventSchema) {
     apiSchema.definitions?.ProviderConfigTransport?.enum ?? [],
     providerCompatibility.transports,
     "ProviderConfig transport enum",
+  );
+  requireExactStrings(
+    zigEnumValues(readFileSync(join(root, "src", "provider.zig"), "utf8"), "ModelProvider"),
+    stringEnum(apiSchema, "ProviderConfigModelProvider"),
+    "Zig ModelProvider values",
   );
   const azureProperties = apiSchema.definitions?.ProviderConfigAzure?.properties ?? {};
   requireExactStrings(

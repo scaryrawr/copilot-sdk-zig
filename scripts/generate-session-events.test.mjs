@@ -52,12 +52,12 @@ function reachablePayloadDefinitions(value) {
   return seen;
 }
 
-test("the pinned schema renders 154 explicit event tags", () => {
+test("the pinned schema renders 156 explicit event tags", () => {
   const value = schema();
   const { entries } = buildRegistry(value);
   const rendered = renderSessionEvents(value);
 
-  assert.equal(entries.length, 154);
+  assert.equal(entries.length, 156);
   assert.doesNotMatch(rendered, /Schema sha256|Discriminators:|Regenerate with:|Source:/);
   assert.match(rendered, /pub const SessionEvent = union\(enum\)/);
   assert.match(rendered, /mcp_oauth_required: McpOauthRequired/);
@@ -142,6 +142,26 @@ test("unsupported reachable schema constructs fail with their path", () => {
   assert.throws(
     () => buildRegistry(value),
     /unsupported schema keyword pattern at #\/definitions\/StartData\/properties\/sessionId/,
+  );
+});
+
+test("mutually exclusive optional properties are enforced when rendering a schema not constraint", () => {
+  const value = schema();
+  value.definitions.StartData.properties.first = { type: "string" };
+  value.definitions.StartData.properties.second = { type: "string" };
+  value.definitions.StartData.not = { required: ["first", "second"] };
+  const rendered = renderSessionEvents(value);
+  assert.match(
+    rendered,
+    /if \(object\.get\("first"\) != null and object\.get\("second"\) != null\) return error\.InvalidSessionEvent;/,
+  );
+  value.definitions.StartData.not = { required: ["first"] };
+  assert.throws(() => buildRegistry(value), /unsupported not constraint at #\/definitions\/StartData/);
+  delete value.definitions.StartData.not;
+  value.definitions.StartData.properties.sessionId.not = { required: ["first", "second"] };
+  assert.throws(
+    () => buildRegistry(value),
+    /unsupported not constraint at #\/definitions\/StartData\/properties\/sessionId/,
   );
 });
 

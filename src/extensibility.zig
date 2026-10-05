@@ -272,6 +272,36 @@ pub const AgentStopOutput = struct {
     reason: ?[]const u8 = null,
 };
 
+pub const SubagentStartInput = struct {
+    base: HookBaseInput,
+    transcript_path: []const u8,
+    agent_name: []const u8,
+    agent_display_name: ?[]const u8 = null,
+    agent_description: ?[]const u8 = null,
+};
+
+pub const SubagentStartOutput = struct {
+    additional_context: ?[]const u8 = null,
+};
+
+pub const SubagentStopInput = struct {
+    base: HookBaseInput,
+    transcript_path: []const u8,
+    agent_name: []const u8,
+    agent_display_name: ?[]const u8 = null,
+    agent_description: ?[]const u8 = null,
+    agent_id: ?[]const u8 = null,
+    agent_type: []const u8,
+    stop_reason: enum { end_turn },
+    response: []const u8,
+};
+
+pub const SubagentStopOutput = struct {
+    block: bool = false,
+    reason: ?[]const u8 = null,
+    modified_response: ?[]const u8 = null,
+};
+
 pub const SessionHooks = struct {
     on_pre_tool_use: ?*const fn (std.mem.Allocator, PreToolUseInput, HookInvocation, ?*anyopaque) anyerror!PreToolUseOutput = null,
     on_pre_mcp_tool_call: ?*const fn (std.mem.Allocator, PreMcpToolCallInput, HookInvocation, ?*anyopaque) anyerror!PreMcpToolCallOutput = null,
@@ -283,6 +313,8 @@ pub const SessionHooks = struct {
     on_session_end: ?*const fn (std.mem.Allocator, SessionEndInput, HookInvocation, ?*anyopaque) anyerror!SessionEndOutput = null,
     on_error_occurred: ?*const fn (std.mem.Allocator, ErrorOccurredInput, HookInvocation, ?*anyopaque) anyerror!ErrorOccurredOutput = null,
     on_agent_stop: ?*const fn (std.mem.Allocator, AgentStopInput, HookInvocation, ?*anyopaque) anyerror!AgentStopOutput = null,
+    on_subagent_start: ?*const fn (std.mem.Allocator, SubagentStartInput, HookInvocation, ?*anyopaque) anyerror!SubagentStartOutput = null,
+    on_subagent_stop: ?*const fn (std.mem.Allocator, SubagentStopInput, HookInvocation, ?*anyopaque) anyerror!SubagentStopOutput = null,
     context: ?*anyopaque = null,
 
     pub fn any(self: SessionHooks) bool {
@@ -290,7 +322,8 @@ pub const SessionHooks = struct {
             self.on_post_tool_use != null or self.on_post_tool_use_failure != null or
             self.on_user_prompt_submitted != null or self.on_user_prompt_transformed != null or
             self.on_session_start != null or self.on_session_end != null or
-            self.on_error_occurred != null or self.on_agent_stop != null;
+            self.on_error_occurred != null or self.on_agent_stop != null or
+            self.on_subagent_start != null or self.on_subagent_stop != null;
     }
 };
 

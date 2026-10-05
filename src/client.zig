@@ -8230,6 +8230,10 @@ pub const Client = struct {
             return runtime.hooks.on_error_occurred != null;
         if (std.mem.eql(u8, hook_type, "agentStop"))
             return runtime.hooks.on_agent_stop != null;
+        if (std.mem.eql(u8, hook_type, "subagentStart"))
+            return runtime.hooks.on_subagent_start != null;
+        if (std.mem.eql(u8, hook_type, "subagentStop"))
+            return runtime.hooks.on_subagent_stop != null;
         return false;
     }
 
@@ -8619,6 +8623,60 @@ pub const Client = struct {
             return self.writeTypedSuccess(writer, id, .{ .output = .{
                 .decision = if (output.block) "block" else null,
                 .reason = output.reason,
+            } });
+        }
+        if (std.mem.eql(u8, hook_type, "subagentStart")) {
+            const handler = runtime.hooks.on_subagent_start orelse
+                return self.writeTypedSuccess(writer, id, .{});
+            const output = handler(self.allocator, .{
+                .base = base,
+                .transcript_path = jsonRequiredString(input, "transcriptPath") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+                .agent_name = jsonRequiredString(input, "agentName") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+                .agent_display_name = jsonOptionalString(input, "agentDisplayName") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+                .agent_description = jsonOptionalString(input, "agentDescription") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+            }, invocation, runtime.hooks.context) catch |err|
+                return self.writeServerRequestError(writer, id, -32000, @errorName(err));
+            return self.writeTypedSuccess(writer, id, .{ .output = .{
+                .additionalContext = output.additional_context,
+            } });
+        }
+        if (std.mem.eql(u8, hook_type, "subagentStop")) {
+            const handler = runtime.hooks.on_subagent_stop orelse
+                return self.writeTypedSuccess(writer, id, .{});
+            const stop_reason = jsonRequiredString(input, "stopReason") catch
+                return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
+            if (!std.mem.eql(u8, stop_reason, "end_turn"))
+                return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
+            const output = handler(self.allocator, .{
+                .base = base,
+                .transcript_path = jsonRequiredString(input, "transcriptPath") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+                .agent_name = jsonRequiredString(input, "agentName") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+                .agent_display_name = jsonOptionalString(input, "agentDisplayName") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+                .agent_description = jsonOptionalString(input, "agentDescription") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+                .agent_id = jsonOptionalString(input, "agentId") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+                .agent_type = jsonRequiredString(input, "agentType") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+                .stop_reason = .end_turn,
+                .response = jsonRequiredString(input, "response") catch
+                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+            }, invocation, runtime.hooks.context) catch |err|
+                return self.writeServerRequestError(writer, id, -32000, @errorName(err));
+            if (output.block and (output.reason == null or output.reason.?.len == 0) or
+                !output.block and output.reason != null)
+                return self.writeServerRequestError(writer, id, -32603, "invalid hook output");
+            return self.writeTypedSuccess(writer, id, .{ .output = .{
+                .decision = if (output.block) "block" else "allow",
+                .reason = output.reason,
+                .modifiedResponse = output.modified_response,
             } });
         }
         return self.writeServerRequestError(writer, id, -32602, "unknown hook type");
@@ -24614,6 +24672,159 @@ test "agent stop hook reads the snake-case wire activity flag" {
         params.value,
     );
     try std.testing.expect(called);
+}
+
+test "subagent lifecycle hooks decode input and return typed output" {
+    const allocator = std.testing.allocator;
+    var client = Client{ .allocator = allocator, .io = undefined };
+    defer client.rollbackExtensionRuntime();
+    var calls: usize = 0;
+    const handlers = struct {
+        fn start(
+            _: std.mem.Allocator,
+            input: ext.SubagentStartInput,
+            invocation: ext.HookInvocation,
+            context: ?*anyopaque,
+        ) !ext.SubagentStartOutput {
+            try std.testing.expectEqualStrings("s1", invocation.session_id);
+            try std.testing.expectEqualStrings("s1", input.base.runtime_session_id);
+            try std.testing.expectEqualStrings("/transcript", input.transcript_path);
+            try std.testing.expectEqualStrings("research", input.agent_name);
+            try std.testing.expectEqualStrings("Researcher", input.agent_display_name.?);
+            try std.testing.expect(input.agent_description == null);
+            const call_count: *usize = @ptrCast(@alignCast(context.?));
+            call_count.* += 1;
+            return .{ .additional_context = "context" };
+        }
+        fn stop(
+            _: std.mem.Allocator,
+            input: ext.SubagentStopInput,
+            _: ext.HookInvocation,
+            context: ?*anyopaque,
+        ) !ext.SubagentStopOutput {
+            try std.testing.expectEqualStrings("research", input.agent_name);
+            try std.testing.expectEqualStrings("child", input.agent_id.?);
+            try std.testing.expectEqual(.end_turn, input.stop_reason);
+            try std.testing.expectEqualStrings("original", input.response);
+            const call_count: *usize = @ptrCast(@alignCast(context.?));
+            call_count.* += 1;
+            if (std.mem.eql(u8, input.agent_type, "block"))
+                return .{ .block = true, .reason = "continue", .modified_response = "ignored" };
+            try std.testing.expectEqualStrings("custom", input.agent_type);
+            return .{ .modified_response = "rewritten" };
+        }
+    };
+    try client.beginExtensionRuntime("s1", session_types.CreateSessionConfig{
+        .extensions = .{ .common = .{ .hooks = .{
+            .on_subagent_start = handlers.start,
+            .on_subagent_stop = handlers.stop,
+            .context = &calls,
+        } } },
+    }, &.{});
+    const cases = [_]struct { request: []const u8, expected: []const u8 }{
+        .{
+            .request =
+            \\{"sessionId":"s1","hookType":"subagentStart","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","transcriptPath":"/transcript","agentName":"research","agentDisplayName":"Researcher"}}
+            ,
+            .expected = "\"additionalContext\":\"context\"",
+        },
+        .{
+            .request =
+            \\{"sessionId":"s1","hookType":"subagentStop","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","transcriptPath":"/transcript","agentName":"research","agentId":"child","agentType":"custom","stopReason":"end_turn","response":"original"}}
+            ,
+            .expected = "\"modifiedResponse\":\"rewritten\"",
+        },
+        .{
+            .request =
+            \\{"sessionId":"s1","hookType":"subagentStop","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","transcriptPath":"/transcript","agentName":"research","agentId":"child","agentType":"block","stopReason":"end_turn","response":"original"}}
+            ,
+            .expected = "\"reason\":\"continue\"",
+        },
+    };
+    for (cases) |case| {
+        const params = try std.json.parseFromSlice(std.json.Value, allocator, case.request, .{});
+        defer params.deinit();
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        defer output.deinit();
+        try client.dispatchServerRequest(&output.writer, .{ .integer = 8 }, "hooks.invoke", params.value);
+        const body = try framedBody(allocator, output.written());
+        defer allocator.free(body);
+        try std.testing.expect(std.mem.indexOf(u8, body, case.expected) != null);
+    }
+    try std.testing.expectEqual(@as(usize, 3), calls);
+}
+
+test "malformed subagent hooks and invalid block outputs receive RPC errors" {
+    const allocator = std.testing.allocator;
+    var client = Client{ .allocator = allocator, .io = undefined };
+    defer client.rollbackExtensionRuntime();
+    var calls: usize = 0;
+    const handlers = struct {
+        fn start(
+            _: std.mem.Allocator,
+            _: ext.SubagentStartInput,
+            _: ext.HookInvocation,
+            context: ?*anyopaque,
+        ) !ext.SubagentStartOutput {
+            const call_count: *usize = @ptrCast(@alignCast(context.?));
+            call_count.* += 1;
+            return .{};
+        }
+        fn stop(
+            _: std.mem.Allocator,
+            _: ext.SubagentStopInput,
+            _: ext.HookInvocation,
+            context: ?*anyopaque,
+        ) !ext.SubagentStopOutput {
+            const call_count: *usize = @ptrCast(@alignCast(context.?));
+            call_count.* += 1;
+            return .{ .block = true };
+        }
+    };
+    try client.beginExtensionRuntime("s1", session_types.CreateSessionConfig{
+        .extensions = .{ .common = .{ .hooks = .{
+            .on_subagent_start = handlers.start,
+            .on_subagent_stop = handlers.stop,
+            .context = &calls,
+        } } },
+    }, &.{});
+    const cases = [_]struct { request: []const u8, code: []const u8 }{
+        .{
+            .request =
+            \\{"sessionId":"s1","hookType":"subagentStart","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","agentName":"research"}}
+            ,
+            .code = "\"code\":-32602",
+        },
+        .{
+            .request =
+            \\{"sessionId":"s1","hookType":"subagentStart","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","transcriptPath":"/transcript","agentName":"research","agentDisplayName":42}}
+            ,
+            .code = "\"code\":-32602",
+        },
+        .{
+            .request =
+            \\{"sessionId":"s1","hookType":"subagentStop","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","transcriptPath":"/transcript","agentName":"research","agentType":"custom","stopReason":"bad","response":"original"}}
+            ,
+            .code = "\"code\":-32602",
+        },
+        .{
+            .request =
+            \\{"sessionId":"s1","hookType":"subagentStop","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","transcriptPath":"/transcript","agentName":"research","agentType":"custom","stopReason":"end_turn","response":"original"}}
+            ,
+            .code = "\"code\":-32603",
+        },
+    };
+    for (cases) |case| {
+        const params = try std.json.parseFromSlice(std.json.Value, allocator, case.request, .{});
+        defer params.deinit();
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        defer output.deinit();
+        try client.dispatchServerRequest(&output.writer, .{ .integer = 8 }, "hooks.invoke", params.value);
+        const body = try framedBody(allocator, output.written());
+        defer allocator.free(body);
+        try std.testing.expect(std.mem.indexOf(u8, body, case.code) != null);
+    }
+    try std.testing.expectEqual(@as(usize, 1), calls);
 }
 
 test "provisional create runtime is unreachable without an exact session id" {
