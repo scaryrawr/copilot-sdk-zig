@@ -1264,6 +1264,12 @@ test "reasoning block representations preserve opaque content and enforce exclus
         ,
         \\{"type":"assistant.message","data":{"content":"hi","messageId":"m1","reasoningBlocks":{"provider":"anthropic"}}}
         ,
+        \\{"type":"assistant.message","data":{"content":"hi","messageId":"m1","reasoningBlocks":{"provider":"anthropic","blocks":null,"orderedBlocks":[]}}}
+        ,
+        \\{"type":"assistant.message","data":{"content":"hi","messageId":"m1","reasoningBlocks":{"provider":"anthropic","blocks":[],"orderedBlocks":null}}}
+        ,
+        \\{"type":"assistant.message","data":{"content":"hi","messageId":"m1","reasoningBlocks":{"provider":"anthropic","blocks":null,"orderedBlocks":null}}}
+        ,
     };
     for (valid, 0..) |json, index| {
         var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
@@ -1283,6 +1289,12 @@ test "reasoning block representations preserve opaque content and enforce exclus
             try std.testing.expectEqualStrings("hi", blocks.ordered_blocks.?[0].object.get("text").?.string);
             try std.testing.expectEqualStrings("secret", blocks.ordered_blocks.?[1].object.get("thinking").?.string);
             try std.testing.expect(blocks.blocks == null);
+        } else if (index == 5) {
+            try std.testing.expect(blocks.blocks == null);
+            try std.testing.expectEqual(@as(usize, 0), blocks.ordered_blocks.?.len);
+        } else if (index == 6) {
+            try std.testing.expectEqual(@as(usize, 0), blocks.blocks.?.len);
+            try std.testing.expect(blocks.ordered_blocks == null);
         } else {
             try std.testing.expect(blocks.blocks == null and blocks.ordered_blocks == null);
         }
@@ -1290,7 +1302,7 @@ test "reasoning block representations preserve opaque content and enforce exclus
     const invalid = [_][]const u8{
         \\{"type":"assistant.message","data":{"content":"hi","messageId":"m1","reasoningBlocks":{"provider":"anthropic","blocks":[],"orderedBlocks":[]}}}
         ,
-        \\{"type":"assistant.message","data":{"content":"hi","messageId":"m1","reasoningBlocks":{"provider":"anthropic","blocks":null,"orderedBlocks":null}}}
+        \\{"type":"assistant.message","data":{"content":"hi","messageId":"m1","reasoningBlocks":{"provider":null,"orderedBlocks":[]}}}
         ,
         \\{"type":"assistant.message","data":{"content":"hi","messageId":"m1","reasoningBlocks":{"orderedBlocks":[]}}}
         ,

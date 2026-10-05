@@ -8377,7 +8377,7 @@ fn parseAssistantMessageServerTools(allocator: std.mem.Allocator, value: std.jso
 
 fn parseAssistantMessageReasoningBlocks(allocator: std.mem.Allocator, value: std.json.Value) !AssistantMessageReasoningBlocks {
     const object = try payloads.requiredObject(value);
-    if (object.contains("blocks") and object.contains("orderedBlocks")) return error.InvalidSessionEvent;
+    if ((if (object.get("blocks")) |field_value| field_value != .null else false) and (if (object.get("orderedBlocks")) |field_value| field_value != .null else false)) return error.InvalidSessionEvent;
     const parsed_provider = try parseString(allocator, object.get("provider") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_provider = parsed_provider;

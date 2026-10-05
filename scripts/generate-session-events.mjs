@@ -671,9 +671,12 @@ ${model.fields.map((field) => {
 
 function renderObjectParser(model) {
   const constraint = model.forbiddenTogether.length > 0
-    ? `if (${model.forbiddenTogether.map((name) =>
-      `object.contains(${zigString(name)})`
-    ).join(" and ")}) return error.InvalidSessionEvent;`
+    ? `if (${model.forbiddenTogether.map((name) => {
+      const field = model.fields.find((field) => field.wire === name);
+      return field.required
+        ? `object.contains(${zigString(name)})`
+        : `(if (object.get(${zigString(name)})) |field_value| field_value != .null else false)`;
+    }).join(" and ")}) return error.InvalidSessionEvent;`
     : "";
   const declarations = model.fields.map((field) => {
     const source = `object.get(${zigString(field.wire)})`;

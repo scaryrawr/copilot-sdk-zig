@@ -145,11 +145,22 @@ test("unsupported reachable schema constructs fail with their path", () => {
   );
 });
 
-test("not-required constraints reject simultaneous property presence", () => {
+test("not-required constraints ignore null optional representations", () => {
   const rendered = renderSessionEvents(schema());
   assert.match(
     rendered,
-    /if \(object\.contains\("blocks"\) and object\.contains\("orderedBlocks"\)\) return error\.InvalidSessionEvent;/,
+    /if \(\(if \(object\.get\("blocks"\)\) \|field_value\| field_value != \.null else false\) and \(if \(object\.get\("orderedBlocks"\)\) \|field_value\| field_value != \.null else false\)\) return error\.InvalidSessionEvent;/,
+  );
+});
+
+test("not-required constraints preserve required-field presence semantics", () => {
+  const value = schema();
+  value.definitions.AssistantMessageReasoningBlocks.required.push("blocks");
+  value.definitions.AssistantMessageReasoningBlocks.properties.blocks.type = ["array", "null"];
+  const rendered = renderSessionEvents(value);
+  assert.match(
+    rendered,
+    /if \(object\.contains\("blocks"\) and \(if \(object\.get\("orderedBlocks"\)\) \|field_value\| field_value != \.null else false\)\) return error\.InvalidSessionEvent;/,
   );
 });
 
