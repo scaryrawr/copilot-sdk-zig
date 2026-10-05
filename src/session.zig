@@ -1251,6 +1251,57 @@ test "known and unknown events retain owned data" {
     try std.testing.expectEqualStrings("{\"answer\":42}", unknown.unknown.data_json);
 }
 
+test "reasoning block representations preserve opaque content and enforce exclusivity" {
+    const allocator = std.testing.allocator;
+    const valid = [_][]const u8{
+        \\{"type":"assistant.message","data":{"content":"hi","messageId":"m1","reasoningBlocks":{"provider":"anthropic","blocks":[{"thinking":"secret"}]}}}
+        ,
+        \\{"type":"assistant.message","data":{"content":"hi","messageId":"m1","reasoningBlocks":{"provider":"anthropic","orderedBlocks":[{"type":"text","text":"hi"},{"thinking":"secret"}]}}}
+        ,
+        \\{"type":"assistant.message","data":{"content":"hi","messageId":"m1","reasoningBlocks":{"provider":"anthropic","blocks":null}}}
+        ,
+        \\{"type":"assistant.message","data":{"content":"hi","messageId":"m1","reasoningBlocks":{"provider":"anthropic","orderedBlocks":null}}}
+        ,
+        \\{"type":"assistant.message","data":{"content":"hi","messageId":"m1","reasoningBlocks":{"provider":"anthropic"}}}
+        ,
+    };
+    for (valid, 0..) |json, index| {
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+        var event = parseEvent(allocator, parsed.value) catch |err| {
+            parsed.deinit();
+            return err;
+        };
+        parsed.deinit();
+        defer event.deinit(allocator);
+        const blocks = event.assistant_message.reasoning_blocks.?;
+        try std.testing.expectEqualStrings("anthropic", blocks.provider);
+        if (index == 0) {
+            try std.testing.expectEqualStrings("secret", blocks.blocks.?[0].object.get("thinking").?.string);
+            try std.testing.expect(blocks.ordered_blocks == null);
+        } else if (index == 1) {
+            try std.testing.expectEqual(@as(usize, 2), blocks.ordered_blocks.?.len);
+            try std.testing.expectEqualStrings("hi", blocks.ordered_blocks.?[0].object.get("text").?.string);
+            try std.testing.expectEqualStrings("secret", blocks.ordered_blocks.?[1].object.get("thinking").?.string);
+            try std.testing.expect(blocks.blocks == null);
+        } else {
+            try std.testing.expect(blocks.blocks == null and blocks.ordered_blocks == null);
+        }
+    }
+    const invalid = [_][]const u8{
+        \\{"type":"assistant.message","data":{"content":"hi","messageId":"m1","reasoningBlocks":{"provider":"anthropic","blocks":[],"orderedBlocks":[]}}}
+        ,
+        \\{"type":"assistant.message","data":{"content":"hi","messageId":"m1","reasoningBlocks":{"provider":"anthropic","blocks":null,"orderedBlocks":null}}}
+        ,
+        \\{"type":"assistant.message","data":{"content":"hi","messageId":"m1","reasoningBlocks":{"orderedBlocks":[]}}}
+        ,
+    };
+    for (invalid) |json| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+        defer parsed.deinit();
+        try std.testing.expectError(error.InvalidSessionEvent, parseEvent(allocator, parsed.value));
+    }
+}
+
 test "raw rich and unknown events outlive the source JSON tree" {
     const allocator = std.testing.allocator;
 

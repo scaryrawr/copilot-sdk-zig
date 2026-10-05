@@ -234,6 +234,70 @@
           "description": "Whether the host running this runtime can run the command sandbox. The runtime checks `supported` once per process. A capability answer can change while the process runs, for example after the user installs a missing package."
         },
         "stability": "experimental"
+      },
+      "proxyCa": {
+        "getStatus": {
+          "rpcMethod": "sandbox.proxyCa.getStatus",
+          "description": "Reports whether the persistent certificate authority of the sandbox credential proxy exists, whether OS trust includes it, and whether it must be rotated. Changes nothing.",
+          "params": {
+            "$ref": "#/definitions/SandboxProxyCaRequest",
+            "description": "Identifies the credential hosts that the persistent certificate authority of the sandbox credential proxy must cover. The runtime always adds the hosts from the saved user settings."
+          },
+          "result": {
+            "$ref": "#/definitions/SandboxProxyCaStatus",
+            "description": "Status of the persistent certificate authority of the sandbox credential proxy."
+          },
+          "stability": "experimental"
+        },
+        "create": {
+          "rpcMethod": "sandbox.proxyCa.create",
+          "description": "Creates the persistent certificate authority of the sandbox credential proxy if none is stored, without changing OS trust, and returns the path of its public certificate. Keeps an existing certificate authority, even one that must be rotated. Fails where OS trust is unsupported. Trust it with sandbox.proxyCa.trust: the CLI trusts only the hosts in the saved user settings, so it refuses a certificate authority that also covers hosts from sandboxConfig.",
+          "params": {
+            "$ref": "#/definitions/SandboxProxyCaRequest",
+            "description": "Identifies the credential hosts that the persistent certificate authority of the sandbox credential proxy must cover. The runtime always adds the hosts from the saved user settings."
+          },
+          "result": {
+            "$ref": "#/definitions/SandboxProxyCaCreateResult",
+            "description": "Result of creating the persistent certificate authority of the sandbox credential proxy."
+          },
+          "stability": "experimental"
+        },
+        "rotate": {
+          "rpcMethod": "sandbox.proxyCa.rotate",
+          "description": "Replaces the persistent certificate authority of the sandbox credential proxy with a new one for the current credential hosts. If OS trust included the old one, removes it and trusts the new one, which can show an OS authentication prompt. Running sandboxed tools keep the old certificate authority until they restart.",
+          "params": {
+            "$ref": "#/definitions/SandboxProxyCaRequest",
+            "description": "Identifies the credential hosts that the persistent certificate authority of the sandbox credential proxy must cover. The runtime always adds the hosts from the saved user settings."
+          },
+          "result": {
+            "$ref": "#/definitions/SandboxProxyCaStatus",
+            "description": "Status of the persistent certificate authority of the sandbox credential proxy."
+          },
+          "stability": "experimental"
+        },
+        "trust": {
+          "rpcMethod": "sandbox.proxyCa.trust",
+          "description": "Adds the persistent certificate authority of the sandbox credential proxy to OS trust, so sandboxed clients that read only OS trust accept the proxy. Call create first. Refuses a certificate authority that is not constrained to the current credential hosts. Can show an OS authentication prompt.",
+          "params": {
+            "$ref": "#/definitions/SandboxProxyCaRequest",
+            "description": "Identifies the credential hosts that the persistent certificate authority of the sandbox credential proxy must cover. The runtime always adds the hosts from the saved user settings."
+          },
+          "result": {
+            "$ref": "#/definitions/SandboxProxyCaStatus",
+            "description": "Status of the persistent certificate authority of the sandbox credential proxy."
+          },
+          "stability": "experimental"
+        },
+        "remove": {
+          "rpcMethod": "sandbox.proxyCa.remove",
+          "description": "Removes the persistent certificate authority of the sandbox credential proxy from OS trust. Keeps the stored certificate authority. Can show an OS authentication prompt. Sandboxed clients that read only OS trust then reject the proxy; clients that read the per-process certificate bundle continue to work.",
+          "params": null,
+          "result": {
+            "$ref": "#/definitions/SandboxProxyCaStatus",
+            "description": "Status of the persistent certificate authority of the sandbox credential proxy."
+          },
+          "stability": "experimental"
+        }
       }
     },
     "tools": {
@@ -1061,7 +1125,7 @@
     "managedSettings": {
       "read": {
         "rpcMethod": "managedSettings.read",
-        "description": "Discovers device-managed settings from production MDM and managed-file sources, validates them against the runtime-owned managed-settings schema, and returns the canonical JSON without requiring a session.",
+        "description": "Discovers device-managed settings from production MDM and managed-file sources, validates them against the runtime-owned managed-settings schema, and returns the canonical JSON without requiring a session. `managedSettings.resolve` returns the same device settings together with the account's server policy.",
         "params": null,
         "result": {
           "$ref": "#/definitions/ManagedSettingsReadResult",
@@ -1071,10 +1135,59 @@
       },
       "clearCache": {
         "rpcMethod": "managedSettings.clearCache",
-        "description": "Force-refreshes enterprise managed settings for every account: wipes the persistent server-policy cache (the whole `<cacheHome>/managed-settings` directory) and drops this runtime process's in-memory retained server policy. It does not itself fetch policy — the effect is that the next time a session resolves managed settings for an account, that resolution re-fetches the account's org policy from the network instead of serving a cached response. Note that `managedSettings.read` returns only device/MDM settings and never triggers the account server-policy fetch, so a host implementing \"sync account policy\" should start a fresh session resolution rather than treat a subsequent `managedSettings.read` as the refreshed org policy. Mirrors the invalidation a sign-out performs, broadened from the one signing-out account to all of them; device/MDM layers describe the machine, not the account, and are left untouched. Rejects if the on-disk cache cannot be removed.",
+        "description": "Force-refreshes enterprise managed settings for every account: wipes the persistent server-policy cache (the whole `<cacheHome>/managed-settings` directory) and drops this runtime process's in-memory retained server policy. It does not itself fetch policy — the effect is that the next time a session resolves managed settings for an account, that resolution re-fetches the account's org policy from the network instead of serving a cached response. Note that `managedSettings.read` returns only device/MDM settings and never triggers the account server-policy fetch, so a host implementing \"sync account policy\" should call `managedSettings.resolve` or start a fresh session resolution rather than treat a subsequent `managedSettings.read` as the refreshed org policy. Mirrors the invalidation a sign-out performs, broadened from the one signing-out account to all of them; device/MDM layers describe the machine, not the account, and are left untouched. Rejects if the on-disk cache cannot be removed.",
         "params": null,
         "result": {
           "type": "null"
+        },
+        "stability": "experimental"
+      },
+      "resolve": {
+        "rpcMethod": "managedSettings.resolve",
+        "description": "Resolves the effective enterprise managed settings without a session, from the device channel and, when an account is available, the account's server policy through the same per-account cache sessions use. A cached server policy less than an hour old is used without a fetch; otherwise the policy is fetched, and when the fetch fails a cached policy up to 24 hours old is used instead, unless `forceRemoteSettingsRefresh` requires a live fetch. With no account requested or signed in, it reports device policy only; signing out removes the account's cached policy. It can fetch server policy over the network when the cache is stale, so call it off latency-critical paths such as startup rather than before listing models. The policy helper is not run. `layers` lists each channel's document before merging, and `values` and `meta` carry typed effective values and their lock state for the keys typed so far.",
+        "params": {
+          "$ref": "#/definitions/ManagedSettingsResolveRequest",
+          "description": "Optional opaque account selection or GitHub token whose managed settings are resolved."
+        },
+        "result": {
+          "$ref": "#/definitions/ManagedSettingsResolveResult",
+          "description": "Effective enterprise managed settings for an account, resolved without a session."
+        },
+        "stability": "experimental"
+      },
+      "schema": {
+        "rpcMethod": "managedSettings.schema",
+        "description": "Returns the managed-settings authoring JSON schema with descriptive `x-composition` annotations aligned with the shared settings-engine vocabulary. These annotations are not a complete runtime composition contract: model, effortLevel, and contextTier remain coupled. Use `managedSettings.compose` for the runtime's effective result. Performs no I/O.",
+        "params": null,
+        "result": {
+          "$ref": "#/definitions/ManagedSettingsSchemaResult",
+          "description": "The authoring JSON schema for managed settings recognized by this runtime."
+        },
+        "stability": "experimental"
+      },
+      "validate": {
+        "rpcMethod": "managedSettings.validate",
+        "description": "Validates a candidate managed-settings document the way the runtime validates delivered policy, without applying it. Reports errors that would reject the document, warnings for content the runtime ignores, and the canonical document it would apply. Document text nested more than 64 levels deep is rejected. Performs no I/O.",
+        "params": {
+          "$ref": "#/definitions/ManagedSettingsValidateRequest",
+          "description": "A candidate managed-settings document to validate without applying it."
+        },
+        "result": {
+          "$ref": "#/definitions/ManagedSettingsValidateResult",
+          "description": "Result of validating a managed-settings document."
+        },
+        "stability": "experimental"
+      },
+      "compose": {
+        "rpcMethod": "managedSettings.compose",
+        "description": "Merges candidate managed-settings documents for the device, server, and policy-helper channels into the effective settings the runtime would enforce on this host, using the same precedence and composition rules as live resolution, without applying them. Like live resolution, a server's advisory sandbox force-enable is declined on a host that cannot run the sandbox. Does not fetch policy or read policy files, but may perform blocking OS or subprocess probes for sandbox support. Preview documents are limited to 1 MiB and 64 levels of nesting.",
+        "params": {
+          "$ref": "#/definitions/ManagedSettingsComposeRequest",
+          "description": "Candidate managed-settings documents to merge without applying them."
+        },
+        "result": {
+          "$ref": "#/definitions/ManagedSettingsComposeResult",
+          "description": "The effective managed settings the runtime would enforce for the given documents, in the same shape `managedSettings.resolve` returns."
         },
         "stability": "experimental"
       }
@@ -1575,25 +1688,165 @@
         },
         "stability": "experimental"
       }
-    },
-    "accounts": {
-      "acquireEntraToken": {
-        "rpcMethod": "accounts.acquireEntraToken",
-        "description": "Acquire a Microsoft Entra access token through the runtime's OneAuth broker. Account-scoped because it uses the same native broker as the account stack: a trusted host application mints a scoped Entra token for its own use, most notably to authenticate to a remote MCP server whose authorization server is Entra ID (in place of the generic browser-OAuth flow).",
-        "params": {
-          "$ref": "#/definitions/EntraTokenAcquireRequest",
-          "description": "OneAuth token request supplied by a trusted host application."
-        },
-        "result": {
-          "$ref": "#/definitions/EntraTokenAcquireResult",
-          "description": "Result of a OneAuth token acquisition."
-        },
-        "stability": "experimental",
-        "visibility": "internal"
-      }
     }
   },
   "session": {
+    "providers": {
+      "getCatalog": {
+        "rpcMethod": "session.providers.getCatalog",
+        "description": "Returns adapter definitions and supported operations in this session's effective provider catalog, without running discovery. Does not list provider instances or select inference models.",
+        "params": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "description": "Target session identifier"
+            }
+          },
+          "required": [
+            "sessionId"
+          ],
+          "additionalProperties": false,
+          "description": "Identifies the target session."
+        },
+        "result": {
+          "$ref": "#/definitions/ModelProviderAdapterCatalog",
+          "description": "Normalized model-provider adapter definitions available to the session, not discovered instances."
+        },
+        "stability": "experimental"
+      },
+      "discover": {
+        "rpcMethod": "session.providers.discover",
+        "description": "Discovers reachable instances using an adapter from this session's effective provider catalog and provider-specific discovery input.",
+        "params": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "description": "Target session identifier"
+            },
+            "adapterId": {
+              "type": "string",
+              "description": "Opaque adapter identity returned by `session.providers.getCatalog`."
+            },
+            "input": {
+              "description": "Provider-specific JSON input. Omission or null selects adapter defaults unless requiresInput is true. Non-null input is validated against the advertised Draft 7 schema when present; otherwise validation belongs to the adapter.",
+              "x-opaque-json": true
+            }
+          },
+          "required": [
+            "sessionId",
+            "adapterId"
+          ],
+          "additionalProperties": false,
+          "description": "Provider discovery parameters.",
+          "title": "ModelProviderDiscoverRequest",
+          "stability": "experimental"
+        },
+        "result": {
+          "$ref": "#/definitions/ModelProviderDiscoverResult",
+          "description": "Provider instances found by a discovery operation."
+        },
+        "stability": "experimental"
+      },
+      "getStatus": {
+        "rpcMethod": "session.providers.getStatus",
+        "description": "Gets current health and version information for a discovered model-provider instance.",
+        "params": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "description": "Target session identifier"
+            },
+            "instance": {
+              "$ref": "#/definitions/ModelProviderInstanceReference",
+              "description": "Provider instance reference returned by discovery."
+            }
+          },
+          "required": [
+            "sessionId",
+            "instance"
+          ],
+          "additionalProperties": false,
+          "description": "Provider status request parameters.",
+          "title": "ModelProviderGetStatusRequest",
+          "stability": "experimental"
+        },
+        "result": {
+          "$ref": "#/definitions/ModelProviderStatus",
+          "description": "Current health information for a provider instance."
+        },
+        "stability": "experimental"
+      },
+      "models": {
+        "list": {
+          "rpcMethod": "session.providers.models.list",
+          "description": "Lists models installed or otherwise available from a discovered model-provider instance.",
+          "params": {
+            "type": "object",
+            "properties": {
+              "sessionId": {
+                "type": "string",
+                "description": "Target session identifier"
+              },
+              "instance": {
+                "$ref": "#/definitions/ModelProviderInstanceReference",
+                "description": "Provider instance reference returned by discovery."
+              }
+            },
+            "required": [
+              "sessionId",
+              "instance"
+            ],
+            "additionalProperties": false,
+            "description": "Provider model inventory request parameters.",
+            "title": "ModelProviderModelsListRequest",
+            "stability": "experimental"
+          },
+          "result": {
+            "$ref": "#/definitions/DiscoveredModelList",
+            "description": "Models offered for agent conversations by one provider instance. Adapters exclude known-incompatible models, but retain candidates with unknown capabilities. Listing does not guarantee compatibility."
+          },
+          "stability": "experimental"
+        },
+        "prepareConfiguration": {
+          "rpcMethod": "session.providers.models.prepareConfiguration",
+          "description": "Translates a discovered model into the provider and model configuration needed to use it, and reports whether each is already registered in this session. Prepares only: it registers nothing, writes nothing, and performs no provider requests.",
+          "params": {
+            "type": "object",
+            "properties": {
+              "sessionId": {
+                "type": "string",
+                "description": "Target session identifier"
+              },
+              "instance": {
+                "$ref": "#/definitions/ModelProviderInstance",
+                "description": "The discovered instance that serves the model."
+              },
+              "model": {
+                "$ref": "#/definitions/DiscoveredModel",
+                "description": "The discovered model to configure."
+              }
+            },
+            "required": [
+              "sessionId",
+              "instance",
+              "model"
+            ],
+            "additionalProperties": false,
+            "description": "A discovered instance and one of its models to translate into provider configuration. Pass back the instance and model as returned by `session.providers.discover` and `session.providers.models.list`.",
+            "title": "ModelProviderPrepareConfigurationRequest",
+            "stability": "experimental"
+          },
+          "result": {
+            "$ref": "#/definitions/ModelProviderConfigurationPlan",
+            "description": "Provider configuration prepared from a discovered model. Preparing a plan changes nothing: it neither registers the model with the session nor writes durable configuration. To apply it, pass `provider` and `model` to `session.provider.add`, omitting whichever the dispositions report as already configured."
+          },
+          "stability": "experimental"
+        }
+      }
+    },
     "suspend": {
       "rpcMethod": "session.suspend",
       "description": "Suspends the session while preserving persisted state for later resume.",
@@ -4728,7 +4981,7 @@
       },
       "reload": {
         "rpcMethod": "session.instructions.reload",
-        "description": "Invalidates cached custom-instruction discovery so subsequent turns and source reads observe instruction files currently on disk.",
+        "description": "For local sessions, invalidates instruction discovery and the model-facing prompt, then returns freshly discovered sources. The updated prompt takes effect on the next turn. Remote sessions must reload on their agent host instead.",
         "params": {
           "type": "object",
           "properties": {
@@ -4744,7 +4997,8 @@
           "description": "Identifies the target session."
         },
         "result": {
-          "type": "null"
+          "$ref": "#/definitions/InstructionsGetSourcesResult",
+          "description": "Instruction sources loaded for the session, in merge order."
         },
         "stability": "experimental"
       }
@@ -4752,7 +5006,7 @@
     "customizations": {
       "reload": {
         "rpcMethod": "session.customizations.reload",
-        "description": "Reloads all repository and user customizations for the active session: instructions, plugins and their MCP servers and hooks, custom agents, extensions, and skills. Returns diagnostics from the final skill reload.",
+        "description": "For local sessions, reconciles repository context and discovered instructions, plugins, skills, agents, hooks, MCP servers, and extensions after files appear or change under the working directory. Independent component failures are returned in outcomes and errors; a rejected call can have partially applied earlier steps. Remote sessions must reload on their agent host instead. The model-facing context is rebuilt on the next turn.",
         "params": {
           "type": "object",
           "properties": {
@@ -4768,8 +5022,8 @@
           "description": "Identifies the target session."
         },
         "result": {
-          "$ref": "#/definitions/SkillsLoadDiagnostics",
-          "description": "Diagnostics from reloading skill definitions, with warnings and errors as separate lists."
+          "$ref": "#/definitions/CustomizationsReloadResult",
+          "description": "Results of reloading discovered session customizations. Inspect outcomes for reloaded, skipped, or failed subsystems; a rejection may follow partial mutation. Changes to the model-facing prompt and tools apply on the next turn."
         },
         "stability": "experimental"
       }
@@ -5570,7 +5824,7 @@
     "mcp": {
       "list": {
         "rpcMethod": "session.mcp.list",
-        "description": "Lists MCP servers configured for the session, their connection status, and host-level state. The host-level state (disabled/filtered servers, failed/needs-auth/pending connections, mcp3p policy, full config) is empty/zero when no MCP host has been initialized for the session.",
+        "description": "Lists materialized MCP servers and their connection status. Cache misses may start and wait for MCP servers.",
         "params": {
           "type": "object",
           "properties": {
@@ -5588,6 +5842,29 @@
         "result": {
           "$ref": "#/definitions/McpServerList",
           "description": "MCP servers configured for the session, with their connection status and host-level state."
+        },
+        "stability": "experimental"
+      },
+      "listConfigured": {
+        "rpcMethod": "session.mcp.listConfigured",
+        "description": "Lists effective MCP configuration without starting, restarting, authenticating, or waiting for servers. An optional live observation is from an already materialized matching server; this is not a readiness guarantee.",
+        "params": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "description": "Target session identifier"
+            }
+          },
+          "required": [
+            "sessionId"
+          ],
+          "additionalProperties": false,
+          "description": "Identifies the target session."
+        },
+        "result": {
+          "$ref": "#/definitions/McpConfiguredServerList",
+          "description": "Effective MCP configuration with optional live observations from matching already materialized servers."
         },
         "stability": "experimental"
       },
@@ -6331,6 +6608,11 @@
                 "$ref": "#/definitions/McpOauthLoginGrantType",
                 "description": "Optional OAuth grant type override for this login. Defaults to the server configuration, or authorization_code when no grant type is specified."
               },
+              "redirectUri": {
+                "type": "string",
+                "format": "uri",
+                "description": "Optional externally visible HTTPS redirect URI for a host-managed callback endpoint. When supplied, the runtime still owns discovery, PKCE, token exchange, persistence, and reconnect, but does not bind a loopback listener or terminate HTTPS. The URI must not contain query parameters or a fragment and must be registered for the selected CIMD, DCR, or static OAuth client."
+              },
               "loginId": {
                 "type": "string",
                 "description": "Required for owned login. Consumes the exact prepareLogin handle once.\nSet forceReauth and display options during preparation, not consumption."
@@ -6345,7 +6627,7 @@
               "serverName"
             ],
             "additionalProperties": false,
-            "description": "Remote MCP server name and optional overrides controlling reauthentication, OAuth client display name, callback success-page copy, and static OAuth client selection.",
+            "description": "Remote MCP server name and optional overrides controlling reauthentication, OAuth client display name, callback handling, and static OAuth client selection.",
             "title": "McpOauthLoginRequest",
             "stability": "experimental",
             "x-legacy-parameters": [
@@ -6362,6 +6644,42 @@
           "result": {
             "$ref": "#/definitions/McpOauthLoginResult",
             "description": "OAuth authorization URL the caller should open, or empty when cached tokens already authenticated the server."
+          },
+          "stability": "experimental"
+        },
+        "complete": {
+          "rpcMethod": "session.mcp.oauth.complete",
+          "description": "Completes a runtime-managed MCP OAuth login after the authorization server redirects to a host-managed callback URL.",
+          "params": {
+            "type": "object",
+            "properties": {
+              "sessionId": {
+                "type": "string",
+                "description": "Target session identifier"
+              },
+              "authorizationId": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Opaque identifier returned by session.mcp.oauth.login for the pending external callback."
+              },
+              "callbackUrl": {
+                "type": "string",
+                "format": "uri",
+                "description": "Full externally visible HTTPS callback URL received by the host, including the authorization response query parameters. Applications behind a reverse proxy must reconstruct the public URL rather than passing an internal proxy URL."
+              }
+            },
+            "required": [
+              "sessionId",
+              "authorizationId",
+              "callbackUrl"
+            ],
+            "additionalProperties": false,
+            "description": "Host-delivered callback for a runtime-managed MCP OAuth login.",
+            "title": "McpOauthCompleteRequest",
+            "stability": "experimental"
+          },
+          "result": {
+            "type": "null"
           },
           "stability": "experimental"
         },
@@ -6832,6 +7150,89 @@
           },
           "stability": "experimental"
         }
+      },
+      "prompts": {
+        "list": {
+          "rpcMethod": "session.mcp.prompts.list",
+          "description": "Enumerate one page of prompts a connected MCP server exposes (proxies MCP `prompts/list`). Pass `cursor` to continue from a prior result's `nextCursor`.",
+          "params": {
+            "type": "object",
+            "properties": {
+              "sessionId": {
+                "type": "string",
+                "description": "Target session identifier"
+              },
+              "serverName": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00-\\x1f/\\x7f-\\x9f}]+(?:\\/[^\\x00-\\x1f/\\x7f-\\x9f}]+)*$",
+                "description": "Name of the MCP server whose prompts to enumerate"
+              },
+              "cursor": {
+                "type": "string",
+                "description": "Opaque MCP pagination cursor from a prior `nextCursor` value"
+              }
+            },
+            "required": [
+              "sessionId",
+              "serverName"
+            ],
+            "additionalProperties": false,
+            "description": "MCP server whose prompts to enumerate.",
+            "title": "McpPromptsListRequest",
+            "stability": "experimental"
+          },
+          "result": {
+            "$ref": "#/definitions/McpPromptsListResult",
+            "description": "One page of prompts advertised by the named MCP server."
+          },
+          "stability": "experimental"
+        },
+        "get": {
+          "rpcMethod": "session.mcp.prompts.get",
+          "description": "Get a prompt's messages from a connected MCP server (proxies MCP `prompts/get`). Content is preserved as opaque JSON. Does not send messages to the model, execute tools, or fetch referenced resources.",
+          "params": {
+            "type": "object",
+            "properties": {
+              "sessionId": {
+                "type": "string",
+                "description": "Target session identifier"
+              },
+              "serverName": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\x00-\\x1f/\\x7f-\\x9f}]+(?:\\/[^\\x00-\\x1f/\\x7f-\\x9f}]+)*$",
+                "description": "Name of the MCP server hosting the prompt"
+              },
+              "promptName": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The programmatic name of the prompt"
+              },
+              "arguments": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "String-valued arguments to pass to the prompt"
+              }
+            },
+            "required": [
+              "sessionId",
+              "serverName",
+              "promptName"
+            ],
+            "additionalProperties": false,
+            "description": "MCP server, prompt name, and optional string-valued arguments.",
+            "title": "McpPromptsGetRequest",
+            "stability": "experimental"
+          },
+          "result": {
+            "$ref": "#/definitions/McpPromptsGetResult",
+            "description": "Prompt messages returned by the MCP server without sending them to the model."
+          },
+          "stability": "experimental"
+        }
       }
     },
     "diagnostics": {
@@ -6937,6 +7338,29 @@
         "result": {
           "$ref": "#/definitions/ConnectorCapabilities",
           "description": "Feature detection and hard polling limits for the EXPERIMENTAL session connector API."
+        },
+        "stability": "experimental"
+      },
+      "getAccount": {
+        "rpcMethod": "session.connectors.getAccount",
+        "description": "Returns the session account selection, or null.",
+        "params": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "description": "Target session identifier"
+            }
+          },
+          "required": [
+            "sessionId"
+          ],
+          "additionalProperties": false,
+          "description": "Identifies the target session."
+        },
+        "result": {
+          "$ref": "#/definitions/ConnectorSessionAccountResult",
+          "description": "Session account selection, or null."
         },
         "stability": "experimental"
       },
@@ -7196,6 +7620,10 @@
             "refreshCatalog": {
               "type": "boolean",
               "description": "When true, refresh the catalog before reconciling. A disabled Connector API performs no service request."
+            },
+            "forceConnectorName": {
+              "type": "string",
+              "description": "Optional Connector name to reinitialize. Requires the targetedReconcile capability."
             }
           },
           "required": [
@@ -7205,7 +7633,11 @@
           "additionalProperties": false,
           "description": "Requests authoritative Connector-to-MCP reconciliation for the pinned account.",
           "title": "ConnectorReconcileRequest",
-          "stability": "experimental"
+          "stability": "experimental",
+          "x-legacy-parameters": [
+            "accountId",
+            "refreshCatalog"
+          ]
         },
         "result": {
           "$ref": "#/definitions/ConnectorStatus",
@@ -7289,7 +7721,7 @@
         },
         "result": {
           "$ref": "#/definitions/ManagedSettingsResolvedData",
-          "description": "Enterprise managed-settings resolution: the effective managed settings the session applied and which channels contributed, so SDK clients can show users what is enterprise-managed. Fires whenever managed policy is (re)applied — at session start, on resume, and on account switch. This is an ephemeral live snapshot (delivered to subscribers but not persisted to the session event log), because at session start it resolves before `session.start` is emitted. Device values take precedence over server values, then the policy helper, per ordinary key, while permissions compose restrictively across device, server, policy-helper, and SDK-client layers. The account-scoped `getManagedSettings()` API does not include session-local client injection. Marked experimental while the managed-settings surface stabilizes."
+          "description": "Effective enterprise managed settings and contributing channels. Session events report applied policy; sessionless resolve reports an account/device snapshot, and compose reports a non-applying preview of candidate documents. Device values take precedence over server values, then the policy helper, per ordinary key, while permissions compose restrictively. Session-local SDK-client policy is included only in session results. Marked experimental while the managed-settings surface stabilizes."
         },
         "stability": "experimental"
       }
@@ -9075,6 +9507,42 @@
         },
         "stability": "experimental"
       },
+      "handleHumanAskUser": {
+        "rpcMethod": "session.ui.handleHumanAskUser",
+        "description": "Resolves a pending elicitation request after direct interaction in the trusted in-process client. Only an accepted response to the built-in ask_user tool can become trusted human evidence.",
+        "params": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "description": "Target session identifier"
+            },
+            "requestId": {
+              "type": "string",
+              "description": "The unique request ID from the elicitation.requested event"
+            },
+            "result": {
+              "$ref": "#/definitions/UIElicitationResponse",
+              "description": "The elicitation response (accept with form values, decline, or cancel)"
+            }
+          },
+          "required": [
+            "sessionId",
+            "requestId",
+            "result"
+          ],
+          "additionalProperties": false,
+          "description": "Pending elicitation request ID and the user's response (accept/decline/cancel + form values).",
+          "title": "UIHandlePendingElicitationRequest",
+          "stability": "experimental"
+        },
+        "result": {
+          "$ref": "#/definitions/UIElicitationResult",
+          "description": "Indicates whether the elicitation response was accepted; false if it was already resolved by another client."
+        },
+        "stability": "experimental",
+        "visibility": "internal"
+      },
       "handlePendingUserInput": {
         "rpcMethod": "session.ui.handlePendingUserInput",
         "description": "Resolves a pending `user_input.requested` event with the user's response.",
@@ -9109,6 +9577,42 @@
           "description": "Indicates whether the pending UI request was resolved by this call."
         },
         "stability": "experimental"
+      },
+      "handleHumanUserInput": {
+        "rpcMethod": "session.ui.handleHumanUserInput",
+        "description": "Resolves a pending `user_input.requested` event after direct interaction in the trusted in-process client.",
+        "params": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "description": "Target session identifier"
+            },
+            "requestId": {
+              "type": "string",
+              "description": "The unique request ID from the user_input.requested event"
+            },
+            "response": {
+              "$ref": "#/definitions/UIUserInputResponse",
+              "description": "User response for a pending user-input request, with answer text and whether it was typed freeform."
+            }
+          },
+          "required": [
+            "sessionId",
+            "requestId",
+            "response"
+          ],
+          "additionalProperties": false,
+          "description": "Request ID of a pending `user_input.requested` event and the user's response.",
+          "title": "UIHandlePendingUserInputRequest",
+          "stability": "experimental"
+        },
+        "result": {
+          "$ref": "#/definitions/UIHandlePendingResult",
+          "description": "Indicates whether the pending UI request was resolved by this call."
+        },
+        "stability": "experimental",
+        "visibility": "internal"
       },
       "handlePendingSampling": {
         "rpcMethod": "session.ui.handlePendingSampling",
@@ -9248,6 +9752,42 @@
           "description": "Indicates whether the pending UI request was resolved by this call."
         },
         "stability": "experimental"
+      },
+      "handleHumanExitPlanMode": {
+        "rpcMethod": "session.ui.handleHumanExitPlanMode",
+        "description": "Resolves a pending `exit_plan_mode.requested` event after direct interaction in the trusted in-process client.",
+        "params": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "description": "Target session identifier"
+            },
+            "requestId": {
+              "type": "string",
+              "description": "The unique request ID from the exit_plan_mode.requested event"
+            },
+            "response": {
+              "$ref": "#/definitions/UIExitPlanModeResponse",
+              "description": "User response for a pending exit-plan-mode request, with approval state, selected action, auto-approve flag, and feedback."
+            }
+          },
+          "required": [
+            "sessionId",
+            "requestId",
+            "response"
+          ],
+          "additionalProperties": false,
+          "description": "Request ID of a pending `exit_plan_mode.requested` event and the user's response.",
+          "title": "UIHandlePendingExitPlanModeRequest",
+          "stability": "experimental"
+        },
+        "result": {
+          "$ref": "#/definitions/UIHandlePendingResult",
+          "description": "Indicates whether the pending UI request was resolved by this call."
+        },
+        "stability": "experimental",
+        "visibility": "internal"
       },
       "registerDirectAutoModeSwitchHandler": {
         "rpcMethod": "session.ui.registerDirectAutoModeSwitchHandler",
@@ -10469,7 +11009,7 @@
     "shell": {
       "exec": {
         "rpcMethod": "session.shell.exec",
-        "description": "Starts a shell command and streams output through session notifications. The command runs as the leader of its own process group (POSIX) or in a dedicated job object (Windows), so a forced termination — via \"shell.kill\", the request timeout, or session disposal — signals that whole group/job rather than only the direct child. Two gaps are worth planning for: a command that exits on its own does not trigger that teardown, and on POSIX a descendant that moves itself into a new session or process group (for example via \"setsid\") leaves the signalled group, so either can leave a background process running.",
+        "description": "Starts a shell command, returning an RPC error if it cannot be spawned. The command runs as the leader of its own process group (POSIX) or in a dedicated job object (Windows), so a forced termination — via \"shell.kill\", the request timeout, or session disposal — signals that whole group/job rather than only the direct child. Two gaps are worth planning for: a command that exits on its own does not trigger that teardown, and on POSIX a descendant that moves itself into a new session or process group (for example via \"setsid\") leaves the signalled group, so either can leave a background process running.",
         "params": {
           "type": "object",
           "properties": {
@@ -10497,13 +11037,13 @@
             "command"
           ],
           "additionalProperties": false,
-          "description": "Shell command to run, with optional working directory and timeout in milliseconds.",
+          "description": "Shell command to run, with optional working directory and timeout in milliseconds. Spawn failures return an RPC error.",
           "title": "ShellExecRequest",
           "stability": "experimental"
         },
         "result": {
           "$ref": "#/definitions/ShellExecResult",
-          "description": "Identifier of the spawned process, used to correlate streamed output and exit notifications."
+          "description": "Identifier of the spawned shell process, usable with shell.kill while the process is running."
         },
         "stability": "experimental"
       },
@@ -12416,6 +12956,36 @@
         },
         "stability": "experimental"
       },
+      "readFileBytes": {
+        "rpcMethod": "sessionFs.readFileBytes",
+        "description": "Reads binary file content from the client-provided session filesystem.",
+        "params": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "description": "Target session identifier"
+            },
+            "path": {
+              "type": "string",
+              "description": "Path using SessionFs conventions"
+            }
+          },
+          "required": [
+            "sessionId",
+            "path"
+          ],
+          "additionalProperties": false,
+          "description": "Path of the binary file to read from the client-provided session filesystem.",
+          "title": "SessionFsReadFileBytesRequest",
+          "stability": "experimental"
+        },
+        "result": {
+          "$ref": "#/definitions/SessionFsReadFileBytesResult",
+          "description": "File bytes as standard base64, or a filesystem error if the read failed."
+        },
+        "stability": "experimental"
+      },
       "writeFile": {
         "rpcMethod": "sessionFs.writeFile",
         "description": "Writes a file in the client-provided session filesystem.",
@@ -12448,6 +13018,54 @@
           "additionalProperties": false,
           "description": "File path, content to write, and optional mode for the client-provided session filesystem.",
           "title": "SessionFsWriteFileRequest",
+          "stability": "experimental"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "not": {}
+            },
+            {
+              "$ref": "#/definitions/SessionFsError",
+              "description": "Describes a filesystem error."
+            }
+          ],
+          "description": "Describes a filesystem error."
+        },
+        "stability": "experimental"
+      },
+      "writeFileBytes": {
+        "rpcMethod": "sessionFs.writeFileBytes",
+        "description": "Writes binary file content to the client-provided session filesystem.",
+        "params": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "description": "Target session identifier"
+            },
+            "path": {
+              "type": "string",
+              "description": "Path using SessionFs conventions"
+            },
+            "content": {
+              "type": "string",
+              "description": "Exact file bytes encoded as standard base64"
+            },
+            "mode": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Optional POSIX-style mode for newly created files"
+            }
+          },
+          "required": [
+            "sessionId",
+            "path",
+            "content"
+          ],
+          "additionalProperties": false,
+          "description": "File path, standard-base64-encoded bytes to write, and optional mode for the client-provided session filesystem.",
+          "title": "SessionFsWriteFileBytesRequest",
           "stability": "experimental"
         },
         "result": {
@@ -13299,6 +13917,32 @@
       "additionalProperties": false,
       "description": "Authenticated account entry returned by `account.getAllUsers`.",
       "title": "AccountAllUsers"
+    },
+    "AccountAuthInfo": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "account",
+          "description": "Provider-owned account authentication."
+        },
+        "host": {
+          "type": "string",
+          "description": "Host coordinate owned by the account's model provider."
+        },
+        "login": {
+          "type": "string",
+          "description": "Login identifying the provider-owned account."
+        }
+      },
+      "required": [
+        "type",
+        "host",
+        "login"
+      ],
+      "additionalProperties": false,
+      "description": "An interactive account whose model provider owns its credentials. It carries no GitHub credential.",
+      "title": "AccountAuthInfo"
     },
     "AccountGetCurrentAuthResult": {
       "type": "object",
@@ -15320,6 +15964,32 @@
       "description": "Credential-free authentication identity safe to expose to hosts and user interfaces.",
       "title": "AuthIdentity"
     },
+    "AuthIdentityMetadata": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "$ref": "#/definitions/AuthInfoType",
+          "description": "Authentication type."
+        },
+        "host": {
+          "type": "string",
+          "description": "Identity host."
+        },
+        "login": {
+          "type": "string",
+          "description": "User login."
+        }
+      },
+      "required": [
+        "type",
+        "host",
+        "login"
+      ],
+      "additionalProperties": false,
+      "description": "Credential-free identity metadata.",
+      "title": "AuthIdentityMetadata",
+      "stability": "experimental"
+    },
     "AuthInfo": {
       "anyOf": [
         {
@@ -15347,6 +16017,10 @@
           "description": "Authentication-info variant for OAuth user auth, with host and login; the token remains in the runtime secret store."
         },
         {
+          "$ref": "#/definitions/AccountAuthInfo",
+          "description": "An interactive account whose model provider owns its credentials. It carries no GitHub credential."
+        },
+        {
           "$ref": "#/definitions/GhCliAuthInfo",
           "description": "Authentication-info input variant for GitHub CLI credentials, carrying host, login, and the `gh auth token` value."
         },
@@ -15364,6 +16038,7 @@
         "hmac",
         "env",
         "user",
+        "account",
         "gh-cli",
         "api-key",
         "token",
@@ -15376,12 +16051,44 @@
         "hmac": "Authentication provided by a GitHub App HMAC credential.",
         "env": "Authentication resolved from environment-provided credentials.",
         "user": "Authentication from an interactive user sign-in.",
+        "account": "Authentication from a selected provider-owned account, without a GitHub credential.",
         "gh-cli": "Authentication delegated to the GitHub CLI.",
         "api-key": "Authentication from an API key credential.",
         "token": "Authentication from a GitHub token.",
         "token-provider": "Authentication from an SDK GitHub token callback.",
         "copilot-api-token": "Authentication from a Copilot API token."
       }
+    },
+    "AuthLoginAccount": {
+      "type": "object",
+      "properties": {
+        "selectionId": {
+          "type": "string",
+          "description": "Opaque identifier supplied to the next login step to select this account."
+        },
+        "host": {
+          "type": "string",
+          "description": "Host coordinate owned by the selected account's provider."
+        },
+        "login": {
+          "type": "string",
+          "description": "Human-readable login for the account choice."
+        },
+        "kind": {
+          "$ref": "#/definitions/AccountKind",
+          "description": "Provider kind that owns this account choice."
+        }
+      },
+      "required": [
+        "selectionId",
+        "host",
+        "login",
+        "kind"
+      ],
+      "additionalProperties": false,
+      "description": "A credential-free account choice after sign-in.",
+      "title": "AuthLoginAccount",
+      "stability": "experimental"
     },
     "AuthLoginAdvanceRequest": {
       "type": "object",
@@ -15461,7 +16168,7 @@
       "properties": {
         "status": {
           "$ref": "#/definitions/AuthLoginResultStatus",
-          "description": "Terminal disposition of the login."
+          "description": "Current disposition of the login, including pending user decisions."
         },
         "host": {
           "type": "string",
@@ -15471,13 +16178,22 @@
         "login": {
           "type": "string",
           "description": "Login that was signed in, when completed."
+        },
+        "accounts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/AuthLoginAccount",
+            "description": "A credential-free account choice after sign-in."
+          },
+          "description": "Available accounts when sign-in is awaiting account selection, ordered with Microsoft 365 first.",
+          "x-copilot-sdk-append-last": true
         }
       },
       "required": [
         "status"
       ],
       "additionalProperties": false,
-      "description": "Terminal result of an interactive login flow.",
+      "description": "Result of an interactive login flow. Pending consent or account selection is not terminal.",
       "title": "AuthLoginResultDto",
       "stability": "experimental"
     },
@@ -15486,13 +16202,15 @@
       "enum": [
         "completed",
         "needs-plaintext-consent",
+        "needs-account-selection",
         "declined"
       ],
-      "description": "Terminal disposition of a login persistence attempt.",
+      "description": "Disposition of a login attempt, including pending user decisions.",
       "title": "AuthLoginResultStatus",
       "x-enumDescriptions": {
-        "completed": "The credential was persisted and the account is signed in.",
+        "completed": "The credential was persisted and the selected account is signed in.",
         "needs-plaintext-consent": "Persistence needs explicit consent to store the token in plaintext.",
+        "needs-account-selection": "Credentials are saved; select an account using a returned selectionId as advance input to complete sign-in.",
         "declined": "The user declined plaintext persistence."
       },
       "stability": "experimental"
@@ -15570,7 +16288,7 @@
           "properties": {
             "result": {
               "$ref": "#/definitions/AuthLoginResultDto",
-              "description": "The terminal login result."
+              "description": "Login result. When status is needs-plaintext-consent or needs-account-selection, advance with the user's decision to continue."
             },
             "kind": {
               "type": "string",
@@ -19522,6 +20240,16 @@
           "type": "boolean",
           "description": "Whether callers select a host-owned GitHub account through an opaque selection ID rather than supplying a provider token."
         },
+        "sessionAccountSelection": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether getAccount is supported. Absence means false."
+        },
+        "targetedReconcile": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether reconcile accepts forceConnectorName. Absence means false."
+        },
         "maxPollAttempts": {
           "type": "integer",
           "minimum": 0,
@@ -19550,7 +20278,16 @@
       "additionalProperties": false,
       "description": "Feature detection and hard polling limits for the EXPERIMENTAL session connector API.",
       "title": "ConnectorCapabilities",
-      "stability": "experimental"
+      "stability": "experimental",
+      "x-legacy-parameters": [
+        "apiVersion",
+        "availability",
+        "consentContinuation",
+        "opaqueAccountSelection",
+        "maxPollAttempts",
+        "maxPollIntervalMs",
+        "maxDeadlineMs"
+      ]
     },
     "ConnectorCatalogEntry": {
       "type": "object",
@@ -19566,6 +20303,18 @@
         "description": {
           "type": "string",
           "description": "Untrusted service description, when present."
+        },
+        "logo": {
+          "type": "string",
+          "description": "Optional catalog logo."
+        },
+        "tier": {
+          "type": "string",
+          "description": "Optional catalog tier."
+        },
+        "releaseTag": {
+          "type": "string",
+          "description": "Optional catalog release tag."
         },
         "status": {
           "$ref": "#/definitions/ConnectorCatalogStatus",
@@ -19588,7 +20337,14 @@
       "additionalProperties": false,
       "description": "Credential-free Connector catalog entry.",
       "title": "ConnectorCatalogEntry",
-      "stability": "experimental"
+      "stability": "experimental",
+      "x-legacy-parameters": [
+        "name",
+        "displayName",
+        "description",
+        "status",
+        "runtimeServerIds"
+      ]
     },
     "ConnectorCatalogResult": {
       "type": "object",
@@ -19830,6 +20586,10 @@
         "refreshCatalog": {
           "type": "boolean",
           "description": "When true, refresh the catalog before reconciling. A disabled Connector API performs no service request."
+        },
+        "forceConnectorName": {
+          "type": "string",
+          "description": "Optional Connector name to reinitialize. Requires the targetedReconcile capability."
         }
       },
       "required": [
@@ -19838,7 +20598,11 @@
       "additionalProperties": false,
       "description": "Requests authoritative Connector-to-MCP reconciliation for the pinned account.",
       "title": "ConnectorReconcileRequest",
-      "stability": "experimental"
+      "stability": "experimental",
+      "x-legacy-parameters": [
+        "accountId",
+        "refreshCatalog"
+      ]
     },
     "ConnectorRuntimeStatus": {
       "type": "object",
@@ -19864,6 +20628,41 @@
       "additionalProperties": false,
       "description": "Live status of one session-owned MCP projection.",
       "title": "ConnectorRuntimeStatus",
+      "stability": "experimental"
+    },
+    "ConnectorSessionAccount": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string",
+          "description": "Opaque session-scoped account selection ID."
+        },
+        "authInfo": {
+          "$ref": "#/definitions/AuthIdentityMetadata",
+          "description": "Credential-free identity metadata."
+        }
+      },
+      "required": [
+        "accountId",
+        "authInfo"
+      ],
+      "additionalProperties": false,
+      "description": "Session account selection.",
+      "title": "ConnectorSessionAccount",
+      "stability": "experimental"
+    },
+    "ConnectorSessionAccountResult": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ConnectorSessionAccount",
+          "description": "Session account selection."
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Session account selection, or null.",
+      "title": "ConnectorSessionAccountResult",
       "stability": "experimental"
     },
     "ConnectorStatus": {
@@ -20663,6 +21462,10 @@
           "type": "string",
           "description": "Currently active model identifier"
         },
+        "planBaseModelId": {
+          "type": "string",
+          "description": "Captured base model to restore when leaving plan mode. Omitted outside plan mode or when no plan override has captured a base model. Persistent agent model requirements apply to this model rather than the temporary plan model."
+        },
         "reasoningEffort": {
           "type": "string",
           "description": "Reasoning effort level currently applied to the active model, when one is set. Reads `Session.getReasoningEffort()` synchronously after `getSelectedModel()` resolves so the two values are reported as a snapshot."
@@ -20746,6 +21549,108 @@
       "additionalProperties": false,
       "description": "Lightweight metadata for a currently initialized session tool",
       "title": "CurrentToolMetadata"
+    },
+    "CustomizationReloadOutcome": {
+      "type": "object",
+      "properties": {
+        "subsystem": {
+          "$ref": "#/definitions/CustomizationReloadSubsystem",
+          "description": "Component whose reload was attempted or skipped"
+        },
+        "status": {
+          "$ref": "#/definitions/CustomizationReloadStatus",
+          "description": "Whether the component reloaded, was skipped, or failed"
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Reason for a skipped component or description of a failure, when available"
+        }
+      },
+      "required": [
+        "subsystem",
+        "status"
+      ],
+      "additionalProperties": false,
+      "description": "Result of one customization reload component.",
+      "title": "CustomizationReloadOutcome"
+    },
+    "CustomizationReloadStatus": {
+      "type": "string",
+      "enum": [
+        "reloaded",
+        "skipped",
+        "failed"
+      ],
+      "description": "Result of reloading a customization component.",
+      "title": "CustomizationReloadStatus",
+      "x-enumDescriptions": {
+        "reloaded": "The component was refreshed successfully.",
+        "skipped": "The component was not configured, loaded, or eligible for refresh.",
+        "failed": "The component could not be refreshed; other components may still reload."
+      }
+    },
+    "CustomizationReloadSubsystem": {
+      "type": "string",
+      "enum": [
+        "repositoryContext",
+        "instructions",
+        "plugins",
+        "hooks",
+        "skills",
+        "agents",
+        "mcp",
+        "extensions"
+      ],
+      "description": "Component of session customization discovery.",
+      "title": "CustomizationReloadSubsystem",
+      "x-enumDescriptions": {
+        "repositoryContext": "Repository metadata and working-directory context.",
+        "instructions": "Session instructions and their cached dynamic context.",
+        "plugins": "Discovered plugin configuration.",
+        "hooks": "Configured session and plugin hooks.",
+        "skills": "Discovered skills.",
+        "agents": "Discovered custom agents.",
+        "mcp": "Loaded MCP server configuration.",
+        "extensions": "Configured session extensions."
+      }
+    },
+    "CustomizationsReloadResult": {
+      "type": "object",
+      "properties": {
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Warnings from skill discovery"
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Errors from any component that could not be refreshed"
+        },
+        "outcomes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/CustomizationReloadOutcome",
+            "description": "Result of one customization reload component."
+          },
+          "description": "Outcome of each component in reload order; a skipped component was not configured or loaded"
+        }
+      },
+      "required": [
+        "warnings",
+        "errors",
+        "outcomes"
+      ],
+      "additionalProperties": false,
+      "description": "Results of reloading discovered session customizations. Inspect outcomes for reloaded, skipped, or failed subsystems; a rejection may follow partial mutation. Changes to the model-facing prompt and tools apply on the next turn.",
+      "title": "CustomizationsReloadResult"
     },
     "DebugCollectLogsCollectedEntry": {
       "type": "object",
@@ -21569,6 +22474,89 @@
         "memory": "Server is backed by an in-memory runtime implementation."
       }
     },
+    "DiscoveredModel": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Provider-native model identifier."
+        },
+        "name": {
+          "type": "string",
+          "description": "Provider-reported display name."
+        },
+        "provenance": {
+          "$ref": "#/definitions/ModelProviderProvenance",
+          "description": "Attribution for the adapter that produced this model row."
+        },
+        "digest": {
+          "type": "string",
+          "description": "Provider-reported artifact digest."
+        },
+        "modifiedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Provider-reported last-modified timestamp."
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Provider-reported artifact size in bytes."
+        },
+        "details": {
+          "$ref": "#/definitions/ModelArtifactDetails",
+          "description": "Provider-reported model artifact details."
+        },
+        "capabilities": {
+          "$ref": "#/definitions/ModelCapabilities",
+          "description": "Provider-reported model capabilities. Omitted capability fields are unknown; explicit false values are preserved."
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ModelProviderWarning",
+            "description": "A non-fatal provider observation warning."
+          },
+          "description": "Non-fatal warnings encountered while enriching this model."
+        }
+      },
+      "required": [
+        "id",
+        "provenance",
+        "details",
+        "capabilities",
+        "warnings"
+      ],
+      "additionalProperties": false,
+      "description": "A model offered for agent conversations. Missing capability metadata does not disqualify a candidate. Models known to be incompatible, such as embedding-only models, are excluded by the adapter.",
+      "title": "DiscoveredModel",
+      "stability": "experimental"
+    },
+    "DiscoveredModelList": {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "$ref": "#/definitions/ModelProviderOperationOutcome",
+          "description": "Typed operation outcome."
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DiscoveredModel",
+            "description": "A model offered for agent conversations. Missing capability metadata does not disqualify a candidate. Models known to be incompatible, such as embedding-only models, are excluded by the adapter."
+          },
+          "description": "Provider-native models in provider order."
+        }
+      },
+      "required": [
+        "outcome",
+        "models"
+      ],
+      "additionalProperties": false,
+      "description": "Models offered for agent conversations by one provider instance. Adapters exclude known-incompatible models, but retain candidates with unknown capabilities. Listing does not guarantee compatibility.",
+      "title": "DiscoveredModelList",
+      "stability": "experimental"
+    },
     "EmbeddedBlobResourceContents": {
       "type": "object",
       "properties": {
@@ -21652,112 +22640,6 @@
       ],
       "description": "Indicates whether the command was accepted into the local execution queue.",
       "title": "EnqueueCommandResult"
-    },
-    "EntraTokenAcquireRequest": {
-      "type": "object",
-      "properties": {
-        "clientId": {
-          "type": "string",
-          "description": "Public client application id."
-        },
-        "tenantId": {
-          "type": "string",
-          "description": "Tenant id or tenant selector, such as common or organizations."
-        },
-        "redirectUri": {
-          "type": "string",
-          "description": "Broker redirect URI registered for the client. Required: the OneAuth broker validates a non-empty, registered redirect URI for the public client (MSAL broker registration), so this is not a browser-flow vestige and cannot be omitted."
-        },
-        "scopes": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "minItems": 1,
-          "description": "Exact delegated scopes to request."
-        },
-        "interaction": {
-          "$ref": "#/definitions/EntraTokenInteraction",
-          "description": "Whether the broker may show interaction."
-        },
-        "accessTokenToRenew": {
-          "type": "string",
-          "description": "Previously rejected token that OneAuth must bypass during renewal."
-        }
-      },
-      "required": [
-        "clientId",
-        "tenantId",
-        "redirectUri",
-        "scopes",
-        "interaction"
-      ],
-      "additionalProperties": false,
-      "description": "OneAuth token request supplied by a trusted host application.",
-      "title": "EntraTokenAcquireRequest",
-      "stability": "experimental"
-    },
-    "EntraTokenAcquireResult": {
-      "anyOf": [
-        {
-          "type": "object",
-          "properties": {
-            "accessToken": {
-              "type": "string",
-              "description": "Opaque access token."
-            },
-            "expiresOnTimestamp": {
-              "type": "number",
-              "description": "Expiry as milliseconds since Unix epoch, when supplied by OneAuth."
-            },
-            "accountId": {
-              "type": "string",
-              "description": "Opaque OneAuth account id, when supplied by the broker."
-            },
-            "status": {
-              "type": "string",
-              "const": "ok",
-              "description": "OneAuth token acquisition outcome discriminator."
-            }
-          },
-          "required": [
-            "status",
-            "accessToken"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "status": {
-              "type": "string",
-              "const": "interaction-required",
-              "description": "OneAuth token acquisition outcome discriminator."
-            }
-          },
-          "required": [
-            "status"
-          ]
-        }
-      ],
-      "description": "Result of a OneAuth token acquisition.",
-      "title": "EntraTokenAcquireResult",
-      "stability": "experimental"
-    },
-    "EntraTokenInteraction": {
-      "type": "string",
-      "enum": [
-        "silent",
-        "interactive",
-        "force-interactive"
-      ],
-      "description": "How far OneAuth may go to acquire the requested token.",
-      "title": "EntraTokenInteraction",
-      "x-enumDescriptions": {
-        "silent": "Acquire the token without any user interaction, failing if interaction would be required.",
-        "interactive": "Allow interactive acquisition, prompting the user only when a cached or silent token is unavailable.",
-        "force-interactive": "Always prompt interactively, bypassing any cached or silently-refreshable token."
-      },
-      "stability": "experimental"
     },
     "EnvAuthInfo": {
       "type": "object",
@@ -25629,6 +26511,202 @@
       "description": "Non-secret host-managed HTTP MCP server configuration. The containing map key is the stable managed identity; credentials are supplied dynamically by the host.",
       "title": "ManagedMcpServerConfig"
     },
+    "ManagedSettingMeta": {
+      "type": "object",
+      "properties": {
+        "overridable": {
+          "type": "boolean",
+          "description": "Whether users and repositories may choose a different value. `false` means policy locks the value."
+        },
+        "source": {
+          "type": "string",
+          "description": "Channel that supplied this scalar value, matching a `layers[].source`: `device`, `server`, or `policyHelper`. These scalar defaults select one winning channel, not a mixed source. Treat unknown values as additional channels; more may be added."
+        }
+      },
+      "required": [
+        "overridable",
+        "source"
+      ],
+      "additionalProperties": false,
+      "description": "Lock state and provenance of one managed setting.",
+      "title": "ManagedSettingMeta",
+      "stability": "experimental"
+    },
+    "ManagedSettingsChannel": {
+      "type": "string",
+      "enum": [
+        "device",
+        "server",
+        "policyHelper"
+      ],
+      "description": "A channel accepted by managedSettings.compose.",
+      "title": "ManagedSettingsChannel",
+      "x-enumDescriptions": {
+        "device": "Device policy, the strongest channel.",
+        "server": "Account or organization policy.",
+        "policyHelper": "Session-local helper output, the weakest channel."
+      },
+      "stability": "experimental"
+    },
+    "ManagedSettingsComposeLayer": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/definitions/ManagedSettingsChannel",
+          "description": "The channel whose candidate document is being supplied."
+        },
+        "settings": {
+          "description": "Candidate managed-settings document. Omit when the channel delivered none, as in resolve output.",
+          "x-opaque-json": true
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "additionalProperties": false,
+      "description": "One candidate channel; absent settings represents a channel that delivered no document.",
+      "title": "ManagedSettingsComposeLayer",
+      "stability": "experimental"
+    },
+    "ManagedSettingsComposeRequest": {
+      "type": "object",
+      "properties": {
+        "layers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ManagedSettingsComposeLayer",
+            "description": "One candidate channel; absent settings represents a channel that delivered no document."
+          },
+          "description": "One entry per channel. `source` must be `device`, `server`, or `policyHelper`, each at most once (checked at runtime); order does not matter, because channel precedence is fixed. To preview documents from resolve output, map recognized source strings to ManagedSettingsChannel and copy their settings; generated resolve and compose layer types are distinct. Omitted settings means this channel delivered no document. Supplied documents must be valid within the preview limits; warnings are returned in diagnostics. Compose does not reproduce source-failure state or retained enforcement floors from resolve."
+        }
+      },
+      "required": [
+        "layers"
+      ],
+      "additionalProperties": false,
+      "description": "Candidate managed-settings documents to merge without applying them.",
+      "title": "ManagedSettingsComposeRequest",
+      "stability": "experimental"
+    },
+    "ManagedSettingsComposeResult": {
+      "type": "object",
+      "properties": {
+        "resolved": {
+          "$ref": "#/definitions/ManagedSettingsResolvedData",
+          "description": "Effective managed settings, in the same shape as `session.managedSettings.get`."
+        },
+        "values": {
+          "$ref": "#/definitions/ManagedSettingsValues",
+          "description": "Typed effective values, as in `managedSettings.resolve`."
+        },
+        "meta": {
+          "$ref": "#/definitions/ManagedSettingsMeta",
+          "description": "Per-key lock state and provenance for `values`."
+        },
+        "layers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ManagedSettingsLayer",
+            "description": "One managed-settings channel and the document it delivered."
+          },
+          "description": "Only the supplied channels, strongest first, with canonical documents. Empty canonical documents are represented as absent settings, as in live resolution."
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ManagedSettingsDiagnostic",
+            "description": "One validation finding for a managed-settings document."
+          },
+          "description": "Warnings about ignored content, with paths prefixed by the channel name."
+        }
+      },
+      "required": [
+        "resolved",
+        "layers",
+        "diagnostics"
+      ],
+      "additionalProperties": false,
+      "description": "The effective managed settings the runtime would enforce for the given documents, in the same shape `managedSettings.resolve` returns.",
+      "title": "ManagedSettingsComposeResult",
+      "stability": "experimental"
+    },
+    "ManagedSettingsDiagnostic": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Dot-separated path of the offending setting, such as `autoTier.overridable`. Empty for the document as a whole."
+        },
+        "severity": {
+          "$ref": "#/definitions/ManagedSettingsDiagnosticSeverity",
+          "description": "Whether the finding rejects the document."
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable description of the finding."
+        }
+      },
+      "required": [
+        "path",
+        "severity",
+        "message"
+      ],
+      "additionalProperties": false,
+      "description": "One validation finding for a managed-settings document.",
+      "title": "ManagedSettingsDiagnostic",
+      "stability": "experimental"
+    },
+    "ManagedSettingsDiagnosticSeverity": {
+      "type": "string",
+      "enum": [
+        "error",
+        "warning"
+      ],
+      "description": "Severity of a managed-settings validation finding.",
+      "title": "ManagedSettingsDiagnosticSeverity",
+      "x-enumDescriptions": {
+        "error": "The runtime rejects the document.",
+        "warning": "The runtime accepts the document but ignores the flagged content."
+      },
+      "stability": "experimental"
+    },
+    "ManagedSettingsLayer": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "Channel identifier: `device` (MDM, plist, registry, or managed file), `server` (account or organization policy), or `policyHelper` (session-local helper output, supported by compose). Treat unknown output values as additional channels; more may be added."
+        },
+        "settings": {
+          "description": "Validated managed-settings document this channel delivered. Absent when the channel delivered none.",
+          "x-opaque-json": true
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "additionalProperties": false,
+      "description": "One managed-settings channel and the document it delivered.",
+      "title": "ManagedSettingsLayer",
+      "stability": "experimental"
+    },
+    "ManagedSettingsMeta": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "$ref": "#/definitions/ManagedSettingMeta",
+          "description": "Lock state and provenance of `values.model`."
+        },
+        "autoTier": {
+          "$ref": "#/definitions/ManagedSettingMeta",
+          "description": "Lock state and provenance of `values.autoTier`."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Per-key lock state and provenance for `ManagedSettingsValues`, with the same field names. Producers emit each typed key in values and meta together; both outer objects are omitted when no typed key is set.",
+      "title": "ManagedSettingsMeta",
+      "stability": "experimental"
+    },
     "ManagedSettingsReadResult": {
       "type": "object",
       "properties": {
@@ -25705,7 +26783,7 @@
         "managedKeys"
       ],
       "additionalProperties": false,
-      "description": "Enterprise managed-settings resolution: the effective managed settings the session applied and which channels contributed, so SDK clients can show users what is enterprise-managed. Fires whenever managed policy is (re)applied — at session start, on resume, and on account switch. This is an ephemeral live snapshot (delivered to subscribers but not persisted to the session event log), because at session start it resolves before `session.start` is emitted. Device values take precedence over server values, then the policy helper, per ordinary key, while permissions compose restrictively across device, server, policy-helper, and SDK-client layers. The account-scoped `getManagedSettings()` API does not include session-local client injection. Marked experimental while the managed-settings surface stabilizes.",
+      "description": "Effective enterprise managed settings and contributing channels. Session events report applied policy; sessionless resolve reports an account/device snapshot, and compose reports a non-applying preview of candidate documents. Device values take precedence over server values, then the policy helper, per ordinary key, while permissions compose restrictively. Session-local SDK-client policy is included only in session results. Marked experimental while the managed-settings surface stabilizes.",
       "title": "ManagedSettingsResolvedData",
       "stability": "experimental"
     },
@@ -25729,6 +26807,167 @@
         "mixed": "More than one channel contributed. Ordinary keys resolve device over server over policy helper per key, while permissions compose restrictively across all present layers.",
         "none": "No managed policy is in force (no channel contributed)."
       }
+    },
+    "ManagedSettingsResolveRequest": {
+      "anyOf": [
+        {
+          "not": {}
+        },
+        {
+          "type": "object",
+          "properties": {
+            "selectionId": {
+              "type": "string",
+              "description": "Opaque account identifier returned by `account.getAllUsers`. When omitted, the current account is used, or device policy only when no account is signed in."
+            },
+            "gitHubToken": {
+              "type": "string",
+              "description": "GitHub token to resolve instead of the current account. The call fails when the token cannot be resolved."
+            },
+            "clientName": {
+              "type": "string",
+              "description": "Embedding client identity for server policy requests, as in session creation. Omit for the CLI identity."
+            }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "description": "Optional opaque account selection or GitHub token whose managed settings are resolved.",
+      "title": "ManagedSettingsResolveRequest",
+      "stability": "experimental"
+    },
+    "ManagedSettingsResolveResult": {
+      "type": "object",
+      "properties": {
+        "account": {
+          "type": "string",
+          "description": "Printable opaque identity of the account the settings were resolved for, suitable for comparison and storage, not an account selectionId. Absent when no account was available, in which case only device policy is reported."
+        },
+        "resolved": {
+          "$ref": "#/definitions/ManagedSettingsResolvedData",
+          "description": "Effective managed settings from the device and account (server) channels, in the same shape as `session.managedSettings.get`, excluding session-local injection."
+        },
+        "values": {
+          "$ref": "#/definitions/ManagedSettingsValues",
+          "description": "Typed effective values of managed settings, keyed like the managed-settings schema and already resolved across channels, with the `{ \"overridable\": ... }` wrapper removed. Present when policy sets at least one typed key. Keys not typed here are available in `resolved.settings`."
+        },
+        "meta": {
+          "$ref": "#/definitions/ManagedSettingsMeta",
+          "description": "Per-key lock state and provenance for the entries in `values`, using the same key names."
+        },
+        "layers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ManagedSettingsLayer",
+            "description": "One managed-settings channel and the document it delivered."
+          },
+          "description": "Each managed-settings channel consulted, strongest first, with the validated document it delivered before merging. `resolved.settings` is the merged result. More channels may be added over time."
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ManagedSettingsDiagnostic",
+            "description": "One validation finding for a managed-settings document."
+          },
+          "description": "Warnings about unavailable policy sources or a failed refresh served from cache. A cached response is not proof of a successful live fetch; `resolved.failClosed` separately describes enforcement."
+        }
+      },
+      "required": [
+        "resolved",
+        "layers",
+        "diagnostics"
+      ],
+      "additionalProperties": false,
+      "description": "Effective enterprise managed settings for an account, resolved without a session.",
+      "title": "ManagedSettingsResolveResult",
+      "stability": "experimental"
+    },
+    "ManagedSettingsSchemaResult": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "description": "JSON schema (draft 2020-12) with descriptive shared `x-composition` annotations, not a complete runtime composition contract. Model, effortLevel, and contextTier remain coupled; use `managedSettings.compose` for the runtime's effective result.",
+          "x-opaque-json": true
+        },
+        "runtimeVersion": {
+          "type": "string",
+          "description": "Version of the runtime that owns this schema."
+        }
+      },
+      "required": [
+        "schema",
+        "runtimeVersion"
+      ],
+      "additionalProperties": false,
+      "description": "The authoring JSON schema for managed settings recognized by this runtime.",
+      "title": "ManagedSettingsSchemaResult",
+      "stability": "experimental"
+    },
+    "ManagedSettingsValidateRequest": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "description": "The document to validate: a JSON object, or a string containing the document's JSON text. Preview documents are limited to 1 MiB and 64 levels of nesting, a stricter resource limit than delivered-policy parsing; violations are returned as diagnostics.",
+          "x-opaque-json": true
+        },
+        "layer": {
+          "type": "string",
+          "description": "Channel the document is meant for (`device`, `server`, or `policyHelper`). Some keys are only honored in some channels; for example, a `policyHelper` registration is ignored in policy-helper output. When omitted, no channel-specific checks run."
+        }
+      },
+      "required": [
+        "content"
+      ],
+      "additionalProperties": false,
+      "description": "A candidate managed-settings document to validate without applying it.",
+      "title": "ManagedSettingsValidateRequest",
+      "stability": "experimental"
+    },
+    "ManagedSettingsValidateResult": {
+      "type": "object",
+      "properties": {
+        "valid": {
+          "type": "boolean",
+          "description": "Whether the runtime would accept the document within the preview resource limits. Always equals whether `settings` is present. An invalid document is rejected as a whole."
+        },
+        "settings": {
+          "description": "Canonical form of the document the runtime would apply, with unrecognized keys removed. Absent when the document is invalid.",
+          "x-opaque-json": true
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ManagedSettingsDiagnostic",
+            "description": "One validation finding for a managed-settings document."
+          },
+          "description": "Errors that reject the document and warnings about content the runtime ignores."
+        }
+      },
+      "required": [
+        "valid",
+        "diagnostics"
+      ],
+      "additionalProperties": false,
+      "description": "Result of validating a managed-settings document.",
+      "title": "ManagedSettingsValidateResult",
+      "stability": "experimental"
+    },
+    "ManagedSettingsValues": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "Managed default model identifier, as configured. New sessions start with it; it can name a model the account cannot use, so hosts match it against the listed models."
+        },
+        "autoTier": {
+          "$ref": "#/definitions/AutoTier",
+          "description": "Managed Auto routing preference, used when the selected model is `auto`."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Typed effective values of managed settings. Each field mirrors the managed-settings schema key of the same name; more keys are added as they are typed.",
+      "title": "ManagedSettingsValues",
+      "stability": "experimental"
     },
     "MarketplaceAddResult": {
       "type": "object",
@@ -26608,6 +27847,89 @@
       "additionalProperties": false,
       "description": "MCP server name and replacement configuration to write to user configuration.",
       "title": "McpConfigUpdateRequest"
+    },
+    "McpConfiguredServer": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\x00-\\x1f/\\x7f-\\x9f}]+(?:\\/[^\\x00-\\x1f/\\x7f-\\x9f}]+)*$",
+          "description": "Server name (config key)"
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether this configured server is enabled after session configuration and policy filtering."
+        },
+        "source": {
+          "$ref": "#/definitions/McpServerSource",
+          "description": "Configuration provenance: user, workspace, plugin, builtin, or managed."
+        },
+        "sourcePlugin": {
+          "type": "string",
+          "description": "Plugin name that provided this server, when source is plugin."
+        },
+        "sourcePluginVersion": {
+          "type": "string",
+          "description": "Plugin version that provided this server, when source is plugin."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Human-readable display name supplied by configuration."
+        },
+        "live": {
+          "$ref": "#/definitions/McpConfiguredServerState",
+          "description": "Observed state from an already materialized matching server. Omitted when no live graph has this configured server; it never determines configuration enablement."
+        }
+      },
+      "required": [
+        "name",
+        "enabled"
+      ],
+      "additionalProperties": false,
+      "description": "Effective MCP configuration entry. Configuration enablement is distinct from the optional live observation.",
+      "title": "McpConfiguredServer",
+      "stability": "experimental"
+    },
+    "McpConfiguredServerList": {
+      "type": "object",
+      "properties": {
+        "servers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/McpConfiguredServer",
+            "description": "Effective MCP configuration entry. Configuration enablement is distinct from the optional live observation."
+          },
+          "description": "Effective configured MCP servers."
+        }
+      },
+      "required": [
+        "servers"
+      ],
+      "additionalProperties": false,
+      "description": "Effective MCP configuration with optional live observations from matching already materialized servers.",
+      "title": "McpConfiguredServerList",
+      "stability": "experimental"
+    },
+    "McpConfiguredServerState": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "$ref": "#/definitions/McpServerStatus",
+          "description": "Observed connection status. This is not a configuration or readiness guarantee."
+        },
+        "error": {
+          "type": "string",
+          "description": "Observed connection error, when the materialized server failed."
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "additionalProperties": false,
+      "description": "Observational state for a matching already materialized MCP server.",
+      "title": "McpConfiguredServerState",
+      "stability": "experimental"
     },
     "McpConfigureGitHubRequest": {
       "type": "object",
@@ -28210,6 +29532,29 @@
       "additionalProperties": false,
       "description": "Honest terminal cancellation result; persistence or recovery failures remain RPC errors."
     },
+    "McpOauthCompleteRequest": {
+      "type": "object",
+      "properties": {
+        "authorizationId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Opaque identifier returned by session.mcp.oauth.login for the pending external callback."
+        },
+        "callbackUrl": {
+          "type": "string",
+          "format": "uri",
+          "description": "Full externally visible HTTPS callback URL received by the host, including the authorization response query parameters. Applications behind a reverse proxy must reconstruct the public URL rather than passing an internal proxy URL."
+        }
+      },
+      "required": [
+        "authorizationId",
+        "callbackUrl"
+      ],
+      "additionalProperties": false,
+      "description": "Host-delivered callback for a runtime-managed MCP OAuth login.",
+      "title": "McpOauthCompleteRequest",
+      "stability": "experimental"
+    },
     "McpOauthHandlePendingRequest": {
       "type": "object",
       "properties": {
@@ -28296,6 +29641,11 @@
           "$ref": "#/definitions/McpOauthLoginGrantType",
           "description": "Optional OAuth grant type override for this login. Defaults to the server configuration, or authorization_code when no grant type is specified."
         },
+        "redirectUri": {
+          "type": "string",
+          "format": "uri",
+          "description": "Optional externally visible HTTPS redirect URI for a host-managed callback endpoint. When supplied, the runtime still owns discovery, PKCE, token exchange, persistence, and reconnect, but does not bind a loopback listener or terminate HTTPS. The URI must not contain query parameters or a fragment and must be registered for the selected CIMD, DCR, or static OAuth client."
+        },
         "loginId": {
           "type": "string",
           "description": "Required for owned login. Consumes the exact prepareLogin handle once.\nSet forceReauth and display options during preparation, not consumption."
@@ -28309,7 +29659,7 @@
         "serverName"
       ],
       "additionalProperties": false,
-      "description": "Remote MCP server name and optional overrides controlling reauthentication, OAuth client display name, callback success-page copy, and static OAuth client selection.",
+      "description": "Remote MCP server name and optional overrides controlling reauthentication, OAuth client display name, callback handling, and static OAuth client selection.",
       "title": "McpOauthLoginRequest",
       "stability": "experimental",
       "x-legacy-parameters": [
@@ -28337,7 +29687,11 @@
         "authorizationUrl": {
           "type": "string",
           "format": "uri",
-          "description": "URL the caller should open in a browser to complete OAuth. Omitted when cached tokens were still valid and no browser interaction was needed — the server is already reconnected in that case. When present, the runtime starts the callback listener before returning and continues the flow in the background; completion is signaled via session.mcp_server_status_changed."
+          "description": "URL the caller should open in a browser to complete OAuth. Omitted when cached tokens were still valid and no browser interaction was needed — the server is already reconnected in that case. For the default loopback flow, the runtime starts its listener before returning. With redirectUri, the host receives the callback and completes it through session.mcp.oauth.complete. The runtime continues the flow in the background and signals completion via session.mcp_server_status_changed."
+        },
+        "authorizationId": {
+          "type": "string",
+          "description": "Opaque authorization identifier returned only for a host-managed redirect URI. The runtime also sends it as the OAuth state value, so the callback endpoint can read state and pass it with the full callback URL to session.mcp.oauth.complete."
         }
       },
       "additionalProperties": false,
@@ -29550,6 +30904,307 @@
       "additionalProperties": false,
       "description": "Side-effect-free preparation of one original bound remote MCP choice.",
       "title": "McpPrepareInstallRequest"
+    },
+    "McpPrompt": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The programmatic name of the prompt"
+        },
+        "title": {
+          "type": "string",
+          "description": "Human-readable display title"
+        },
+        "description": {
+          "type": "string",
+          "description": "Description of what this prompt provides"
+        },
+        "arguments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/McpPromptArgument",
+            "description": "An argument accepted by an MCP prompt."
+          },
+          "description": "Arguments accepted by the prompt"
+        },
+        "icons": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/McpPromptIcon",
+            "description": "An MCP prompt icon with standard size hints and preserved non-standard fields."
+          },
+          "description": "Icons associated with this prompt"
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": {
+            "x-opaque-json": true
+          },
+          "description": "Prompt-level metadata"
+        },
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": {
+            "x-opaque-json": true
+          },
+          "description": "Server-provided non-standard descriptor fields"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "description": "An MCP prompt descriptor. Server-provided non-standard fields are exposed under `additionalProperties`.",
+      "title": "McpPrompt"
+    },
+    "McpPromptArgument": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name of the argument"
+        },
+        "description": {
+          "type": "string",
+          "description": "Description of the argument"
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Whether the argument is required; omission is distinct from false"
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": {
+            "x-opaque-json": true
+          },
+          "description": "Argument-level metadata"
+        },
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": {
+            "x-opaque-json": true
+          },
+          "description": "Server-provided non-standard argument fields"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "description": "An argument accepted by an MCP prompt.",
+      "title": "McpPromptArgument"
+    },
+    "McpPromptIcon": {
+      "type": "object",
+      "properties": {
+        "src": {
+          "type": "string",
+          "description": "Icon URI"
+        },
+        "mimeType": {
+          "type": "string",
+          "description": "Icon MIME type, when known"
+        },
+        "sizes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Icon sizes, such as `48x48` or `any`"
+        },
+        "theme": {
+          "type": "string",
+          "description": "Theme hint for this icon"
+        },
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": {
+            "x-opaque-json": true
+          },
+          "description": "Server-provided non-standard icon fields"
+        }
+      },
+      "required": [
+        "src"
+      ],
+      "additionalProperties": false,
+      "description": "An MCP prompt icon with standard size hints and preserved non-standard fields.",
+      "title": "McpPromptIcon"
+    },
+    "McpPromptMessage": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "$ref": "#/definitions/McpPromptRole",
+          "description": "The role of the message sender"
+        },
+        "content": {
+          "description": "The original MCP content block, including nested metadata and unfamiliar content types",
+          "x-opaque-json": true
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": {
+            "x-opaque-json": true
+          },
+          "description": "Message-level metadata"
+        },
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": {
+            "x-opaque-json": true
+          },
+          "description": "Server-provided non-standard message fields"
+        }
+      },
+      "required": [
+        "role",
+        "content"
+      ],
+      "additionalProperties": false,
+      "description": "An MCP prompt message with opaque JSON content preserved without flattening or content-type filtering.",
+      "title": "McpPromptMessage"
+    },
+    "McpPromptRole": {
+      "type": "string",
+      "enum": [
+        "user",
+        "assistant"
+      ],
+      "description": "The sender role of an MCP prompt message.",
+      "title": "McpPromptRole",
+      "x-enumDescriptions": {
+        "user": "A message from the user.",
+        "assistant": "A message from the assistant."
+      }
+    },
+    "McpPromptsGetRequest": {
+      "type": "object",
+      "properties": {
+        "serverName": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\x00-\\x1f/\\x7f-\\x9f}]+(?:\\/[^\\x00-\\x1f/\\x7f-\\x9f}]+)*$",
+          "description": "Name of the MCP server hosting the prompt"
+        },
+        "promptName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The programmatic name of the prompt"
+        },
+        "arguments": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "String-valued arguments to pass to the prompt"
+        }
+      },
+      "required": [
+        "serverName",
+        "promptName"
+      ],
+      "additionalProperties": false,
+      "description": "MCP server, prompt name, and optional string-valued arguments.",
+      "title": "McpPromptsGetRequest",
+      "stability": "experimental"
+    },
+    "McpPromptsGetResult": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Description of the prompt"
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/McpPromptMessage",
+            "description": "An MCP prompt message with opaque JSON content preserved without flattening or content-type filtering."
+          },
+          "description": "Ordered prompt messages"
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": {
+            "x-opaque-json": true
+          },
+          "description": "MCP result metadata"
+        },
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": {
+            "x-opaque-json": true
+          },
+          "description": "Server-provided non-standard result fields"
+        }
+      },
+      "required": [
+        "messages"
+      ],
+      "additionalProperties": false,
+      "description": "Prompt messages returned by the MCP server without sending them to the model.",
+      "title": "McpPromptsGetResult"
+    },
+    "McpPromptsListRequest": {
+      "type": "object",
+      "properties": {
+        "serverName": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\x00-\\x1f/\\x7f-\\x9f}]+(?:\\/[^\\x00-\\x1f/\\x7f-\\x9f}]+)*$",
+          "description": "Name of the MCP server whose prompts to enumerate"
+        },
+        "cursor": {
+          "type": "string",
+          "description": "Opaque MCP pagination cursor from a prior `nextCursor` value"
+        }
+      },
+      "required": [
+        "serverName"
+      ],
+      "additionalProperties": false,
+      "description": "MCP server whose prompts to enumerate.",
+      "title": "McpPromptsListRequest",
+      "stability": "experimental"
+    },
+    "McpPromptsListResult": {
+      "type": "object",
+      "properties": {
+        "prompts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/McpPrompt",
+            "description": "An MCP prompt descriptor. Server-provided non-standard fields are exposed under `additionalProperties`."
+          },
+          "description": "Prompts advertised by the server"
+        },
+        "nextCursor": {
+          "type": "string",
+          "description": "Opaque cursor for the next page, if the server has more prompts"
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": {
+            "x-opaque-json": true
+          },
+          "description": "MCP result metadata"
+        },
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": {
+            "x-opaque-json": true
+          },
+          "description": "Server-provided non-standard result fields"
+        }
+      },
+      "required": [
+        "prompts"
+      ],
+      "additionalProperties": false,
+      "description": "One page of prompts advertised by the named MCP server.",
+      "title": "McpPromptsListResult"
     },
     "McpRegisterExternalClientRequest": {
       "type": "object",
@@ -31805,6 +33460,46 @@
       "title": "ModelApplyStartupOverlayRequest",
       "stability": "experimental"
     },
+    "ModelArtifactDetails": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": "string",
+          "description": "Artifact format, such as `gguf`."
+        },
+        "family": {
+          "type": "string",
+          "description": "Primary model family."
+        },
+        "families": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Provider-reported model families."
+        },
+        "parameterSize": {
+          "type": "string",
+          "description": "Provider-reported parameter count label."
+        },
+        "quantization": {
+          "type": "string",
+          "description": "Provider-reported quantization label."
+        },
+        "architecture": {
+          "type": "string",
+          "description": "Provider-reported model architecture."
+        },
+        "tokenizer": {
+          "type": "string",
+          "description": "Provider-reported tokenizer."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Provider-reported model artifact metadata.",
+      "title": "ModelArtifactDetails",
+      "stability": "experimental"
+    },
     "ModelBilling": {
       "type": "object",
       "properties": {
@@ -32134,6 +33829,10 @@
     "ModelCapabilitiesSupports": {
       "type": "object",
       "properties": {
+        "thinking": {
+          "type": "boolean",
+          "description": "Whether the model supports provider-native thinking. Independent of configurable reasoning effort; omission means unknown."
+        },
         "vision": {
           "type": "boolean",
           "description": "Whether this model supports vision/image input"
@@ -32361,6 +34060,219 @@
         "unconfigured": "No explicit policy is configured for the model."
       }
     },
+    "ModelProviderAdapterCatalog": {
+      "type": "object",
+      "properties": {
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ModelProviderAdapterDescriptor",
+            "description": "A normalized model-provider adapter in the session's effective catalog."
+          },
+          "description": "Available provider adapters ordered by adapterId."
+        }
+      },
+      "required": [
+        "providers"
+      ],
+      "additionalProperties": false,
+      "description": "Normalized model-provider adapter definitions available to the session, not discovered instances.",
+      "title": "ModelProviderAdapterCatalog",
+      "stability": "experimental"
+    },
+    "ModelProviderAdapterDescriptor": {
+      "type": "object",
+      "properties": {
+        "adapterId": {
+          "type": "string",
+          "description": "Stable opaque identity for routing to this adapter. Unique in the effective catalog, independent of live registration generations."
+        },
+        "providerKind": {
+          "type": "string",
+          "description": "Descriptive provider family, such as `ollama`. Different adapters may have the same family; use adapterId for routing."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Human-readable provider name."
+        },
+        "provenance": {
+          "$ref": "#/definitions/ModelProviderAttribution",
+          "description": "Attribution for the adapter itself."
+        },
+        "automaticDiscovery": {
+          "$ref": "#/definitions/ModelProviderAutomaticDiscoveryPolicy",
+          "description": "Adapter-declared policy for passive and automatic discovery."
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ModelProviderAdapterOperationDescriptor",
+            "description": "An operation supported by a model-provider adapter."
+          },
+          "description": "Operations supported by this provider adapter."
+        }
+      },
+      "required": [
+        "adapterId",
+        "providerKind",
+        "displayName",
+        "provenance",
+        "automaticDiscovery",
+        "operations"
+      ],
+      "additionalProperties": false,
+      "description": "A normalized model-provider adapter in the session's effective catalog.",
+      "title": "ModelProviderAdapterDescriptor",
+      "stability": "experimental"
+    },
+    "ModelProviderAdapterOperationDescriptor": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Supported operation name: `discover`, `getStatus`, or `models.list`. Unknown names and duplicate declarations are rejected."
+        },
+        "inputSchema": {
+          "description": "Optional self-contained JSON Schema Draft 7 for non-null discovery input. Only supported on discover. No external references are resolved. Omitted or null input selects defaults when requiresInput is false. Without a schema, the adapter validates supplied input.",
+          "x-opaque-json": true
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "description": "An operation supported by a model-provider adapter.",
+      "title": "ModelProviderAdapterOperationDescriptor",
+      "stability": "experimental"
+    },
+    "ModelProviderAttribution": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/definitions/ModelProviderProvenanceSource",
+          "description": "Kind of component that supplied the adapter. Attribution does not confer authority."
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Stable contributor identifier. Required and nonblank for extension and custom sources; optional for built-in and configured sources. Does not grant authority."
+        },
+        "ownerDisplayName": {
+          "type": "string",
+          "description": "Human-readable contributor name, not the adapter display name."
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "additionalProperties": false,
+      "description": "Contributor attribution, independent of routing identity and authorization.",
+      "title": "ModelProviderAttribution",
+      "stability": "experimental"
+    },
+    "ModelProviderAutomaticDiscoveryMode": {
+      "type": "string",
+      "enum": [
+        "automatic",
+        "configuredOnly",
+        "explicit"
+      ],
+      "description": "When the runtime may run an adapter without an explicit user action.",
+      "title": "ModelProviderAutomaticDiscoveryMode",
+      "x-enumDescriptions": {
+        "automatic": "The adapter declares that automatic discovery is safe when the other policy fields are satisfied.",
+        "configuredOnly": "The adapter may refresh instances the user already configured, but must not scan for new instances automatically.",
+        "explicit": "The adapter must run only after an explicit user action."
+      }
+    },
+    "ModelProviderAutomaticDiscoveryPolicy": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "$ref": "#/definitions/ModelProviderAutomaticDiscoveryMode",
+          "description": "Whether automatic discovery is allowed, limited to configured providers, or explicit-only."
+        },
+        "networkScope": {
+          "$ref": "#/definitions/ModelProviderDiscoveryNetworkScope",
+          "description": "Maximum network scope used by this adapter during discovery."
+        },
+        "requiresInput": {
+          "type": "boolean",
+          "description": "True when discovery requires non-null caller input. Omission or null is rejected before adapter execution. When false, omitted or null input selects adapter defaults without schema validation."
+        },
+        "requiresTrust": {
+          "type": "boolean",
+          "description": "True when the adapter must be enabled by a trusted owner, such as a trusted extension, before automatic discovery may run."
+        }
+      },
+      "required": [
+        "mode",
+        "networkScope",
+        "requiresInput",
+        "requiresTrust"
+      ],
+      "additionalProperties": false,
+      "description": "Adapter-declared policy that tells clients whether discovery may run automatically.",
+      "title": "ModelProviderAutomaticDiscoveryPolicy",
+      "stability": "experimental"
+    },
+    "ModelProviderConfigurationDisposition": {
+      "type": "string",
+      "enum": [
+        "create",
+        "alreadyConfigured"
+      ],
+      "description": "Whether a planned configuration entry is new or already present in the session registry.",
+      "title": "ModelProviderConfigurationDisposition",
+      "x-enumDescriptions": {
+        "create": "No matching entry is registered; the caller should add the entry.",
+        "alreadyConfigured": "An equivalent entry is already registered; the caller should reuse it rather than adding a duplicate."
+      }
+    },
+    "ModelProviderConfigurationPlan": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "$ref": "#/definitions/NamedProviderConfig",
+          "description": "Provider connection prepared from the instance's inference metadata. Carries no credential; supply one if the endpoint requires it."
+        },
+        "model": {
+          "$ref": "#/definitions/ProviderModelConfig",
+          "description": "Model definition prepared from the discovered model. Capability fields the provider did not report stay omitted rather than being asserted false."
+        },
+        "selectionId": {
+          "type": "string",
+          "description": "Provider-qualified selection id (`provider/id`) to pass to `switchTo` once the plan is applied."
+        },
+        "providerDisposition": {
+          "$ref": "#/definitions/ModelProviderConfigurationDisposition",
+          "description": "Whether `provider` still needs to be registered. When `alreadyConfigured`, a provider with the same endpoint is already registered and `provider` restates it under its existing name; adding it again is rejected as a duplicate."
+        },
+        "modelDisposition": {
+          "$ref": "#/definitions/ModelProviderConfigurationDisposition",
+          "description": "Whether `model` still needs to be registered. When `alreadyConfigured`, `selectionId` is already registered and the caller can select it without adding anything."
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ModelProviderWarning",
+            "description": "A non-fatal provider observation warning."
+          },
+          "description": "Non-fatal warnings carried over from the discovered model, such as capabilities the provider did not report."
+        }
+      },
+      "required": [
+        "provider",
+        "model",
+        "selectionId",
+        "providerDisposition",
+        "modelDisposition",
+        "warnings"
+      ],
+      "additionalProperties": false,
+      "description": "Provider configuration prepared from a discovered model. Preparing a plan changes nothing: it neither registers the model with the session nor writes durable configuration. To apply it, pass `provider` and `model` to `session.provider.add`, omitting whichever the dispositions report as already configured.",
+      "title": "ModelProviderConfigurationPlan",
+      "stability": "experimental"
+    },
     "ModelProviderDescriptor": {
       "type": "object",
       "properties": {
@@ -32393,6 +34305,161 @@
       "title": "ModelProviderDescriptor",
       "stability": "experimental"
     },
+    "ModelProviderDiscoverRequest": {
+      "type": "object",
+      "properties": {
+        "adapterId": {
+          "type": "string",
+          "description": "Opaque adapter identity returned by `session.providers.getCatalog`."
+        },
+        "input": {
+          "description": "Provider-specific JSON input. Omission or null selects adapter defaults unless requiresInput is true. Non-null input is validated against the advertised Draft 7 schema when present; otherwise validation belongs to the adapter.",
+          "x-opaque-json": true
+        }
+      },
+      "required": [
+        "adapterId"
+      ],
+      "additionalProperties": false,
+      "description": "Provider discovery parameters.",
+      "title": "ModelProviderDiscoverRequest",
+      "stability": "experimental"
+    },
+    "ModelProviderDiscoverResult": {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "$ref": "#/definitions/ModelProviderOperationOutcome",
+          "description": "Typed operation outcome. Passive discovery can return `absent` with an empty instance list."
+        },
+        "instances": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ModelProviderInstance",
+            "description": "A normalized model-provider instance discovered by the runtime."
+          },
+          "description": "Discovered provider instances. Empty when passive default discovery finds no reachable provider."
+        }
+      },
+      "required": [
+        "outcome",
+        "instances"
+      ],
+      "additionalProperties": false,
+      "description": "Provider instances found by a discovery operation.",
+      "title": "ModelProviderDiscoverResult",
+      "stability": "experimental"
+    },
+    "ModelProviderDiscoveryNetworkScope": {
+      "type": "string",
+      "enum": [
+        "none",
+        "loopbackOnly",
+        "configuredEndpointOnly",
+        "localNetwork",
+        "internet"
+      ],
+      "description": "Network reach an adapter may use during discovery.",
+      "title": "ModelProviderDiscoveryNetworkScope",
+      "x-enumDescriptions": {
+        "none": "Discovery does not contact a network service.",
+        "loopbackOnly": "Discovery is limited to loopback addresses on the local machine.",
+        "configuredEndpointOnly": "Discovery contacts only endpoints the user already configured.",
+        "localNetwork": "Discovery may scan or contact the local network.",
+        "internet": "Discovery may contact remote internet services."
+      }
+    },
+    "ModelProviderGetStatusRequest": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "$ref": "#/definitions/ModelProviderInstanceReference",
+          "description": "Provider instance reference returned by discovery."
+        }
+      },
+      "required": [
+        "instance"
+      ],
+      "additionalProperties": false,
+      "description": "Provider status request parameters.",
+      "title": "ModelProviderGetStatusRequest",
+      "stability": "experimental"
+    },
+    "ModelProviderInstance": {
+      "type": "object",
+      "properties": {
+        "reference": {
+          "$ref": "#/definitions/ModelProviderInstanceReference",
+          "description": "Self-contained reference for subsequent provider operations."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Human-readable instance name."
+        },
+        "provenance": {
+          "$ref": "#/definitions/ModelProviderProvenance",
+          "description": "Attribution for the adapter that produced this instance."
+        },
+        "inferenceEndpoint": {
+          "type": "string",
+          "format": "uri",
+          "description": "Inference API endpoint when the provider exposes one separately from its management endpoint."
+        },
+        "inferenceType": {
+          "$ref": "#/definitions/ProviderEndpointType",
+          "description": "Provider family to use for inference against this instance."
+        },
+        "inferenceWireApi": {
+          "$ref": "#/definitions/ProviderEndpointWireApi",
+          "description": "Wire API to use for inference against this instance, when required by the provider family."
+        },
+        "inferenceTransport": {
+          "$ref": "#/definitions/ProviderEndpointTransport",
+          "description": "Transport to use for inference against this instance."
+        }
+      },
+      "required": [
+        "reference",
+        "displayName",
+        "provenance"
+      ],
+      "additionalProperties": false,
+      "description": "A normalized model-provider instance discovered by the runtime.",
+      "title": "ModelProviderInstance",
+      "stability": "experimental"
+    },
+    "ModelProviderInstanceReference": {
+      "type": "object",
+      "properties": {
+        "adapterId": {
+          "type": "string",
+          "description": "Stable opaque identity of the adapter that owns this reference. Must be present in the target session's effective catalog."
+        },
+        "providerKind": {
+          "type": "string",
+          "description": "Descriptive provider family. Must match the selected adapter; not a routing key."
+        },
+        "id": {
+          "type": "string",
+          "description": "Stable instance identifier derived by the provider adapter, such as `ollama:{normalizedEndpoint}`."
+        },
+        "managementEndpoint": {
+          "type": "string",
+          "format": "uri",
+          "description": "Absolute provider management URI. The adapter validates normalization, supported schemes, and permission to access it against its bound configuration; a reference does not grant authority."
+        }
+      },
+      "required": [
+        "adapterId",
+        "providerKind",
+        "id",
+        "managementEndpoint"
+      ],
+      "additionalProperties": false,
+      "description": "Serializable reference to a discovered provider instance.",
+      "title": "ModelProviderInstanceReference",
+      "stability": "experimental"
+    },
     "ModelProviderKind": {
       "type": "string",
       "enum": [
@@ -32406,6 +34473,131 @@
         "loki": "Microsoft 365 Copilot (Loki) inference models, spawned by a resolvable Entra-derived Loki account."
       },
       "stability": "experimental"
+    },
+    "ModelProviderModelsListRequest": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "$ref": "#/definitions/ModelProviderInstanceReference",
+          "description": "Provider instance reference returned by discovery."
+        }
+      },
+      "required": [
+        "instance"
+      ],
+      "additionalProperties": false,
+      "description": "Provider model inventory request parameters.",
+      "title": "ModelProviderModelsListRequest",
+      "stability": "experimental"
+    },
+    "ModelProviderOperationOutcome": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/ModelProviderOperationOutcomeCode",
+          "description": "Machine-readable operation outcome."
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable detail for non-success outcomes."
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "additionalProperties": false,
+      "description": "Typed provider-operation outcome. Use the code for control flow and the optional message for display.",
+      "title": "ModelProviderOperationOutcome",
+      "stability": "experimental"
+    },
+    "ModelProviderOperationOutcomeCode": {
+      "type": "string",
+      "enum": [
+        "success",
+        "absent",
+        "unreachable",
+        "failed"
+      ],
+      "description": "Typed outcome for a provider operation.",
+      "title": "ModelProviderOperationOutcomeCode",
+      "x-enumDescriptions": {
+        "success": "The operation completed successfully; an empty inventory is valid.",
+        "absent": "The provider or instance is absent during discovery, status, or model listing. Distinct from a successful empty inventory.",
+        "unreachable": "The provider is configured or expected but could not be reached.",
+        "failed": "The operation failed for a reason other than absence or reachability."
+      }
+    },
+    "ModelProviderPrepareConfigurationRequest": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "$ref": "#/definitions/ModelProviderInstance",
+          "description": "The discovered instance that serves the model."
+        },
+        "model": {
+          "$ref": "#/definitions/DiscoveredModel",
+          "description": "The discovered model to configure."
+        }
+      },
+      "required": [
+        "instance",
+        "model"
+      ],
+      "additionalProperties": false,
+      "description": "A discovered instance and one of its models to translate into provider configuration. Pass back the instance and model as returned by `session.providers.discover` and `session.providers.models.list`.",
+      "title": "ModelProviderPrepareConfigurationRequest",
+      "stability": "experimental"
+    },
+    "ModelProviderProvenance": {
+      "type": "object",
+      "properties": {
+        "adapterId": {
+          "type": "string",
+          "description": "Stable opaque adapter identity from the effective catalog. Treat this as a whole identifier, not a parseable owner or kind."
+        },
+        "providerKind": {
+          "type": "string",
+          "description": "Descriptive provider family that produced this row; not a routing key."
+        },
+        "source": {
+          "$ref": "#/definitions/ModelProviderProvenanceSource",
+          "description": "Kind of component that supplied the adapter."
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Stable contributor identifier when the adapter has an owner outside the runtime. Independent of the contribution mechanism and not a routing key."
+        },
+        "ownerDisplayName": {
+          "type": "string",
+          "description": "Human-readable contributor name, not the adapter display name."
+        }
+      },
+      "required": [
+        "adapterId",
+        "providerKind",
+        "source"
+      ],
+      "additionalProperties": false,
+      "description": "Attribution for the adapter that produced a provider row.",
+      "title": "ModelProviderProvenance",
+      "stability": "experimental"
+    },
+    "ModelProviderProvenanceSource": {
+      "type": "string",
+      "enum": [
+        "builtIn",
+        "configured",
+        "extension",
+        "custom"
+      ],
+      "description": "Kind of component that supplied a provider adapter or row. Attribution does not confer authority.",
+      "title": "ModelProviderProvenanceSource",
+      "x-enumDescriptions": {
+        "builtIn": "Built into the runtime.",
+        "configured": "Derived from existing user configuration.",
+        "extension": "Supplied by an extension.",
+        "custom": "Supplied by another trusted contributor."
+      }
     },
     "ModelProviderRef": {
       "type": "object",
@@ -32431,6 +34623,57 @@
       "additionalProperties": false,
       "description": "A neutral reference to the model provider that produced a model: an opaque id, a human-readable label, and the provider kind. Carried on each enumerated Model so consumers can group by provider without reaching into a provider-shaped internal type.",
       "title": "ModelProviderRef",
+      "stability": "experimental"
+    },
+    "ModelProviderStatus": {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "$ref": "#/definitions/ModelProviderOperationOutcome",
+          "description": "Typed operation outcome."
+        },
+        "instance": {
+          "$ref": "#/definitions/ModelProviderInstance",
+          "description": "Normalized provider instance."
+        },
+        "status": {
+          "type": "string",
+          "description": "Open provider status value, such as `healthy`, `unreachable`, or `notInstalled`."
+        },
+        "version": {
+          "type": "string",
+          "description": "Provider-reported version."
+        }
+      },
+      "required": [
+        "outcome",
+        "instance",
+        "status"
+      ],
+      "additionalProperties": false,
+      "description": "Current health information for a provider instance.",
+      "title": "ModelProviderStatus",
+      "stability": "experimental"
+    },
+    "ModelProviderWarning": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Machine-readable warning code."
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable warning message."
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "additionalProperties": false,
+      "description": "A non-fatal provider observation warning.",
+      "title": "ModelProviderWarning",
       "stability": "experimental"
     },
     "ModelSetAllowedModelsRequest": {
@@ -32981,6 +35224,10 @@
             "type": "string"
           },
           "description": "Additional HTTP headers included with provider requests."
+        },
+        "modelProvider": {
+          "$ref": "#/definitions/ProviderConfigModelProvider",
+          "description": "The product serving the provider's models, reported in telemetry as `model_provider`. Only affects telemetry."
         },
         "hasBearerTokenProvider": {
           "type": "boolean",
@@ -36807,6 +39054,10 @@
           "type": "string",
           "description": "Provider name used for model and telemetry attribution."
         },
+        "modelProvider": {
+          "$ref": "#/definitions/ProviderConfigModelProvider",
+          "description": "The product serving the model, reported in telemetry as `model_provider`. Set it when `type` alone cannot identify the product, such as Ollama or LM Studio behind an OpenAI-compatible endpoint. Only affects telemetry."
+        },
         "wireModel": {
           "type": "string",
           "description": "The model identifier sent to the provider API for inference (the \"wire\" model), as opposed to modelId which is the well-known base."
@@ -36854,6 +39105,29 @@
       "additionalProperties": false,
       "description": "Azure-specific provider options.",
       "title": "ProviderConfigAzure"
+    },
+    "ProviderConfigModelProvider": {
+      "type": "string",
+      "enum": [
+        "openai",
+        "anthropic",
+        "azure_openai",
+        "ollama",
+        "lm_studio",
+        "foundry_local",
+        "llama_cpp"
+      ],
+      "description": "The product serving the model, reported in telemetry as `model_provider`.",
+      "title": "ProviderConfigModelProvider",
+      "x-enumDescriptions": {
+        "openai": "OpenAI API.",
+        "anthropic": "Anthropic API.",
+        "azure_openai": "Azure OpenAI Service.",
+        "ollama": "Ollama.",
+        "lm_studio": "LM Studio.",
+        "foundry_local": "Foundry Local.",
+        "llama_cpp": "llama.cpp server."
+      }
     },
     "ProviderConfigTransport": {
       "type": "string",
@@ -39642,7 +41916,7 @@
       "properties": {
         "name": {
           "$ref": "#/definitions/SandboxHostCapabilityName",
-          "description": "The policy feature, as an extensible string: ignore names you do not recognize. Known values: `network` (sandboxed commands can reach the network; on Linux this needs the tooling for Bubblewrap's private network namespace, such as slirp4netns), `network_filtering` (host rules and the sandbox proxy; on Linux this needs the same tooling as `network`; on Windows it needs Process Security Environment 1.1 host-loopback support, and a policy that uses it must also set `network.allowLocalNetwork`), `denied_paths` (native enforcement of `filesystem.deniedPaths`), and `shell` (shell commands inside the sandbox; on Windows this needs Process Security Environment 1.1 filesystem enumeration support)."
+          "description": "The policy feature, as an extensible string: ignore names you do not recognize. Known values: `network` (sandboxed commands can reach the network; on Linux this needs the tooling for Bubblewrap's private network namespace, such as slirp4netns), `network_filtering` (host rules and the sandbox proxy; on Linux this needs the same tooling as `network`; on Windows it needs Process Security Environment 1.1 host-loopback support, and a policy that uses it must also set `network.allowLocalNetwork`), `denied_paths` (native enforcement of `filesystem.deniedPaths`), `shell` (shell commands inside the sandbox), and `filesystem_enumeration` (enumerate-only filesystem grants; on Windows this needs Process Security Environment 1.1 filesystem enumeration support, and without it sandboxed PowerShell still runs but cannot resolve its current location; other platforms always report it)."
         },
         "supported": {
           "type": "boolean",
@@ -39658,7 +41932,7 @@
         "supported"
       ],
       "additionalProperties": false,
-      "description": "Whether this host can run one sandbox policy feature. A session whose effective policy uses an unsupported feature fails each sandboxed command with `reason`.",
+      "description": "Whether this host can run one sandbox policy feature. A session whose effective policy uses an unsupported feature fails each sandboxed command with `reason`, except `filesystem_enumeration`, whose absence degrades sandboxed PowerShell instead of failing it.",
       "title": "SandboxHostCapability"
     },
     "SandboxHostCapabilityName": {
@@ -39666,7 +41940,7 @@
       "minLength": 1,
       "maxLength": 64,
       "pattern": "^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$",
-      "description": "Extensible identifier of a sandbox policy feature whose availability varies between hosts. A plain string, so an older client decodes a name added by a newer runtime; ignore names you do not recognize. Known values: `network` — sandboxed commands can reach the network (`network.allowOutbound`, on by default); on Linux this needs the tooling for Bubblewrap's private network namespace, such as slirp4netns. `network_filtering` — host rules and the sandbox proxy (`network.allowedHosts`, `network.blockedHosts`, `network.proxy`); on Linux this needs the same tooling as `network`; on Windows it needs a version with Process Security Environment 1.1 host-loopback support, and a policy that uses it must also set `network.allowLocalNetwork`, because Windows reaches the local proxy only together with private-network access. `denied_paths` — native enforcement of `filesystem.deniedPaths`; on Windows this needs a version whose sandbox contract reports denied-path support. `shell` — shell commands inside the sandbox: bash on macOS and Linux, PowerShell on Windows; on Windows this needs a version with Process Security Environment 1.1 filesystem enumeration support.",
+      "description": "Extensible identifier of a sandbox policy feature whose availability varies between hosts. A plain string, so an older client decodes a name added by a newer runtime; ignore names you do not recognize. Known values: `network` — sandboxed commands can reach the network (`network.allowOutbound`, on by default); on Linux this needs the tooling for Bubblewrap's private network namespace, such as slirp4netns. `network_filtering` — host rules and the sandbox proxy (`network.allowedHosts`, `network.blockedHosts`, `network.proxy`); on Linux this needs the same tooling as `network`; on Windows it needs a version with Process Security Environment 1.1 host-loopback support, and a policy that uses it must also set `network.allowLocalNetwork`, because Windows reaches the local proxy only together with private-network access. `denied_paths` — native enforcement of `filesystem.deniedPaths`; on Windows this needs a version whose sandbox contract reports denied-path support. `shell` — shell commands inside the sandbox: bash on macOS and Linux, PowerShell on Windows. `filesystem_enumeration` — enumerate-only filesystem grants, which PowerShell's drive roots use on Windows; this needs a version with Process Security Environment 1.1 filesystem enumeration support. Without it, sandboxed PowerShell still runs, but `Get-Location` may report the drive root, `Set-Location` may fail, and relative paths may resolve against the drive root; the session also receives a `session.warning` with `warningType` `sandbox`. Other platforms always report it.",
       "title": "SandboxHostCapabilityName"
     },
     "SandboxHostSupport": {
@@ -39684,7 +41958,7 @@
           "type": "array",
           "items": {
             "$ref": "#/definitions/SandboxHostCapability",
-            "description": "Whether this host can run one sandbox policy feature. A session whose effective policy uses an unsupported feature fails each sandboxed command with `reason`."
+            "description": "Whether this host can run one sandbox policy feature. A session whose effective policy uses an unsupported feature fails each sandboxed command with `reason`, except `filesystem_enumeration`, whose absence degrades sandboxed PowerShell instead of failing it."
           },
           "description": "Sandbox policy features whose availability varies between hosts that can run the backend. Empty when `supported` is false, because no feature can run without a backend. Later runtimes can add entries; ignore an entry whose `name` you do not recognize."
         }
@@ -39714,6 +41988,78 @@
       "additionalProperties": false,
       "description": "Destinations authorized to receive one masked environment credential.",
       "title": "SandboxMaskedEnvVar"
+    },
+    "SandboxProxyCaCreateResult": {
+      "type": "object",
+      "properties": {
+        "certificatePath": {
+          "type": "string",
+          "description": "Absolute path of the public certificate of the certificate authority, in PEM format."
+        }
+      },
+      "required": [
+        "certificatePath"
+      ],
+      "additionalProperties": false,
+      "description": "Result of creating the persistent certificate authority of the sandbox credential proxy.",
+      "title": "SandboxProxyCaCreateResult",
+      "stability": "experimental"
+    },
+    "SandboxProxyCaRequest": {
+      "type": "object",
+      "properties": {
+        "sandboxConfig": {
+          "$ref": "#/definitions/SandboxConfig",
+          "description": "The sandbox configuration that the host gives its sessions. The runtime reads the credential hosts from `auth` and `credentials`; it ignores `enabled` and the other fields."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Identifies the credential hosts that the persistent certificate authority of the sandbox credential proxy must cover. The runtime always adds the hosts from the saved user settings.",
+      "title": "SandboxProxyCaRequest",
+      "stability": "experimental"
+    },
+    "SandboxProxyCaState": {
+      "type": "string",
+      "enum": [
+        "unsupported",
+        "notInstalled",
+        "installed",
+        "error"
+      ],
+      "description": "State of the persistent certificate authority of the sandbox credential proxy.",
+      "title": "SandboxProxyCaState",
+      "x-enumDescriptions": {
+        "unsupported": "This platform has no supported OS trust store. The proxy uses a per-process certificate bundle.",
+        "notInstalled": "OS trust does not include the certificate authority, or none is stored.",
+        "installed": "OS trust includes the stored certificate authority.",
+        "error": "The runtime could not read the certificate authority or the OS trust store."
+      },
+      "stability": "experimental"
+    },
+    "SandboxProxyCaStatus": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "$ref": "#/definitions/SandboxProxyCaState",
+          "description": "The state of the certificate authority."
+        },
+        "detail": {
+          "type": "string",
+          "description": "Human-readable reason for the state. On `installed` or `notInstalled`, present only when the certificate authority must be rotated, and then says why."
+        },
+        "canInstall": {
+          "type": "boolean",
+          "description": "Whether this process can add the certificate authority to OS trust without credentials from a different user. False where OS trust is unsupported, and on Windows when the process cannot elevate itself to write the machine trust store. When false, do not offer to set up the certificate authority."
+        }
+      },
+      "required": [
+        "state",
+        "canInstall"
+      ],
+      "additionalProperties": false,
+      "description": "Status of the persistent certificate authority of the sandbox credential proxy.",
+      "title": "SandboxProxyCaStatus",
+      "stability": "experimental"
     },
     "SandboxSessionChange": {
       "type": "string",
@@ -40998,6 +43344,10 @@
         "message": {
           "type": "string",
           "description": "Free-form detail about the error, for logging/diagnostics"
+        },
+        "writeChanged": {
+          "type": "boolean",
+          "description": "For failed writeFile requests only: true if the provider changed the target before failing. Omit when unknown or unchanged."
         }
       },
       "required": [
@@ -41186,6 +43536,41 @@
       "description": "Entries in the requested directory paired with file/directory type information, or a filesystem error if the read failed.",
       "title": "SessionFsReaddirWithTypesResult"
     },
+    "SessionFsReadFileBytesRequest": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path using SessionFs conventions"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false,
+      "description": "Path of the binary file to read from the client-provided session filesystem.",
+      "title": "SessionFsReadFileBytesRequest",
+      "stability": "experimental"
+    },
+    "SessionFsReadFileBytesResult": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string",
+          "description": "Exact file bytes encoded as standard base64"
+        },
+        "error": {
+          "$ref": "#/definitions/SessionFsError",
+          "description": "Describes a filesystem error."
+        }
+      },
+      "required": [
+        "content"
+      ],
+      "additionalProperties": false,
+      "description": "File bytes as standard base64, or a filesystem error if the read failed.",
+      "title": "SessionFsReadFileBytesResult"
+    },
     "SessionFsReadFileRequest": {
       "type": "object",
       "properties": {
@@ -41272,6 +43657,10 @@
         "sqlite": {
           "type": "boolean",
           "description": "Whether the provider supports SQLite query/exists operations"
+        },
+        "binary": {
+          "type": "boolean",
+          "description": "Whether the provider supports binary reads and writes through sessionFs.readFileBytes and sessionFs.writeFileBytes"
         }
       },
       "additionalProperties": false,
@@ -41601,6 +43990,32 @@
       "additionalProperties": false,
       "description": "Filesystem metadata for the requested path, or a filesystem error if the stat failed.",
       "title": "SessionFsStatResult"
+    },
+    "SessionFsWriteFileBytesRequest": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path using SessionFs conventions"
+        },
+        "content": {
+          "type": "string",
+          "description": "Exact file bytes encoded as standard base64"
+        },
+        "mode": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Optional POSIX-style mode for newly created files"
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ],
+      "additionalProperties": false,
+      "description": "File path, standard-base64-encoded bytes to write, and optional mode for the client-provided session filesystem.",
+      "title": "SessionFsWriteFileBytesRequest",
+      "stability": "experimental"
     },
     "SessionFsWriteFileRequest": {
       "type": "object",
@@ -44963,6 +47378,10 @@
           "description": "Authentication-info variant for OAuth user auth, with host and login; the token remains in the runtime secret store."
         },
         {
+          "$ref": "#/definitions/AccountAuthInfo",
+          "description": "An interactive account whose model provider owns its credentials. It carries no GitHub credential."
+        },
+        {
           "$ref": "#/definitions/GhCliAuthInfo",
           "description": "Authentication-info input variant for GitHub CLI credentials, carrying host, login, and the `gh auth token` value."
         },
@@ -45059,7 +47478,7 @@
         "command"
       ],
       "additionalProperties": false,
-      "description": "Shell command to run, with optional working directory and timeout in milliseconds.",
+      "description": "Shell command to run, with optional working directory and timeout in milliseconds. Spawn failures return an RPC error.",
       "title": "ShellExecRequest",
       "stability": "experimental"
     },
@@ -45068,14 +47487,14 @@
       "properties": {
         "processId": {
           "type": "string",
-          "description": "Unique identifier for tracking streamed output"
+          "description": "Identifier usable with shell.kill while the process is running"
         }
       },
       "required": [
         "processId"
       ],
       "additionalProperties": false,
-      "description": "Identifier of the spawned process, used to correlate streamed output and exit notifications.",
+      "description": "Identifier of the spawned shell process, usable with shell.kill while the process is running.",
       "title": "ShellExecResult"
     },
     "ShellExecuteUserRequestedRequest": {

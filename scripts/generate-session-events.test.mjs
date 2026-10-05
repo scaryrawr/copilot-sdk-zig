@@ -52,12 +52,12 @@ function reachablePayloadDefinitions(value) {
   return seen;
 }
 
-test("the pinned schema renders 154 explicit event tags", () => {
+test("the pinned schema renders 156 explicit event tags", () => {
   const value = schema();
   const { entries } = buildRegistry(value);
   const rendered = renderSessionEvents(value);
 
-  assert.equal(entries.length, 154);
+  assert.equal(entries.length, 156);
   assert.doesNotMatch(rendered, /Schema sha256|Discriminators:|Regenerate with:|Source:/);
   assert.match(rendered, /pub const SessionEvent = union\(enum\)/);
   assert.match(rendered, /mcp_oauth_required: McpOauthRequired/);
@@ -143,6 +143,45 @@ test("unsupported reachable schema constructs fail with their path", () => {
     () => buildRegistry(value),
     /unsupported schema keyword pattern at #\/definitions\/StartData\/properties\/sessionId/,
   );
+});
+
+test("not-required constraints reject simultaneous property presence", () => {
+  const rendered = renderSessionEvents(schema());
+  assert.match(
+    rendered,
+    /if \(object\.contains\("blocks"\) and object\.contains\("orderedBlocks"\)\) return error\.InvalidSessionEvent;/,
+  );
+});
+
+test("unsupported not constraints fail instead of weakening validation", () => {
+  for (const constraint of [
+    {},
+    { required: [] },
+    { required: ["blocks", "blocks"] },
+    { required: ["undeclared"] },
+    { required: ["blocks"], properties: { blocks: { type: "array" } } },
+    { type: "string" },
+  ]) {
+    const value = schema();
+    value.definitions.AssistantMessageReasoningBlocks.not = constraint;
+    assert.throws(
+      () => buildRegistry(value),
+      /unsupported schema constraint not at #\/definitions\/AssistantMessageReasoningBlocks/,
+    );
+  }
+  for (const sibling of [
+    { $ref: "#/definitions/AssistantMessageServerTools" },
+    { anyOf: [{ type: "object" }] },
+    { "x-opaque-json": true },
+    { type: "string" },
+  ]) {
+    const value = schema();
+    Object.assign(value.definitions.AssistantMessageReasoningBlocks, sibling);
+    assert.throws(
+      () => buildRegistry(value),
+      /unsupported schema constraint not at #\/definitions\/AssistantMessageReasoningBlocks/,
+    );
+  }
 });
 
 test("unreachable definitions are not generated or interpreted", () => {

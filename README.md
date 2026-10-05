@@ -530,6 +530,13 @@ and the MCP Apps opt-in. Each lifecycle-specific `.extensions` config exposes
 `canvas_provider` as a sibling of `.common`; resume and join also expose restored
 canvas state. Configuration is validated before a lifecycle RPC.
 
+Subagent hooks use `.hooks.on_subagent_start` to prepend context to a child's
+first prompt and `.hooks.on_subagent_stop` to continue the child or rewrite its
+response to the parent. Their input session metadata identifies the parent.
+The stop handler returns `.allow = .{ .modified_response = ... }` or
+`.block = .{ .reason = ... }`; a block requires a nonempty reason and takes
+precedence over a supplied response rewrite.
+
 MCP OAuth uses the pinned runtime's real flow: set
 `mcp.on_auth_request`, receive `mcp.oauth_required`, and return an allocated
 token or cancellation. Select `.oauth_token_storage = .persistent` to request
@@ -798,6 +805,9 @@ callback context and must keep it valid until the session disconnects or the
 client is deinitialized. A dynamic token takes precedence over a static bearer
 token and an API key. Singular providers always use the callback route
 `"default"`. `provider_name` only supplies provider attribution.
+Both singular and named providers accept `model_provider` (for example,
+`.ollama` or `.lm_studio`) to identify the serving product in telemetry without
+changing the API protocol.
 
 Use `CreateSessionConfig.providers` and `CreateSessionConfig.models` to add
 named provider connections and selectable models. The same fields are
@@ -859,7 +869,7 @@ remains available for source compatibility and delegates to `resumeSession`.
 `ModelCapabilitiesOverride` is a typed deep-partial override: every nested field
 is optional. Null fields are omitted so the runtime keeps its defaults; explicit
 `false` disables a capability. Overrides do not change the model ID or wire model.
-The nested types follow the existing model metadata field names: `ModelSupports`
+The nested types follow the existing model metadata field names: `ModelSupportsOverride`
 has `vision`, `toolCalls`, `reasoningEffort`, and `adaptive_thinking`; `ModelLimitsOverride`
 has `max_prompt_tokens`, `max_output_tokens`, `max_context_window_tokens`, and
 optional `vision`. `ModelVisionLimitsOverride` has optional
@@ -869,6 +879,8 @@ When supplied, `max_prompt_images` must be at least 1. Both session APIs return
 counterparts return the same native error in `Failure`.
 Capability overrides require a runtime that supports `modelCapabilities`; they
 do not add image support to a text-only model.
+The model-list response's `ModelSupports` additionally exposes `thinking`,
+which is not an outbound capability override in the pinned schema.
 
 `hasBearerTokenProvider` is private wire state derived from
 `bearer_token_provider`. Alternate SDK transports and remaining unsupported

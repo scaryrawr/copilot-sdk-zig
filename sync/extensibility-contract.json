@@ -1,5 +1,5 @@
 {
-  "upstreamCommit": "4dc774c91aff609c338563aadc699d5c2dc596f7",
+  "upstreamCommit": "d12079020c434b872705dc8ee68b3bc61d2f72bb",
   "startup": {
     "builtinPluginDirectories": {
       "status": "typed",
@@ -86,7 +86,9 @@
         "onSessionStart": "SessionStartHandler",
         "onSessionEnd": "SessionEndHandler",
         "onErrorOccurred": "ErrorOccurredHandler",
-        "onAgentStop": "AgentStopHandler"
+        "onAgentStop": "AgentStopHandler",
+        "onSubagentStart": "SubagentStartHandler",
+        "onSubagentStop": "SubagentStopHandler"
       }
     },
     "canvasProvider": {
