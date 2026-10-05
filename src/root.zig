@@ -217,6 +217,7 @@ pub const WorkflowProgressPage = workflow.WorkflowProgressPage;
 pub const WorkflowApi = client.WorkflowApi;
 pub const deinitOptionalJsonSlice = workflow.deinitOptionalJsonSlice;
 pub const ProviderConfig = provider.ProviderConfig;
+pub const ModelProvider = provider.ModelProvider;
 pub const Authentication = provider.Authentication;
 pub const Header = provider.Header;
 pub const BearerTokenCallback = provider.BearerTokenCallback;
@@ -305,6 +306,7 @@ test "root declarations compile" {
     _ = BearerTokenProvider;
     _ = ProviderTokenRequest;
     _ = NamedProviderConfig;
+    _ = ModelProvider;
     _ = ProviderModelConfig;
     _ = MessageAttachment;
     _ = WaitOptions;
