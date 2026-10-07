@@ -106,6 +106,7 @@ jobs:
             vendor/copilot \
             src/protocol_version.zig \
             src/session_event_generated.zig \
+            sync/compatibility.json \
             sync/extensibility-contract.json \
             sync/public-rpc-surface.json \
             sync/schema-snapshot.json \

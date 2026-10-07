@@ -39,6 +39,7 @@ import {
 } from "./typescript-contract.mjs";
 import { parseSyncArgs } from "./sync-args.mjs";
 import { verifyWorkflowOptionsSourceContract } from "./workflow-source-contract.mjs";
+import { verifySubagentHooksSourceContract } from "./hook-source-contract.mjs";
 
 const repository = "github/copilot-sdk";
 const ref = "main";
@@ -52,6 +53,7 @@ const zigSessionSource = readFileSync(join(root, "src", "session.zig"), "utf8");
 const zigClientSource = readFileSync(join(root, "src", "client.zig"), "utf8");
 const zigWorkflowSource = readFileSync(join(root, "src", "workflow.zig"), "utf8");
 const zigModelsSource = readFileSync(join(root, "src", "models.zig"), "utf8");
+const zigProviderSource = readFileSync(join(root, "src", "provider.zig"), "utf8");
 const zigRuntimeSource = readFileSync(join(root, "src", "runtime.zig"), "utf8");
 const compatibilityPath = join(root, "sync", "compatibility.json");
 const publicRpcSurfacePath = join(root, "sync", "public-rpc-surface.json");
@@ -837,6 +839,7 @@ function verifyHookContract(contract, typesSource) {
       `SessionHooks.${name} changed from ${handler}`,
     );
   }
+  verifySubagentHooksSourceContract(typesSource);
 }
 
 function verifyExtensibilitySourceContract(
@@ -1944,6 +1947,16 @@ function eventDiscriminators(schema) {
 }
 
 function expectedModelCompatibility(apiSchema) {
+  for (const [schemaName, zigName] of [
+    ["ModelCapabilitiesSupports", "Supports"],
+    ["ModelCapabilitiesOverrideSupports", "SupportsOverride"],
+  ]) {
+    requireExactStrings(
+      Object.keys(zigStructFields(zigModelsSource, zigName)),
+      Object.keys(apiSchema.definitions?.[schemaName]?.properties ?? {}),
+      `Zig ${zigName} fields`,
+    );
+  }
   const definitions = [
     "ModelsListRequest",
     "ModelList",
@@ -1988,14 +2001,13 @@ function expectedModelCompatibility(apiSchema) {
 
 function writeCompatibility() {
   const compatibility = parseJson(compatibilityPath);
-  const apiSchema = parseJson(join(schemaDirectory, "api.schema.json"));
   Object.assign(
     compatibility,
-    expectedModelCompatibility(apiSchema),
+    expectedModelCompatibility(parseJson(join(schemaDirectory, "api.schema.json"))),
   );
   compatibility.providerConfig.properties.modelProvider = {
     status: "supported",
-    contract: schemaContract(apiSchema.definitions.ProviderConfig.properties.modelProvider),
+    contract: { ref: "ProviderConfigModelProvider" },
   };
   writeFileSync(compatibilityPath, `${JSON.stringify(compatibility, null, 2)}\n`);
 }
@@ -2206,6 +2218,29 @@ function verifyCompatibility(apiSchema, eventSchema) {
   const providerCompatibility = compatibility.providerConfig;
   assert(provider?.properties, "ProviderConfig has no properties");
   assert(providerCompatibility.properties, "ProviderConfig property classifications are missing");
+  requireExactStrings(
+    zigEnumValues(zigProviderSource, "ModelProvider"),
+    stringEnum(apiSchema, "ProviderConfigModelProvider"),
+    "Zig ModelProvider values",
+  );
+  for (const owner of ["ProviderConfig", "NamedProviderConfig"]) {
+    requireSchemaContract(
+      apiSchema.definitions?.[owner]?.properties?.modelProvider,
+      { ref: "ProviderConfigModelProvider" },
+      `${owner}.modelProvider`,
+    );
+    const fields = sourceSection(
+      zigProviderSource,
+      `pub const ${owner} = struct {`,
+      owner === "ProviderConfig" ? "    pub const Authentication" : "    pub const Protocol",
+      `Zig ${owner}`,
+    );
+    const field = zigStructFields(`${fields}};`, owner).model_provider;
+    assert(
+      field?.type === "?ModelProvider" && field.default === "null",
+      `Zig ${owner}.model_provider changed`,
+    );
+  }
 
   const providerProperties = Object.keys(provider.properties).sort();
   const classifiedProperties = Object.keys(providerCompatibility.properties).sort();
@@ -2252,11 +2287,6 @@ function verifyCompatibility(apiSchema, eventSchema) {
     apiSchema.definitions?.ProviderConfigTransport?.enum ?? [],
     providerCompatibility.transports,
     "ProviderConfig transport enum",
-  );
-  requireExactStrings(
-    zigEnumValues(readFileSync(join(root, "src", "provider.zig"), "utf8"), "ModelProvider"),
-    stringEnum(apiSchema, "ProviderConfigModelProvider"),
-    "Zig ModelProvider values",
   );
   const azureProperties = apiSchema.definitions?.ProviderConfigAzure?.properties ?? {};
   requireExactStrings(

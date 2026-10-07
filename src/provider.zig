@@ -35,6 +35,16 @@ const ProviderHeader = struct {
 pub const Authentication = ProviderAuthentication;
 pub const Header = ProviderHeader;
 
+pub const ModelProvider = enum {
+    openai,
+    anthropic,
+    azure_openai,
+    ollama,
+    lm_studio,
+    foundry_local,
+    llama_cpp,
+};
+
 pub const ProviderConfig = struct {
     base_url: []const u8,
     protocol: Protocol = .{ .openai = .completions },
@@ -75,16 +85,6 @@ pub const ProviderConfig = struct {
     };
 };
 
-pub const ModelProvider = enum {
-    openai,
-    anthropic,
-    azure_openai,
-    ollama,
-    lm_studio,
-    foundry_local,
-    llama_cpp,
-};
-
 pub const NamedProviderConfig = struct {
     name: []const u8,
     base_url: []const u8,
@@ -92,6 +92,7 @@ pub const NamedProviderConfig = struct {
     authentication: ProviderAuthentication = .none,
     bearer_token_provider: ?BearerTokenProvider = null,
     headers: []const ProviderHeader = &.{},
+    model_provider: ?ModelProvider = null,
 
     pub const Protocol = union(enum) {
         openai: OpenAI,
@@ -195,6 +196,7 @@ pub const WireNamedProvider = struct {
     bearerToken: ?[]const u8 = null,
     azure: ?WireAzure = null,
     headers: ?WireHeaders = null,
+    modelProvider: ?ModelProvider = null,
     hasBearerTokenProvider: ?bool = null,
 };
 
@@ -356,6 +358,7 @@ fn lowerNamedProvider(config: NamedProviderConfig) !WireNamedProvider {
         .apiKey = authentication.api_key,
         .bearerToken = authentication.bearer_token,
         .headers = if (config.headers.len == 0) null else .{ .values = config.headers },
+        .modelProvider = config.model_provider,
         .hasBearerTokenProvider = if (config.bearer_token_provider != null) true else null,
     };
 
@@ -575,6 +578,31 @@ test "named providers and models lower to exact wire JSON" {
         "{\"providers\":[{\"name\":\"azure\",\"type\":\"azure\",\"wireApi\":\"responses\",\"transport\":\"websockets\",\"baseUrl\":\"https://example.openai.azure.com\",\"apiKey\":\"key\",\"bearerToken\":\"token\",\"azure\":{\"apiVersion\":\"2025-04-01-preview\"},\"headers\":{\"X-Tenant\":\"acme\"}}],\"models\":[{\"id\":\"reasoner\",\"provider\":\"azure\",\"wireModel\":\"deployment\",\"modelId\":\"gpt-4.1\",\"name\":\"Reasoner\",\"maxPromptTokens\":100,\"maxContextWindowTokens\":200,\"maxOutputTokens\":50,\"capabilities\":{\"supports\":{\"reasoningEffort\":true}}}]}",
         encoded,
     );
+}
+
+test "model provider attribution lowers for singular and named providers" {
+    const allocator = std.testing.allocator;
+    for (std.meta.tags(ModelProvider)) |product| {
+        const singular = try encodePrepared(.{
+            .base_url = "http://localhost",
+            .model_provider = product,
+        });
+        defer allocator.free(singular);
+        const expected = try std.fmt.allocPrint(allocator, "\"modelProvider\":\"{s}\"", .{@tagName(product)});
+        defer allocator.free(expected);
+        try std.testing.expect(std.mem.indexOf(u8, singular, expected) != null);
+        var prepared = try prepareSessionProviders(allocator, null, &.{.{
+            .name = "local",
+            .base_url = "http://localhost",
+            .model_provider = product,
+        }}, &.{});
+        defer prepared.deinit(allocator);
+        const named = try std.json.Stringify.valueAlloc(allocator, prepared.providers, .{
+            .emit_null_optional_fields = false,
+        });
+        defer allocator.free(named);
+        try std.testing.expect(std.mem.indexOf(u8, named, expected) != null);
+    }
 }
 
 test "provider graph validation rejects only documented invalid shapes" {

@@ -296,10 +296,14 @@ pub const SubagentStopInput = struct {
     response: []const u8,
 };
 
-pub const SubagentStopOutput = struct {
-    block: bool = false,
-    reason: ?[]const u8 = null,
-    modified_response: ?[]const u8 = null,
+pub const SubagentStopOutput = union(enum) {
+    allow: struct {
+        modified_response: ?[]const u8 = null,
+    },
+    block: struct {
+        reason: []const u8,
+        modified_response: ?[]const u8 = null,
+    },
 };
 
 pub const SessionHooks = struct {

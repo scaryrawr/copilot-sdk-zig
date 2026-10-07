@@ -8628,18 +8628,14 @@ pub const Client = struct {
         if (std.mem.eql(u8, hook_type, "subagentStart")) {
             const handler = runtime.hooks.on_subagent_start orelse
                 return self.writeTypedSuccess(writer, id, .{});
-            const output = handler(self.allocator, .{
-                .base = base,
-                .transcript_path = jsonRequiredString(input, "transcriptPath") catch
-                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
-                .agent_name = jsonRequiredString(input, "agentName") catch
-                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
-                .agent_display_name = jsonOptionalString(input, "agentDisplayName") catch
-                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
-                .agent_description = jsonOptionalString(input, "agentDescription") catch
-                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
-            }, invocation, runtime.hooks.context) catch |err|
+            const hook_input = parseSubagentStartHookInput(input, base) catch
+                return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
+            const output = handler(self.allocator, hook_input, invocation, runtime.hooks.context) catch |err|
                 return self.writeServerRequestError(writer, id, -32000, @errorName(err));
+            if (output.additional_context) |context| {
+                if (!std.unicode.utf8ValidateSlice(context))
+                    return self.writeServerRequestError(writer, id, -32603, "invalid hook output");
+            }
             return self.writeTypedSuccess(writer, id, .{ .output = .{
                 .additionalContext = output.additional_context,
             } });
@@ -8647,20 +8643,18 @@ pub const Client = struct {
         if (std.mem.eql(u8, hook_type, "subagentStop")) {
             const handler = runtime.hooks.on_subagent_stop orelse
                 return self.writeTypedSuccess(writer, id, .{});
+            const common = parseSubagentStartHookInput(input, base) catch
+                return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
             const stop_reason = jsonRequiredString(input, "stopReason") catch
                 return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
             if (!std.mem.eql(u8, stop_reason, "end_turn"))
                 return self.writeServerRequestError(writer, id, -32602, "invalid hook input");
             const output = handler(self.allocator, .{
-                .base = base,
-                .transcript_path = jsonRequiredString(input, "transcriptPath") catch
-                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
-                .agent_name = jsonRequiredString(input, "agentName") catch
-                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
-                .agent_display_name = jsonOptionalString(input, "agentDisplayName") catch
-                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
-                .agent_description = jsonOptionalString(input, "agentDescription") catch
-                    return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
+                .base = common.base,
+                .transcript_path = common.transcript_path,
+                .agent_name = common.agent_name,
+                .agent_display_name = common.agent_display_name,
+                .agent_description = common.agent_description,
                 .agent_id = jsonOptionalString(input, "agentId") catch
                     return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
                 .agent_type = jsonRequiredString(input, "agentType") catch
@@ -8670,14 +8664,30 @@ pub const Client = struct {
                     return self.writeServerRequestError(writer, id, -32602, "invalid hook input"),
             }, invocation, runtime.hooks.context) catch |err|
                 return self.writeServerRequestError(writer, id, -32000, @errorName(err));
-            if (output.block and (output.reason == null or output.reason.?.len == 0) or
-                !output.block and output.reason != null)
-                return self.writeServerRequestError(writer, id, -32603, "invalid hook output");
-            return self.writeTypedSuccess(writer, id, .{ .output = .{
-                .decision = if (output.block) "block" else "allow",
-                .reason = output.reason,
-                .modifiedResponse = output.modified_response,
-            } });
+            const modified_response = switch (output) {
+                .allow => |value| value.modified_response,
+                .block => |value| value.modified_response,
+            };
+            if (modified_response) |response| {
+                if (!std.unicode.utf8ValidateSlice(response))
+                    return self.writeServerRequestError(writer, id, -32603, "invalid hook output");
+            }
+            return switch (output) {
+                .allow => self.writeTypedSuccess(writer, id, .{ .output = .{
+                    .decision = "allow",
+                    .modifiedResponse = modified_response,
+                } }),
+                .block => |value| blk: {
+                    if (std.mem.trim(u8, value.reason, " \t\r\n").len == 0 or
+                        !std.unicode.utf8ValidateSlice(value.reason))
+                        return self.writeServerRequestError(writer, id, -32603, "invalid hook output");
+                    break :blk self.writeTypedSuccess(writer, id, .{ .output = .{
+                        .decision = "block",
+                        .reason = value.reason,
+                        .modifiedResponse = modified_response,
+                    } });
+                },
+            };
         }
         return self.writeServerRequestError(writer, id, -32602, "unknown hook type");
     }
@@ -15551,6 +15561,16 @@ fn parseHookBase(input: std.json.ObjectMap) !ext.HookBaseInput {
     };
 }
 
+fn parseSubagentStartHookInput(input: std.json.ObjectMap, base: ext.HookBaseInput) !ext.SubagentStartInput {
+    return .{
+        .base = base,
+        .transcript_path = try jsonRequiredString(input, "transcriptPath"),
+        .agent_name = try jsonRequiredString(input, "agentName"),
+        .agent_display_name = try jsonOptionalString(input, "agentDisplayName"),
+        .agent_description = try jsonOptionalString(input, "agentDescription"),
+    };
+}
+
 fn wipeLifecycleResponseSecrets(response: WireSessionLifecycleResponse) void {
     const grants = response.grantedEnvironmentVariables orelse return;
     wipeJsonStrings(grants);
@@ -19109,6 +19129,69 @@ test "model list options map to wire fields" {
     const params = parsed.value.object.get("params").?.object;
     try std.testing.expectEqualStrings("account-1", params.get("selectionId").?.string);
     try std.testing.expectEqualStrings("token", params.get("gitHubToken").?.string);
+}
+
+test "both model list APIs preserve true false omitted and null thinking support" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const result_json =
+        \\{"models":[
+        \\{"id":"thinking","name":"Thinking","capabilities":{"supports":{"thinking":true}}},
+        \\{"id":"nonthinking","name":"Nonthinking","capabilities":{"supports":{"thinking":false}}},
+        \\{"id":"omitted","name":"Omitted","capabilities":{"supports":{}}},
+        \\{"id":"null","name":"Null","capabilities":{"supports":{"thinking":null}}}
+        \\]}
+    ;
+    var frames: std.Io.Writer.Allocating = .init(allocator);
+    defer frames.deinit();
+    for (1..3) |id| {
+        const body = try std.fmt.allocPrint(
+            allocator,
+            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{s}}}",
+            .{ id, result_json },
+        );
+        defer allocator.free(body);
+        try json_rpc.writeFrame(&frames.writer, body);
+    }
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = frames.written() });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    const expected = [_]?bool{ true, false, null, null };
+    const legacy = try client.listModels(.{});
+    defer legacy.deinit();
+    try std.testing.expectEqual(expected.len, legacy.value.models.len);
+    for (legacy.value.models, expected) |model, thinking| {
+        try std.testing.expectEqual(thinking, model.capabilities.supports.?.thinking);
+    }
+    var detailed = try client.listModelsDetailed(.{});
+    defer switch (detailed) {
+        .success => |value| value.deinit(),
+        .failure => |*failure| failure.deinit(),
+    };
+    const detailed_models = switch (detailed) {
+        .success => |value| value.value.models,
+        .failure => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(expected.len, detailed_models.len);
+    for (detailed_models, expected) |model, thinking| {
+        try std.testing.expectEqual(thinking, model.capabilities.supports.?.thinking);
+    }
+    try std.testing.expect(!@hasField(models.SupportsOverride, "thinking"));
 }
 
 test "inbound RPC params preserve omission and non-object values" {
@@ -24674,157 +24757,213 @@ test "agent stop hook reads the snake-case wire activity flag" {
     try std.testing.expect(called);
 }
 
-test "subagent lifecycle hooks decode input and return typed output" {
+test "subagent hooks advertise registration and preserve parent metadata and decisions" {
     const allocator = std.testing.allocator;
     var client = Client{ .allocator = allocator, .io = undefined };
     defer client.rollbackExtensionRuntime();
-    var calls: usize = 0;
-    const handlers = struct {
+    const State = struct {
+        starts: usize = 0,
+        stops: usize = 0,
+
         fn start(
             _: std.mem.Allocator,
             input: ext.SubagentStartInput,
             invocation: ext.HookInvocation,
             context: ?*anyopaque,
         ) !ext.SubagentStartOutput {
-            try std.testing.expectEqualStrings("s1", invocation.session_id);
-            try std.testing.expectEqualStrings("s1", input.base.runtime_session_id);
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            try std.testing.expectEqualStrings("parent", invocation.session_id);
+            try std.testing.expectEqualStrings("parent", input.base.runtime_session_id);
+            try std.testing.expectEqual(@as(i64, 42), input.base.timestamp_ms);
+            try std.testing.expectEqualStrings("/repo", input.base.working_directory);
             try std.testing.expectEqualStrings("/transcript", input.transcript_path);
-            try std.testing.expectEqualStrings("research", input.agent_name);
-            try std.testing.expectEqualStrings("Researcher", input.agent_display_name.?);
+            try std.testing.expectEqualStrings("reviewer", input.agent_name);
+            try std.testing.expect(input.agent_display_name == null);
             try std.testing.expect(input.agent_description == null);
-            const call_count: *usize = @ptrCast(@alignCast(context.?));
-            call_count.* += 1;
-            return .{ .additional_context = "context" };
+            self.starts += 1;
+            return .{ .additional_context = "review carefully" };
         }
+
         fn stop(
             _: std.mem.Allocator,
             input: ext.SubagentStopInput,
-            _: ext.HookInvocation,
+            invocation: ext.HookInvocation,
             context: ?*anyopaque,
         ) !ext.SubagentStopOutput {
-            try std.testing.expectEqualStrings("research", input.agent_name);
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            try std.testing.expectEqualStrings("parent", invocation.session_id);
+            try std.testing.expectEqualStrings("parent", input.base.runtime_session_id);
+            try std.testing.expectEqualStrings("/transcript", input.transcript_path);
+            try std.testing.expectEqualStrings("reviewer", input.agent_name);
+            try std.testing.expectEqualStrings("Reviewer", input.agent_display_name.?);
+            try std.testing.expectEqualStrings("review code", input.agent_description.?);
             try std.testing.expectEqualStrings("child", input.agent_id.?);
+            try std.testing.expectEqualStrings("code-review", input.agent_type);
             try std.testing.expectEqual(.end_turn, input.stop_reason);
             try std.testing.expectEqualStrings("original", input.response);
-            const call_count: *usize = @ptrCast(@alignCast(context.?));
-            call_count.* += 1;
-            if (std.mem.eql(u8, input.agent_type, "block"))
-                return .{ .block = true, .reason = "continue", .modified_response = "ignored" };
-            try std.testing.expectEqualStrings("custom", input.agent_type);
-            return .{ .modified_response = "rewritten" };
+            self.stops += 1;
+            return switch (self.stops) {
+                1 => .{ .allow = .{ .modified_response = "rewritten" } },
+                2 => .{ .block = .{ .reason = "fix findings", .modified_response = "not yet" } },
+                else => .{ .allow = .{} },
+            };
         }
     };
-    try client.beginExtensionRuntime("s1", session_types.CreateSessionConfig{
-        .extensions = .{ .common = .{ .hooks = .{
-            .on_subagent_start = handlers.start,
-            .on_subagent_stop = handlers.stop,
-            .context = &calls,
-        } } },
-    }, &.{});
-    const cases = [_]struct { request: []const u8, expected: []const u8 }{
-        .{
-            .request =
-            \\{"sessionId":"s1","hookType":"subagentStart","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","transcriptPath":"/transcript","agentName":"research","agentDisplayName":"Researcher"}}
-            ,
-            .expected = "\"additionalContext\":\"context\"",
-        },
-        .{
-            .request =
-            \\{"sessionId":"s1","hookType":"subagentStop","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","transcriptPath":"/transcript","agentName":"research","agentId":"child","agentType":"custom","stopReason":"end_turn","response":"original"}}
-            ,
-            .expected = "\"modifiedResponse\":\"rewritten\"",
-        },
-        .{
-            .request =
-            \\{"sessionId":"s1","hookType":"subagentStop","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","transcriptPath":"/transcript","agentName":"research","agentId":"child","agentType":"block","stopReason":"end_turn","response":"original"}}
-            ,
-            .expected = "\"reason\":\"continue\"",
-        },
+    var state: State = .{};
+    const hooks = ext.SessionHooks{
+        .on_subagent_start = State.start,
+        .on_subagent_stop = State.stop,
+        .context = &state,
     };
-    for (cases) |case| {
-        const params = try std.json.parseFromSlice(std.json.Value, allocator, case.request, .{});
+    try std.testing.expect((ext.SessionHooks{ .on_subagent_start = State.start }).any());
+    try std.testing.expect((ext.SessionHooks{ .on_subagent_stop = State.stop }).any());
+    const config = session_types.CreateSessionConfig{
+        .extensions = .{ .common = .{ .hooks = hooks } },
+    };
+    var values = ExtensionWireValues.init(allocator);
+    defer values.deinit();
+    const request_json = try std.json.Stringify.valueAlloc(
+        allocator,
+        try buildCreateSessionRequest(config, &.{}, &values),
+        .{ .emit_null_optional_fields = false },
+    );
+    defer allocator.free(request_json);
+    try std.testing.expect(std.mem.indexOf(u8, request_json, "\"hooks\":true") != null);
+    try client.beginExtensionRuntime("parent", config, &.{});
+    const start =
+        \\{"sessionId":"parent","hookType":"subagentStart","input":{"sessionId":"parent","timestamp":42,"cwd":"/repo","transcriptPath":"/transcript","agentName":"reviewer"}}
+    ;
+    const start_null =
+        \\{"sessionId":"parent","hookType":"subagentStart","input":{"sessionId":"parent","timestamp":42,"cwd":"/repo","transcriptPath":"/transcript","agentName":"reviewer","agentDisplayName":null,"agentDescription":null}}
+    ;
+    const stop =
+        \\{"sessionId":"parent","hookType":"subagentStop","input":{"sessionId":"parent","timestamp":42,"cwd":"/repo","transcriptPath":"/transcript","agentName":"reviewer","agentDisplayName":"Reviewer","agentDescription":"review code","agentId":"child","agentType":"code-review","stopReason":"end_turn","response":"original"}}
+    ;
+    const cases = .{
+        .{ start, "{\"output\":{\"additionalContext\":\"review carefully\"}}" },
+        .{ start_null, "{\"output\":{\"additionalContext\":\"review carefully\"}}" },
+        .{ stop, "{\"output\":{\"decision\":\"allow\",\"modifiedResponse\":\"rewritten\"}}" },
+        .{ stop, "{\"output\":{\"decision\":\"block\",\"reason\":\"fix findings\",\"modifiedResponse\":\"not yet\"}}" },
+        .{ stop, "{\"output\":{\"decision\":\"allow\"}}" },
+    };
+    inline for (cases, 0..) |case, index| {
+        const params = try std.json.parseFromSlice(std.json.Value, allocator, case[0], .{});
         defer params.deinit();
+        try std.testing.expect(client.hasApplicableHookRegistration(params.value.object));
         var output: std.Io.Writer.Allocating = .init(allocator);
         defer output.deinit();
-        try client.dispatchServerRequest(&output.writer, .{ .integer = 8 }, "hooks.invoke", params.value);
+        try client.dispatchServerRequest(&output.writer, .{ .integer = index }, "hooks.invoke", params.value);
         const body = try framedBody(allocator, output.written());
         defer allocator.free(body);
-        try std.testing.expect(std.mem.indexOf(u8, body, case.expected) != null);
+        const response = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+        defer response.deinit();
+        try std.testing.expectEqual(@as(i64, index), response.value.object.get("id").?.integer);
+        const result = try std.json.Stringify.valueAlloc(allocator, response.value.object.get("result").?, .{});
+        defer allocator.free(result);
+        try std.testing.expectEqualStrings(case[1], result);
     }
-    try std.testing.expectEqual(@as(usize, 3), calls);
+    try std.testing.expectEqual(@as(usize, 2), state.starts);
+    try std.testing.expectEqual(@as(usize, 3), state.stops);
 }
 
-test "malformed subagent hooks and invalid block outputs receive RPC errors" {
+test "subagent hooks reject malformed inputs before invoking a handler" {
     const allocator = std.testing.allocator;
     var client = Client{ .allocator = allocator, .io = undefined };
     defer client.rollbackExtensionRuntime();
-    var calls: usize = 0;
     const handlers = struct {
-        fn start(
-            _: std.mem.Allocator,
-            _: ext.SubagentStartInput,
-            _: ext.HookInvocation,
-            context: ?*anyopaque,
-        ) !ext.SubagentStartOutput {
-            const call_count: *usize = @ptrCast(@alignCast(context.?));
-            call_count.* += 1;
-            return .{};
+        fn start(_: std.mem.Allocator, _: ext.SubagentStartInput, _: ext.HookInvocation, _: ?*anyopaque) !ext.SubagentStartOutput {
+            return error.TestUnexpectedHookInvocation;
         }
-        fn stop(
-            _: std.mem.Allocator,
-            _: ext.SubagentStopInput,
-            _: ext.HookInvocation,
-            context: ?*anyopaque,
-        ) !ext.SubagentStopOutput {
-            const call_count: *usize = @ptrCast(@alignCast(context.?));
-            call_count.* += 1;
-            return .{ .block = true };
+        fn stop(_: std.mem.Allocator, _: ext.SubagentStopInput, _: ext.HookInvocation, _: ?*anyopaque) !ext.SubagentStopOutput {
+            return error.TestUnexpectedHookInvocation;
         }
     };
-    try client.beginExtensionRuntime("s1", session_types.CreateSessionConfig{
+    try client.beginExtensionRuntime("parent", session_types.CreateSessionConfig{
         .extensions = .{ .common = .{ .hooks = .{
             .on_subagent_start = handlers.start,
             .on_subagent_stop = handlers.stop,
-            .context = &calls,
         } } },
     }, &.{});
-    const cases = [_]struct { request: []const u8, code: []const u8 }{
-        .{
-            .request =
-            \\{"sessionId":"s1","hookType":"subagentStart","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","agentName":"research"}}
-            ,
-            .code = "\"code\":-32602",
-        },
-        .{
-            .request =
-            \\{"sessionId":"s1","hookType":"subagentStart","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","transcriptPath":"/transcript","agentName":"research","agentDisplayName":42}}
-            ,
-            .code = "\"code\":-32602",
-        },
-        .{
-            .request =
-            \\{"sessionId":"s1","hookType":"subagentStop","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","transcriptPath":"/transcript","agentName":"research","agentType":"custom","stopReason":"bad","response":"original"}}
-            ,
-            .code = "\"code\":-32602",
-        },
-        .{
-            .request =
-            \\{"sessionId":"s1","hookType":"subagentStop","input":{"sessionId":"s1","timestamp":42,"cwd":"/repo","transcriptPath":"/transcript","agentName":"research","agentType":"custom","stopReason":"end_turn","response":"original"}}
-            ,
-            .code = "\"code\":-32603",
-        },
+    for ([_][]const u8{ "subagentStart", "subagentStop" }) |hook_type| {
+        const fields: []const []const u8 = if (std.mem.eql(u8, hook_type, "subagentStart"))
+            &.{ "sessionId", "timestamp", "cwd", "transcriptPath", "agentName", "agentDisplayName", "agentDescription" }
+        else
+            &.{ "sessionId", "timestamp", "cwd", "transcriptPath", "agentName", "agentDisplayName", "agentDescription", "agentId", "agentType", "stopReason", "response" };
+        for (fields) |field| {
+            for ([_]enum { missing, wrong_type, wrong_value }{ .missing, .wrong_type, .wrong_value }) |invalid| {
+                if (invalid == .wrong_value and !std.mem.eql(u8, field, "sessionId") and
+                    !std.mem.eql(u8, field, "stopReason")) continue;
+                if (invalid == .missing and (std.mem.eql(u8, field, "agentDisplayName") or
+                    std.mem.eql(u8, field, "agentDescription") or
+                    std.mem.eql(u8, field, "agentId"))) continue;
+                var params = try std.json.parseFromSlice(std.json.Value, allocator,
+                    \\{"sessionId":"parent","hookType":"subagentStop","input":{"sessionId":"parent","timestamp":42,"cwd":"/repo","transcriptPath":"/transcript","agentName":"reviewer","agentType":"code-review","stopReason":"end_turn","response":"original"}}
+                , .{});
+                defer params.deinit();
+                try params.value.object.put(params.arena.allocator(), "hookType", .{ .string = hook_type });
+                const input = &params.value.object.getPtr("input").?.object;
+                if (invalid == .missing) {
+                    _ = input.swapRemove(field);
+                } else {
+                    try input.put(params.arena.allocator(), field, if (invalid == .wrong_value or
+                        std.mem.eql(u8, field, "timestamp")) .{ .string = "invalid" } else .{ .integer = 42 });
+                }
+                var output: std.Io.Writer.Allocating = .init(allocator);
+                defer output.deinit();
+                try client.dispatchServerRequest(&output.writer, .{ .integer = 19 }, "hooks.invoke", params.value);
+                const body = try framedBody(allocator, output.written());
+                defer allocator.free(body);
+                try std.testing.expect(std.mem.indexOf(u8, body, "\"code\":-32602") != null);
+                try std.testing.expect(std.mem.indexOf(u8, body, "\"id\":19") != null);
+            }
+        }
+    }
+}
+
+test "subagent hooks report invalid output and handler errors with correlated responses" {
+    const allocator = std.testing.allocator;
+    var client = Client{ .allocator = allocator, .io = undefined };
+    defer client.rollbackExtensionRuntime();
+    var mode: usize = 0;
+    const handlers = struct {
+        fn start(_: std.mem.Allocator, _: ext.SubagentStartInput, _: ext.HookInvocation, _: ?*anyopaque) !ext.SubagentStartOutput {
+            return .{ .additional_context = "\xff" };
+        }
+        fn stop(_: std.mem.Allocator, input: ext.SubagentStopInput, _: ext.HookInvocation, context: ?*anyopaque) !ext.SubagentStopOutput {
+            const current: *usize = @ptrCast(@alignCast(context.?));
+            try std.testing.expect(input.agent_id == null);
+            return switch (current.*) {
+                0 => .{ .block = .{ .reason = "" } },
+                1 => .{ .block = .{ .reason = " \t\n" } },
+                2 => .{ .block = .{ .reason = "\xff" } },
+                3 => .{ .allow = .{ .modified_response = "\xff" } },
+                4 => .{ .block = .{ .reason = "continue", .modified_response = "\xff" } },
+                else => error.SubagentHookFailed,
+            };
+        }
     };
-    for (cases) |case| {
-        const params = try std.json.parseFromSlice(std.json.Value, allocator, case.request, .{});
+    try client.beginExtensionRuntime("parent", session_types.CreateSessionConfig{
+        .extensions = .{ .common = .{ .hooks = .{
+            .on_subagent_start = handlers.start,
+            .on_subagent_stop = handlers.stop,
+            .context = &mode,
+        } } },
+    }, &.{});
+    for (0..7) |index| {
+        mode = index;
+        var params = try std.json.parseFromSlice(std.json.Value, allocator,
+            \\{"sessionId":"parent","hookType":"subagentStop","input":{"sessionId":"parent","timestamp":42,"cwd":"/repo","transcriptPath":"/transcript","agentName":"reviewer","agentType":"code-review","stopReason":"end_turn","response":"original","agentId":null}}
+        , .{});
         defer params.deinit();
+        if (index == 6) try params.value.object.put(params.arena.allocator(), "hookType", .{ .string = "subagentStart" });
         var output: std.Io.Writer.Allocating = .init(allocator);
         defer output.deinit();
-        try client.dispatchServerRequest(&output.writer, .{ .integer = 8 }, "hooks.invoke", params.value);
+        try client.dispatchServerRequest(&output.writer, .{ .integer = 23 }, "hooks.invoke", params.value);
         const body = try framedBody(allocator, output.written());
         defer allocator.free(body);
-        try std.testing.expect(std.mem.indexOf(u8, body, case.code) != null);
+        try std.testing.expect(std.mem.indexOf(u8, body, if (index == 5) "\"code\":-32000" else "\"code\":-32603") != null);
+        try std.testing.expect(std.mem.indexOf(u8, body, "\"id\":23") != null);
     }
-    try std.testing.expectEqual(@as(usize, 1), calls);
 }
 
 test "provisional create runtime is unreachable without an exact session id" {

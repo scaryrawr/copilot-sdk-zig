@@ -145,24 +145,54 @@ test("unsupported reachable schema constructs fail with their path", () => {
   );
 });
 
-test("mutually exclusive optional properties are enforced when rendering a schema not constraint", () => {
+test("not-required constraints ignore null optional representations", () => {
+  const rendered = renderSessionEvents(schema());
+  assert.match(
+    rendered,
+    /if \(\(if \(object\.get\("blocks"\)\) \|field_value\| field_value != \.null else false\) and \(if \(object\.get\("orderedBlocks"\)\) \|field_value\| field_value != \.null else false\)\) return error\.InvalidSessionEvent;/,
+  );
+});
+
+test("not-required constraints preserve required-field presence semantics", () => {
   const value = schema();
-  value.definitions.StartData.properties.first = { type: "string" };
-  value.definitions.StartData.properties.second = { type: "string" };
-  value.definitions.StartData.not = { required: ["first", "second"] };
+  value.definitions.AssistantMessageReasoningBlocks.required.push("blocks");
+  value.definitions.AssistantMessageReasoningBlocks.properties.blocks.type = ["array", "null"];
   const rendered = renderSessionEvents(value);
   assert.match(
     rendered,
-    /if \(object\.get\("first"\) != null and object\.get\("second"\) != null\) return error\.InvalidSessionEvent;/,
+    /if \(object\.contains\("blocks"\) and \(if \(object\.get\("orderedBlocks"\)\) \|field_value\| field_value != \.null else false\)\) return error\.InvalidSessionEvent;/,
   );
-  value.definitions.StartData.not = { required: ["first"] };
-  assert.throws(() => buildRegistry(value), /unsupported not constraint at #\/definitions\/StartData/);
-  delete value.definitions.StartData.not;
-  value.definitions.StartData.properties.sessionId.not = { required: ["first", "second"] };
-  assert.throws(
-    () => buildRegistry(value),
-    /unsupported not constraint at #\/definitions\/StartData\/properties\/sessionId/,
-  );
+});
+
+test("unsupported not constraints fail instead of weakening validation", () => {
+  for (const constraint of [
+    {},
+    { required: [] },
+    { required: ["blocks", "blocks"] },
+    { required: ["undeclared"] },
+    { required: ["blocks"], properties: { blocks: { type: "array" } } },
+    { type: "string" },
+  ]) {
+    const value = schema();
+    value.definitions.AssistantMessageReasoningBlocks.not = constraint;
+    assert.throws(
+      () => buildRegistry(value),
+      /unsupported schema constraint not at #\/definitions\/AssistantMessageReasoningBlocks/,
+    );
+  }
+  for (const sibling of [
+    { $ref: "#/definitions/AssistantMessageServerTools" },
+    { anyOf: [{ type: "object" }] },
+    { "x-opaque-json": true },
+    { type: "string" },
+  ]) {
+    const value = schema();
+    Object.assign(value.definitions.AssistantMessageReasoningBlocks, sibling);
+    assert.throws(
+      () => buildRegistry(value),
+      /unsupported schema constraint not at #\/definitions\/AssistantMessageReasoningBlocks/,
+    );
+  }
 });
 
 test("unreachable definitions are not generated or interpreted", () => {

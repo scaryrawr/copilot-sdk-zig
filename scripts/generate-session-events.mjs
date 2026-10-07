@@ -194,7 +194,6 @@ const shapeKeywords = new Set([
   "minItems",
   "minLength",
   "minimum",
-  "not",
   "properties",
   "required",
   "type",
@@ -271,6 +270,20 @@ class SchemaModel {
 
   checkKeywords(node, path) {
     for (const keyword of Object.keys(node)) {
+      if (keyword === "not") {
+        const constraint = node.not;
+        if (node.type === "object" && !node.$ref && !node.anyOf &&
+            !node.enum && node.const === undefined && node["x-opaque-json"] !== true && constraint &&
+            Object.keys(constraint).length === 1 &&
+            Array.isArray(constraint.required) && constraint.required.length > 0 &&
+            new Set(constraint.required).size === constraint.required.length &&
+            constraint.required.every((name) =>
+              typeof name === "string" && Object.hasOwn(node.properties ?? {}, name)
+            )) {
+          continue;
+        }
+        throw new Error(`unsupported schema constraint not at ${path}`);
+      }
       if (!shapeKeywords.has(keyword) && !ignoredKeywords.has(keyword)) {
         throw new Error(`unsupported schema keyword ${keyword} at ${path}`);
       }
@@ -303,9 +316,6 @@ class SchemaModel {
       throw new Error(`invalid schema node at ${path}`);
     }
     this.checkKeywords(node, path);
-    if (node.not !== undefined && node.type !== "object") {
-      throw new Error(`unsupported not constraint at ${path}`);
-    }
 
     if (node.$ref) {
       const prefix = "#/definitions/";
@@ -411,17 +421,6 @@ class SchemaModel {
       }
       case "object": {
         const properties = node.properties ?? {};
-        const mutuallyExclusive = node.not?.required;
-        if (node.not !== undefined && (
-          !Array.isArray(mutuallyExclusive) ||
-          mutuallyExclusive.length !== 2 ||
-          new Set(mutuallyExclusive).size !== 2 ||
-          mutuallyExclusive.some((field) => !Object.hasOwn(properties, field) ||
-            (node.required ?? []).includes(field)) ||
-          Object.keys(node.not).some((key) => key !== "required")
-        )) {
-          throw new Error(`unsupported not constraint at ${path}`);
-        }
         if (Object.keys(properties).length === 0 &&
             node.additionalProperties &&
             typeof node.additionalProperties === "object") {
@@ -467,7 +466,7 @@ class SchemaModel {
           name,
           fields,
           rejectUnknown: additional === false,
-          mutuallyExclusive,
+          forbiddenTogether: node.not?.required ?? [],
         };
         if (!publicType) this.nodes.set(name, model);
         return model;
@@ -671,6 +670,14 @@ ${model.fields.map((field) => {
 }
 
 function renderObjectParser(model) {
+  const constraint = model.forbiddenTogether.length > 0
+    ? `if (${model.forbiddenTogether.map((name) => {
+      const field = model.fields.find((field) => field.wire === name);
+      return field.required
+        ? `object.contains(${zigString(name)})`
+        : `(if (object.get(${zigString(name)})) |field_value| field_value != .null else false)`;
+    }).join(" and ")}) return error.InvalidSessionEvent;`
+    : "";
   const declarations = model.fields.map((field) => {
     const source = `object.get(${zigString(field.wire)})`;
     const effectiveModel = !field.required && field.model.kind !== "nullable"
@@ -700,7 +707,7 @@ function renderObjectParser(model) {
   const objectUsed = model.fields.length > 0;
   return `fn parse${model.name}(${parseUsesAllocator(model) ? "allocator" : "_"}: std.mem.Allocator, value: std.json.Value) !${model.name} {
     ${objectUsed ? "const object =" : "_ ="} try payloads.requiredObject(value);
-    ${model.mutuallyExclusive ? `if (object.get(${zigString(model.mutuallyExclusive[0])}) != null and object.get(${zigString(model.mutuallyExclusive[1])}) != null) return error.InvalidSessionEvent;` : ""}
+    ${constraint}
     ${declarations}
     return .{
 ${assignments}

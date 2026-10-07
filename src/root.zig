@@ -270,6 +270,7 @@ pub const ModelProviderRef = models.ProviderRef;
 pub const ModelProviderKind = models.ProviderKind;
 pub const ModelCapabilities = models.Capabilities;
 pub const ModelCapabilitiesOverride = models.CapabilitiesOverride;
+pub const ModelSupportsOverride = models.SupportsOverride;
 pub const ModelLimitsOverride = models.LimitsOverride;
 pub const ModelVisionLimitsOverride = models.VisionLimitsOverride;
 pub const ModelSupports = models.Supports;
