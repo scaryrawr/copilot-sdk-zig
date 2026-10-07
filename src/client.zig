@@ -19131,6 +19131,69 @@ test "model list options map to wire fields" {
     try std.testing.expectEqualStrings("token", params.get("gitHubToken").?.string);
 }
 
+test "both model list APIs preserve true false omitted and null thinking support" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const result_json =
+        \\{"models":[
+        \\{"id":"thinking","name":"Thinking","capabilities":{"supports":{"thinking":true}}},
+        \\{"id":"nonthinking","name":"Nonthinking","capabilities":{"supports":{"thinking":false}}},
+        \\{"id":"omitted","name":"Omitted","capabilities":{"supports":{}}},
+        \\{"id":"null","name":"Null","capabilities":{"supports":{"thinking":null}}}
+        \\]}
+    ;
+    var frames: std.Io.Writer.Allocating = .init(allocator);
+    defer frames.deinit();
+    for (1..3) |id| {
+        const body = try std.fmt.allocPrint(
+            allocator,
+            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{s}}}",
+            .{ id, result_json },
+        );
+        defer allocator.free(body);
+        try json_rpc.writeFrame(&frames.writer, body);
+    }
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "response", .data = frames.written() });
+    const response_file = try tmp.dir.openFile(std.testing.io, "response", .{});
+    defer response_file.close(std.testing.io);
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = response_file.readerStreaming(std.testing.io, &reader_buffer);
+    const request_file = try tmp.dir.createFile(std.testing.io, "request", .{});
+    defer request_file.close(std.testing.io);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = request_file.writer(std.testing.io, &writer_buffer);
+    var client = Client{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .reader = &reader,
+        .writer = &writer,
+        .reader_buffer = &.{},
+        .writer_buffer = &.{},
+    };
+    const expected = [_]?bool{ true, false, null, null };
+    const legacy = try client.listModels(.{});
+    defer legacy.deinit();
+    try std.testing.expectEqual(expected.len, legacy.value.models.len);
+    for (legacy.value.models, expected) |model, thinking| {
+        try std.testing.expectEqual(thinking, model.capabilities.supports.?.thinking);
+    }
+    var detailed = try client.listModelsDetailed(.{});
+    defer switch (detailed) {
+        .success => |value| value.deinit(),
+        .failure => |*failure| failure.deinit(),
+    };
+    const detailed_models = switch (detailed) {
+        .success => |value| value.value.models,
+        .failure => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(expected.len, detailed_models.len);
+    for (detailed_models, expected) |model, thinking| {
+        try std.testing.expectEqual(thinking, model.capabilities.supports.?.thinking);
+    }
+    try std.testing.expect(!@hasField(models.SupportsOverride, "thinking"));
+}
+
 test "inbound RPC params preserve omission and non-object values" {
     try std.testing.expect(try stringifyRpcParams(std.testing.allocator, null) == null);
 

@@ -307,6 +307,7 @@ test "root declarations compile" {
     _ = BearerTokenProvider;
     _ = ProviderTokenRequest;
     _ = NamedProviderConfig;
+    _ = ModelProvider;
     _ = ProviderModelConfig;
     _ = MessageAttachment;
     _ = WaitOptions;

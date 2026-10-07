@@ -491,6 +491,7 @@ test "singular provider preserves static credentials and derives callback flag" 
         .model_id = "gpt-4.1",
         .model_capabilities = .{ .supports = .{ .vision = true } },
         .provider_name = "telemetry-name",
+        .model_provider = .ollama,
         .wire_model = "deployment",
         .max_prompt_tokens = 100,
         .max_context_window_tokens = 200,
@@ -499,7 +500,7 @@ test "singular provider preserves static credentials and derives callback flag" 
     defer std.testing.allocator.free(encoded);
 
     try std.testing.expectEqualStrings(
-        "{\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"https://api.example.test\",\"apiKey\":\"key\",\"bearerToken\":\"static\",\"modelId\":\"gpt-4.1\",\"modelCapabilities\":{\"supports\":{\"vision\":true}},\"providerName\":\"telemetry-name\",\"wireModel\":\"deployment\",\"maxPromptTokens\":100,\"maxContextWindowTokens\":200,\"maxOutputTokens\":50,\"hasBearerTokenProvider\":true}",
+        "{\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"https://api.example.test\",\"apiKey\":\"key\",\"bearerToken\":\"static\",\"modelId\":\"gpt-4.1\",\"modelCapabilities\":{\"supports\":{\"vision\":true}},\"providerName\":\"telemetry-name\",\"modelProvider\":\"ollama\",\"wireModel\":\"deployment\",\"maxPromptTokens\":100,\"maxContextWindowTokens\":200,\"maxOutputTokens\":50,\"hasBearerTokenProvider\":true}",
         encoded,
     );
 }
