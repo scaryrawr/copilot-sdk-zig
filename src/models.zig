@@ -13,6 +13,7 @@ pub const Model = struct {
     id: []const u8,
     name: []const u8,
     capabilities: Capabilities,
+    vendor: ?[]const u8 = null,
     provider: ?ProviderRef = null,
     metadata: ?std.json.Value = null,
     policy: ?Policy = null,
@@ -174,6 +175,7 @@ test "model list preserves published metadata" {
         \\{"models":[{
         \\  "id":"claude-opus-5",
         \\  "name":"Claude Opus 5",
+        \\  "vendor":"Anthropic",
         \\  "provider":{"id":"github","label":"GitHub Copilot","kind":"copilot"},
         \\  "capabilities":{
         \\    "supports":{"vision":true,"toolCalls":true,"reasoningEffort":true,"thinking":true,"adaptive_thinking":"adaptive_only"},
@@ -207,6 +209,7 @@ test "model list preserves published metadata" {
 
     const model = parsed.value.models[0];
     try std.testing.expectEqualStrings("claude-opus-5", model.id);
+    try std.testing.expectEqualStrings("Anthropic", model.vendor.?);
     try std.testing.expectEqual(AdaptiveThinking.adaptive_only, model.capabilities.supports.?.adaptive_thinking.?);
     try std.testing.expect(model.capabilities.supports.?.toolCalls.?);
     try std.testing.expect(model.capabilities.supports.?.thinking.?);
@@ -236,4 +239,5 @@ test "model capabilities preserve absent optional sections" {
 
     try std.testing.expect(parsed.value.models[0].capabilities.supports == null);
     try std.testing.expect(parsed.value.models[0].capabilities.limits == null);
+    try std.testing.expect(parsed.value.models[0].vendor == null);
 }

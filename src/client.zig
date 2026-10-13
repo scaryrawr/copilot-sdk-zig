@@ -13489,6 +13489,15 @@ pub const Session = struct {
         comptime failure_policy: FailurePolicy,
         auto_tier: ?session_types.AutoTier,
     ) errors.DetailedError!PolicyResult(failure_policy, std.json.Parsed(session_types.AutoTierSwitchResult)) {
+        if (auto_tier) |tier| {
+            _ = session_types.AutoTier.init(tier.wireName()) catch |err|
+                return .{ .failure = try policyFailure(
+                    failure_policy,
+                    err,
+                    recordClientJson,
+                    .{ self.client.allocator, .write, err },
+                ) };
+        }
         const resolved = switch (try self.resolveForPolicy(failure_policy)) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
@@ -13577,6 +13586,15 @@ pub const Session = struct {
         failure_policy,
         std.json.Parsed(session_types.ModelSwitchResult),
     ) {
+        if (options.auto_tier) |tier| {
+            _ = session_types.AutoTier.init(tier.wireName()) catch |err|
+                return .{ .failure = try policyFailure(
+                    failure_policy,
+                    err,
+                    recordClientJson,
+                    .{ self.client.allocator, .write, err },
+                ) };
+        }
         const resolved = switch (try self.resolveForPolicy(failure_policy)) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
@@ -16814,6 +16832,9 @@ fn managedSettingsEnabled(config: anytype) bool {
 }
 
 fn validateLifecycleConfig(config: anytype) !void {
+    if (config.capi) |capi| {
+        if (capi.auto_tier) |tier| _ = try session_types.AutoTier.init(tier.wireName());
+    }
     if (config.git_hub_token != null and config.git_hub_token_provider != null)
         return error.ConflictingGitHubAuthentication;
 }
@@ -19163,10 +19184,10 @@ test "both model list APIs preserve true false omitted and null thinking support
     defer tmp.cleanup();
     const result_json =
         \\{"models":[
-        \\{"id":"thinking","name":"Thinking","capabilities":{"supports":{"thinking":true}}},
+        \\{"id":"thinking","name":"Thinking","vendor":"Example vendor","capabilities":{"supports":{"thinking":true}}},
         \\{"id":"nonthinking","name":"Nonthinking","capabilities":{"supports":{"thinking":false}}},
         \\{"id":"omitted","name":"Omitted","capabilities":{"supports":{}}},
-        \\{"id":"null","name":"Null","capabilities":{"supports":{"thinking":null}}}
+        \\{"id":"null","name":"Null","vendor":null,"capabilities":{"supports":{"thinking":null}}}
         \\]}
     ;
     var frames: std.Io.Writer.Allocating = .init(allocator);
@@ -19200,6 +19221,9 @@ test "both model list APIs preserve true false omitted and null thinking support
     const expected = [_]?bool{ true, false, null, null };
     const legacy = try client.listModels(.{});
     defer legacy.deinit();
+    try std.testing.expectEqualStrings("Example vendor", legacy.value.models[0].vendor.?);
+    try std.testing.expect(legacy.value.models[2].vendor == null);
+    try std.testing.expect(legacy.value.models[3].vendor == null);
     try std.testing.expectEqual(expected.len, legacy.value.models.len);
     for (legacy.value.models, expected) |model, thinking| {
         try std.testing.expectEqual(thinking, model.capabilities.supports.?.thinking);
@@ -19213,6 +19237,9 @@ test "both model list APIs preserve true false omitted and null thinking support
         .success => |value| value.value.models,
         .failure => return error.TestUnexpectedResult,
     };
+    try std.testing.expectEqualStrings("Example vendor", detailed_models[0].vendor.?);
+    try std.testing.expect(detailed_models[2].vendor == null);
+    try std.testing.expect(detailed_models[3].vendor == null);
     try std.testing.expectEqual(expected.len, detailed_models.len);
     for (detailed_models, expected) |model, thinking| {
         try std.testing.expectEqual(thinking, model.capabilities.supports.?.thinking);
@@ -30371,6 +30398,22 @@ test "create resume and parent join lower custom agents to literal lifecycle JSO
     });
     defer joined.deinit();
     try std.testing.expectEqualStrings("parent-session", joined.session.id);
+    try std.testing.expectError(
+        error.InvalidAutoTier,
+        created.setAutoTier(.{ .custom = "white space" }),
+    );
+    try std.testing.expectError(
+        error.InvalidAutoTier,
+        created.setModel("auto", .{ .auto_tier = .{ .custom = "white space" } }),
+    );
+    try std.testing.expectError(
+        error.InvalidAutoTier,
+        client.createSession(.{ .capi = .{ .auto_tier = .{ .custom = "white space" } } }),
+    );
+    try std.testing.expectError(
+        error.InvalidAutoTier,
+        client.resumeSession("session-1", .{ .capi = .{ .auto_tier = .{ .custom = "white space" } } }),
+    );
     const tier_result = try created.setAutoTier(try session_types.AutoTier.init("provider-speed"));
     defer tier_result.deinit();
     try std.testing.expectEqual(.pending, tier_result.value.status);

@@ -36,6 +36,7 @@ pub const AutoTier = union(enum) {
     }
 
     pub fn jsonStringify(self: AutoTier, writer: anytype) !void {
+        if (!validIdentifier(self.wireName())) return error.WriteFailed;
         try writer.write(self.wireName());
     }
 
@@ -66,5 +67,13 @@ test "auto tiers preserve known presets and provider identifiers" {
     }
     for ([_][]const u8{ "", "white space", "tier\t", "\x00", "\x7f", "\xc2\x85", "\xc2\xa0", "\xe2\x80\xa8", "\xef\xbb\xbf", "\xff" }) |value| {
         try std.testing.expectError(error.InvalidAutoTier, AutoTier.init(value));
+        var writer: std.Io.Writer.Allocating = .init(allocator);
+        defer writer.deinit();
+        try std.testing.expectError(
+            error.WriteFailed,
+            std.json.Stringify.value(.{
+                .autoTier = @as(?AutoTier, .{ .custom = value }),
+            }, .{ .emit_null_optional_fields = false }, &writer.writer),
+        );
     }
 }

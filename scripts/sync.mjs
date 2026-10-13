@@ -1951,6 +1951,7 @@ function eventDiscriminators(schema) {
 
 function expectedModelCompatibility(apiSchema) {
   for (const [schemaName, zigName] of [
+    ["Model", "Model"],
     ["ModelCapabilitiesSupports", "Supports"],
     ["ModelCapabilitiesOverrideSupports", "SupportsOverride"],
   ]) {

@@ -71,4 +71,7 @@ test("join guards reject missing exclusions, owner-only redeclarations, and miss
   assert.throws(() => verifyJoinSessionSourceContract(
     types, extension.replace('"onPermissionRequest"', '"onPermissionRequest" | "tools"'),
   ), /exclusions changed/);
+  assert.throws(() => verifyJoinSessionSourceContract(
+    types, extension.replace("{ ...rest }", "{ ...rest, ...config }"),
+  ), /must not spread unstripped config/);
 });

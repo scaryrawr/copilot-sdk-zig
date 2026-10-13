@@ -67,6 +67,12 @@ export function verifyJoinSessionSourceContract(typesSource, extensionSource) {
   }
   function rejectOwnerOnlyForwarding(node) {
     if (
+      ts.isSpreadAssignment(node) &&
+      node.expression.getText(sourceFile) === "config"
+    ) {
+      assert.fail("joinSession must not spread unstripped config");
+    }
+    if (
       ts.isPropertyAccessExpression(node) &&
       node.expression.getText(sourceFile) === "config"
     ) {
