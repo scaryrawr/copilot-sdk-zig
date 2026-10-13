@@ -40,6 +40,9 @@ import {
 import { parseSyncArgs } from "./sync-args.mjs";
 import { verifyWorkflowOptionsSourceContract } from "./workflow-source-contract.mjs";
 import { verifySubagentHooksSourceContract } from "./hook-source-contract.mjs";
+import { joinOwnerOnlyFields, verifyJoinSessionSourceContract } from "./join-source-contract.mjs";
+import { verifyCustomAgentConfigurationSourceContract } from "./custom-agent-source-contract.mjs";
+import { verifyAutoTierSchema } from "./auto-tier-contract.mjs";
 
 const repository = "github/copilot-sdk";
 const ref = "main";
@@ -318,7 +321,7 @@ const extensibilityMethods = [
   "workflow.abort",
 ];
 
-function expectedExtensibilityContract(upstreamCommit) {
+function expectedExtensibilityContract(upstreamCommit, typesSource) {
   return {
     upstreamCommit,
     startup: {
@@ -352,7 +355,7 @@ function expectedExtensibilityContract(upstreamCommit) {
         responseFields: ["grantedEnvironmentVariables"],
         ownership: "owned-result",
         redeclared: ["onPermissionRequest"],
-        omitted: ["extensionSdkPath"],
+        omitted: joinOwnerOnlyFields(typesSource),
       },
     },
     callbacks: {
@@ -414,18 +417,6 @@ function expectedExtensibilityContract(upstreamCommit) {
 }
 
 const expectedCustomAgentSourceContract = {
-  customAgent: {
-    name: "required:string",
-    displayName: "optional:string",
-    description: "optional:string",
-    tools: "optional:string[]|null",
-    prompt: "required:string",
-    mcpServers: "optional:Record<string,MCPServerConfig>",
-    infer: "optional:boolean",
-    skills: "optional:string[]",
-    model: "optional:string",
-    reasoningEffort: "optional:ReasoningEffort",
-  },
   defaultAgent: {
     excludedTools: "optional:string[]",
   },
@@ -449,7 +440,6 @@ const expectedCustomAgentSourceContract = {
     },
     join: {
       base: "ResumeSessionConfig",
-      excluded: ["onPermissionRequest", "extensionSdkPath"],
       properties: {
         onPermissionRequest: "optional:PermissionHandler",
         requestedEnvironmentVariables: "optional:string[]",
@@ -506,11 +496,24 @@ function verifyCustomAgentSourceContract(
   zigSessionSource,
 ) {
   const expected = expectedCustomAgentSourceContract;
-  requireExactPropertySignatures(
-    interfacePropertySignatures(typesSource, "CustomAgentConfig"),
-    expected.customAgent,
-    "CustomAgentConfig",
+  verifyCustomAgentConfigurationSourceContract(typesSource);
+  const zigAgent = zigStructFields(zigSessionSource, "CustomAgentConfig");
+  assert(
+    zigAgent.hooks?.type === "?[]const CustomAgentHook" &&
+      zigAgent.hooks?.default === "null",
+    "Zig CustomAgentConfig.hooks changed",
   );
+  requireExactPropertySignatures(
+    zigStructFields(zigSessionSource, "CustomAgentHook"),
+    {
+      event: { type: "[]const u8", default: null },
+      actions: { type: "[]const std.json.ObjectMap", default: null },
+    },
+    "Zig CustomAgentHook",
+  );
+  requireSourceFragments(zigClientSource, [
+    ".hooks = if (agent.hooks) |hooks| WireCustomAgentHooks{ .values = hooks } else null",
+  ], "Zig custom agent hook lowering");
 
   requireExactPropertySignatures(
     interfacePropertySignatures(typesSource, "DefaultAgentConfig"),
@@ -539,11 +542,11 @@ function verifyCustomAgentSourceContract(
     interfaceBase(typesSource, "ResumeSessionConfig") === expected.lifecycle.resumeExtends,
     "upstream ResumeSessionConfig inheritance changed",
   );
-  const joinShape = omitIntersectionAlias(extensionSource, "JoinSessionConfig");
+  const joinShape = verifyJoinSessionSourceContract(typesSource, extensionSource);
   assert(joinShape.base === expected.lifecycle.join.base, "JoinSessionConfig base changed");
   requireExactStrings(
     joinShape.excluded,
-    expected.lifecycle.join.excluded,
+    ["onPermissionRequest", ...joinOwnerOnlyFields(typesSource)],
     "JoinSessionConfig exclusions",
   );
   requireExactPropertySignatures(
@@ -1237,7 +1240,7 @@ function verifyPinnedSourceContracts(
   verifyOutboundMessageEnumContract(publicTypesSource, zigSessionSource);
   verifyStableSessionRuntimeSourceContract(clientSource, typesSource);
   verifyExtensibilitySourceContract(
-    expectedExtensibilityContract(upstreamCommit),
+    expectedExtensibilityContract(upstreamCommit, typesSource),
     clientSource,
     typesSource,
     extensionSource,
@@ -1307,7 +1310,7 @@ function verifyWorkflowSourceContract(workflowSource, clientSource) {
 }
 
 function writeExtensibilityContract(upstreamCommit, clientSource, typesSource, extensionSource) {
-  const contract = expectedExtensibilityContract(upstreamCommit);
+  const contract = expectedExtensibilityContract(upstreamCommit, typesSource);
   writeFileSync(extensibilityContractPath, `${JSON.stringify(contract, null, 2)}\n`);
 }
 
@@ -1503,14 +1506,14 @@ function verifyStableParitySourceContract(
     `${authority.name} CopilotExpAssignmentResponse`,
   );
 
-  const joinShape = omitIntersectionAlias(extensionSource, "JoinSessionConfig");
+  const joinShape = verifyJoinSessionSourceContract(typesSource, extensionSource);
   assert(
     joinShape.base === "ResumeSessionConfig",
     `${authority.name} JoinSessionConfig base changed`,
   );
   requireExactStrings(
     joinShape.excluded,
-    ["onPermissionRequest", "extensionSdkPath"],
+    ["onPermissionRequest", ...joinOwnerOnlyFields(typesSource)],
     `${authority.name} JoinSessionConfig exclusions`,
   );
   for (const field of Object.keys(stableBaseProperties)) {
@@ -2072,9 +2075,8 @@ function verifyCompatibility(apiSchema, eventSchema) {
       `Zig ${contract[1]} values`,
     );
   }
-  const autoTiers = ["balance", "efficiency", "fast", "intelligence"];
-  requireExactStrings(stringEnum(apiSchema, "AutoTier"), autoTiers, "API AutoTier enum");
-  requireExactStrings(stringEnum(eventSchema, "AutoTier"), autoTiers, "event AutoTier enum");
+  verifyAutoTierSchema(apiSchema);
+  verifyAutoTierSchema(eventSchema);
   for (const contract of [
     {
       schema: "SessionFsSetProviderConventions",
@@ -2303,7 +2305,7 @@ function verifyCompatibility(apiSchema, eventSchema) {
   }
 }
 
-function verify() {
+function verify(typesSource) {
   const metadata = parseJson(metadataPath);
   validateMetadata(metadata);
   const publicRpcSurface = parseJson(publicRpcSurfacePath);
@@ -2336,7 +2338,7 @@ function verify() {
   verifyCompatibility(schemas["api.schema.json"], schemas["session-events.schema.json"]);
   const extensibility = parseJson(extensibilityContractPath);
   assert(
-    JSON.stringify(extensibility) === JSON.stringify(expectedExtensibilityContract(metadata.upstreamCommit)),
+    JSON.stringify(extensibility) === JSON.stringify(expectedExtensibilityContract(metadata.upstreamCommit, typesSource)),
     "extensibility contract is stale",
   );
   const methods = collectPropertyValues(schemas["api.schema.json"], "rpcMethod");
@@ -2565,7 +2567,7 @@ async function synchronize(explicitCommit, ifPublished = false) {
     rmSync(workDirectory, { force: true, recursive: true });
   }
 
-  verify();
+  verify(nodeTypes);
 }
 
 const args = process.argv.slice(2);
@@ -2619,7 +2621,7 @@ if (options.check) {
     publicTypes,
     publicExtension,
   );
-  verify();
+  verify(nodeTypes);
 } else {
   await synchronize(options.explicitCommit, options.ifPublished);
 }

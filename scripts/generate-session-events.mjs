@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sessionEventRegistry } from "./schema-snapshot.mjs";
+import { autoTierIdentifierPattern } from "./auto-tier-contract.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const schemaPath = join(root, "vendor", "copilot", "schemas", "session-events.schema.json");
@@ -270,6 +271,36 @@ class SchemaModel {
 
   checkKeywords(node, path) {
     for (const keyword of Object.keys(node)) {
+      if (keyword === "x-extensible-enum") {
+        const values = node[keyword];
+        if (
+          node.type === "string" && !node.enum && node.const === undefined &&
+          !node.$ref && !node.anyOf && node["x-opaque-json"] !== true &&
+          Array.isArray(values) && values.length > 0 &&
+          values.every((value) => typeof value === "string") &&
+          new Set(values).size === values.length
+        ) {
+          continue;
+        }
+        throw new Error(`unsupported extensible enum at ${path}`);
+      }
+      if (keyword === "pattern") {
+        if (node.type === "string" && node.pattern === autoTierIdentifierPattern) {
+          continue;
+        }
+        throw new Error(`unsupported schema keyword pattern at ${path}`);
+      }
+      if (keyword === "x-legacy-parameters") {
+        const fields = node[keyword];
+        if (
+          node.type === "object" && Array.isArray(fields) &&
+          new Set(fields).size === fields.length &&
+          fields.every((field) => typeof field === "string" && Object.hasOwn(node.properties ?? {}, field))
+        ) {
+          continue;
+        }
+        throw new Error(`unsupported legacy parameters at ${path}`);
+      }
       if (keyword === "not") {
         const constraint = node.not;
         if (node.type === "object" && !node.$ref && !node.anyOf &&
@@ -393,7 +424,10 @@ class SchemaModel {
 
     switch (node.type) {
       case "string":
-        return { kind: "string", minLength: node.minLength, maxLength: node.maxLength };
+        return {
+          kind: "string", minLength: node.minLength, maxLength: node.maxLength,
+          routingIdentifier: node.pattern !== undefined,
+        };
       case "boolean":
         return { kind: "boolean" };
       case "integer":
@@ -560,7 +594,9 @@ function parseExpression(model, value, allocator) {
     case "ref":
       return `try parse${model.target}(${allocator}, ${value})`;
     case "string":
-      return `try parseString(${allocator}, ${value}, ${model.minLength ?? "null"}, ${model.maxLength ?? "null"})`;
+      return model.routingIdentifier
+        ? `try parseRoutingIdentifier(${allocator}, ${value}, ${model.minLength ?? "null"}, ${model.maxLength ?? "null"})`
+        : `try parseString(${allocator}, ${value}, ${model.minLength ?? "null"}, ${model.maxLength ?? "null"})`;
     case "constant":
       return `try parseConstant(${allocator}, ${value}, ${zigString(model.value)})`;
     case "boolean":
@@ -1355,6 +1391,17 @@ fn parseString(
     if (minimum) |bound| if (length < bound) return error.InvalidSessionEvent;
     if (maximum) |bound| if (length > bound) return error.InvalidSessionEvent;
     return allocator.dupe(u8, string);
+}
+
+fn parseRoutingIdentifier(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+    minimum: ?usize,
+    maximum: ?usize,
+) ![]const u8 {
+    if (!@import("auto_tier.zig").validIdentifier(try valueString(value)))
+        return error.InvalidSessionEvent;
+    return parseString(allocator, value, minimum, maximum);
 }
 
 fn parseConstant(

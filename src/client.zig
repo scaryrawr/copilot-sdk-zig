@@ -13470,9 +13470,9 @@ pub const Session = struct {
     pub fn setAutoTier(
         self: Session,
         auto_tier: ?session_types.AutoTier,
-    ) !session_types.AutoTierSwitchResult {
+    ) !std.json.Parsed(session_types.AutoTierSwitchResult) {
         return legacyResult(
-            session_types.AutoTierSwitchResult,
+            std.json.Parsed(session_types.AutoTierSwitchResult),
             self.setAutoTierImpl(.legacy, auto_tier),
         );
     }
@@ -13480,7 +13480,7 @@ pub const Session = struct {
     pub fn setAutoTierDetailed(
         self: Session,
         auto_tier: ?session_types.AutoTier,
-    ) errors.DetailedError!errors.DetailedResult(session_types.AutoTierSwitchResult) {
+    ) errors.DetailedError!errors.DetailedResult(std.json.Parsed(session_types.AutoTierSwitchResult)) {
         return self.setAutoTierImpl(.detailed, auto_tier);
     }
 
@@ -13488,7 +13488,7 @@ pub const Session = struct {
         self: Session,
         comptime failure_policy: FailurePolicy,
         auto_tier: ?session_types.AutoTier,
-    ) errors.DetailedError!PolicyResult(failure_policy, session_types.AutoTierSwitchResult) {
+    ) errors.DetailedError!PolicyResult(failure_policy, std.json.Parsed(session_types.AutoTierSwitchResult)) {
         const resolved = switch (try self.resolveForPolicy(failure_policy)) {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
@@ -13500,7 +13500,7 @@ pub const Session = struct {
             .{
                 .sessionId = resolved.id,
                 .autoTier = if (auto_tier) |tier|
-                    std.json.Value{ .string = @tagName(tier) }
+                    std.json.Value{ .string = tier.wireName() }
                 else
                     std.json.Value.null,
             },
@@ -13509,8 +13509,7 @@ pub const Session = struct {
             .success => |value| value,
             .failure => |failure| return .{ .failure = failure },
         };
-        defer parsed.deinit();
-        return .{ .success = parsed.value };
+        return .{ .success = parsed };
     }
 
     /// Aborts the current agent turn. The caller owns the returned result.
@@ -16167,6 +16166,14 @@ fn validateCustomAgents(
             if (std.mem.eql(u8, previous.name, agent.name))
                 return error.DuplicateCustomAgentName;
         }
+        if (agent.hooks) |hooks| {
+            for (hooks, 0..) |hook, hook_index| {
+                for (hooks[0..hook_index]) |previous| {
+                    if (std.mem.eql(u8, previous.event, hook.event))
+                        return error.DuplicateCustomAgentHookEvent;
+                }
+            }
+        }
     }
     const selected_name = switch (initial_agent) {
         .default_agent => return,
@@ -16197,6 +16204,24 @@ const WireCustomAgent = struct {
     skills: ?[]const []const u8,
     model: ?[]const u8,
     reasoningEffort: ?session_types.ReasoningEffort,
+    hooks: ?WireCustomAgentHooks,
+};
+
+const WireCustomAgentHooks = struct {
+    values: []const session_types.CustomAgentHook,
+
+    pub fn jsonStringify(self: WireCustomAgentHooks, writer: anytype) !void {
+        try writer.beginObject();
+        for (self.values) |hook| {
+            try writer.objectField(hook.event);
+            try writer.beginArray();
+            for (hook.actions) |action| {
+                try writer.write(std.json.Value{ .object = action });
+            }
+            try writer.endArray();
+        }
+        try writer.endObject();
+    }
 };
 
 const WireDefaultAgent = struct {
@@ -16419,6 +16444,7 @@ const ExtensionWireValues = struct {
                 .skills = agent.skills,
                 .model = agent.model,
                 .reasoningEffort = agent.reasoning_effort,
+                .hooks = if (agent.hooks) |hooks| WireCustomAgentHooks{ .values = hooks } else null,
             });
         }
     }
@@ -18023,7 +18049,7 @@ test "stdio runtime lowers stable argv and environment options" {
     const send_wait_fn: *const fn (Session, session_types.MessageOptions) anyerror!?session_types.AssistantMessage = &Session.sendAndWait;
     const event_fn: *const fn (Session) anyerror!session_types.SessionEvent = &Session.nextEvent;
     const disconnect_fn: *const fn (Session) anyerror!void = &Session.disconnect;
-    const auto_tier_fn: *const fn (Session, ?session_types.AutoTier) anyerror!session_types.AutoTierSwitchResult = &Session.setAutoTier;
+    const auto_tier_fn: *const fn (Session, ?session_types.AutoTier) anyerror!std.json.Parsed(session_types.AutoTierSwitchResult) = &Session.setAutoTier;
     const abort_fn: *const fn (Session) anyerror!std.json.Parsed(session_types.AbortResult) = &Session.abort;
     const model_fn: *const fn (Session, []const u8, session_types.ModelSwitchOptions) anyerror!std.json.Parsed(session_types.ModelSwitchResult) = &Session.setModel;
     const log_fn: *const fn (Session, []const u8, session_types.LogOptions) anyerror![]u8 = &Session.log;
@@ -30207,14 +30233,25 @@ test "parity production fixes preserve boundary behavior" {
 
 test "create resume and parent join lower custom agents to literal lifecycle JSON" {
     const allocator = std.testing.allocator;
+    const hook_action = try std.json.parseFromSlice(std.json.Value, allocator,
+        \\{"type":"command","command":"echo reviewed","timeoutSec":10,"custom":{"enabled":true}}
+    , .{});
+    defer hook_action.deinit();
+    const agent_hooks = &[_]session_types.CustomAgentHook{
+        .{ .event = "preToolUse", .actions = &.{hook_action.value.object} },
+        .{ .event = "agentStop", .actions = &.{} },
+    };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const create_response = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"sessionId\":\"created\"}}";
     const resume_response = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"session-1\"}}";
     const join_response = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"sessionId\":\"parent-session\"}}";
+    const tier_response =
+        \\{"jsonrpc":"2.0","id":4,"result":{"status":"pending","effectiveAutoTier":"provider-balanced","pendingAutoTier":"provider-speed","activatingAutoTier":null,"supersededAutoTier":"previous-provider"}}
+    ;
     const responses = try std.fmt.allocPrint(
         allocator,
-        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        "Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}Content-Length: {d}\r\n\r\n{s}",
         .{
             create_response.len,
             create_response,
@@ -30222,6 +30259,8 @@ test "create resume and parent join lower custom agents to literal lifecycle JSO
             resume_response,
             join_response.len,
             join_response,
+            tier_response.len,
+            tier_response,
         },
     );
     defer allocator.free(responses);
@@ -30274,6 +30313,7 @@ test "create resume and parent join lower custom agents to literal lifecycle JSO
             .skills = &.{"review"},
             .model = "gpt-5.4",
             .reasoning_effort = .xhigh,
+            .hooks = agent_hooks,
         }},
         .default_agent = .{ .excluded_tools = &.{"deploy"} },
         .agent = .{ .custom_agent = "reviewer" },
@@ -30285,6 +30325,7 @@ test "create resume and parent join lower custom agents to literal lifecycle JSO
         .custom_agents = &.{.{
             .name = "docs",
             .prompt = "Answer from docs.",
+            .hooks = agent_hooks,
             .mcp_servers = &.{.{
                 .name = "search",
                 .config = .{ .http = .{
@@ -30321,6 +30362,7 @@ test "create resume and parent join lower custom agents to literal lifecycle JSO
             .skills = &.{"review"},
             .model = "gpt-5.4",
             .reasoning_effort = .max,
+            .hooks = agent_hooks,
         }},
         .default_agent = .{ .excluded_tools = &.{"write"} },
         .agent = .{ .custom_agent = "parent-reviewer" },
@@ -30329,6 +30371,13 @@ test "create resume and parent join lower custom agents to literal lifecycle JSO
     });
     defer joined.deinit();
     try std.testing.expectEqualStrings("parent-session", joined.session.id);
+    const tier_result = try created.setAutoTier(try session_types.AutoTier.init("provider-speed"));
+    defer tier_result.deinit();
+    try std.testing.expectEqual(.pending, tier_result.value.status);
+    try std.testing.expectEqualStrings("provider-balanced", tier_result.value.effectiveAutoTier.?.wireName());
+    try std.testing.expectEqualStrings("provider-speed", tier_result.value.pendingAutoTier.?.wireName());
+    try std.testing.expectEqualStrings("previous-provider", tier_result.value.supersededAutoTier.?.wireName());
+    try std.testing.expect(tier_result.value.activatingAutoTier == null);
 
     const requests = try tmp.dir.readFileAlloc(std.testing.io, "requests", allocator, .limited(8192));
     defer allocator.free(requests);
@@ -30336,18 +30385,23 @@ test "create resume and parent join lower custom agents to literal lifecycle JSO
     const create_body = try json_rpc.readFrame(allocator, &frames);
     defer allocator.free(create_body);
     try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":1,"method":"session.create","params":{"sessionId":"created","streaming":false,"includeSubAgentStreamingEvents":true,"tools":[],"customAgents":[{"name":"reviewer","displayName":"Code reviewer","description":"Reviews code.","tools":["read"],"prompt":"Review.","mcpServers":{"docs":{"type":"stdio","command":"docs-mcp","args":["--stdio"],"env":{"TOKEN":"secret"},"cwd":"/repo","tools":["lookup"],"timeout":25}},"infer":false,"skills":["review"],"model":"gpt-5.4","reasoningEffort":"xhigh"}],"defaultAgent":{"excludedTools":["deploy"]},"agent":"reviewer","customAgentsLocalOnly":true,"excludedBuiltinAgents":["explore"],"toolFilterPrecedence":"excluded","requestPermission":false,"requestUserInput":false,"requestElicitation":false,"requestExitPlanMode":false,"requestAutoModeSwitch":false,"enableManagedSettings":false}}
+        \\{"jsonrpc":"2.0","id":1,"method":"session.create","params":{"sessionId":"created","streaming":false,"includeSubAgentStreamingEvents":true,"tools":[],"customAgents":[{"name":"reviewer","displayName":"Code reviewer","description":"Reviews code.","tools":["read"],"prompt":"Review.","mcpServers":{"docs":{"type":"stdio","command":"docs-mcp","args":["--stdio"],"env":{"TOKEN":"secret"},"cwd":"/repo","tools":["lookup"],"timeout":25}},"infer":false,"skills":["review"],"model":"gpt-5.4","reasoningEffort":"xhigh","hooks":{"preToolUse":[{"type":"command","command":"echo reviewed","timeoutSec":10,"custom":{"enabled":true}}],"agentStop":[]}}],"defaultAgent":{"excludedTools":["deploy"]},"agent":"reviewer","customAgentsLocalOnly":true,"excludedBuiltinAgents":["explore"],"toolFilterPrecedence":"excluded","requestPermission":false,"requestUserInput":false,"requestElicitation":false,"requestExitPlanMode":false,"requestAutoModeSwitch":false,"enableManagedSettings":false}}
     , create_body);
     const resume_body = try json_rpc.readFrame(allocator, &frames);
     defer allocator.free(resume_body);
     try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":2,"method":"session.resume","params":{"sessionId":"session-1","streaming":false,"includeSubAgentStreamingEvents":true,"tools":[],"customAgents":[{"name":"docs","prompt":"Answer from docs.","mcpServers":{"search":{"type":"sse","url":"https://example.test/mcp","headers":{"Authorization":"secret"},"tools":["search"],"timeout":50}}}],"agent":"docs","toolFilterPrecedence":"excluded","requestPermission":false,"requestUserInput":false,"requestElicitation":false,"requestExitPlanMode":false,"requestAutoModeSwitch":false,"enableManagedSettings":false}}
+        \\{"jsonrpc":"2.0","id":2,"method":"session.resume","params":{"sessionId":"session-1","streaming":false,"includeSubAgentStreamingEvents":true,"tools":[],"customAgents":[{"name":"docs","prompt":"Answer from docs.","mcpServers":{"search":{"type":"sse","url":"https://example.test/mcp","headers":{"Authorization":"secret"},"tools":["search"],"timeout":50}},"hooks":{"preToolUse":[{"type":"command","command":"echo reviewed","timeoutSec":10,"custom":{"enabled":true}}],"agentStop":[]}}],"agent":"docs","toolFilterPrecedence":"excluded","requestPermission":false,"requestUserInput":false,"requestElicitation":false,"requestExitPlanMode":false,"requestAutoModeSwitch":false,"enableManagedSettings":false}}
     , resume_body);
     const join_body = try json_rpc.readFrame(allocator, &frames);
     defer allocator.free(join_body);
     try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","id":3,"method":"session.resume","params":{"sessionId":"parent-session","streaming":false,"includeSubAgentStreamingEvents":true,"tools":[],"customAgents":[{"name":"parent-reviewer","displayName":"Parent reviewer","description":"Reviews the parent session.","tools":["read"],"prompt":"Review the parent.","mcpServers":{"parent-docs":{"type":"stdio","command":"parent-mcp","args":["--stdio"],"env":{"TOKEN":"secret"},"cwd":"/parent","tools":["lookup"],"timeout":75}},"infer":true,"skills":["review"],"model":"gpt-5.4","reasoningEffort":"max"}],"defaultAgent":{"excludedTools":["write"]},"agent":"parent-reviewer","customAgentsLocalOnly":false,"excludedBuiltinAgents":["task"],"toolFilterPrecedence":"excluded","requestPermission":true,"requestUserInput":false,"requestElicitation":false,"requestExitPlanMode":false,"requestAutoModeSwitch":false,"enableManagedSettings":false,"disableResume":true}}
+        \\{"jsonrpc":"2.0","id":3,"method":"session.resume","params":{"sessionId":"parent-session","streaming":false,"includeSubAgentStreamingEvents":true,"tools":[],"customAgents":[{"name":"parent-reviewer","displayName":"Parent reviewer","description":"Reviews the parent session.","tools":["read"],"prompt":"Review the parent.","mcpServers":{"parent-docs":{"type":"stdio","command":"parent-mcp","args":["--stdio"],"env":{"TOKEN":"secret"},"cwd":"/parent","tools":["lookup"],"timeout":75}},"infer":true,"skills":["review"],"model":"gpt-5.4","reasoningEffort":"max","hooks":{"preToolUse":[{"type":"command","command":"echo reviewed","timeoutSec":10,"custom":{"enabled":true}}],"agentStop":[]}}],"defaultAgent":{"excludedTools":["write"]},"agent":"parent-reviewer","customAgentsLocalOnly":false,"excludedBuiltinAgents":["task"],"toolFilterPrecedence":"excluded","requestPermission":true,"requestUserInput":false,"requestElicitation":false,"requestExitPlanMode":false,"requestAutoModeSwitch":false,"enableManagedSettings":false,"disableResume":true}}
     , join_body);
+    const tier_body = try json_rpc.readFrame(allocator, &frames);
+    defer allocator.free(tier_body);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","id":4,"method":"session.model.switchAutoTier","params":{"sessionId":"created","autoTier":"provider-speed"}}
+    , tier_body);
     try std.testing.expectEqualStrings("", frames.buffered());
 }
 
@@ -30417,6 +30471,7 @@ test "custom agent optional slices preserve omitted and empty values" {
                 .tools = &.{},
                 .mcp_servers = &.{},
                 .skills = &.{},
+                .hooks = &.{},
             },
         },
         .default_agent = .{ .excluded_tools = &.{} },
@@ -30435,9 +30490,11 @@ test "custom agent optional slices preserve omitted and empty values" {
     try std.testing.expect(!agents[0].object.contains("tools"));
     try std.testing.expect(!agents[0].object.contains("mcpServers"));
     try std.testing.expect(!agents[0].object.contains("skills"));
+    try std.testing.expect(!agents[0].object.contains("hooks"));
     try std.testing.expectEqual(@as(usize, 0), agents[1].object.get("tools").?.array.items.len);
     try std.testing.expectEqual(@as(usize, 0), agents[1].object.get("mcpServers").?.object.count());
     try std.testing.expectEqual(@as(usize, 0), agents[1].object.get("skills").?.array.items.len);
+    try std.testing.expectEqual(@as(usize, 0), agents[1].object.get("hooks").?.object.count());
     try std.testing.expectEqual(
         @as(usize, 0),
         params.get("defaultAgent").?.object.get("excludedTools").?.array.items.len,
@@ -31191,6 +31248,26 @@ test "custom agent validation precedes lifecycle state and RPC writes" {
     try std.testing.expectError(
         error.DuplicateCustomAgentName,
         client.resumeSession("s1", .{ .custom_agents = duplicate }),
+    );
+    const duplicate_hooks = &[_]session_types.CustomAgentConfig{.{
+        .name = "hooked",
+        .prompt = "Hooked.",
+        .hooks = &.{
+            .{ .event = "preToolUse", .actions = &.{} },
+            .{ .event = "preToolUse", .actions = &.{} },
+        },
+    }};
+    try std.testing.expectError(
+        error.DuplicateCustomAgentHookEvent,
+        client.createSession(.{ .custom_agents = duplicate_hooks }),
+    );
+    try std.testing.expectError(
+        error.DuplicateCustomAgentHookEvent,
+        client.resumeSession("s1", .{ .custom_agents = duplicate_hooks }),
+    );
+    try std.testing.expectError(
+        error.DuplicateCustomAgentHookEvent,
+        client.joinParentSession("s1", .{ .custom_agents = duplicate_hooks }),
     );
     try std.testing.expectError(
         error.UnknownCustomAgent,

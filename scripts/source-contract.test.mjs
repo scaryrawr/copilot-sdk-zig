@@ -462,7 +462,7 @@ test("Omit intersection aliases retain the exact JoinSessionConfig shape", () =>
   const source = `
 export type JoinSessionConfig = Omit<
   ResumeSessionConfig,
-  "onPermissionRequest" | "extensionSdkPath"
+  "onPermissionRequest" | "extensionSdkPath" | "skillProvider" | "imageGeneration"
 > & {
   onPermissionRequest?: PermissionHandler;
   requestedEnvironmentVariables?: string[];
@@ -472,7 +472,7 @@ export type JoinSessionConfig = Omit<
 
   assert.deepEqual(omitIntersectionAlias(source, "JoinSessionConfig"), {
     base: "ResumeSessionConfig",
-    excluded: ["onPermissionRequest", "extensionSdkPath"],
+    excluded: ["onPermissionRequest", "extensionSdkPath", "skillProvider", "imageGeneration"],
     properties: {
       onPermissionRequest: "optional:PermissionHandler",
       requestedEnvironmentVariables: "optional:string[]",

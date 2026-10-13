@@ -281,6 +281,7 @@ pub const AssistantMessageData = struct {
     message_id: []const u8,
     originating_message_id: ?[]const u8 = null,
     model: ?[]const u8 = null,
+    provider_id: ?[]const u8 = null,
     content: []const u8,
     tool_requests: ?[]const AssistantMessageToolRequest = null,
     reasoning_opaque: ?[]const u8 = null,
@@ -363,9 +364,61 @@ pub const AssistantTurnStartData = struct {
     parent_tool_call_id: ?[]const u8 = null,
 };
 
+pub const AiCreditsStatus = enum {
+    complete,
+    partial,
+    unavailable,
+};
+
+pub const ModelProviderKind = enum {
+    copilot,
+    loki,
+};
+
+pub const ModelProviderRef = struct {
+    id: []const u8,
+    label: []const u8,
+    kind: ModelProviderKind,
+};
+
+pub const UsageAccountingIdentity = struct {
+    source_session_id: []const u8,
+    sequence: u64,
+    usage_id: []const u8,
+};
+
 pub const AssistantUsageTransport = enum {
     http,
     websocket,
+};
+
+pub const ModelCallRequestBodyEncoding = enum {
+    identity,
+    gzip,
+    zstd,
+};
+
+pub const ModelCallWebSocketFallbackReason = enum {
+    connect_failed,
+    connection_unavailable,
+    send_failed,
+    api_error,
+    transport_failed,
+};
+
+pub const ModelCallWebSocketFallbackErrorKind = enum {
+    dns,
+    tls,
+    timeout,
+    connection_refused,
+    connection_reset,
+    closed_by_peer,
+    closed_locally,
+    not_connected,
+    http_status,
+    protocol,
+    configuration,
+    other,
 };
 
 pub const AssistantUsageApiEndpoint = enum {
@@ -410,7 +463,11 @@ pub const ReasoningSummary = enum {
 };
 
 pub const AssistantUsageData = struct {
+    ai_credits_status: ?AiCreditsStatus = null,
     model: []const u8,
+    provider: ?ModelProviderRef = null,
+    model_display_name: ?[]const u8 = null,
+    accounting: ?UsageAccountingIdentity = null,
     input_tokens: ?u64 = null,
     output_tokens: ?u64 = null,
     cache_read_tokens: ?u64 = null,
@@ -435,6 +492,16 @@ pub const AssistantUsageData = struct {
     accepted_prediction_tokens: ?u64 = null,
     rejected_prediction_tokens: ?u64 = null,
     transport: ?AssistantUsageTransport = null,
+    request_body_bytes: ?u64 = null,
+    request_body_wire_bytes: ?u64 = null,
+    request_body_encoding: ?ModelCallRequestBodyEncoding = null,
+    websocket_fallback_reason: ?ModelCallWebSocketFallbackReason = null,
+    websocket_fallback_after_ms: ?u64 = null,
+    websocket_fallback_error_kind: ?ModelCallWebSocketFallbackErrorKind = null,
+    websocket_fallback_status_code: ?u64 = null,
+    websocket_fallback_close_code: ?u64 = null,
+    websocket_fallback_reconnect_attempted: ?bool = null,
+    websocket_fallback_started_this_call: ?bool = null,
     api_call_id: ?[]const u8 = null,
     provider_call_id: ?[]const u8 = null,
     service_request_id: ?[]const u8 = null,
@@ -787,6 +854,9 @@ pub const ModelCallFailureRequestFingerprint = struct {
     nameless_tool_call_count: u64,
     image_part_count: u64,
     image_parts_missing_media_type: u64,
+    image_bytes: ?u64 = null,
+    reasoning_item_count: ?u64 = null,
+    encrypted_content_bytes: ?u64 = null,
     last_message_role: ?[]const u8 = null,
 };
 
@@ -803,6 +873,17 @@ pub const ModelCallFailureData = struct {
     api_endpoint: ?AssistantUsageApiEndpoint = null,
     transport: ?ModelCallFailureTransport = null,
     failure_kind: ?ModelCallFailureKind = null,
+    request_body_bytes: ?u64 = null,
+    request_body_wire_bytes: ?u64 = null,
+    request_body_encoding: ?ModelCallRequestBodyEncoding = null,
+    retry_attempt: ?u64 = null,
+    websocket_fallback_reason: ?ModelCallWebSocketFallbackReason = null,
+    websocket_fallback_after_ms: ?u64 = null,
+    websocket_fallback_error_kind: ?ModelCallWebSocketFallbackErrorKind = null,
+    websocket_fallback_status_code: ?u64 = null,
+    websocket_fallback_close_code: ?u64 = null,
+    websocket_fallback_reconnect_attempted: ?bool = null,
+    websocket_fallback_started_this_call: ?bool = null,
     max_prompt_tokens: ?u64 = null,
     max_output_tokens: ?u64 = null,
     is_byok: ?bool = null,
@@ -948,6 +1029,8 @@ pub const PermissionRecoveryAttempt = struct {
 
 pub const PermissionRecoveryData = struct {
     episode_id: []const u8,
+    owner_session_id: ?[]const u8 = null,
+    owner_agent_id: ?[]const u8 = null,
     status: PermissionRecoveryStatus,
     on_blocked: PermissionRecoveryOnBlocked,
     reason: PermissionRecoveryReason,
@@ -1188,6 +1271,16 @@ pub const PermissionRequestShell = struct {
     sandbox_path_grant: ?PermissionSandboxPathGrant = null,
 };
 
+pub const PermissionWriteFileContent = struct {
+    path: []const u8,
+    content: []const u8,
+};
+
+pub const PermissionWriteFileEdit = struct {
+    before: ?PermissionWriteFileContent = null,
+    after: ?PermissionWriteFileContent = null,
+};
+
 pub const PermissionRequestWrite = struct {
     kind: []const u8,
     tool_call_id: ?[]const u8 = null,
@@ -1197,6 +1290,7 @@ pub const PermissionRequestWrite = struct {
     resolved_path: ?[]const u8 = null,
     diff: []const u8,
     new_file_contents: ?[]const u8 = null,
+    file_edits: ?[]const PermissionWriteFileEdit = null,
     can_offer_session_approval: bool,
     request_sandbox_bypass: ?bool = null,
     request_sandbox_bypass_reason: ?[]const u8 = null,
@@ -1265,6 +1359,7 @@ pub const PermissionApprovalEvaluationReasonCode = enum {
     sandbox_bypass,
     action_too_long,
     path_not_authorized,
+    content_excluded,
     invalid_working_directory,
     unreadable,
     not_regular_file,
@@ -1277,6 +1372,12 @@ pub const PermissionApprovalEvaluationReasonCode = enum {
     interpreter_wrapped_script,
     unreviewable_script_invocation,
     argument_binding_unreviewable,
+    unsupported_command_shape,
+    unsupported_source,
+    dynamic_source,
+    too_many_sources,
+    executable_unavailable,
+    executable_too_large,
     malformed_script_action_review,
     malformed_script_action_manifest,
     unavailable,
@@ -1453,6 +1554,7 @@ pub const PermissionPromptRequestWrite = struct {
     resolved_path: ?[]const u8 = null,
     diff: []const u8,
     new_file_contents: ?[]const u8 = null,
+    file_edits: ?[]const PermissionWriteFileEdit = null,
     can_offer_session_approval: bool,
     assisted_approval: ?PermissionAssistedApproval = null,
     managed_approval_required: ?bool = null,
@@ -1616,6 +1718,8 @@ pub const PermissionRequestedData = struct {
     prompt_request: ?PermissionPromptRequest = null,
     permission_mode: ?PermissionMode = null,
     agent_mode: ?SessionMode = null,
+    owner_session_id: ?[]const u8 = null,
+    owner_agent_id: ?[]const u8 = null,
     risk_assessment: ?std.json.Value = null,
     resolved_by_hook: ?bool = null,
     recovery_episode_id: ?[]const u8 = null,
@@ -1922,22 +2026,13 @@ pub const AutoModeResolvedData = struct {
     has_image: ?bool = null,
 };
 
-pub const RecommendedAutoTier = enum {
-    efficiency,
-    balance,
-    intelligence,
-};
+pub const RecommendedAutoTier = []const u8;
 
 pub const AutoTierRecommendationData = struct {
     recommended_auto_tier: RecommendedAutoTier,
 };
 
-pub const AutoTier = enum {
-    efficiency,
-    balance,
-    intelligence,
-    fast,
-};
+pub const AutoTier = []const u8;
 
 pub const AutoTierSwitchFailureReason = enum {
     policy_rejected,
@@ -2068,6 +2163,10 @@ pub const CompactionCompleteCompactionTokensUsedCopilotUsage = struct {
 };
 
 pub const CompactionCompleteCompactionTokensUsed = struct {
+    request_count: ?u64 = null,
+    ai_credits_status: ?AiCreditsStatus = null,
+    provider: ?ModelProviderRef = null,
+    model_display_name: ?[]const u8 = null,
     input_tokens: ?u64 = null,
     output_tokens: ?u64 = null,
     cache_read_tokens: ?u64 = null,
@@ -2224,11 +2323,14 @@ pub const RemediationAction = enum {
     show_account,
     review_sandbox_policy,
     allow_sandbox_outbound,
+    rewind_conversation,
 };
 
 pub const ErrorData = struct {
     error_type: []const u8,
     error_code: ?[]const u8 = null,
+    provider_error_type: ?[]const u8 = null,
+    provider_error_param: ?[]const u8 = null,
     eligible_for_auto_switch: ?bool = null,
     message: []const u8,
     remediation: ?RemediationAction = null,
@@ -2709,6 +2811,18 @@ pub const InfoData = struct {
     tip: ?[]const u8 = null,
 };
 
+pub const ManagedPluginProgressPhase = enum {
+    initializing,
+    installing,
+    updating,
+    complete,
+};
+
+pub const ManagedPluginProgressData = struct {
+    phase: ManagedPluginProgressPhase,
+    plugin_specs: []const []const u8,
+};
+
 pub const ManagedSettingsEnforcedAction = enum {
     bypass_permissions_blocked,
 };
@@ -2730,6 +2844,11 @@ pub const ManagedSettingsEnforcedData = struct {
     message: []const u8,
 };
 
+pub const ManagedPermissionsContext = struct {
+    permissions: ?std.json.Value = null,
+    fail_closed: bool,
+};
+
 pub const ManagedSettingsResolvedSource = enum {
     server,
     device,
@@ -2740,6 +2859,7 @@ pub const ManagedSettingsResolvedSource = enum {
 };
 
 pub const ManagedSettingsResolvedData = struct {
+    permissions_context: ?ManagedPermissionsContext = null,
     source: ManagedSettingsResolvedSource,
     server_managed: bool,
     device_managed: bool,
@@ -2785,6 +2905,7 @@ pub const McpServerSource = enum {
     plugin,
     builtin,
     managed,
+    account,
 };
 
 pub const McpServerMetadata = struct {
@@ -2856,18 +2977,23 @@ pub const ModelChangeSource = enum {
 pub const ModelChangeData = struct {
     previous_model: ?[]const u8 = null,
     new_model: []const u8,
+    provider_id: ?[]const u8 = null,
+    previous_provider_id: ?[]const u8 = null,
     previous_reasoning_effort: ?[]const u8 = null,
     reasoning_effort: ?[]const u8,
     reasoning_effort_model: ?[]const u8 = null,
+    reasoning_effort_managed: ?bool = null,
     previous_reasoning_summary: ?ReasoningSummary = null,
     reasoning_summary: ?ReasoningSummary = null,
     previous_verbosity: ?Verbosity = null,
     verbosity: ?Verbosity = null,
     context_tier: ?ContextTier,
+    context_tier_managed: ?bool = null,
     cause: ?[]const u8 = null,
     source: ?ModelChangeSource = null,
     previous_auto_tier: ?AutoTier = null,
     auto_tier: ?AutoTier,
+    auto_tier_managed: ?bool = null,
 };
 
 pub const ModelDeselectedReason = enum {
@@ -2895,6 +3021,111 @@ pub const PlanChangedData = struct {
     operation: PlanChangedOperation,
 };
 
+pub const ProviderQuotaUnit = enum {
+    ai_credits,
+    requests,
+    tokens,
+    unknown,
+};
+
+pub const ProviderQuotaAccessState = enum {
+    allowed,
+    denied,
+    not_required,
+    unknown,
+    unavailable,
+};
+
+pub const ProviderQuotaCapacityState = enum {
+    available,
+    exhausted,
+    unlimited,
+    not_required,
+    not_applicable,
+    unknown,
+    unavailable,
+};
+
+pub const ProviderQuotaObservationKind = enum {
+    account_snapshot,
+    admission_state,
+};
+
+pub const ProviderQuotaQuantityKind = enum {
+    authoritative_budget,
+    advisory_balance,
+    none,
+};
+
+pub const ProviderQuotaAcquisitionStatus = enum {
+    succeeded,
+    unavailable,
+    failed,
+};
+
+pub const ProviderQuotaBudgetMetadata = struct {
+    unlimited: bool,
+    entitlement: f64,
+    consumed: f64,
+    remaining_percentage: f64,
+    usage_allowed_when_exhausted: bool,
+    overage: f64,
+    overage_allowed_when_exhausted: bool,
+    reset_at_epoch_ms: ?f64 = null,
+    reset_estimated: ?bool = null,
+    token_based_billing: ?bool = null,
+    overage_limit: ?f64 = null,
+};
+
+pub const ProviderMonthlyUsageState = enum {
+    available,
+    no_policy,
+    unavailable,
+    unknown,
+};
+
+pub const ProviderMonthlyUsageScope = enum {
+    user,
+    unknown,
+};
+
+pub const ProviderMonthlyUsage = struct {
+    state: ProviderMonthlyUsageState,
+    unit: ProviderQuotaUnit,
+    scope: ProviderMonthlyUsageScope,
+    consumed_quantity: ?f64 = null,
+    queried_at: ?[]const u8 = null,
+    cycle_start: ?[]const u8 = null,
+    reset_on: ?[]const u8 = null,
+};
+
+pub const ProviderQuotaState = struct {
+    provider: ModelProviderRef,
+    quota_id: []const u8,
+    unit: ProviderQuotaUnit,
+    access_state: ProviderQuotaAccessState,
+    capacity_state: ProviderQuotaCapacityState,
+    observation_kind: ?ProviderQuotaObservationKind = null,
+    quantity_kind: ?ProviderQuotaQuantityKind = null,
+    acquisition_status: ?ProviderQuotaAcquisitionStatus = null,
+    observed_at: ?[]const u8 = null,
+    http_status: ?i64 = null,
+    acquisition_error: ?[]const u8 = null,
+    budget_metadata: ?ProviderQuotaBudgetMetadata = null,
+    monthly_usage: ?ProviderMonthlyUsage = null,
+    compatibility_key: ?[]const u8 = null,
+    has_quota: ?bool,
+    entitled_quantity: ?i64,
+    available_quantity: ?i64,
+    reason: ?[]const u8,
+    source: ?[]const u8,
+    service: ?[]const u8,
+};
+
+pub const ProviderQuotaObservationData = struct {
+    observation: ProviderQuotaState,
+};
+
 pub const RemoteSteerableChangedData = struct {
     remote_steerable: bool,
 };
@@ -2908,12 +3139,16 @@ pub const ResumeData = struct {
     event_count: u64,
     events_file_size_bytes: ?u64 = null,
     selected_model: ?[]const u8 = null,
+    provider_id: ?[]const u8 = null,
     reasoning_effort: ?[]const u8 = null,
     reasoning_effort_model: ?[]const u8 = null,
+    reasoning_effort_managed: ?bool = null,
     reasoning_summary: ?ReasoningSummary = null,
     verbosity: ?Verbosity = null,
     context_tier: ?ContextTier,
+    context_tier_managed: ?bool = null,
     auto_tier: ?AutoTier = null,
+    auto_tier_managed: ?bool = null,
     session_limits: ?SessionLimitsConfig,
     context: ?WorkingDirectoryContext = null,
     already_in_use: ?bool = null,
@@ -2951,6 +3186,75 @@ pub const ScheduleRearmedData = struct {
 
 pub const SessionLimitsChangedData = struct {
     session_limits: ?SessionLimitsConfig,
+};
+
+pub const UsageMetricsTokenDetail = struct {
+    token_count: u64,
+};
+
+pub const UsageMetricsCodeChanges = struct {
+    lines_added: u64,
+    lines_removed: u64,
+    files_modified_count: u64,
+    files_modified: []const []const u8,
+};
+
+pub const UsageMetricsModelMetricRequests = struct {
+    count: u64,
+    cost: f64,
+};
+
+pub const UsageMetricsModelMetricUsage = struct {
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+    reasoning_tokens: ?u64 = null,
+};
+
+pub const UsageMetricsModelMetricTokenDetail = struct {
+    token_count: u64,
+};
+
+pub const UsageMetricsModelMetric = struct {
+    ai_credits_status: ?AiCreditsStatus = null,
+    requests: UsageMetricsModelMetricRequests,
+    usage: UsageMetricsModelMetricUsage,
+    cache_expires_at: ?[]const u8 = null,
+    total_nano_aiu: ?f64 = null,
+    token_details: ?std.json.ArrayHashMap(UsageMetricsModelMetricTokenDetail) = null,
+};
+
+pub const UsageMetricsProviderModelMetric = struct {
+    provider: ?ModelProviderRef,
+    model_id: ?[]const u8,
+    model_display_name: ?[]const u8 = null,
+    metrics: UsageMetricsModelMetric,
+};
+
+pub const UsageMetricsAgentMetric = struct {
+    agent_name: ?[]const u8 = null,
+    agent_display_name: ?[]const u8 = null,
+    total_api_duration_ms: u64,
+    total_nano_aiu: f64,
+    model_metrics: std.json.ArrayHashMap(UsageMetricsModelMetric),
+};
+
+pub const UsageGetMetricsResult = struct {
+    ai_credits_status: ?AiCreditsStatus = null,
+    total_premium_request_cost: f64,
+    total_user_requests: u64,
+    total_nano_aiu: ?f64 = null,
+    token_details: ?std.json.ArrayHashMap(UsageMetricsTokenDetail) = null,
+    total_api_duration_ms: u64,
+    session_start_time: []const u8,
+    code_changes: UsageMetricsCodeChanges,
+    model_metrics: std.json.ArrayHashMap(UsageMetricsModelMetric),
+    provider_model_metrics: ?[]const UsageMetricsProviderModelMetric = null,
+    agent_metrics: ?std.json.ArrayHashMap(UsageMetricsAgentMetric) = null,
+    current_model: ?[]const u8 = null,
+    last_call_input_tokens: u64,
+    last_call_output_tokens: u64,
 };
 
 pub const ShutdownType = enum {
@@ -2995,6 +3299,9 @@ pub const ShutdownAgentMetric = struct {
 };
 
 pub const ShutdownData = struct {
+    accounting_snapshot: ?UsageGetMetricsResult = null,
+    provider_model_metrics: ?[]const UsageMetricsProviderModelMetric = null,
+    usage_accounting_watermarks: ?std.json.ArrayHashMap(u64) = null,
     shutdown_type: ShutdownType,
     error_reason: ?[]const u8 = null,
     total_premium_requests: ?f64 = null,
@@ -3059,12 +3366,16 @@ pub const StartData = struct {
     copilot_version: []const u8,
     start_time: []const u8,
     selected_model: ?[]const u8 = null,
+    provider_id: ?[]const u8 = null,
     reasoning_effort: ?[]const u8 = null,
     reasoning_effort_model: ?[]const u8 = null,
+    reasoning_effort_managed: ?bool = null,
     reasoning_summary: ?ReasoningSummary = null,
     verbosity: ?Verbosity = null,
     context_tier: ?ContextTier,
+    context_tier_managed: ?bool = null,
     auto_tier: ?AutoTier = null,
+    auto_tier_managed: ?bool = null,
     session_limits: ?SessionLimitsConfig = null,
     context: ?WorkingDirectoryContext = null,
     github_mcp_tool_config: ?GitHubMcpToolConfig = null,
@@ -3117,6 +3428,9 @@ pub const UsageCheckpointModelCacheState = struct {
 
 pub const UsageCheckpointData = struct {
     total_nano_aiu: f64,
+    accounting_snapshot: ?UsageGetMetricsResult = null,
+    provider_model_metrics: ?[]const UsageMetricsProviderModelMetric = null,
+    usage_accounting_watermarks: ?std.json.ArrayHashMap(u64) = null,
     total_premium_requests: ?f64 = null,
     model_cache_state: ?[]const UsageCheckpointModelCacheState = null,
     prompt_cache_break_state: ?[]const std.json.Value = null,
@@ -3130,6 +3444,10 @@ pub const UsageInfoData = struct {
     conversation_tokens: ?u64 = null,
     tool_definitions_tokens: ?u64 = null,
     is_initial: ?bool = null,
+};
+
+pub const UsageAccountingRecordData = struct {
+    usage: AssistantUsageData,
 };
 
 pub const WarningData = struct {
@@ -3969,6 +4287,7 @@ pub const FusionRouteStartedEventPayload = OwnedPayload(FusionRouteStartedData, 
 pub const HandoffEventPayload = OwnedPayload(HandoffData, wipeHandoffData);
 pub const IndexedSearchEventPayload = OwnedPayload(IndexedSearchData, wipeIndexedSearchData);
 pub const InfoEventPayload = OwnedPayload(InfoData, wipeInfoData);
+pub const ManagedPluginProgressEventPayload = OwnedPayload(ManagedPluginProgressData, wipeManagedPluginProgressData);
 pub const ManagedSettingsEnforcedEventPayload = OwnedPayload(ManagedSettingsEnforcedData, wipeManagedSettingsEnforcedData);
 pub const ManagedSettingsResolvedEventPayload = OwnedPayload(ManagedSettingsResolvedData, wipeManagedSettingsResolvedData);
 pub const McpServerNeedsReconnectEventPayload = OwnedPayload(McpServerNeedsReconnectData, wipeMcpServerNeedsReconnectData);
@@ -3983,6 +4302,7 @@ pub const ModelDeselectedEventPayload = OwnedPayload(ModelDeselectedData, wipeMo
 pub const PermissionRecoveryEventPayload = OwnedPayload(PermissionRecoveryData, wipePermissionRecoveryData);
 pub const PermissionsChangedEventPayload = OwnedPayload(PermissionsChangedData, wipePermissionsChangedData);
 pub const PlanChangedEventPayload = OwnedPayload(PlanChangedData, wipePlanChangedData);
+pub const ProviderQuotaObservationEventPayload = OwnedPayload(ProviderQuotaObservationData, wipeProviderQuotaObservationData);
 pub const RemoteSteerableChangedEventPayload = OwnedPayload(RemoteSteerableChangedData, wipeRemoteSteerableChangedData);
 pub const ResumeEventPayload = OwnedPayload(ResumeData, wipeResumeData);
 pub const ScheduleCancelledEventPayload = OwnedPayload(ScheduleCancelledData, wipeScheduleCancelledData);
@@ -4000,6 +4320,7 @@ pub const ToolsUpdatedEventPayload = OwnedPayload(ToolsUpdatedData, wipeToolsUpd
 pub const TruncationEventPayload = OwnedPayload(TruncationData, wipeTruncationData);
 pub const UsageCheckpointEventPayload = OwnedPayload(UsageCheckpointData, wipeUsageCheckpointData);
 pub const UsageInfoEventPayload = OwnedPayload(UsageInfoData, wipeUsageInfoData);
+pub const UsageAccountingRecordEventPayload = OwnedPayload(UsageAccountingRecordData, wipeUsageAccountingRecordData);
 pub const WarningEventPayload = OwnedPayload(WarningData, wipeWarningData);
 pub const WorkspaceFileChangedEventPayload = OwnedPayload(WorkspaceFileChangedData, wipeWorkspaceFileChangedData);
 pub const SessionLimitsExhaustedCompletedEventPayload = OwnedPayload(SessionLimitsExhaustedCompletedData, wipeSessionLimitsExhaustedCompletedData);
@@ -4035,6 +4356,7 @@ pub const AssistantMessage = struct {
     message_id: ?[]const u8 = null,
     originating_message_id: ?[]const u8 = null,
     model: ?[]const u8 = null,
+    provider_id: ?[]const u8 = null,
     content: []const u8,
     tool_requests: ?[]const AssistantMessageToolRequest = null,
     reasoning_opaque: ?[]const u8 = null,
@@ -4250,6 +4572,8 @@ pub const PermissionRequested = struct {
     prompt_request: ?PermissionPromptRequest = null,
     permission_mode: ?PermissionMode = null,
     agent_mode: ?SessionMode = null,
+    owner_session_id: ?[]const u8 = null,
+    owner_agent_id: ?[]const u8 = null,
     risk_assessment: ?std.json.Value = null,
     resolved_by_hook: ?bool = null,
     recovery_episode_id: ?[]const u8 = null,
@@ -4298,6 +4622,8 @@ pub const PermissionRequested = struct {
 pub const SessionError = struct {
     error_type: []const u8,
     error_code: ?[]const u8 = null,
+    provider_error_type: ?[]const u8 = null,
+    provider_error_param: ?[]const u8 = null,
     eligible_for_auto_switch: ?bool = null,
     message: []const u8,
     remediation: ?RemediationAction = null,
@@ -4437,6 +4763,7 @@ pub const SessionEvent = union(enum) {
     session_idle: SessionIdle,
     session_indexed_search: IndexedSearchEventPayload,
     session_info: InfoEventPayload,
+    session_managed_plugin_progress: ManagedPluginProgressEventPayload,
     session_managed_settings_enforced: ManagedSettingsEnforcedEventPayload,
     session_managed_settings_resolved: ManagedSettingsResolvedEventPayload,
     session_mcp_server_needs_reconnect: McpServerNeedsReconnectEventPayload,
@@ -4451,6 +4778,7 @@ pub const SessionEvent = union(enum) {
     session_permission_recovery: PermissionRecoveryEventPayload,
     session_permissions_changed: PermissionsChangedEventPayload,
     session_plan_changed: PlanChangedEventPayload,
+    session_quota_observation: ProviderQuotaObservationEventPayload,
     session_remote_steerable_changed: RemoteSteerableChangedEventPayload,
     session_resume: ResumeEventPayload,
     session_schedule_cancelled: ScheduleCancelledEventPayload,
@@ -4468,6 +4796,7 @@ pub const SessionEvent = union(enum) {
     session_truncation: TruncationEventPayload,
     session_usage_checkpoint: UsageCheckpointEventPayload,
     session_usage_info: UsageInfoEventPayload,
+    session_usage_record: UsageAccountingRecordEventPayload,
     session_warning: WarningEventPayload,
     session_workspace_file_changed: WorkspaceFileChangedEventPayload,
     session_limits_exhausted_completed: SessionLimitsExhaustedCompletedEventPayload,
@@ -4597,6 +4926,7 @@ pub const SessionEvent = union(enum) {
             .session_idle => "session.idle",
             .session_indexed_search => "session.indexed_search",
             .session_info => "session.info",
+            .session_managed_plugin_progress => "session.managed_plugin_progress",
             .session_managed_settings_enforced => "session.managed_settings_enforced",
             .session_managed_settings_resolved => "session.managed_settings_resolved",
             .session_mcp_server_needs_reconnect => "session.mcp_server_needs_reconnect",
@@ -4611,6 +4941,7 @@ pub const SessionEvent = union(enum) {
             .session_permission_recovery => "session.permission_recovery",
             .session_permissions_changed => "session.permissions_changed",
             .session_plan_changed => "session.plan_changed",
+            .session_quota_observation => "session.quota_observation",
             .session_remote_steerable_changed => "session.remote_steerable_changed",
             .session_resume => "session.resume",
             .session_schedule_cancelled => "session.schedule_cancelled",
@@ -4628,6 +4959,7 @@ pub const SessionEvent = union(enum) {
             .session_truncation => "session.truncation",
             .session_usage_checkpoint => "session.usage_checkpoint",
             .session_usage_info => "session.usage_info",
+            .session_usage_record => "session.usage_record",
             .session_warning => "session.warning",
             .session_workspace_file_changed => "session.workspace_file_changed",
             .session_limits_exhausted_completed => "session_limits_exhausted.completed",
@@ -4759,6 +5091,7 @@ pub const SessionEvent = union(enum) {
             .session_idle => |value| value.raw.data_json,
             .session_indexed_search => |value| value.data_json,
             .session_info => |value| value.data_json,
+            .session_managed_plugin_progress => |value| value.data_json,
             .session_managed_settings_enforced => |value| value.data_json,
             .session_managed_settings_resolved => |value| value.data_json,
             .session_mcp_server_needs_reconnect => |value| value.data_json,
@@ -4773,6 +5106,7 @@ pub const SessionEvent = union(enum) {
             .session_permission_recovery => |value| value.data_json,
             .session_permissions_changed => |value| value.data_json,
             .session_plan_changed => |value| value.data_json,
+            .session_quota_observation => |value| value.data_json,
             .session_remote_steerable_changed => |value| value.data_json,
             .session_resume => |value| value.data_json,
             .session_schedule_cancelled => |value| value.data_json,
@@ -4790,6 +5124,7 @@ pub const SessionEvent = union(enum) {
             .session_truncation => |value| value.data_json,
             .session_usage_checkpoint => |value| value.data_json,
             .session_usage_info => |value| value.data_json,
+            .session_usage_record => |value| value.data_json,
             .session_warning => |value| value.data_json,
             .session_workspace_file_changed => |value| value.data_json,
             .session_limits_exhausted_completed => |value| value.data_json,
@@ -4921,6 +5256,7 @@ pub const SessionEvent = union(enum) {
             .session_idle => |*value| value.deinit(allocator),
             .session_indexed_search => |*value| value.deinit(allocator),
             .session_info => |*value| value.deinit(allocator),
+            .session_managed_plugin_progress => |*value| value.deinit(allocator),
             .session_managed_settings_enforced => |*value| value.deinit(allocator),
             .session_managed_settings_resolved => |*value| value.deinit(allocator),
             .session_mcp_server_needs_reconnect => |*value| value.deinit(allocator),
@@ -4935,6 +5271,7 @@ pub const SessionEvent = union(enum) {
             .session_permission_recovery => |*value| value.deinit(allocator),
             .session_permissions_changed => |*value| value.deinit(allocator),
             .session_plan_changed => |*value| value.deinit(allocator),
+            .session_quota_observation => |*value| value.deinit(allocator),
             .session_remote_steerable_changed => |*value| value.deinit(allocator),
             .session_resume => |*value| value.deinit(allocator),
             .session_schedule_cancelled => |*value| value.deinit(allocator),
@@ -4952,6 +5289,7 @@ pub const SessionEvent = union(enum) {
             .session_truncation => |*value| value.deinit(allocator),
             .session_usage_checkpoint => |*value| value.deinit(allocator),
             .session_usage_info => |*value| value.deinit(allocator),
+            .session_usage_record => |*value| value.deinit(allocator),
             .session_warning => |*value| value.deinit(allocator),
             .session_workspace_file_changed => |*value| value.deinit(allocator),
             .session_limits_exhausted_completed => |*value| value.deinit(allocator),
@@ -5090,6 +5428,7 @@ pub const pinned_discriminators = [_]RegistryEntry{
     .{ .wire = "session.idle", .tag = .session_idle },
     .{ .wire = "session.indexed_search", .tag = .session_indexed_search },
     .{ .wire = "session.info", .tag = .session_info },
+    .{ .wire = "session.managed_plugin_progress", .tag = .session_managed_plugin_progress },
     .{ .wire = "session.managed_settings_enforced", .tag = .session_managed_settings_enforced },
     .{ .wire = "session.managed_settings_resolved", .tag = .session_managed_settings_resolved },
     .{ .wire = "session.mcp_server_needs_reconnect", .tag = .session_mcp_server_needs_reconnect },
@@ -5104,6 +5443,7 @@ pub const pinned_discriminators = [_]RegistryEntry{
     .{ .wire = "session.permission_recovery", .tag = .session_permission_recovery },
     .{ .wire = "session.permissions_changed", .tag = .session_permissions_changed },
     .{ .wire = "session.plan_changed", .tag = .session_plan_changed },
+    .{ .wire = "session.quota_observation", .tag = .session_quota_observation },
     .{ .wire = "session.remote_steerable_changed", .tag = .session_remote_steerable_changed },
     .{ .wire = "session.resume", .tag = .session_resume },
     .{ .wire = "session.schedule_cancelled", .tag = .session_schedule_cancelled },
@@ -5121,6 +5461,7 @@ pub const pinned_discriminators = [_]RegistryEntry{
     .{ .wire = "session.truncation", .tag = .session_truncation },
     .{ .wire = "session.usage_checkpoint", .tag = .session_usage_checkpoint },
     .{ .wire = "session.usage_info", .tag = .session_usage_info },
+    .{ .wire = "session.usage_record", .tag = .session_usage_record },
     .{ .wire = "session.warning", .tag = .session_warning },
     .{ .wire = "session.workspace_file_changed", .tag = .session_workspace_file_changed },
     .{ .wire = "session_limits_exhausted.completed", .tag = .session_limits_exhausted_completed },
@@ -5172,6 +5513,17 @@ fn parseString(
     if (minimum) |bound| if (length < bound) return error.InvalidSessionEvent;
     if (maximum) |bound| if (length > bound) return error.InvalidSessionEvent;
     return allocator.dupe(u8, string);
+}
+
+fn parseRoutingIdentifier(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+    minimum: ?usize,
+    maximum: ?usize,
+) ![]const u8 {
+    if (!@import("auto_tier.zig").validIdentifier(try valueString(value)))
+        return error.InvalidSessionEvent;
+    return parseString(allocator, value, minimum, maximum);
 }
 
 fn parseConstant(
@@ -6110,6 +6462,24 @@ fn parsePermissionRequestShellPossibleUrlsArray(allocator: std.mem.Allocator, va
     return result;
 }
 
+fn parsePermissionRequestWriteFileEditsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const PermissionWriteFileEdit {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 1) return error.InvalidSessionEvent;
+    const result = try allocator.alloc(PermissionWriteFileEdit, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipePermissionWriteFileEdit(&item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parsePermissionWriteFileEdit(allocator, item);
+        initialized += 1;
+    }
+    return result;
+}
+
 fn parsePermissionRequestWorkflowPhasesArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const WorkflowPermissionPhase {
     const source = switch (value) {
         .array => |array| array.items,
@@ -6177,6 +6547,24 @@ fn parsePermissionPromptRequestCommandsCommandIdentifiersArray(allocator: std.me
     };
     for (source, result) |item, *destination| {
         destination.* = try parseString(allocator, item, null, null);
+        initialized += 1;
+    }
+    return result;
+}
+
+fn parsePermissionPromptRequestWriteFileEditsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const PermissionWriteFileEdit {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 1) return error.InvalidSessionEvent;
+    const result = try allocator.alloc(PermissionWriteFileEdit, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipePermissionWriteFileEdit(&item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parsePermissionWriteFileEdit(allocator, item);
         initialized += 1;
     }
     return result;
@@ -6862,6 +7250,24 @@ fn parseFusionResolvedDataCriticsArray(allocator: std.mem.Allocator, value: std.
     return result;
 }
 
+fn parseManagedPluginProgressDataPluginSpecsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc([]const u8, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeString(item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseString(allocator, item, null, null);
+        initialized += 1;
+    }
+    return result;
+}
+
 fn parseManagedSettingsResolvedDataManagedKeysArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
     const source = switch (value) {
         .array => |array| array.items,
@@ -6894,6 +7300,162 @@ fn parseMcpServersLoadedDataServersArray(allocator: std.mem.Allocator, value: st
     for (source, result) |item, *destination| {
         destination.* = try parseMcpServersLoadedServer(allocator, item);
         initialized += 1;
+    }
+    return result;
+}
+
+fn parseUsageMetricsCodeChangesFilesModifiedArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc([]const u8, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeString(item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseString(allocator, item, null, null);
+        initialized += 1;
+    }
+    return result;
+}
+
+fn parseUsageMetricsModelMetricTokenDetailsMap(allocator: std.mem.Allocator, value: std.json.Value) !std.json.ArrayHashMap(UsageMetricsModelMetricTokenDetail) {
+    const source = try payloads.requiredObject(value);
+    var result: std.json.ArrayHashMap(UsageMetricsModelMetricTokenDetail) = .{};
+    errdefer {
+        var cleanup_iterator = result.map.iterator();
+        while (cleanup_iterator.next()) |entry| {
+            wipeString(entry.key_ptr.*);
+            wipeUsageMetricsModelMetricTokenDetail(&entry.value_ptr.*);
+        }
+    }
+    var iterator = source.iterator();
+    while (iterator.next()) |entry| {
+        const key = try allocator.dupe(u8, entry.key_ptr.*);
+        errdefer wipeString(key);
+        const parsed_value = try parseUsageMetricsModelMetricTokenDetail(allocator, entry.value_ptr.*);
+        errdefer {
+            var cleanup_value = parsed_value;
+            wipeUsageMetricsModelMetricTokenDetail(&cleanup_value);
+        }
+        try result.map.put(allocator, key, parsed_value);
+    }
+    return result;
+}
+
+fn parseUsageMetricsAgentMetricModelMetricsMap(allocator: std.mem.Allocator, value: std.json.Value) !std.json.ArrayHashMap(UsageMetricsModelMetric) {
+    const source = try payloads.requiredObject(value);
+    var result: std.json.ArrayHashMap(UsageMetricsModelMetric) = .{};
+    errdefer {
+        var cleanup_iterator = result.map.iterator();
+        while (cleanup_iterator.next()) |entry| {
+            wipeString(entry.key_ptr.*);
+            wipeUsageMetricsModelMetric(&entry.value_ptr.*);
+        }
+    }
+    var iterator = source.iterator();
+    while (iterator.next()) |entry| {
+        const key = try allocator.dupe(u8, entry.key_ptr.*);
+        errdefer wipeString(key);
+        const parsed_value = try parseUsageMetricsModelMetric(allocator, entry.value_ptr.*);
+        errdefer {
+            var cleanup_value = parsed_value;
+            wipeUsageMetricsModelMetric(&cleanup_value);
+        }
+        try result.map.put(allocator, key, parsed_value);
+    }
+    return result;
+}
+
+fn parseUsageGetMetricsResultTokenDetailsMap(allocator: std.mem.Allocator, value: std.json.Value) !std.json.ArrayHashMap(UsageMetricsTokenDetail) {
+    const source = try payloads.requiredObject(value);
+    var result: std.json.ArrayHashMap(UsageMetricsTokenDetail) = .{};
+    errdefer {
+        var cleanup_iterator = result.map.iterator();
+        while (cleanup_iterator.next()) |entry| {
+            wipeString(entry.key_ptr.*);
+            wipeUsageMetricsTokenDetail(&entry.value_ptr.*);
+        }
+    }
+    var iterator = source.iterator();
+    while (iterator.next()) |entry| {
+        const key = try allocator.dupe(u8, entry.key_ptr.*);
+        errdefer wipeString(key);
+        const parsed_value = try parseUsageMetricsTokenDetail(allocator, entry.value_ptr.*);
+        errdefer {
+            var cleanup_value = parsed_value;
+            wipeUsageMetricsTokenDetail(&cleanup_value);
+        }
+        try result.map.put(allocator, key, parsed_value);
+    }
+    return result;
+}
+
+fn parseUsageGetMetricsResultModelMetricsMap(allocator: std.mem.Allocator, value: std.json.Value) !std.json.ArrayHashMap(UsageMetricsModelMetric) {
+    const source = try payloads.requiredObject(value);
+    var result: std.json.ArrayHashMap(UsageMetricsModelMetric) = .{};
+    errdefer {
+        var cleanup_iterator = result.map.iterator();
+        while (cleanup_iterator.next()) |entry| {
+            wipeString(entry.key_ptr.*);
+            wipeUsageMetricsModelMetric(&entry.value_ptr.*);
+        }
+    }
+    var iterator = source.iterator();
+    while (iterator.next()) |entry| {
+        const key = try allocator.dupe(u8, entry.key_ptr.*);
+        errdefer wipeString(key);
+        const parsed_value = try parseUsageMetricsModelMetric(allocator, entry.value_ptr.*);
+        errdefer {
+            var cleanup_value = parsed_value;
+            wipeUsageMetricsModelMetric(&cleanup_value);
+        }
+        try result.map.put(allocator, key, parsed_value);
+    }
+    return result;
+}
+
+fn parseUsageGetMetricsResultProviderModelMetricsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const UsageMetricsProviderModelMetric {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc(UsageMetricsProviderModelMetric, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeUsageMetricsProviderModelMetric(&item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseUsageMetricsProviderModelMetric(allocator, item);
+        initialized += 1;
+    }
+    return result;
+}
+
+fn parseUsageGetMetricsResultAgentMetricsMap(allocator: std.mem.Allocator, value: std.json.Value) !std.json.ArrayHashMap(UsageMetricsAgentMetric) {
+    const source = try payloads.requiredObject(value);
+    var result: std.json.ArrayHashMap(UsageMetricsAgentMetric) = .{};
+    errdefer {
+        var cleanup_iterator = result.map.iterator();
+        while (cleanup_iterator.next()) |entry| {
+            wipeString(entry.key_ptr.*);
+            wipeUsageMetricsAgentMetric(&entry.value_ptr.*);
+        }
+    }
+    var iterator = source.iterator();
+    while (iterator.next()) |entry| {
+        const key = try allocator.dupe(u8, entry.key_ptr.*);
+        errdefer wipeString(key);
+        const parsed_value = try parseUsageMetricsAgentMetric(allocator, entry.value_ptr.*);
+        errdefer {
+            var cleanup_value = parsed_value;
+            wipeUsageMetricsAgentMetric(&cleanup_value);
+        }
+        try result.map.put(allocator, key, parsed_value);
     }
     return result;
 }
@@ -6941,6 +7503,44 @@ fn parseShutdownAgentMetricModelMetricsMap(allocator: std.mem.Allocator, value: 
             var cleanup_value = parsed_value;
             wipeShutdownModelMetric(&cleanup_value);
         }
+        try result.map.put(allocator, key, parsed_value);
+    }
+    return result;
+}
+
+fn parseShutdownDataProviderModelMetricsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const UsageMetricsProviderModelMetric {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc(UsageMetricsProviderModelMetric, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeUsageMetricsProviderModelMetric(&item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseUsageMetricsProviderModelMetric(allocator, item);
+        initialized += 1;
+    }
+    return result;
+}
+
+fn parseShutdownDataUsageAccountingWatermarksMap(allocator: std.mem.Allocator, value: std.json.Value) !std.json.ArrayHashMap(u64) {
+    const source = try payloads.requiredObject(value);
+    var result: std.json.ArrayHashMap(u64) = .{};
+    errdefer {
+        var cleanup_iterator = result.map.iterator();
+        while (cleanup_iterator.next()) |entry| {
+            wipeString(entry.key_ptr.*);
+        }
+    }
+    var iterator = source.iterator();
+    while (iterator.next()) |entry| {
+        const key = try allocator.dupe(u8, entry.key_ptr.*);
+        errdefer wipeString(key);
+        const parsed_value = try parseInteger(u64, entry.value_ptr.*, 0, null, null);
+
         try result.map.put(allocator, key, parsed_value);
     }
     return result;
@@ -7086,6 +7686,44 @@ fn parseGitHubMcpToolConfigAdditionalToolsArray(allocator: std.mem.Allocator, va
     for (source, result) |item, *destination| {
         destination.* = try parseString(allocator, item, null, null);
         initialized += 1;
+    }
+    return result;
+}
+
+fn parseUsageCheckpointDataProviderModelMetricsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const UsageMetricsProviderModelMetric {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc(UsageMetricsProviderModelMetric, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeUsageMetricsProviderModelMetric(&item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseUsageMetricsProviderModelMetric(allocator, item);
+        initialized += 1;
+    }
+    return result;
+}
+
+fn parseUsageCheckpointDataUsageAccountingWatermarksMap(allocator: std.mem.Allocator, value: std.json.Value) !std.json.ArrayHashMap(u64) {
+    const source = try payloads.requiredObject(value);
+    var result: std.json.ArrayHashMap(u64) = .{};
+    errdefer {
+        var cleanup_iterator = result.map.iterator();
+        while (cleanup_iterator.next()) |entry| {
+            wipeString(entry.key_ptr.*);
+        }
+    }
+    var iterator = source.iterator();
+    while (iterator.next()) |entry| {
+        const key = try allocator.dupe(u8, entry.key_ptr.*);
+        errdefer wipeString(key);
+        const parsed_value = try parseInteger(u64, entry.value_ptr.*, 0, null, null);
+
+        try result.map.put(allocator, key, parsed_value);
     }
     return result;
 }
@@ -8709,6 +9347,13 @@ fn parseAssistantMessageData(allocator: std.mem.Allocator, value: std.json.Value
             wipeString(present.*);
         }
     }
+    const parsed_provider_id = if (object.get("providerId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_provider_id = parsed_provider_id;
+        if (cleanup_provider_id) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_content = try parseString(allocator, object.get("content") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_content = parsed_content;
@@ -8843,6 +9488,7 @@ fn parseAssistantMessageData(allocator: std.mem.Allocator, value: std.json.Value
         .message_id = parsed_message_id,
         .originating_message_id = parsed_originating_message_id,
         .model = parsed_model,
+        .provider_id = parsed_provider_id,
         .content = parsed_content,
         .tool_requests = parsed_tool_requests,
         .reasoning_opaque = parsed_reasoning_opaque,
@@ -9116,10 +9762,106 @@ fn parseAssistantTurnStartData(allocator: std.mem.Allocator, value: std.json.Val
     };
 }
 
+fn parseAiCreditsStatus(_: std.mem.Allocator, value: std.json.Value) !AiCreditsStatus {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "complete")) return .complete;
+    if (std.mem.eql(u8, wire, "partial")) return .partial;
+    if (std.mem.eql(u8, wire, "unavailable")) return .unavailable;
+    return error.InvalidSessionEvent;
+}
+
+fn parseModelProviderKind(_: std.mem.Allocator, value: std.json.Value) !ModelProviderKind {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "copilot")) return .copilot;
+    if (std.mem.eql(u8, wire, "loki")) return .loki;
+    return error.InvalidSessionEvent;
+}
+
+fn parseModelProviderRef(allocator: std.mem.Allocator, value: std.json.Value) !ModelProviderRef {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_id = try parseString(allocator, object.get("id") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_id = parsed_id;
+        wipeString(cleanup_id);
+    }
+    const parsed_label = try parseString(allocator, object.get("label") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_label = parsed_label;
+        wipeString(cleanup_label);
+    }
+    const parsed_kind = try parseModelProviderKind(allocator, object.get("kind") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_kind = parsed_kind;
+        wipeModelProviderKind(&cleanup_kind);
+    }
+    return .{
+        .id = parsed_id,
+        .label = parsed_label,
+        .kind = parsed_kind,
+    };
+}
+
+fn parseUsageAccountingIdentity(allocator: std.mem.Allocator, value: std.json.Value) !UsageAccountingIdentity {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_source_session_id = try parseString(allocator, object.get("sourceSessionId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_source_session_id = parsed_source_session_id;
+        wipeString(cleanup_source_session_id);
+    }
+    const parsed_sequence = try parseInteger(u64, object.get("sequence") orelse return error.InvalidSessionEvent, 1, null, 9007199254740991);
+    const parsed_usage_id = try parseString(allocator, object.get("usageId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_usage_id = parsed_usage_id;
+        wipeString(cleanup_usage_id);
+    }
+    return .{
+        .source_session_id = parsed_source_session_id,
+        .sequence = parsed_sequence,
+        .usage_id = parsed_usage_id,
+    };
+}
+
 fn parseAssistantUsageTransport(_: std.mem.Allocator, value: std.json.Value) !AssistantUsageTransport {
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "http")) return .http;
     if (std.mem.eql(u8, wire, "websocket")) return .websocket;
+    return error.InvalidSessionEvent;
+}
+
+fn parseModelCallRequestBodyEncoding(_: std.mem.Allocator, value: std.json.Value) !ModelCallRequestBodyEncoding {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "identity")) return .identity;
+    if (std.mem.eql(u8, wire, "gzip")) return .gzip;
+    if (std.mem.eql(u8, wire, "zstd")) return .zstd;
+    return error.InvalidSessionEvent;
+}
+
+fn parseModelCallWebSocketFallbackReason(_: std.mem.Allocator, value: std.json.Value) !ModelCallWebSocketFallbackReason {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "connect_failed")) return .connect_failed;
+    if (std.mem.eql(u8, wire, "connection_unavailable")) return .connection_unavailable;
+    if (std.mem.eql(u8, wire, "send_failed")) return .send_failed;
+    if (std.mem.eql(u8, wire, "api_error")) return .api_error;
+    if (std.mem.eql(u8, wire, "transport_failed")) return .transport_failed;
+    return error.InvalidSessionEvent;
+}
+
+fn parseModelCallWebSocketFallbackErrorKind(_: std.mem.Allocator, value: std.json.Value) !ModelCallWebSocketFallbackErrorKind {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "dns")) return .dns;
+    if (std.mem.eql(u8, wire, "tls")) return .tls;
+    if (std.mem.eql(u8, wire, "timeout")) return .timeout;
+    if (std.mem.eql(u8, wire, "connection_refused")) return .connection_refused;
+    if (std.mem.eql(u8, wire, "connection_reset")) return .connection_reset;
+    if (std.mem.eql(u8, wire, "closed_by_peer")) return .closed_by_peer;
+    if (std.mem.eql(u8, wire, "closed_locally")) return .closed_locally;
+    if (std.mem.eql(u8, wire, "not_connected")) return .not_connected;
+    if (std.mem.eql(u8, wire, "http_status")) return .http_status;
+    if (std.mem.eql(u8, wire, "protocol")) return .protocol;
+    if (std.mem.eql(u8, wire, "configuration")) return .configuration;
+    if (std.mem.eql(u8, wire, "other")) return .other;
     return error.InvalidSessionEvent;
 }
 
@@ -9232,10 +9974,38 @@ fn parseReasoningSummary(_: std.mem.Allocator, value: std.json.Value) !Reasoning
 fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) !AssistantUsageData {
     const object = try payloads.requiredObject(value);
 
+    const parsed_ai_credits_status = if (object.get("aiCreditsStatus")) |field_value| if ((field_value) == .null) null else try parseAiCreditsStatus(allocator, field_value) else null;
+    errdefer {
+        var cleanup_ai_credits_status = parsed_ai_credits_status;
+        if (cleanup_ai_credits_status) |*present| {
+            wipeAiCreditsStatus(&present.*);
+        }
+    }
     const parsed_model = try parseString(allocator, object.get("model") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_model = parsed_model;
         wipeString(cleanup_model);
+    }
+    const parsed_provider = if (object.get("provider")) |field_value| if ((field_value) == .null) null else try parseModelProviderRef(allocator, field_value) else null;
+    errdefer {
+        var cleanup_provider = parsed_provider;
+        if (cleanup_provider) |*present| {
+            wipeModelProviderRef(&present.*);
+        }
+    }
+    const parsed_model_display_name = if (object.get("modelDisplayName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_model_display_name = parsed_model_display_name;
+        if (cleanup_model_display_name) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_accounting = if (object.get("accounting")) |field_value| if ((field_value) == .null) null else try parseUsageAccountingIdentity(allocator, field_value) else null;
+    errdefer {
+        var cleanup_accounting = parsed_accounting;
+        if (cleanup_accounting) |*present| {
+            wipeUsageAccountingIdentity(&present.*);
+        }
     }
     const parsed_input_tokens = if (object.get("inputTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_output_tokens = if (object.get("outputTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
@@ -9305,6 +10075,34 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
             wipeAssistantUsageTransport(&present.*);
         }
     }
+    const parsed_request_body_bytes = if (object.get("requestBodyBytes")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_request_body_wire_bytes = if (object.get("requestBodyWireBytes")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_request_body_encoding = if (object.get("requestBodyEncoding")) |field_value| if ((field_value) == .null) null else try parseModelCallRequestBodyEncoding(allocator, field_value) else null;
+    errdefer {
+        var cleanup_request_body_encoding = parsed_request_body_encoding;
+        if (cleanup_request_body_encoding) |*present| {
+            wipeModelCallRequestBodyEncoding(&present.*);
+        }
+    }
+    const parsed_websocket_fallback_reason = if (object.get("websocketFallbackReason")) |field_value| if ((field_value) == .null) null else try parseModelCallWebSocketFallbackReason(allocator, field_value) else null;
+    errdefer {
+        var cleanup_websocket_fallback_reason = parsed_websocket_fallback_reason;
+        if (cleanup_websocket_fallback_reason) |*present| {
+            wipeModelCallWebSocketFallbackReason(&present.*);
+        }
+    }
+    const parsed_websocket_fallback_after_ms = if (object.get("websocketFallbackAfterMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_websocket_fallback_error_kind = if (object.get("websocketFallbackErrorKind")) |field_value| if ((field_value) == .null) null else try parseModelCallWebSocketFallbackErrorKind(allocator, field_value) else null;
+    errdefer {
+        var cleanup_websocket_fallback_error_kind = parsed_websocket_fallback_error_kind;
+        if (cleanup_websocket_fallback_error_kind) |*present| {
+            wipeModelCallWebSocketFallbackErrorKind(&present.*);
+        }
+    }
+    const parsed_websocket_fallback_status_code = if (object.get("websocketFallbackStatusCode")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, 999) else null;
+    const parsed_websocket_fallback_close_code = if (object.get("websocketFallbackCloseCode")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, 4999) else null;
+    const parsed_websocket_fallback_reconnect_attempted = if (object.get("websocketFallbackReconnectAttempted")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_websocket_fallback_started_this_call = if (object.get("websocketFallbackStartedThisCall")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_api_call_id = if (object.get("apiCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_api_call_id = parsed_api_call_id;
@@ -9415,7 +10213,11 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
         }
     }
     return .{
+        .ai_credits_status = parsed_ai_credits_status,
         .model = parsed_model,
+        .provider = parsed_provider,
+        .model_display_name = parsed_model_display_name,
+        .accounting = parsed_accounting,
         .input_tokens = parsed_input_tokens,
         .output_tokens = parsed_output_tokens,
         .cache_read_tokens = parsed_cache_read_tokens,
@@ -9440,6 +10242,16 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
         .accepted_prediction_tokens = parsed_accepted_prediction_tokens,
         .rejected_prediction_tokens = parsed_rejected_prediction_tokens,
         .transport = parsed_transport,
+        .request_body_bytes = parsed_request_body_bytes,
+        .request_body_wire_bytes = parsed_request_body_wire_bytes,
+        .request_body_encoding = parsed_request_body_encoding,
+        .websocket_fallback_reason = parsed_websocket_fallback_reason,
+        .websocket_fallback_after_ms = parsed_websocket_fallback_after_ms,
+        .websocket_fallback_error_kind = parsed_websocket_fallback_error_kind,
+        .websocket_fallback_status_code = parsed_websocket_fallback_status_code,
+        .websocket_fallback_close_code = parsed_websocket_fallback_close_code,
+        .websocket_fallback_reconnect_attempted = parsed_websocket_fallback_reconnect_attempted,
+        .websocket_fallback_started_this_call = parsed_websocket_fallback_started_this_call,
         .api_call_id = parsed_api_call_id,
         .provider_call_id = parsed_provider_call_id,
         .service_request_id = parsed_service_request_id,
@@ -10713,6 +11525,9 @@ fn parseModelCallFailureRequestFingerprint(allocator: std.mem.Allocator, value: 
     const parsed_nameless_tool_call_count = try parseInteger(u64, object.get("namelessToolCallCount") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_image_part_count = try parseInteger(u64, object.get("imagePartCount") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_image_parts_missing_media_type = try parseInteger(u64, object.get("imagePartsMissingMediaType") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_image_bytes = if (object.get("imageBytes")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_reasoning_item_count = if (object.get("reasoningItemCount")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_encrypted_content_bytes = if (object.get("encryptedContentBytes")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_last_message_role = if (object.get("lastMessageRole")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_last_message_role = parsed_last_message_role;
@@ -10727,6 +11542,9 @@ fn parseModelCallFailureRequestFingerprint(allocator: std.mem.Allocator, value: 
         .nameless_tool_call_count = parsed_nameless_tool_call_count,
         .image_part_count = parsed_image_part_count,
         .image_parts_missing_media_type = parsed_image_parts_missing_media_type,
+        .image_bytes = parsed_image_bytes,
+        .reasoning_item_count = parsed_reasoning_item_count,
+        .encrypted_content_bytes = parsed_encrypted_content_bytes,
         .last_message_role = parsed_last_message_role,
     };
 }
@@ -10800,6 +11618,35 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
             wipeModelCallFailureKind(&present.*);
         }
     }
+    const parsed_request_body_bytes = if (object.get("requestBodyBytes")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_request_body_wire_bytes = if (object.get("requestBodyWireBytes")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_request_body_encoding = if (object.get("requestBodyEncoding")) |field_value| if ((field_value) == .null) null else try parseModelCallRequestBodyEncoding(allocator, field_value) else null;
+    errdefer {
+        var cleanup_request_body_encoding = parsed_request_body_encoding;
+        if (cleanup_request_body_encoding) |*present| {
+            wipeModelCallRequestBodyEncoding(&present.*);
+        }
+    }
+    const parsed_retry_attempt = if (object.get("retryAttempt")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_websocket_fallback_reason = if (object.get("websocketFallbackReason")) |field_value| if ((field_value) == .null) null else try parseModelCallWebSocketFallbackReason(allocator, field_value) else null;
+    errdefer {
+        var cleanup_websocket_fallback_reason = parsed_websocket_fallback_reason;
+        if (cleanup_websocket_fallback_reason) |*present| {
+            wipeModelCallWebSocketFallbackReason(&present.*);
+        }
+    }
+    const parsed_websocket_fallback_after_ms = if (object.get("websocketFallbackAfterMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_websocket_fallback_error_kind = if (object.get("websocketFallbackErrorKind")) |field_value| if ((field_value) == .null) null else try parseModelCallWebSocketFallbackErrorKind(allocator, field_value) else null;
+    errdefer {
+        var cleanup_websocket_fallback_error_kind = parsed_websocket_fallback_error_kind;
+        if (cleanup_websocket_fallback_error_kind) |*present| {
+            wipeModelCallWebSocketFallbackErrorKind(&present.*);
+        }
+    }
+    const parsed_websocket_fallback_status_code = if (object.get("websocketFallbackStatusCode")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, 999) else null;
+    const parsed_websocket_fallback_close_code = if (object.get("websocketFallbackCloseCode")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, 4999) else null;
+    const parsed_websocket_fallback_reconnect_attempted = if (object.get("websocketFallbackReconnectAttempted")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_websocket_fallback_started_this_call = if (object.get("websocketFallbackStartedThisCall")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_max_prompt_tokens = if (object.get("maxPromptTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_max_output_tokens = if (object.get("maxOutputTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_is_byok = if (object.get("isByok")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
@@ -10905,6 +11752,17 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
         .api_endpoint = parsed_api_endpoint,
         .transport = parsed_transport,
         .failure_kind = parsed_failure_kind,
+        .request_body_bytes = parsed_request_body_bytes,
+        .request_body_wire_bytes = parsed_request_body_wire_bytes,
+        .request_body_encoding = parsed_request_body_encoding,
+        .retry_attempt = parsed_retry_attempt,
+        .websocket_fallback_reason = parsed_websocket_fallback_reason,
+        .websocket_fallback_after_ms = parsed_websocket_fallback_after_ms,
+        .websocket_fallback_error_kind = parsed_websocket_fallback_error_kind,
+        .websocket_fallback_status_code = parsed_websocket_fallback_status_code,
+        .websocket_fallback_close_code = parsed_websocket_fallback_close_code,
+        .websocket_fallback_reconnect_attempted = parsed_websocket_fallback_reconnect_attempted,
+        .websocket_fallback_started_this_call = parsed_websocket_fallback_started_this_call,
         .max_prompt_tokens = parsed_max_prompt_tokens,
         .max_output_tokens = parsed_max_output_tokens,
         .is_byok = parsed_is_byok,
@@ -11233,6 +12091,20 @@ fn parsePermissionRecoveryData(allocator: std.mem.Allocator, value: std.json.Val
         const cleanup_episode_id = parsed_episode_id;
         wipeString(cleanup_episode_id);
     }
+    const parsed_owner_session_id = if (object.get("ownerSessionId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_owner_session_id = parsed_owner_session_id;
+        if (cleanup_owner_session_id) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_owner_agent_id = if (object.get("ownerAgentId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_owner_agent_id = parsed_owner_agent_id;
+        if (cleanup_owner_agent_id) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_status = try parsePermissionRecoveryStatus(allocator, object.get("status") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_status = parsed_status;
@@ -11258,6 +12130,8 @@ fn parsePermissionRecoveryData(allocator: std.mem.Allocator, value: std.json.Val
     }
     return .{
         .episode_id = parsed_episode_id,
+        .owner_session_id = parsed_owner_session_id,
+        .owner_agent_id = parsed_owner_agent_id,
         .status = parsed_status,
         .on_blocked = parsed_on_blocked,
         .reason = parsed_reason,
@@ -12130,6 +13004,48 @@ fn parsePermissionRequestShell(allocator: std.mem.Allocator, value: std.json.Val
     };
 }
 
+fn parsePermissionWriteFileContent(allocator: std.mem.Allocator, value: std.json.Value) !PermissionWriteFileContent {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_path = try parseString(allocator, object.get("path") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_path = parsed_path;
+        wipeString(cleanup_path);
+    }
+    const parsed_content = try parseString(allocator, object.get("content") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_content = parsed_content;
+        wipeString(cleanup_content);
+    }
+    return .{
+        .path = parsed_path,
+        .content = parsed_content,
+    };
+}
+
+fn parsePermissionWriteFileEdit(allocator: std.mem.Allocator, value: std.json.Value) !PermissionWriteFileEdit {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_before = if (object.get("before")) |field_value| if ((field_value) == .null) null else try parsePermissionWriteFileContent(allocator, field_value) else null;
+    errdefer {
+        var cleanup_before = parsed_before;
+        if (cleanup_before) |*present| {
+            wipePermissionWriteFileContent(&present.*);
+        }
+    }
+    const parsed_after = if (object.get("after")) |field_value| if ((field_value) == .null) null else try parsePermissionWriteFileContent(allocator, field_value) else null;
+    errdefer {
+        var cleanup_after = parsed_after;
+        if (cleanup_after) |*present| {
+            wipePermissionWriteFileContent(&present.*);
+        }
+    }
+    return .{
+        .before = parsed_before,
+        .after = parsed_after,
+    };
+}
+
 fn parsePermissionRequestWrite(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRequestWrite {
     const object = try payloads.requiredObject(value);
 
@@ -12175,6 +13091,15 @@ fn parsePermissionRequestWrite(allocator: std.mem.Allocator, value: std.json.Val
             wipeString(present.*);
         }
     }
+    const parsed_file_edits = if (object.get("fileEdits")) |field_value| if ((field_value) == .null) null else try parsePermissionRequestWriteFileEditsArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_file_edits = parsed_file_edits;
+        if (cleanup_file_edits) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipePermissionWriteFileEdit(&item.*);
+            }
+        }
+    }
     const parsed_can_offer_session_approval = try parseBool(object.get("canOfferSessionApproval") orelse return error.InvalidSessionEvent);
     const parsed_request_sandbox_bypass = if (object.get("requestSandboxBypass")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_request_sandbox_bypass_reason = if (object.get("requestSandboxBypassReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
@@ -12200,6 +13125,7 @@ fn parsePermissionRequestWrite(allocator: std.mem.Allocator, value: std.json.Val
         .resolved_path = parsed_resolved_path,
         .diff = parsed_diff,
         .new_file_contents = parsed_new_file_contents,
+        .file_edits = parsed_file_edits,
         .can_offer_session_approval = parsed_can_offer_session_approval,
         .request_sandbox_bypass = parsed_request_sandbox_bypass,
         .request_sandbox_bypass_reason = parsed_request_sandbox_bypass_reason,
@@ -12415,6 +13341,7 @@ fn parsePermissionApprovalEvaluationReasonCode(_: std.mem.Allocator, value: std.
     if (std.mem.eql(u8, wire, "sandbox-bypass")) return .sandbox_bypass;
     if (std.mem.eql(u8, wire, "action-too-long")) return .action_too_long;
     if (std.mem.eql(u8, wire, "path-not-authorized")) return .path_not_authorized;
+    if (std.mem.eql(u8, wire, "content-excluded")) return .content_excluded;
     if (std.mem.eql(u8, wire, "invalid-working-directory")) return .invalid_working_directory;
     if (std.mem.eql(u8, wire, "unreadable")) return .unreadable;
     if (std.mem.eql(u8, wire, "not-regular-file")) return .not_regular_file;
@@ -12427,6 +13354,12 @@ fn parsePermissionApprovalEvaluationReasonCode(_: std.mem.Allocator, value: std.
     if (std.mem.eql(u8, wire, "interpreter-wrapped-script")) return .interpreter_wrapped_script;
     if (std.mem.eql(u8, wire, "unreviewable-script-invocation")) return .unreviewable_script_invocation;
     if (std.mem.eql(u8, wire, "argument-binding-unreviewable")) return .argument_binding_unreviewable;
+    if (std.mem.eql(u8, wire, "unsupported-command-shape")) return .unsupported_command_shape;
+    if (std.mem.eql(u8, wire, "unsupported-source")) return .unsupported_source;
+    if (std.mem.eql(u8, wire, "dynamic-source")) return .dynamic_source;
+    if (std.mem.eql(u8, wire, "too-many-sources")) return .too_many_sources;
+    if (std.mem.eql(u8, wire, "executable-unavailable")) return .executable_unavailable;
+    if (std.mem.eql(u8, wire, "executable-too-large")) return .executable_too_large;
     if (std.mem.eql(u8, wire, "malformed-script-action-review")) return .malformed_script_action_review;
     if (std.mem.eql(u8, wire, "malformed-script-action-manifest")) return .malformed_script_action_manifest;
     if (std.mem.eql(u8, wire, "unavailable")) return .unavailable;
@@ -13062,6 +13995,15 @@ fn parsePermissionPromptRequestWrite(allocator: std.mem.Allocator, value: std.js
             wipeString(present.*);
         }
     }
+    const parsed_file_edits = if (object.get("fileEdits")) |field_value| if ((field_value) == .null) null else try parsePermissionPromptRequestWriteFileEditsArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_file_edits = parsed_file_edits;
+        if (cleanup_file_edits) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipePermissionWriteFileEdit(&item.*);
+            }
+        }
+    }
     const parsed_can_offer_session_approval = try parseBool(object.get("canOfferSessionApproval") orelse return error.InvalidSessionEvent);
     const parsed_assisted_approval = if (object.get("assistedApproval")) |field_value| if ((field_value) == .null) null else try parsePermissionAssistedApproval(allocator, field_value) else null;
     errdefer {
@@ -13079,6 +14021,7 @@ fn parsePermissionPromptRequestWrite(allocator: std.mem.Allocator, value: std.js
         .resolved_path = parsed_resolved_path,
         .diff = parsed_diff,
         .new_file_contents = parsed_new_file_contents,
+        .file_edits = parsed_file_edits,
         .can_offer_session_approval = parsed_can_offer_session_approval,
         .assisted_approval = parsed_assisted_approval,
         .managed_approval_required = parsed_managed_approval_required,
@@ -13777,6 +14720,20 @@ fn parsePermissionRequestedData(allocator: std.mem.Allocator, value: std.json.Va
             wipeSessionMode(&present.*);
         }
     }
+    const parsed_owner_session_id = if (object.get("ownerSessionId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_owner_session_id = parsed_owner_session_id;
+        if (cleanup_owner_session_id) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_owner_agent_id = if (object.get("ownerAgentId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_owner_agent_id = parsed_owner_agent_id;
+        if (cleanup_owner_agent_id) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_risk_assessment = if (object.get("riskAssessment")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_risk_assessment = parsed_risk_assessment;
@@ -13798,6 +14755,8 @@ fn parsePermissionRequestedData(allocator: std.mem.Allocator, value: std.json.Va
         .prompt_request = parsed_prompt_request,
         .permission_mode = parsed_permission_mode,
         .agent_mode = parsed_agent_mode,
+        .owner_session_id = parsed_owner_session_id,
+        .owner_agent_id = parsed_owner_agent_id,
         .risk_assessment = parsed_risk_assessment,
         .resolved_by_hook = parsed_resolved_by_hook,
         .recovery_episode_id = parsed_recovery_episode_id,
@@ -14960,12 +15919,8 @@ fn parseAutoModeResolvedData(allocator: std.mem.Allocator, value: std.json.Value
     };
 }
 
-fn parseRecommendedAutoTier(_: std.mem.Allocator, value: std.json.Value) !RecommendedAutoTier {
-    const wire = try valueString(value);
-    if (std.mem.eql(u8, wire, "efficiency")) return .efficiency;
-    if (std.mem.eql(u8, wire, "balance")) return .balance;
-    if (std.mem.eql(u8, wire, "intelligence")) return .intelligence;
-    return error.InvalidSessionEvent;
+fn parseRecommendedAutoTier(allocator: std.mem.Allocator, value: std.json.Value) !RecommendedAutoTier {
+    return try parseString(allocator, value, 1, null);
 }
 
 fn parseAutoTierRecommendationData(allocator: std.mem.Allocator, value: std.json.Value) !AutoTierRecommendationData {
@@ -14981,13 +15936,8 @@ fn parseAutoTierRecommendationData(allocator: std.mem.Allocator, value: std.json
     };
 }
 
-fn parseAutoTier(_: std.mem.Allocator, value: std.json.Value) !AutoTier {
-    const wire = try valueString(value);
-    if (std.mem.eql(u8, wire, "efficiency")) return .efficiency;
-    if (std.mem.eql(u8, wire, "balance")) return .balance;
-    if (std.mem.eql(u8, wire, "intelligence")) return .intelligence;
-    if (std.mem.eql(u8, wire, "fast")) return .fast;
-    return error.InvalidSessionEvent;
+fn parseAutoTier(allocator: std.mem.Allocator, value: std.json.Value) !AutoTier {
+    return try parseRoutingIdentifier(allocator, value, 1, null);
 }
 
 fn parseAutoTierSwitchFailureReason(_: std.mem.Allocator, value: std.json.Value) !AutoTierSwitchFailureReason {
@@ -15516,6 +16466,28 @@ fn parseCompactionCompleteCompactionTokensUsedCopilotUsage(allocator: std.mem.Al
 fn parseCompactionCompleteCompactionTokensUsed(allocator: std.mem.Allocator, value: std.json.Value) !CompactionCompleteCompactionTokensUsed {
     const object = try payloads.requiredObject(value);
 
+    const parsed_request_count = if (object.get("requestCount")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_ai_credits_status = if (object.get("aiCreditsStatus")) |field_value| if ((field_value) == .null) null else try parseAiCreditsStatus(allocator, field_value) else null;
+    errdefer {
+        var cleanup_ai_credits_status = parsed_ai_credits_status;
+        if (cleanup_ai_credits_status) |*present| {
+            wipeAiCreditsStatus(&present.*);
+        }
+    }
+    const parsed_provider = if (object.get("provider")) |field_value| if ((field_value) == .null) null else try parseModelProviderRef(allocator, field_value) else null;
+    errdefer {
+        var cleanup_provider = parsed_provider;
+        if (cleanup_provider) |*present| {
+            wipeModelProviderRef(&present.*);
+        }
+    }
+    const parsed_model_display_name = if (object.get("modelDisplayName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_model_display_name = parsed_model_display_name;
+        if (cleanup_model_display_name) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_input_tokens = if (object.get("inputTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_output_tokens = if (object.get("outputTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_cache_read_tokens = if (object.get("cacheReadTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
@@ -15536,6 +16508,10 @@ fn parseCompactionCompleteCompactionTokensUsed(allocator: std.mem.Allocator, val
         }
     }
     return .{
+        .request_count = parsed_request_count,
+        .ai_credits_status = parsed_ai_credits_status,
+        .provider = parsed_provider,
+        .model_display_name = parsed_model_display_name,
         .input_tokens = parsed_input_tokens,
         .output_tokens = parsed_output_tokens,
         .cache_read_tokens = parsed_cache_read_tokens,
@@ -16083,6 +17059,7 @@ fn parseRemediationAction(_: std.mem.Allocator, value: std.json.Value) !Remediat
     if (std.mem.eql(u8, wire, "show_account")) return .show_account;
     if (std.mem.eql(u8, wire, "review_sandbox_policy")) return .review_sandbox_policy;
     if (std.mem.eql(u8, wire, "allow_sandbox_outbound")) return .allow_sandbox_outbound;
+    if (std.mem.eql(u8, wire, "rewind_conversation")) return .rewind_conversation;
     return error.InvalidSessionEvent;
 }
 
@@ -16098,6 +17075,20 @@ fn parseErrorData(allocator: std.mem.Allocator, value: std.json.Value) !ErrorDat
     errdefer {
         var cleanup_error_code = parsed_error_code;
         if (cleanup_error_code) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_provider_error_type = if (object.get("providerErrorType")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_provider_error_type = parsed_provider_error_type;
+        if (cleanup_provider_error_type) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_provider_error_param = if (object.get("providerErrorParam")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_provider_error_param = parsed_provider_error_param;
+        if (cleanup_provider_error_param) |*present| {
             wipeString(present.*);
         }
     }
@@ -16146,6 +17137,8 @@ fn parseErrorData(allocator: std.mem.Allocator, value: std.json.Value) !ErrorDat
     return .{
         .error_type = parsed_error_type,
         .error_code = parsed_error_code,
+        .provider_error_type = parsed_provider_error_type,
+        .provider_error_param = parsed_provider_error_param,
         .eligible_for_auto_switch = parsed_eligible_for_auto_switch,
         .message = parsed_message,
         .remediation = parsed_remediation,
@@ -17902,6 +18895,36 @@ fn parseInfoData(allocator: std.mem.Allocator, value: std.json.Value) !InfoData 
     };
 }
 
+fn parseManagedPluginProgressPhase(_: std.mem.Allocator, value: std.json.Value) !ManagedPluginProgressPhase {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "initializing")) return .initializing;
+    if (std.mem.eql(u8, wire, "installing")) return .installing;
+    if (std.mem.eql(u8, wire, "updating")) return .updating;
+    if (std.mem.eql(u8, wire, "complete")) return .complete;
+    return error.InvalidSessionEvent;
+}
+
+fn parseManagedPluginProgressData(allocator: std.mem.Allocator, value: std.json.Value) !ManagedPluginProgressData {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_phase = try parseManagedPluginProgressPhase(allocator, object.get("phase") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_phase = parsed_phase;
+        wipeManagedPluginProgressPhase(&cleanup_phase);
+    }
+    const parsed_plugin_specs = try parseManagedPluginProgressDataPluginSpecsArray(allocator, object.get("pluginSpecs") orelse return error.InvalidSessionEvent);
+    errdefer {
+        const cleanup_plugin_specs = parsed_plugin_specs;
+        for (@constCast(cleanup_plugin_specs)) |*item| {
+            wipeString(item.*);
+        }
+    }
+    return .{
+        .phase = parsed_phase,
+        .plugin_specs = parsed_plugin_specs,
+    };
+}
+
 fn parseManagedSettingsEnforcedAction(_: std.mem.Allocator, value: std.json.Value) !ManagedSettingsEnforcedAction {
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "bypass_permissions_blocked")) return .bypass_permissions_blocked;
@@ -17954,6 +18977,23 @@ fn parseManagedSettingsEnforcedData(allocator: std.mem.Allocator, value: std.jso
     };
 }
 
+fn parseManagedPermissionsContext(allocator: std.mem.Allocator, value: std.json.Value) !ManagedPermissionsContext {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_permissions = if (object.get("permissions")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
+    errdefer {
+        var cleanup_permissions = parsed_permissions;
+        if (cleanup_permissions) |*present| {
+            wipeJsonValue(&present.*);
+        }
+    }
+    const parsed_fail_closed = try parseBool(object.get("failClosed") orelse return error.InvalidSessionEvent);
+    return .{
+        .permissions = parsed_permissions,
+        .fail_closed = parsed_fail_closed,
+    };
+}
+
 fn parseManagedSettingsResolvedSource(_: std.mem.Allocator, value: std.json.Value) !ManagedSettingsResolvedSource {
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "server")) return .server;
@@ -17968,6 +19008,13 @@ fn parseManagedSettingsResolvedSource(_: std.mem.Allocator, value: std.json.Valu
 fn parseManagedSettingsResolvedData(allocator: std.mem.Allocator, value: std.json.Value) !ManagedSettingsResolvedData {
     const object = try payloads.requiredObject(value);
 
+    const parsed_permissions_context = if (object.get("permissionsContext")) |field_value| if ((field_value) == .null) null else try parseManagedPermissionsContext(allocator, field_value) else null;
+    errdefer {
+        var cleanup_permissions_context = parsed_permissions_context;
+        if (cleanup_permissions_context) |*present| {
+            wipeManagedPermissionsContext(&present.*);
+        }
+    }
     const parsed_source = try parseManagedSettingsResolvedSource(allocator, object.get("source") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_source = parsed_source;
@@ -17996,6 +19043,7 @@ fn parseManagedSettingsResolvedData(allocator: std.mem.Allocator, value: std.jso
         }
     }
     return .{
+        .permissions_context = parsed_permissions_context,
         .source = parsed_source,
         .server_managed = parsed_server_managed,
         .device_managed = parsed_device_managed,
@@ -18098,6 +19146,7 @@ fn parseMcpServerSource(_: std.mem.Allocator, value: std.json.Value) !McpServerS
     if (std.mem.eql(u8, wire, "plugin")) return .plugin;
     if (std.mem.eql(u8, wire, "builtin")) return .builtin;
     if (std.mem.eql(u8, wire, "managed")) return .managed;
+    if (std.mem.eql(u8, wire, "account")) return .account;
     return error.InvalidSessionEvent;
 }
 
@@ -18309,6 +19358,20 @@ fn parseModelChangeData(allocator: std.mem.Allocator, value: std.json.Value) !Mo
         const cleanup_new_model = parsed_new_model;
         wipeString(cleanup_new_model);
     }
+    const parsed_provider_id = if (object.get("providerId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_provider_id = parsed_provider_id;
+        if (cleanup_provider_id) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_previous_provider_id = if (object.get("previousProviderId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_previous_provider_id = parsed_previous_provider_id;
+        if (cleanup_previous_provider_id) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_previous_reasoning_effort = if (object.get("previousReasoningEffort")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_previous_reasoning_effort = parsed_previous_reasoning_effort;
@@ -18330,6 +19393,7 @@ fn parseModelChangeData(allocator: std.mem.Allocator, value: std.json.Value) !Mo
             wipeString(present.*);
         }
     }
+    const parsed_reasoning_effort_managed = if (object.get("reasoningEffortManaged")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_previous_reasoning_summary = if (object.get("previousReasoningSummary")) |field_value| if ((field_value) == .null) null else try parseReasoningSummary(allocator, field_value) else null;
     errdefer {
         var cleanup_previous_reasoning_summary = parsed_previous_reasoning_summary;
@@ -18365,6 +19429,7 @@ fn parseModelChangeData(allocator: std.mem.Allocator, value: std.json.Value) !Mo
             wipeContextTier(&present.*);
         }
     }
+    const parsed_context_tier_managed = if (object.get("contextTierManaged")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_cause = if (object.get("cause")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_cause = parsed_cause;
@@ -18393,21 +19458,27 @@ fn parseModelChangeData(allocator: std.mem.Allocator, value: std.json.Value) !Mo
             wipeAutoTier(&present.*);
         }
     }
+    const parsed_auto_tier_managed = if (object.get("autoTierManaged")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .previous_model = parsed_previous_model,
         .new_model = parsed_new_model,
+        .provider_id = parsed_provider_id,
+        .previous_provider_id = parsed_previous_provider_id,
         .previous_reasoning_effort = parsed_previous_reasoning_effort,
         .reasoning_effort = parsed_reasoning_effort,
         .reasoning_effort_model = parsed_reasoning_effort_model,
+        .reasoning_effort_managed = parsed_reasoning_effort_managed,
         .previous_reasoning_summary = parsed_previous_reasoning_summary,
         .reasoning_summary = parsed_reasoning_summary,
         .previous_verbosity = parsed_previous_verbosity,
         .verbosity = parsed_verbosity,
         .context_tier = parsed_context_tier,
+        .context_tier_managed = parsed_context_tier_managed,
         .cause = parsed_cause,
         .source = parsed_source,
         .previous_auto_tier = parsed_previous_auto_tier,
         .auto_tier = parsed_auto_tier,
+        .auto_tier_managed = parsed_auto_tier_managed,
     };
 }
 
@@ -18488,6 +19559,302 @@ fn parsePlanChangedData(allocator: std.mem.Allocator, value: std.json.Value) !Pl
     };
 }
 
+fn parseProviderQuotaUnit(_: std.mem.Allocator, value: std.json.Value) !ProviderQuotaUnit {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "ai_credits")) return .ai_credits;
+    if (std.mem.eql(u8, wire, "requests")) return .requests;
+    if (std.mem.eql(u8, wire, "tokens")) return .tokens;
+    if (std.mem.eql(u8, wire, "unknown")) return .unknown;
+    return error.InvalidSessionEvent;
+}
+
+fn parseProviderQuotaAccessState(_: std.mem.Allocator, value: std.json.Value) !ProviderQuotaAccessState {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "allowed")) return .allowed;
+    if (std.mem.eql(u8, wire, "denied")) return .denied;
+    if (std.mem.eql(u8, wire, "not_required")) return .not_required;
+    if (std.mem.eql(u8, wire, "unknown")) return .unknown;
+    if (std.mem.eql(u8, wire, "unavailable")) return .unavailable;
+    return error.InvalidSessionEvent;
+}
+
+fn parseProviderQuotaCapacityState(_: std.mem.Allocator, value: std.json.Value) !ProviderQuotaCapacityState {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "available")) return .available;
+    if (std.mem.eql(u8, wire, "exhausted")) return .exhausted;
+    if (std.mem.eql(u8, wire, "unlimited")) return .unlimited;
+    if (std.mem.eql(u8, wire, "not_required")) return .not_required;
+    if (std.mem.eql(u8, wire, "not_applicable")) return .not_applicable;
+    if (std.mem.eql(u8, wire, "unknown")) return .unknown;
+    if (std.mem.eql(u8, wire, "unavailable")) return .unavailable;
+    return error.InvalidSessionEvent;
+}
+
+fn parseProviderQuotaObservationKind(_: std.mem.Allocator, value: std.json.Value) !ProviderQuotaObservationKind {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "account_snapshot")) return .account_snapshot;
+    if (std.mem.eql(u8, wire, "admission_state")) return .admission_state;
+    return error.InvalidSessionEvent;
+}
+
+fn parseProviderQuotaQuantityKind(_: std.mem.Allocator, value: std.json.Value) !ProviderQuotaQuantityKind {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "authoritative_budget")) return .authoritative_budget;
+    if (std.mem.eql(u8, wire, "advisory_balance")) return .advisory_balance;
+    if (std.mem.eql(u8, wire, "none")) return .none;
+    return error.InvalidSessionEvent;
+}
+
+fn parseProviderQuotaAcquisitionStatus(_: std.mem.Allocator, value: std.json.Value) !ProviderQuotaAcquisitionStatus {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "succeeded")) return .succeeded;
+    if (std.mem.eql(u8, wire, "unavailable")) return .unavailable;
+    if (std.mem.eql(u8, wire, "failed")) return .failed;
+    return error.InvalidSessionEvent;
+}
+
+fn parseProviderQuotaBudgetMetadata(_: std.mem.Allocator, value: std.json.Value) !ProviderQuotaBudgetMetadata {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_unlimited = try parseBool(object.get("unlimited") orelse return error.InvalidSessionEvent);
+    const parsed_entitlement = try parseNumber(object.get("entitlement") orelse return error.InvalidSessionEvent, null, null, null);
+    const parsed_consumed = try parseNumber(object.get("consumed") orelse return error.InvalidSessionEvent, null, null, null);
+    const parsed_remaining_percentage = try parseNumber(object.get("remainingPercentage") orelse return error.InvalidSessionEvent, null, null, null);
+    const parsed_usage_allowed_when_exhausted = try parseBool(object.get("usageAllowedWhenExhausted") orelse return error.InvalidSessionEvent);
+    const parsed_overage = try parseNumber(object.get("overage") orelse return error.InvalidSessionEvent, null, null, null);
+    const parsed_overage_allowed_when_exhausted = try parseBool(object.get("overageAllowedWhenExhausted") orelse return error.InvalidSessionEvent);
+    const parsed_reset_at_epoch_ms = if (object.get("resetAtEpochMs")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, null, null) else null;
+    const parsed_reset_estimated = if (object.get("resetEstimated")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_token_based_billing = if (object.get("tokenBasedBilling")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_overage_limit = if (object.get("overageLimit")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, null, null) else null;
+    return .{
+        .unlimited = parsed_unlimited,
+        .entitlement = parsed_entitlement,
+        .consumed = parsed_consumed,
+        .remaining_percentage = parsed_remaining_percentage,
+        .usage_allowed_when_exhausted = parsed_usage_allowed_when_exhausted,
+        .overage = parsed_overage,
+        .overage_allowed_when_exhausted = parsed_overage_allowed_when_exhausted,
+        .reset_at_epoch_ms = parsed_reset_at_epoch_ms,
+        .reset_estimated = parsed_reset_estimated,
+        .token_based_billing = parsed_token_based_billing,
+        .overage_limit = parsed_overage_limit,
+    };
+}
+
+fn parseProviderMonthlyUsageState(_: std.mem.Allocator, value: std.json.Value) !ProviderMonthlyUsageState {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "available")) return .available;
+    if (std.mem.eql(u8, wire, "no_policy")) return .no_policy;
+    if (std.mem.eql(u8, wire, "unavailable")) return .unavailable;
+    if (std.mem.eql(u8, wire, "unknown")) return .unknown;
+    return error.InvalidSessionEvent;
+}
+
+fn parseProviderMonthlyUsageScope(_: std.mem.Allocator, value: std.json.Value) !ProviderMonthlyUsageScope {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "user")) return .user;
+    if (std.mem.eql(u8, wire, "unknown")) return .unknown;
+    return error.InvalidSessionEvent;
+}
+
+fn parseProviderMonthlyUsage(allocator: std.mem.Allocator, value: std.json.Value) !ProviderMonthlyUsage {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_state = try parseProviderMonthlyUsageState(allocator, object.get("state") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_state = parsed_state;
+        wipeProviderMonthlyUsageState(&cleanup_state);
+    }
+    const parsed_unit = try parseProviderQuotaUnit(allocator, object.get("unit") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_unit = parsed_unit;
+        wipeProviderQuotaUnit(&cleanup_unit);
+    }
+    const parsed_scope = try parseProviderMonthlyUsageScope(allocator, object.get("scope") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_scope = parsed_scope;
+        wipeProviderMonthlyUsageScope(&cleanup_scope);
+    }
+    const parsed_consumed_quantity = if (object.get("consumedQuantity")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, null, null, null) else null;
+    const parsed_queried_at = if (object.get("queriedAt")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_queried_at = parsed_queried_at;
+        if (cleanup_queried_at) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_cycle_start = if (object.get("cycleStart")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_cycle_start = parsed_cycle_start;
+        if (cleanup_cycle_start) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_reset_on = if (object.get("resetOn")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_reset_on = parsed_reset_on;
+        if (cleanup_reset_on) |*present| {
+            wipeString(present.*);
+        }
+    }
+    return .{
+        .state = parsed_state,
+        .unit = parsed_unit,
+        .scope = parsed_scope,
+        .consumed_quantity = parsed_consumed_quantity,
+        .queried_at = parsed_queried_at,
+        .cycle_start = parsed_cycle_start,
+        .reset_on = parsed_reset_on,
+    };
+}
+
+fn parseProviderQuotaState(allocator: std.mem.Allocator, value: std.json.Value) !ProviderQuotaState {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_provider = try parseModelProviderRef(allocator, object.get("provider") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_provider = parsed_provider;
+        wipeModelProviderRef(&cleanup_provider);
+    }
+    const parsed_quota_id = try parseString(allocator, object.get("quotaId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_quota_id = parsed_quota_id;
+        wipeString(cleanup_quota_id);
+    }
+    const parsed_unit = try parseProviderQuotaUnit(allocator, object.get("unit") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_unit = parsed_unit;
+        wipeProviderQuotaUnit(&cleanup_unit);
+    }
+    const parsed_access_state = try parseProviderQuotaAccessState(allocator, object.get("accessState") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_access_state = parsed_access_state;
+        wipeProviderQuotaAccessState(&cleanup_access_state);
+    }
+    const parsed_capacity_state = try parseProviderQuotaCapacityState(allocator, object.get("capacityState") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_capacity_state = parsed_capacity_state;
+        wipeProviderQuotaCapacityState(&cleanup_capacity_state);
+    }
+    const parsed_observation_kind = if (object.get("observationKind")) |field_value| if ((field_value) == .null) null else try parseProviderQuotaObservationKind(allocator, field_value) else null;
+    errdefer {
+        var cleanup_observation_kind = parsed_observation_kind;
+        if (cleanup_observation_kind) |*present| {
+            wipeProviderQuotaObservationKind(&present.*);
+        }
+    }
+    const parsed_quantity_kind = if (object.get("quantityKind")) |field_value| if ((field_value) == .null) null else try parseProviderQuotaQuantityKind(allocator, field_value) else null;
+    errdefer {
+        var cleanup_quantity_kind = parsed_quantity_kind;
+        if (cleanup_quantity_kind) |*present| {
+            wipeProviderQuotaQuantityKind(&present.*);
+        }
+    }
+    const parsed_acquisition_status = if (object.get("acquisitionStatus")) |field_value| if ((field_value) == .null) null else try parseProviderQuotaAcquisitionStatus(allocator, field_value) else null;
+    errdefer {
+        var cleanup_acquisition_status = parsed_acquisition_status;
+        if (cleanup_acquisition_status) |*present| {
+            wipeProviderQuotaAcquisitionStatus(&present.*);
+        }
+    }
+    const parsed_observed_at = if (object.get("observedAt")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_observed_at = parsed_observed_at;
+        if (cleanup_observed_at) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_http_status = if (object.get("httpStatus")) |field_value| if ((field_value) == .null) null else try parseInteger(i64, field_value, null, null, null) else null;
+    const parsed_acquisition_error = if (object.get("acquisitionError")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_acquisition_error = parsed_acquisition_error;
+        if (cleanup_acquisition_error) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_budget_metadata = if (object.get("budgetMetadata")) |field_value| if ((field_value) == .null) null else try parseProviderQuotaBudgetMetadata(allocator, field_value) else null;
+    errdefer {
+        var cleanup_budget_metadata = parsed_budget_metadata;
+        if (cleanup_budget_metadata) |*present| {
+            wipeProviderQuotaBudgetMetadata(&present.*);
+        }
+    }
+    const parsed_monthly_usage = if (object.get("monthlyUsage")) |field_value| if ((field_value) == .null) null else try parseProviderMonthlyUsage(allocator, field_value) else null;
+    errdefer {
+        var cleanup_monthly_usage = parsed_monthly_usage;
+        if (cleanup_monthly_usage) |*present| {
+            wipeProviderMonthlyUsage(&present.*);
+        }
+    }
+    const parsed_compatibility_key = if (object.get("compatibilityKey")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_compatibility_key = parsed_compatibility_key;
+        if (cleanup_compatibility_key) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_has_quota = if (object.get("hasQuota")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_entitled_quantity = if (object.get("entitledQuantity")) |field_value| if ((field_value) == .null) null else try parseInteger(i64, field_value, null, null, null) else null;
+    const parsed_available_quantity = if (object.get("availableQuantity")) |field_value| if ((field_value) == .null) null else try parseInteger(i64, field_value, null, null, null) else null;
+    const parsed_reason = if (object.get("reason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_reason = parsed_reason;
+        if (cleanup_reason) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_source = if (object.get("source")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_source = parsed_source;
+        if (cleanup_source) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_service = if (object.get("service")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_service = parsed_service;
+        if (cleanup_service) |*present| {
+            wipeString(present.*);
+        }
+    }
+    return .{
+        .provider = parsed_provider,
+        .quota_id = parsed_quota_id,
+        .unit = parsed_unit,
+        .access_state = parsed_access_state,
+        .capacity_state = parsed_capacity_state,
+        .observation_kind = parsed_observation_kind,
+        .quantity_kind = parsed_quantity_kind,
+        .acquisition_status = parsed_acquisition_status,
+        .observed_at = parsed_observed_at,
+        .http_status = parsed_http_status,
+        .acquisition_error = parsed_acquisition_error,
+        .budget_metadata = parsed_budget_metadata,
+        .monthly_usage = parsed_monthly_usage,
+        .compatibility_key = parsed_compatibility_key,
+        .has_quota = parsed_has_quota,
+        .entitled_quantity = parsed_entitled_quantity,
+        .available_quantity = parsed_available_quantity,
+        .reason = parsed_reason,
+        .source = parsed_source,
+        .service = parsed_service,
+    };
+}
+
+fn parseProviderQuotaObservationData(allocator: std.mem.Allocator, value: std.json.Value) !ProviderQuotaObservationData {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_observation = try parseProviderQuotaState(allocator, object.get("observation") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_observation = parsed_observation;
+        wipeProviderQuotaState(&cleanup_observation);
+    }
+    return .{
+        .observation = parsed_observation,
+    };
+}
+
 fn parseRemoteSteerableChangedData(_: std.mem.Allocator, value: std.json.Value) !RemoteSteerableChangedData {
     const object = try payloads.requiredObject(value);
 
@@ -18523,6 +19890,13 @@ fn parseResumeData(allocator: std.mem.Allocator, value: std.json.Value) !ResumeD
             wipeString(present.*);
         }
     }
+    const parsed_provider_id = if (object.get("providerId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_provider_id = parsed_provider_id;
+        if (cleanup_provider_id) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_reasoning_effort = parsed_reasoning_effort;
@@ -18537,6 +19911,7 @@ fn parseResumeData(allocator: std.mem.Allocator, value: std.json.Value) !ResumeD
             wipeString(present.*);
         }
     }
+    const parsed_reasoning_effort_managed = if (object.get("reasoningEffortManaged")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_reasoning_summary = if (object.get("reasoningSummary")) |field_value| if ((field_value) == .null) null else try parseReasoningSummary(allocator, field_value) else null;
     errdefer {
         var cleanup_reasoning_summary = parsed_reasoning_summary;
@@ -18558,6 +19933,7 @@ fn parseResumeData(allocator: std.mem.Allocator, value: std.json.Value) !ResumeD
             wipeContextTier(&present.*);
         }
     }
+    const parsed_context_tier_managed = if (object.get("contextTierManaged")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_auto_tier = if (object.get("autoTier")) |field_value| if ((field_value) == .null) null else try parseAutoTier(allocator, field_value) else null;
     errdefer {
         var cleanup_auto_tier = parsed_auto_tier;
@@ -18565,6 +19941,7 @@ fn parseResumeData(allocator: std.mem.Allocator, value: std.json.Value) !ResumeD
             wipeAutoTier(&present.*);
         }
     }
+    const parsed_auto_tier_managed = if (object.get("autoTierManaged")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_session_limits = if (object.get("sessionLimits")) |field_value| if ((field_value) == .null) null else try parseSessionLimitsConfig(allocator, field_value) else null;
     errdefer {
         var cleanup_session_limits = parsed_session_limits;
@@ -18588,12 +19965,16 @@ fn parseResumeData(allocator: std.mem.Allocator, value: std.json.Value) !ResumeD
         .event_count = parsed_event_count,
         .events_file_size_bytes = parsed_events_file_size_bytes,
         .selected_model = parsed_selected_model,
+        .provider_id = parsed_provider_id,
         .reasoning_effort = parsed_reasoning_effort,
         .reasoning_effort_model = parsed_reasoning_effort_model,
+        .reasoning_effort_managed = parsed_reasoning_effort_managed,
         .reasoning_summary = parsed_reasoning_summary,
         .verbosity = parsed_verbosity,
         .context_tier = parsed_context_tier,
+        .context_tier_managed = parsed_context_tier_managed,
         .auto_tier = parsed_auto_tier,
+        .auto_tier_managed = parsed_auto_tier_managed,
         .session_limits = parsed_session_limits,
         .context = parsed_context,
         .already_in_use = parsed_already_in_use,
@@ -18697,6 +20078,297 @@ fn parseSessionLimitsChangedData(allocator: std.mem.Allocator, value: std.json.V
     }
     return .{
         .session_limits = parsed_session_limits,
+    };
+}
+
+fn parseUsageMetricsTokenDetail(_: std.mem.Allocator, value: std.json.Value) !UsageMetricsTokenDetail {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_token_count = try parseInteger(u64, object.get("tokenCount") orelse return error.InvalidSessionEvent, 0, null, null);
+    return .{
+        .token_count = parsed_token_count,
+    };
+}
+
+fn parseUsageMetricsCodeChanges(allocator: std.mem.Allocator, value: std.json.Value) !UsageMetricsCodeChanges {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_lines_added = try parseInteger(u64, object.get("linesAdded") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_lines_removed = try parseInteger(u64, object.get("linesRemoved") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_files_modified_count = try parseInteger(u64, object.get("filesModifiedCount") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_files_modified = try parseUsageMetricsCodeChangesFilesModifiedArray(allocator, object.get("filesModified") orelse return error.InvalidSessionEvent);
+    errdefer {
+        const cleanup_files_modified = parsed_files_modified;
+        for (@constCast(cleanup_files_modified)) |*item| {
+            wipeString(item.*);
+        }
+    }
+    return .{
+        .lines_added = parsed_lines_added,
+        .lines_removed = parsed_lines_removed,
+        .files_modified_count = parsed_files_modified_count,
+        .files_modified = parsed_files_modified,
+    };
+}
+
+fn parseUsageMetricsModelMetricRequests(_: std.mem.Allocator, value: std.json.Value) !UsageMetricsModelMetricRequests {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_count = try parseInteger(u64, object.get("count") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_cost = try parseNumber(object.get("cost") orelse return error.InvalidSessionEvent, null, null, null);
+    return .{
+        .count = parsed_count,
+        .cost = parsed_cost,
+    };
+}
+
+fn parseUsageMetricsModelMetricUsage(_: std.mem.Allocator, value: std.json.Value) !UsageMetricsModelMetricUsage {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_input_tokens = try parseInteger(u64, object.get("inputTokens") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_output_tokens = try parseInteger(u64, object.get("outputTokens") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_cache_read_tokens = try parseInteger(u64, object.get("cacheReadTokens") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_cache_write_tokens = try parseInteger(u64, object.get("cacheWriteTokens") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_reasoning_tokens = if (object.get("reasoningTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    return .{
+        .input_tokens = parsed_input_tokens,
+        .output_tokens = parsed_output_tokens,
+        .cache_read_tokens = parsed_cache_read_tokens,
+        .cache_write_tokens = parsed_cache_write_tokens,
+        .reasoning_tokens = parsed_reasoning_tokens,
+    };
+}
+
+fn parseUsageMetricsModelMetricTokenDetail(_: std.mem.Allocator, value: std.json.Value) !UsageMetricsModelMetricTokenDetail {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_token_count = try parseInteger(u64, object.get("tokenCount") orelse return error.InvalidSessionEvent, 0, null, null);
+    return .{
+        .token_count = parsed_token_count,
+    };
+}
+
+fn parseUsageMetricsModelMetric(allocator: std.mem.Allocator, value: std.json.Value) !UsageMetricsModelMetric {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_ai_credits_status = if (object.get("aiCreditsStatus")) |field_value| if ((field_value) == .null) null else try parseAiCreditsStatus(allocator, field_value) else null;
+    errdefer {
+        var cleanup_ai_credits_status = parsed_ai_credits_status;
+        if (cleanup_ai_credits_status) |*present| {
+            wipeAiCreditsStatus(&present.*);
+        }
+    }
+    const parsed_requests = try parseUsageMetricsModelMetricRequests(allocator, object.get("requests") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_requests = parsed_requests;
+        wipeUsageMetricsModelMetricRequests(&cleanup_requests);
+    }
+    const parsed_usage = try parseUsageMetricsModelMetricUsage(allocator, object.get("usage") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_usage = parsed_usage;
+        wipeUsageMetricsModelMetricUsage(&cleanup_usage);
+    }
+    const parsed_cache_expires_at = if (object.get("cacheExpiresAt")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_cache_expires_at = parsed_cache_expires_at;
+        if (cleanup_cache_expires_at) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_total_nano_aiu = if (object.get("totalNanoAiu")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_token_details = if (object.get("tokenDetails")) |field_value| if ((field_value) == .null) null else try parseUsageMetricsModelMetricTokenDetailsMap(allocator, field_value) else null;
+    errdefer {
+        var cleanup_token_details = parsed_token_details;
+        if (cleanup_token_details) |*present| {
+            {
+                var iterator = present.*.map.iterator();
+                while (iterator.next()) |entry| {
+                    wipeString(entry.key_ptr.*);
+                    wipeUsageMetricsModelMetricTokenDetail(&entry.value_ptr.*);
+                }
+            }
+        }
+    }
+    return .{
+        .ai_credits_status = parsed_ai_credits_status,
+        .requests = parsed_requests,
+        .usage = parsed_usage,
+        .cache_expires_at = parsed_cache_expires_at,
+        .total_nano_aiu = parsed_total_nano_aiu,
+        .token_details = parsed_token_details,
+    };
+}
+
+fn parseUsageMetricsProviderModelMetric(allocator: std.mem.Allocator, value: std.json.Value) !UsageMetricsProviderModelMetric {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_provider = if ((object.get("provider") orelse return error.InvalidSessionEvent) == .null) null else try parseModelProviderRef(allocator, object.get("provider") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_provider = parsed_provider;
+        if (cleanup_provider) |*present| {
+            wipeModelProviderRef(&present.*);
+        }
+    }
+    const parsed_model_id = if ((object.get("modelId") orelse return error.InvalidSessionEvent) == .null) null else try parseString(allocator, object.get("modelId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        var cleanup_model_id = parsed_model_id;
+        if (cleanup_model_id) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_model_display_name = if (object.get("modelDisplayName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_model_display_name = parsed_model_display_name;
+        if (cleanup_model_display_name) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_metrics = try parseUsageMetricsModelMetric(allocator, object.get("metrics") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_metrics = parsed_metrics;
+        wipeUsageMetricsModelMetric(&cleanup_metrics);
+    }
+    return .{
+        .provider = parsed_provider,
+        .model_id = parsed_model_id,
+        .model_display_name = parsed_model_display_name,
+        .metrics = parsed_metrics,
+    };
+}
+
+fn parseUsageMetricsAgentMetric(allocator: std.mem.Allocator, value: std.json.Value) !UsageMetricsAgentMetric {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_agent_name = if (object.get("agentName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_agent_name = parsed_agent_name;
+        if (cleanup_agent_name) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_agent_display_name = if (object.get("agentDisplayName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_agent_display_name = parsed_agent_display_name;
+        if (cleanup_agent_display_name) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_total_api_duration_ms = try parseInteger(u64, object.get("totalApiDurationMs") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_total_nano_aiu = try parseNumber(object.get("totalNanoAiu") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_model_metrics = try parseUsageMetricsAgentMetricModelMetricsMap(allocator, object.get("modelMetrics") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_model_metrics = parsed_model_metrics;
+        {
+            var iterator = cleanup_model_metrics.map.iterator();
+            while (iterator.next()) |entry| {
+                wipeString(entry.key_ptr.*);
+                wipeUsageMetricsModelMetric(&entry.value_ptr.*);
+            }
+        }
+    }
+    return .{
+        .agent_name = parsed_agent_name,
+        .agent_display_name = parsed_agent_display_name,
+        .total_api_duration_ms = parsed_total_api_duration_ms,
+        .total_nano_aiu = parsed_total_nano_aiu,
+        .model_metrics = parsed_model_metrics,
+    };
+}
+
+fn parseUsageGetMetricsResult(allocator: std.mem.Allocator, value: std.json.Value) !UsageGetMetricsResult {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_ai_credits_status = if (object.get("aiCreditsStatus")) |field_value| if ((field_value) == .null) null else try parseAiCreditsStatus(allocator, field_value) else null;
+    errdefer {
+        var cleanup_ai_credits_status = parsed_ai_credits_status;
+        if (cleanup_ai_credits_status) |*present| {
+            wipeAiCreditsStatus(&present.*);
+        }
+    }
+    const parsed_total_premium_request_cost = try parseNumber(object.get("totalPremiumRequestCost") orelse return error.InvalidSessionEvent, null, null, null);
+    const parsed_total_user_requests = try parseInteger(u64, object.get("totalUserRequests") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_total_nano_aiu = if (object.get("totalNanoAiu")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_token_details = if (object.get("tokenDetails")) |field_value| if ((field_value) == .null) null else try parseUsageGetMetricsResultTokenDetailsMap(allocator, field_value) else null;
+    errdefer {
+        var cleanup_token_details = parsed_token_details;
+        if (cleanup_token_details) |*present| {
+            {
+                var iterator = present.*.map.iterator();
+                while (iterator.next()) |entry| {
+                    wipeString(entry.key_ptr.*);
+                    wipeUsageMetricsTokenDetail(&entry.value_ptr.*);
+                }
+            }
+        }
+    }
+    const parsed_total_api_duration_ms = try parseInteger(u64, object.get("totalApiDurationMs") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_session_start_time = try parseString(allocator, object.get("sessionStartTime") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_session_start_time = parsed_session_start_time;
+        wipeString(cleanup_session_start_time);
+    }
+    const parsed_code_changes = try parseUsageMetricsCodeChanges(allocator, object.get("codeChanges") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_code_changes = parsed_code_changes;
+        wipeUsageMetricsCodeChanges(&cleanup_code_changes);
+    }
+    const parsed_model_metrics = try parseUsageGetMetricsResultModelMetricsMap(allocator, object.get("modelMetrics") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_model_metrics = parsed_model_metrics;
+        {
+            var iterator = cleanup_model_metrics.map.iterator();
+            while (iterator.next()) |entry| {
+                wipeString(entry.key_ptr.*);
+                wipeUsageMetricsModelMetric(&entry.value_ptr.*);
+            }
+        }
+    }
+    const parsed_provider_model_metrics = if (object.get("providerModelMetrics")) |field_value| if ((field_value) == .null) null else try parseUsageGetMetricsResultProviderModelMetricsArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_provider_model_metrics = parsed_provider_model_metrics;
+        if (cleanup_provider_model_metrics) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipeUsageMetricsProviderModelMetric(&item.*);
+            }
+        }
+    }
+    const parsed_agent_metrics = if (object.get("agentMetrics")) |field_value| if ((field_value) == .null) null else try parseUsageGetMetricsResultAgentMetricsMap(allocator, field_value) else null;
+    errdefer {
+        var cleanup_agent_metrics = parsed_agent_metrics;
+        if (cleanup_agent_metrics) |*present| {
+            {
+                var iterator = present.*.map.iterator();
+                while (iterator.next()) |entry| {
+                    wipeString(entry.key_ptr.*);
+                    wipeUsageMetricsAgentMetric(&entry.value_ptr.*);
+                }
+            }
+        }
+    }
+    const parsed_current_model = if (object.get("currentModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_current_model = parsed_current_model;
+        if (cleanup_current_model) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_last_call_input_tokens = try parseInteger(u64, object.get("lastCallInputTokens") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_last_call_output_tokens = try parseInteger(u64, object.get("lastCallOutputTokens") orelse return error.InvalidSessionEvent, 0, null, null);
+    return .{
+        .ai_credits_status = parsed_ai_credits_status,
+        .total_premium_request_cost = parsed_total_premium_request_cost,
+        .total_user_requests = parsed_total_user_requests,
+        .total_nano_aiu = parsed_total_nano_aiu,
+        .token_details = parsed_token_details,
+        .total_api_duration_ms = parsed_total_api_duration_ms,
+        .session_start_time = parsed_session_start_time,
+        .code_changes = parsed_code_changes,
+        .model_metrics = parsed_model_metrics,
+        .provider_model_metrics = parsed_provider_model_metrics,
+        .agent_metrics = parsed_agent_metrics,
+        .current_model = parsed_current_model,
+        .last_call_input_tokens = parsed_last_call_input_tokens,
+        .last_call_output_tokens = parsed_last_call_output_tokens,
     };
 }
 
@@ -18830,6 +20502,34 @@ fn parseShutdownAgentMetric(allocator: std.mem.Allocator, value: std.json.Value)
 fn parseShutdownData(allocator: std.mem.Allocator, value: std.json.Value) !ShutdownData {
     const object = try payloads.requiredObject(value);
 
+    const parsed_accounting_snapshot = if (object.get("accountingSnapshot")) |field_value| if ((field_value) == .null) null else try parseUsageGetMetricsResult(allocator, field_value) else null;
+    errdefer {
+        var cleanup_accounting_snapshot = parsed_accounting_snapshot;
+        if (cleanup_accounting_snapshot) |*present| {
+            wipeUsageGetMetricsResult(&present.*);
+        }
+    }
+    const parsed_provider_model_metrics = if (object.get("providerModelMetrics")) |field_value| if ((field_value) == .null) null else try parseShutdownDataProviderModelMetricsArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_provider_model_metrics = parsed_provider_model_metrics;
+        if (cleanup_provider_model_metrics) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipeUsageMetricsProviderModelMetric(&item.*);
+            }
+        }
+    }
+    const parsed_usage_accounting_watermarks = if (object.get("usageAccountingWatermarks")) |field_value| if ((field_value) == .null) null else try parseShutdownDataUsageAccountingWatermarksMap(allocator, field_value) else null;
+    errdefer {
+        var cleanup_usage_accounting_watermarks = parsed_usage_accounting_watermarks;
+        if (cleanup_usage_accounting_watermarks) |*present| {
+            {
+                var iterator = present.*.map.iterator();
+                while (iterator.next()) |entry| {
+                    wipeString(entry.key_ptr.*);
+                }
+            }
+        }
+    }
     const parsed_shutdown_type = try parseShutdownType(allocator, object.get("shutdownType") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_shutdown_type = parsed_shutdown_type;
@@ -18901,6 +20601,9 @@ fn parseShutdownData(allocator: std.mem.Allocator, value: std.json.Value) !Shutd
     const parsed_conversation_tokens = if (object.get("conversationTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_tool_definitions_tokens = if (object.get("toolDefinitionsTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     return .{
+        .accounting_snapshot = parsed_accounting_snapshot,
+        .provider_model_metrics = parsed_provider_model_metrics,
+        .usage_accounting_watermarks = parsed_usage_accounting_watermarks,
         .shutdown_type = parsed_shutdown_type,
         .error_reason = parsed_error_reason,
         .total_premium_requests = parsed_total_premium_requests,
@@ -19088,6 +20791,13 @@ fn parseStartData(allocator: std.mem.Allocator, value: std.json.Value) !StartDat
             wipeString(present.*);
         }
     }
+    const parsed_provider_id = if (object.get("providerId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_provider_id = parsed_provider_id;
+        if (cleanup_provider_id) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_reasoning_effort = parsed_reasoning_effort;
@@ -19102,6 +20812,7 @@ fn parseStartData(allocator: std.mem.Allocator, value: std.json.Value) !StartDat
             wipeString(present.*);
         }
     }
+    const parsed_reasoning_effort_managed = if (object.get("reasoningEffortManaged")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_reasoning_summary = if (object.get("reasoningSummary")) |field_value| if ((field_value) == .null) null else try parseReasoningSummary(allocator, field_value) else null;
     errdefer {
         var cleanup_reasoning_summary = parsed_reasoning_summary;
@@ -19123,6 +20834,7 @@ fn parseStartData(allocator: std.mem.Allocator, value: std.json.Value) !StartDat
             wipeContextTier(&present.*);
         }
     }
+    const parsed_context_tier_managed = if (object.get("contextTierManaged")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_auto_tier = if (object.get("autoTier")) |field_value| if ((field_value) == .null) null else try parseAutoTier(allocator, field_value) else null;
     errdefer {
         var cleanup_auto_tier = parsed_auto_tier;
@@ -19130,6 +20842,7 @@ fn parseStartData(allocator: std.mem.Allocator, value: std.json.Value) !StartDat
             wipeAutoTier(&present.*);
         }
     }
+    const parsed_auto_tier_managed = if (object.get("autoTierManaged")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_session_limits = if (object.get("sessionLimits")) |field_value| if ((field_value) == .null) null else try parseSessionLimitsConfig(allocator, field_value) else null;
     errdefer {
         var cleanup_session_limits = parsed_session_limits;
@@ -19167,12 +20880,16 @@ fn parseStartData(allocator: std.mem.Allocator, value: std.json.Value) !StartDat
         .copilot_version = parsed_copilot_version,
         .start_time = parsed_start_time,
         .selected_model = parsed_selected_model,
+        .provider_id = parsed_provider_id,
         .reasoning_effort = parsed_reasoning_effort,
         .reasoning_effort_model = parsed_reasoning_effort_model,
+        .reasoning_effort_managed = parsed_reasoning_effort_managed,
         .reasoning_summary = parsed_reasoning_summary,
         .verbosity = parsed_verbosity,
         .context_tier = parsed_context_tier,
+        .context_tier_managed = parsed_context_tier_managed,
         .auto_tier = parsed_auto_tier,
+        .auto_tier_managed = parsed_auto_tier_managed,
         .session_limits = parsed_session_limits,
         .context = parsed_context,
         .github_mcp_tool_config = parsed_github_mcp_tool_config,
@@ -19317,6 +21034,34 @@ fn parseUsageCheckpointData(allocator: std.mem.Allocator, value: std.json.Value)
     const object = try payloads.requiredObject(value);
 
     const parsed_total_nano_aiu = try parseNumber(object.get("totalNanoAiu") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_accounting_snapshot = if (object.get("accountingSnapshot")) |field_value| if ((field_value) == .null) null else try parseUsageGetMetricsResult(allocator, field_value) else null;
+    errdefer {
+        var cleanup_accounting_snapshot = parsed_accounting_snapshot;
+        if (cleanup_accounting_snapshot) |*present| {
+            wipeUsageGetMetricsResult(&present.*);
+        }
+    }
+    const parsed_provider_model_metrics = if (object.get("providerModelMetrics")) |field_value| if ((field_value) == .null) null else try parseUsageCheckpointDataProviderModelMetricsArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_provider_model_metrics = parsed_provider_model_metrics;
+        if (cleanup_provider_model_metrics) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipeUsageMetricsProviderModelMetric(&item.*);
+            }
+        }
+    }
+    const parsed_usage_accounting_watermarks = if (object.get("usageAccountingWatermarks")) |field_value| if ((field_value) == .null) null else try parseUsageCheckpointDataUsageAccountingWatermarksMap(allocator, field_value) else null;
+    errdefer {
+        var cleanup_usage_accounting_watermarks = parsed_usage_accounting_watermarks;
+        if (cleanup_usage_accounting_watermarks) |*present| {
+            {
+                var iterator = present.*.map.iterator();
+                while (iterator.next()) |entry| {
+                    wipeString(entry.key_ptr.*);
+                }
+            }
+        }
+    }
     const parsed_total_premium_requests = if (object.get("totalPremiumRequests")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
     const parsed_model_cache_state = if (object.get("modelCacheState")) |field_value| if ((field_value) == .null) null else try parseUsageCheckpointDataModelCacheStateArray(allocator, field_value) else null;
     errdefer {
@@ -19338,6 +21083,9 @@ fn parseUsageCheckpointData(allocator: std.mem.Allocator, value: std.json.Value)
     }
     return .{
         .total_nano_aiu = parsed_total_nano_aiu,
+        .accounting_snapshot = parsed_accounting_snapshot,
+        .provider_model_metrics = parsed_provider_model_metrics,
+        .usage_accounting_watermarks = parsed_usage_accounting_watermarks,
         .total_premium_requests = parsed_total_premium_requests,
         .model_cache_state = parsed_model_cache_state,
         .prompt_cache_break_state = parsed_prompt_cache_break_state,
@@ -19362,6 +21110,19 @@ fn parseUsageInfoData(_: std.mem.Allocator, value: std.json.Value) !UsageInfoDat
         .conversation_tokens = parsed_conversation_tokens,
         .tool_definitions_tokens = parsed_tool_definitions_tokens,
         .is_initial = parsed_is_initial,
+    };
+}
+
+fn parseUsageAccountingRecordData(allocator: std.mem.Allocator, value: std.json.Value) !UsageAccountingRecordData {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_usage = try parseAssistantUsageData(allocator, object.get("usage") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_usage = parsed_usage;
+        wipeAssistantUsageData(&cleanup_usage);
+    }
+    return .{
+        .usage = parsed_usage,
     };
 }
 
@@ -22783,6 +24544,9 @@ fn wipeAssistantMessageData(value: *AssistantMessageData) void {
     if (value.model) |*present| {
         wipeString(present.*);
     }
+    if (value.provider_id) |*present| {
+        wipeString(present.*);
+    }
     wipeString(value.content);
     if (value.tool_requests) |*present| {
         for (@constCast(present.*)) |*item| {
@@ -22917,7 +24681,38 @@ fn wipeAssistantTurnStartData(value: *AssistantTurnStartData) void {
     }
 }
 
+fn wipeAiCreditsStatus(value: *AiCreditsStatus) void {
+    _ = value;
+}
+
+fn wipeModelProviderKind(value: *ModelProviderKind) void {
+    _ = value;
+}
+
+fn wipeModelProviderRef(value: *ModelProviderRef) void {
+    wipeString(value.id);
+    wipeString(value.label);
+    wipeModelProviderKind(&value.kind);
+}
+
+fn wipeUsageAccountingIdentity(value: *UsageAccountingIdentity) void {
+    wipeString(value.source_session_id);
+    wipeString(value.usage_id);
+}
+
 fn wipeAssistantUsageTransport(value: *AssistantUsageTransport) void {
+    _ = value;
+}
+
+fn wipeModelCallRequestBodyEncoding(value: *ModelCallRequestBodyEncoding) void {
+    _ = value;
+}
+
+fn wipeModelCallWebSocketFallbackReason(value: *ModelCallWebSocketFallbackReason) void {
+    _ = value;
+}
+
+fn wipeModelCallWebSocketFallbackErrorKind(value: *ModelCallWebSocketFallbackErrorKind) void {
     _ = value;
 }
 
@@ -22954,7 +24749,19 @@ fn wipeReasoningSummary(value: *ReasoningSummary) void {
 }
 
 fn wipeAssistantUsageData(value: *AssistantUsageData) void {
+    if (value.ai_credits_status) |*present| {
+        wipeAiCreditsStatus(&present.*);
+    }
     wipeString(value.model);
+    if (value.provider) |*present| {
+        wipeModelProviderRef(&present.*);
+    }
+    if (value.model_display_name) |*present| {
+        wipeString(present.*);
+    }
+    if (value.accounting) |*present| {
+        wipeUsageAccountingIdentity(&present.*);
+    }
     if (value.cache_expires_at) |*present| {
         wipeString(present.*);
     }
@@ -22977,6 +24784,15 @@ fn wipeAssistantUsageData(value: *AssistantUsageData) void {
     }
     if (value.transport) |*present| {
         wipeAssistantUsageTransport(&present.*);
+    }
+    if (value.request_body_encoding) |*present| {
+        wipeModelCallRequestBodyEncoding(&present.*);
+    }
+    if (value.websocket_fallback_reason) |*present| {
+        wipeModelCallWebSocketFallbackReason(&present.*);
+    }
+    if (value.websocket_fallback_error_kind) |*present| {
+        wipeModelCallWebSocketFallbackErrorKind(&present.*);
     }
     if (value.api_call_id) |*present| {
         wipeString(present.*);
@@ -23499,6 +25315,15 @@ fn wipeModelCallFailureData(value: *ModelCallFailureData) void {
     if (value.failure_kind) |*present| {
         wipeModelCallFailureKind(&present.*);
     }
+    if (value.request_body_encoding) |*present| {
+        wipeModelCallRequestBodyEncoding(&present.*);
+    }
+    if (value.websocket_fallback_reason) |*present| {
+        wipeModelCallWebSocketFallbackReason(&present.*);
+    }
+    if (value.websocket_fallback_error_kind) |*present| {
+        wipeModelCallWebSocketFallbackErrorKind(&present.*);
+    }
     if (value.byok_kind) |*present| {
         wipeString(present.*);
     }
@@ -23639,6 +25464,12 @@ fn wipePermissionRecoveryAttempt(value: *PermissionRecoveryAttempt) void {
 
 fn wipePermissionRecoveryData(value: *PermissionRecoveryData) void {
     wipeString(value.episode_id);
+    if (value.owner_session_id) |*present| {
+        wipeString(present.*);
+    }
+    if (value.owner_agent_id) |*present| {
+        wipeString(present.*);
+    }
     wipePermissionRecoveryStatus(&value.status);
     wipePermissionRecoveryOnBlocked(&value.on_blocked);
     wipePermissionRecoveryReason(&value.reason);
@@ -23975,6 +25806,20 @@ fn wipePermissionRequestShell(value: *PermissionRequestShell) void {
     }
 }
 
+fn wipePermissionWriteFileContent(value: *PermissionWriteFileContent) void {
+    wipeString(value.path);
+    wipeString(value.content);
+}
+
+fn wipePermissionWriteFileEdit(value: *PermissionWriteFileEdit) void {
+    if (value.before) |*present| {
+        wipePermissionWriteFileContent(&present.*);
+    }
+    if (value.after) |*present| {
+        wipePermissionWriteFileContent(&present.*);
+    }
+}
+
 fn wipePermissionRequestWrite(value: *PermissionRequestWrite) void {
     wipeString(value.kind);
     if (value.tool_call_id) |*present| {
@@ -23988,6 +25833,11 @@ fn wipePermissionRequestWrite(value: *PermissionRequestWrite) void {
     wipeString(value.diff);
     if (value.new_file_contents) |*present| {
         wipeString(present.*);
+    }
+    if (value.file_edits) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipePermissionWriteFileEdit(&item.*);
+        }
     }
     if (value.request_sandbox_bypass_reason) |*present| {
         wipeString(present.*);
@@ -24297,6 +26147,11 @@ fn wipePermissionPromptRequestWrite(value: *PermissionPromptRequestWrite) void {
     if (value.new_file_contents) |*present| {
         wipeString(present.*);
     }
+    if (value.file_edits) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipePermissionWriteFileEdit(&item.*);
+        }
+    }
     if (value.assisted_approval) |*present| {
         wipePermissionAssistedApproval(&present.*);
     }
@@ -24557,6 +26412,12 @@ fn wipePermissionRequestedData(value: *PermissionRequestedData) void {
     }
     if (value.agent_mode) |*present| {
         wipeSessionMode(&present.*);
+    }
+    if (value.owner_session_id) |*present| {
+        wipeString(present.*);
+    }
+    if (value.owner_agent_id) |*present| {
+        wipeString(present.*);
     }
     if (value.risk_assessment) |*present| {
         wipeJsonValue(&present.*);
@@ -24963,7 +26824,7 @@ fn wipeAutoModeResolvedData(value: *AutoModeResolvedData) void {
 }
 
 fn wipeRecommendedAutoTier(value: *RecommendedAutoTier) void {
-    _ = value;
+    wipeString(value.*);
 }
 
 fn wipeAutoTierRecommendationData(value: *AutoTierRecommendationData) void {
@@ -24971,7 +26832,7 @@ fn wipeAutoTierRecommendationData(value: *AutoTierRecommendationData) void {
 }
 
 fn wipeAutoTier(value: *AutoTier) void {
-    _ = value;
+    wipeString(value.*);
 }
 
 fn wipeAutoTierSwitchFailureReason(value: *AutoTierSwitchFailureReason) void {
@@ -25146,6 +27007,15 @@ fn wipeCompactionCompleteCompactionTokensUsedCopilotUsage(value: *CompactionComp
 }
 
 fn wipeCompactionCompleteCompactionTokensUsed(value: *CompactionCompleteCompactionTokensUsed) void {
+    if (value.ai_credits_status) |*present| {
+        wipeAiCreditsStatus(&present.*);
+    }
+    if (value.provider) |*present| {
+        wipeModelProviderRef(&present.*);
+    }
+    if (value.model_display_name) |*present| {
+        wipeString(present.*);
+    }
     if (value.copilot_usage) |*present| {
         wipeCompactionCompleteCompactionTokensUsedCopilotUsage(&present.*);
     }
@@ -25341,6 +27211,12 @@ fn wipeRemediationAction(value: *RemediationAction) void {
 fn wipeErrorData(value: *ErrorData) void {
     wipeString(value.error_type);
     if (value.error_code) |*present| {
+        wipeString(present.*);
+    }
+    if (value.provider_error_type) |*present| {
+        wipeString(present.*);
+    }
+    if (value.provider_error_param) |*present| {
         wipeString(present.*);
     }
     wipeString(value.message);
@@ -25914,6 +27790,17 @@ fn wipeInfoData(value: *InfoData) void {
     }
 }
 
+fn wipeManagedPluginProgressPhase(value: *ManagedPluginProgressPhase) void {
+    _ = value;
+}
+
+fn wipeManagedPluginProgressData(value: *ManagedPluginProgressData) void {
+    wipeManagedPluginProgressPhase(&value.phase);
+    for (@constCast(value.plugin_specs)) |*item| {
+        wipeString(item.*);
+    }
+}
+
 fn wipeManagedSettingsEnforcedAction(value: *ManagedSettingsEnforcedAction) void {
     _ = value;
 }
@@ -25931,11 +27818,20 @@ fn wipeManagedSettingsEnforcedData(value: *ManagedSettingsEnforcedData) void {
     wipeString(value.message);
 }
 
+fn wipeManagedPermissionsContext(value: *ManagedPermissionsContext) void {
+    if (value.permissions) |*present| {
+        wipeJsonValue(&present.*);
+    }
+}
+
 fn wipeManagedSettingsResolvedSource(value: *ManagedSettingsResolvedSource) void {
     _ = value;
 }
 
 fn wipeManagedSettingsResolvedData(value: *ManagedSettingsResolvedData) void {
+    if (value.permissions_context) |*present| {
+        wipeManagedPermissionsContext(&present.*);
+    }
     wipeManagedSettingsResolvedSource(&value.source);
     for (@constCast(value.managed_keys)) |*item| {
         wipeString(item.*);
@@ -26050,6 +27946,12 @@ fn wipeModelChangeData(value: *ModelChangeData) void {
         wipeString(present.*);
     }
     wipeString(value.new_model);
+    if (value.provider_id) |*present| {
+        wipeString(present.*);
+    }
+    if (value.previous_provider_id) |*present| {
+        wipeString(present.*);
+    }
     if (value.previous_reasoning_effort) |*present| {
         wipeString(present.*);
     }
@@ -26117,6 +28019,102 @@ fn wipePlanChangedData(value: *PlanChangedData) void {
     wipePlanChangedOperation(&value.operation);
 }
 
+fn wipeProviderQuotaUnit(value: *ProviderQuotaUnit) void {
+    _ = value;
+}
+
+fn wipeProviderQuotaAccessState(value: *ProviderQuotaAccessState) void {
+    _ = value;
+}
+
+fn wipeProviderQuotaCapacityState(value: *ProviderQuotaCapacityState) void {
+    _ = value;
+}
+
+fn wipeProviderQuotaObservationKind(value: *ProviderQuotaObservationKind) void {
+    _ = value;
+}
+
+fn wipeProviderQuotaQuantityKind(value: *ProviderQuotaQuantityKind) void {
+    _ = value;
+}
+
+fn wipeProviderQuotaAcquisitionStatus(value: *ProviderQuotaAcquisitionStatus) void {
+    _ = value;
+}
+
+fn wipeProviderQuotaBudgetMetadata(value: *ProviderQuotaBudgetMetadata) void {
+    _ = value;
+}
+
+fn wipeProviderMonthlyUsageState(value: *ProviderMonthlyUsageState) void {
+    _ = value;
+}
+
+fn wipeProviderMonthlyUsageScope(value: *ProviderMonthlyUsageScope) void {
+    _ = value;
+}
+
+fn wipeProviderMonthlyUsage(value: *ProviderMonthlyUsage) void {
+    wipeProviderMonthlyUsageState(&value.state);
+    wipeProviderQuotaUnit(&value.unit);
+    wipeProviderMonthlyUsageScope(&value.scope);
+    if (value.queried_at) |*present| {
+        wipeString(present.*);
+    }
+    if (value.cycle_start) |*present| {
+        wipeString(present.*);
+    }
+    if (value.reset_on) |*present| {
+        wipeString(present.*);
+    }
+}
+
+fn wipeProviderQuotaState(value: *ProviderQuotaState) void {
+    wipeModelProviderRef(&value.provider);
+    wipeString(value.quota_id);
+    wipeProviderQuotaUnit(&value.unit);
+    wipeProviderQuotaAccessState(&value.access_state);
+    wipeProviderQuotaCapacityState(&value.capacity_state);
+    if (value.observation_kind) |*present| {
+        wipeProviderQuotaObservationKind(&present.*);
+    }
+    if (value.quantity_kind) |*present| {
+        wipeProviderQuotaQuantityKind(&present.*);
+    }
+    if (value.acquisition_status) |*present| {
+        wipeProviderQuotaAcquisitionStatus(&present.*);
+    }
+    if (value.observed_at) |*present| {
+        wipeString(present.*);
+    }
+    if (value.acquisition_error) |*present| {
+        wipeString(present.*);
+    }
+    if (value.budget_metadata) |*present| {
+        wipeProviderQuotaBudgetMetadata(&present.*);
+    }
+    if (value.monthly_usage) |*present| {
+        wipeProviderMonthlyUsage(&present.*);
+    }
+    if (value.compatibility_key) |*present| {
+        wipeString(present.*);
+    }
+    if (value.reason) |*present| {
+        wipeString(present.*);
+    }
+    if (value.source) |*present| {
+        wipeString(present.*);
+    }
+    if (value.service) |*present| {
+        wipeString(present.*);
+    }
+}
+
+fn wipeProviderQuotaObservationData(value: *ProviderQuotaObservationData) void {
+    wipeProviderQuotaState(&value.observation);
+}
+
 fn wipeRemoteSteerableChangedData(value: *RemoteSteerableChangedData) void {
     _ = value;
 }
@@ -26128,6 +28126,9 @@ fn wipeSessionLimitsConfig(value: *SessionLimitsConfig) void {
 fn wipeResumeData(value: *ResumeData) void {
     wipeString(value.resume_time);
     if (value.selected_model) |*present| {
+        wipeString(present.*);
+    }
+    if (value.provider_id) |*present| {
         wipeString(present.*);
     }
     if (value.reasoning_effort) |*present| {
@@ -26190,6 +28191,118 @@ fn wipeSessionLimitsChangedData(value: *SessionLimitsChangedData) void {
     }
 }
 
+fn wipeUsageMetricsTokenDetail(value: *UsageMetricsTokenDetail) void {
+    _ = value;
+}
+
+fn wipeUsageMetricsCodeChanges(value: *UsageMetricsCodeChanges) void {
+    for (@constCast(value.files_modified)) |*item| {
+        wipeString(item.*);
+    }
+}
+
+fn wipeUsageMetricsModelMetricRequests(value: *UsageMetricsModelMetricRequests) void {
+    _ = value;
+}
+
+fn wipeUsageMetricsModelMetricUsage(value: *UsageMetricsModelMetricUsage) void {
+    _ = value;
+}
+
+fn wipeUsageMetricsModelMetricTokenDetail(value: *UsageMetricsModelMetricTokenDetail) void {
+    _ = value;
+}
+
+fn wipeUsageMetricsModelMetric(value: *UsageMetricsModelMetric) void {
+    if (value.ai_credits_status) |*present| {
+        wipeAiCreditsStatus(&present.*);
+    }
+    wipeUsageMetricsModelMetricRequests(&value.requests);
+    wipeUsageMetricsModelMetricUsage(&value.usage);
+    if (value.cache_expires_at) |*present| {
+        wipeString(present.*);
+    }
+    if (value.token_details) |*present| {
+        {
+            var iterator = present.*.map.iterator();
+            while (iterator.next()) |entry| {
+                wipeString(entry.key_ptr.*);
+                wipeUsageMetricsModelMetricTokenDetail(&entry.value_ptr.*);
+            }
+        }
+    }
+}
+
+fn wipeUsageMetricsProviderModelMetric(value: *UsageMetricsProviderModelMetric) void {
+    if (value.provider) |*present| {
+        wipeModelProviderRef(&present.*);
+    }
+    if (value.model_id) |*present| {
+        wipeString(present.*);
+    }
+    if (value.model_display_name) |*present| {
+        wipeString(present.*);
+    }
+    wipeUsageMetricsModelMetric(&value.metrics);
+}
+
+fn wipeUsageMetricsAgentMetric(value: *UsageMetricsAgentMetric) void {
+    if (value.agent_name) |*present| {
+        wipeString(present.*);
+    }
+    if (value.agent_display_name) |*present| {
+        wipeString(present.*);
+    }
+    {
+        var iterator = value.model_metrics.map.iterator();
+        while (iterator.next()) |entry| {
+            wipeString(entry.key_ptr.*);
+            wipeUsageMetricsModelMetric(&entry.value_ptr.*);
+        }
+    }
+}
+
+fn wipeUsageGetMetricsResult(value: *UsageGetMetricsResult) void {
+    if (value.ai_credits_status) |*present| {
+        wipeAiCreditsStatus(&present.*);
+    }
+    if (value.token_details) |*present| {
+        {
+            var iterator = present.*.map.iterator();
+            while (iterator.next()) |entry| {
+                wipeString(entry.key_ptr.*);
+                wipeUsageMetricsTokenDetail(&entry.value_ptr.*);
+            }
+        }
+    }
+    wipeString(value.session_start_time);
+    wipeUsageMetricsCodeChanges(&value.code_changes);
+    {
+        var iterator = value.model_metrics.map.iterator();
+        while (iterator.next()) |entry| {
+            wipeString(entry.key_ptr.*);
+            wipeUsageMetricsModelMetric(&entry.value_ptr.*);
+        }
+    }
+    if (value.provider_model_metrics) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeUsageMetricsProviderModelMetric(&item.*);
+        }
+    }
+    if (value.agent_metrics) |*present| {
+        {
+            var iterator = present.*.map.iterator();
+            while (iterator.next()) |entry| {
+                wipeString(entry.key_ptr.*);
+                wipeUsageMetricsAgentMetric(&entry.value_ptr.*);
+            }
+        }
+    }
+    if (value.current_model) |*present| {
+        wipeString(present.*);
+    }
+}
+
 fn wipeShutdownType(value: *ShutdownType) void {
     _ = value;
 }
@@ -26241,6 +28354,22 @@ fn wipeShutdownAgentMetric(value: *ShutdownAgentMetric) void {
 }
 
 fn wipeShutdownData(value: *ShutdownData) void {
+    if (value.accounting_snapshot) |*present| {
+        wipeUsageGetMetricsResult(&present.*);
+    }
+    if (value.provider_model_metrics) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeUsageMetricsProviderModelMetric(&item.*);
+        }
+    }
+    if (value.usage_accounting_watermarks) |*present| {
+        {
+            var iterator = present.*.map.iterator();
+            while (iterator.next()) |entry| {
+                wipeString(entry.key_ptr.*);
+            }
+        }
+    }
     wipeShutdownType(&value.shutdown_type);
     if (value.error_reason) |*present| {
         wipeString(present.*);
@@ -26331,6 +28460,9 @@ fn wipeStartData(value: *StartData) void {
     if (value.selected_model) |*present| {
         wipeString(present.*);
     }
+    if (value.provider_id) |*present| {
+        wipeString(present.*);
+    }
     if (value.reasoning_effort) |*present| {
         wipeString(present.*);
     }
@@ -26404,6 +28536,22 @@ fn wipeUsageCheckpointModelCacheState(value: *UsageCheckpointModelCacheState) vo
 }
 
 fn wipeUsageCheckpointData(value: *UsageCheckpointData) void {
+    if (value.accounting_snapshot) |*present| {
+        wipeUsageGetMetricsResult(&present.*);
+    }
+    if (value.provider_model_metrics) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeUsageMetricsProviderModelMetric(&item.*);
+        }
+    }
+    if (value.usage_accounting_watermarks) |*present| {
+        {
+            var iterator = present.*.map.iterator();
+            while (iterator.next()) |entry| {
+                wipeString(entry.key_ptr.*);
+            }
+        }
+    }
     if (value.model_cache_state) |*present| {
         for (@constCast(present.*)) |*item| {
             wipeUsageCheckpointModelCacheState(&item.*);
@@ -26418,6 +28566,10 @@ fn wipeUsageCheckpointData(value: *UsageCheckpointData) void {
 
 fn wipeUsageInfoData(value: *UsageInfoData) void {
     _ = value;
+}
+
+fn wipeUsageAccountingRecordData(value: *UsageAccountingRecordData) void {
+    wipeAssistantUsageData(&value.usage);
 }
 
 fn wipeWarningData(value: *WarningData) void {
@@ -27976,6 +30128,10 @@ fn freeAssistantMessageData(value: *AssistantMessageData, allocator: std.mem.All
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.provider_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     wipeString(value.content);
     allocator.free(@constCast(value.content));
     if (value.tool_requests) |*present| {
@@ -28149,7 +30305,42 @@ fn freeAssistantTurnStartData(value: *AssistantTurnStartData, allocator: std.mem
     }
 }
 
+fn freeAiCreditsStatus(value: *AiCreditsStatus, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeModelProviderKind(value: *ModelProviderKind, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeModelProviderRef(value: *ModelProviderRef, allocator: std.mem.Allocator) void {
+    wipeString(value.id);
+    allocator.free(@constCast(value.id));
+    wipeString(value.label);
+    allocator.free(@constCast(value.label));
+    freeModelProviderKind(&value.kind, allocator);
+}
+
+fn freeUsageAccountingIdentity(value: *UsageAccountingIdentity, allocator: std.mem.Allocator) void {
+    wipeString(value.source_session_id);
+    allocator.free(@constCast(value.source_session_id));
+    wipeString(value.usage_id);
+    allocator.free(@constCast(value.usage_id));
+}
+
 fn freeAssistantUsageTransport(value: *AssistantUsageTransport, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeModelCallRequestBodyEncoding(value: *ModelCallRequestBodyEncoding, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeModelCallWebSocketFallbackReason(value: *ModelCallWebSocketFallbackReason, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeModelCallWebSocketFallbackErrorKind(value: *ModelCallWebSocketFallbackErrorKind, _: std.mem.Allocator) void {
     _ = value;
 }
 
@@ -28191,8 +30382,21 @@ fn freeReasoningSummary(value: *ReasoningSummary, _: std.mem.Allocator) void {
 }
 
 fn freeAssistantUsageData(value: *AssistantUsageData, allocator: std.mem.Allocator) void {
+    if (value.ai_credits_status) |*present| {
+        freeAiCreditsStatus(&present.*, allocator);
+    }
     wipeString(value.model);
     allocator.free(@constCast(value.model));
+    if (value.provider) |*present| {
+        freeModelProviderRef(&present.*, allocator);
+    }
+    if (value.model_display_name) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.accounting) |*present| {
+        freeUsageAccountingIdentity(&present.*, allocator);
+    }
     if (value.cache_expires_at) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
@@ -28222,6 +30426,15 @@ fn freeAssistantUsageData(value: *AssistantUsageData, allocator: std.mem.Allocat
     }
     if (value.transport) |*present| {
         freeAssistantUsageTransport(&present.*, allocator);
+    }
+    if (value.request_body_encoding) |*present| {
+        freeModelCallRequestBodyEncoding(&present.*, allocator);
+    }
+    if (value.websocket_fallback_reason) |*present| {
+        freeModelCallWebSocketFallbackReason(&present.*, allocator);
+    }
+    if (value.websocket_fallback_error_kind) |*present| {
+        freeModelCallWebSocketFallbackErrorKind(&present.*, allocator);
     }
     if (value.api_call_id) |*present| {
         wipeString(present.*);
@@ -28862,6 +31075,15 @@ fn freeModelCallFailureData(value: *ModelCallFailureData, allocator: std.mem.All
     if (value.failure_kind) |*present| {
         freeModelCallFailureKind(&present.*, allocator);
     }
+    if (value.request_body_encoding) |*present| {
+        freeModelCallRequestBodyEncoding(&present.*, allocator);
+    }
+    if (value.websocket_fallback_reason) |*present| {
+        freeModelCallWebSocketFallbackReason(&present.*, allocator);
+    }
+    if (value.websocket_fallback_error_kind) |*present| {
+        freeModelCallWebSocketFallbackErrorKind(&present.*, allocator);
+    }
     if (value.byok_kind) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
@@ -29028,6 +31250,14 @@ fn freePermissionRecoveryAttempt(value: *PermissionRecoveryAttempt, allocator: s
 fn freePermissionRecoveryData(value: *PermissionRecoveryData, allocator: std.mem.Allocator) void {
     wipeString(value.episode_id);
     allocator.free(@constCast(value.episode_id));
+    if (value.owner_session_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.owner_agent_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     freePermissionRecoveryStatus(&value.status, allocator);
     freePermissionRecoveryOnBlocked(&value.on_blocked, allocator);
     freePermissionRecoveryReason(&value.reason, allocator);
@@ -29442,6 +31672,22 @@ fn freePermissionRequestShell(value: *PermissionRequestShell, allocator: std.mem
     }
 }
 
+fn freePermissionWriteFileContent(value: *PermissionWriteFileContent, allocator: std.mem.Allocator) void {
+    wipeString(value.path);
+    allocator.free(@constCast(value.path));
+    wipeString(value.content);
+    allocator.free(@constCast(value.content));
+}
+
+fn freePermissionWriteFileEdit(value: *PermissionWriteFileEdit, allocator: std.mem.Allocator) void {
+    if (value.before) |*present| {
+        freePermissionWriteFileContent(&present.*, allocator);
+    }
+    if (value.after) |*present| {
+        freePermissionWriteFileContent(&present.*, allocator);
+    }
+}
+
 fn freePermissionRequestWrite(value: *PermissionRequestWrite, allocator: std.mem.Allocator) void {
     wipeString(value.kind);
     allocator.free(@constCast(value.kind));
@@ -29461,6 +31707,12 @@ fn freePermissionRequestWrite(value: *PermissionRequestWrite, allocator: std.mem
     allocator.free(@constCast(value.diff));
     if (value.new_file_contents) |*present| {
         wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.file_edits) |*present| {
+        for (@constCast(present.*)) |*item| {
+            freePermissionWriteFileEdit(&item.*, allocator);
+        }
         allocator.free(@constCast(present.*));
     }
     if (value.request_sandbox_bypass_reason) |*present| {
@@ -29844,6 +32096,12 @@ fn freePermissionPromptRequestWrite(value: *PermissionPromptRequestWrite, alloca
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.file_edits) |*present| {
+        for (@constCast(present.*)) |*item| {
+            freePermissionWriteFileEdit(&item.*, allocator);
+        }
+        allocator.free(@constCast(present.*));
+    }
     if (value.assisted_approval) |*present| {
         freePermissionAssistedApproval(&present.*, allocator);
     }
@@ -30161,6 +32419,14 @@ fn freePermissionRequestedData(value: *PermissionRequestedData, allocator: std.m
     }
     if (value.agent_mode) |*present| {
         freeSessionMode(&present.*, allocator);
+    }
+    if (value.owner_session_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.owner_agent_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
     }
     if (value.risk_assessment) |*present| {
         freeJsonValue(&present.*, allocator);
@@ -30645,16 +32911,18 @@ fn freeAutoModeResolvedData(value: *AutoModeResolvedData, allocator: std.mem.All
     }
 }
 
-fn freeRecommendedAutoTier(value: *RecommendedAutoTier, _: std.mem.Allocator) void {
-    _ = value;
+fn freeRecommendedAutoTier(value: *RecommendedAutoTier, allocator: std.mem.Allocator) void {
+    wipeString(value.*);
+    allocator.free(@constCast(value.*));
 }
 
 fn freeAutoTierRecommendationData(value: *AutoTierRecommendationData, allocator: std.mem.Allocator) void {
     freeRecommendedAutoTier(&value.recommended_auto_tier, allocator);
 }
 
-fn freeAutoTier(value: *AutoTier, _: std.mem.Allocator) void {
-    _ = value;
+fn freeAutoTier(value: *AutoTier, allocator: std.mem.Allocator) void {
+    wipeString(value.*);
+    allocator.free(@constCast(value.*));
 }
 
 fn freeAutoTierSwitchFailureReason(value: *AutoTierSwitchFailureReason, _: std.mem.Allocator) void {
@@ -30874,6 +33142,16 @@ fn freeCompactionCompleteCompactionTokensUsedCopilotUsage(value: *CompactionComp
 }
 
 fn freeCompactionCompleteCompactionTokensUsed(value: *CompactionCompleteCompactionTokensUsed, allocator: std.mem.Allocator) void {
+    if (value.ai_credits_status) |*present| {
+        freeAiCreditsStatus(&present.*, allocator);
+    }
+    if (value.provider) |*present| {
+        freeModelProviderRef(&present.*, allocator);
+    }
+    if (value.model_display_name) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.copilot_usage) |*present| {
         freeCompactionCompleteCompactionTokensUsedCopilotUsage(&present.*, allocator);
     }
@@ -31114,6 +33392,14 @@ fn freeErrorData(value: *ErrorData, allocator: std.mem.Allocator) void {
     wipeString(value.error_type);
     allocator.free(@constCast(value.error_type));
     if (value.error_code) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.provider_error_type) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.provider_error_param) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
@@ -31836,6 +34122,19 @@ fn freeInfoData(value: *InfoData, allocator: std.mem.Allocator) void {
     }
 }
 
+fn freeManagedPluginProgressPhase(value: *ManagedPluginProgressPhase, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeManagedPluginProgressData(value: *ManagedPluginProgressData, allocator: std.mem.Allocator) void {
+    freeManagedPluginProgressPhase(&value.phase, allocator);
+    for (@constCast(value.plugin_specs)) |*item| {
+        wipeString(item.*);
+        allocator.free(@constCast(item.*));
+    }
+    allocator.free(@constCast(value.plugin_specs));
+}
+
 fn freeManagedSettingsEnforcedAction(value: *ManagedSettingsEnforcedAction, _: std.mem.Allocator) void {
     _ = value;
 }
@@ -31855,11 +34154,20 @@ fn freeManagedSettingsEnforcedData(value: *ManagedSettingsEnforcedData, allocato
     allocator.free(@constCast(value.message));
 }
 
+fn freeManagedPermissionsContext(value: *ManagedPermissionsContext, allocator: std.mem.Allocator) void {
+    if (value.permissions) |*present| {
+        freeJsonValue(&present.*, allocator);
+    }
+}
+
 fn freeManagedSettingsResolvedSource(value: *ManagedSettingsResolvedSource, _: std.mem.Allocator) void {
     _ = value;
 }
 
 fn freeManagedSettingsResolvedData(value: *ManagedSettingsResolvedData, allocator: std.mem.Allocator) void {
+    if (value.permissions_context) |*present| {
+        freeManagedPermissionsContext(&present.*, allocator);
+    }
     freeManagedSettingsResolvedSource(&value.source, allocator);
     for (@constCast(value.managed_keys)) |*item| {
         wipeString(item.*);
@@ -31993,6 +34301,14 @@ fn freeModelChangeData(value: *ModelChangeData, allocator: std.mem.Allocator) vo
     }
     wipeString(value.new_model);
     allocator.free(@constCast(value.new_model));
+    if (value.provider_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.previous_provider_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.previous_reasoning_effort) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
@@ -32066,6 +34382,113 @@ fn freePlanChangedData(value: *PlanChangedData, allocator: std.mem.Allocator) vo
     freePlanChangedOperation(&value.operation, allocator);
 }
 
+fn freeProviderQuotaUnit(value: *ProviderQuotaUnit, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeProviderQuotaAccessState(value: *ProviderQuotaAccessState, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeProviderQuotaCapacityState(value: *ProviderQuotaCapacityState, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeProviderQuotaObservationKind(value: *ProviderQuotaObservationKind, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeProviderQuotaQuantityKind(value: *ProviderQuotaQuantityKind, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeProviderQuotaAcquisitionStatus(value: *ProviderQuotaAcquisitionStatus, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeProviderQuotaBudgetMetadata(value: *ProviderQuotaBudgetMetadata, allocator: std.mem.Allocator) void {
+    _ = value;
+    _ = allocator;
+}
+
+fn freeProviderMonthlyUsageState(value: *ProviderMonthlyUsageState, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeProviderMonthlyUsageScope(value: *ProviderMonthlyUsageScope, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeProviderMonthlyUsage(value: *ProviderMonthlyUsage, allocator: std.mem.Allocator) void {
+    freeProviderMonthlyUsageState(&value.state, allocator);
+    freeProviderQuotaUnit(&value.unit, allocator);
+    freeProviderMonthlyUsageScope(&value.scope, allocator);
+    if (value.queried_at) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.cycle_start) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.reset_on) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+}
+
+fn freeProviderQuotaState(value: *ProviderQuotaState, allocator: std.mem.Allocator) void {
+    freeModelProviderRef(&value.provider, allocator);
+    wipeString(value.quota_id);
+    allocator.free(@constCast(value.quota_id));
+    freeProviderQuotaUnit(&value.unit, allocator);
+    freeProviderQuotaAccessState(&value.access_state, allocator);
+    freeProviderQuotaCapacityState(&value.capacity_state, allocator);
+    if (value.observation_kind) |*present| {
+        freeProviderQuotaObservationKind(&present.*, allocator);
+    }
+    if (value.quantity_kind) |*present| {
+        freeProviderQuotaQuantityKind(&present.*, allocator);
+    }
+    if (value.acquisition_status) |*present| {
+        freeProviderQuotaAcquisitionStatus(&present.*, allocator);
+    }
+    if (value.observed_at) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.acquisition_error) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.budget_metadata) |*present| {
+        freeProviderQuotaBudgetMetadata(&present.*, allocator);
+    }
+    if (value.monthly_usage) |*present| {
+        freeProviderMonthlyUsage(&present.*, allocator);
+    }
+    if (value.compatibility_key) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.reason) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.source) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.service) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+}
+
+fn freeProviderQuotaObservationData(value: *ProviderQuotaObservationData, allocator: std.mem.Allocator) void {
+    freeProviderQuotaState(&value.observation, allocator);
+}
+
 fn freeRemoteSteerableChangedData(value: *RemoteSteerableChangedData, allocator: std.mem.Allocator) void {
     _ = value;
     _ = allocator;
@@ -32080,6 +34503,10 @@ fn freeResumeData(value: *ResumeData, allocator: std.mem.Allocator) void {
     wipeString(value.resume_time);
     allocator.free(@constCast(value.resume_time));
     if (value.selected_model) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.provider_id) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
@@ -32151,6 +34578,142 @@ fn freeSessionLimitsChangedData(value: *SessionLimitsChangedData, allocator: std
     }
 }
 
+fn freeUsageMetricsTokenDetail(value: *UsageMetricsTokenDetail, allocator: std.mem.Allocator) void {
+    _ = value;
+    _ = allocator;
+}
+
+fn freeUsageMetricsCodeChanges(value: *UsageMetricsCodeChanges, allocator: std.mem.Allocator) void {
+    for (@constCast(value.files_modified)) |*item| {
+        wipeString(item.*);
+        allocator.free(@constCast(item.*));
+    }
+    allocator.free(@constCast(value.files_modified));
+}
+
+fn freeUsageMetricsModelMetricRequests(value: *UsageMetricsModelMetricRequests, allocator: std.mem.Allocator) void {
+    _ = value;
+    _ = allocator;
+}
+
+fn freeUsageMetricsModelMetricUsage(value: *UsageMetricsModelMetricUsage, allocator: std.mem.Allocator) void {
+    _ = value;
+    _ = allocator;
+}
+
+fn freeUsageMetricsModelMetricTokenDetail(value: *UsageMetricsModelMetricTokenDetail, allocator: std.mem.Allocator) void {
+    _ = value;
+    _ = allocator;
+}
+
+fn freeUsageMetricsModelMetric(value: *UsageMetricsModelMetric, allocator: std.mem.Allocator) void {
+    if (value.ai_credits_status) |*present| {
+        freeAiCreditsStatus(&present.*, allocator);
+    }
+    freeUsageMetricsModelMetricRequests(&value.requests, allocator);
+    freeUsageMetricsModelMetricUsage(&value.usage, allocator);
+    if (value.cache_expires_at) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.token_details) |*present| {
+        {
+            var iterator = present.*.map.iterator();
+            while (iterator.next()) |entry| {
+                wipeString(entry.key_ptr.*);
+                allocator.free(@constCast(entry.key_ptr.*));
+                freeUsageMetricsModelMetricTokenDetail(&entry.value_ptr.*, allocator);
+            }
+            present.*.deinit(allocator);
+        }
+    }
+}
+
+fn freeUsageMetricsProviderModelMetric(value: *UsageMetricsProviderModelMetric, allocator: std.mem.Allocator) void {
+    if (value.provider) |*present| {
+        freeModelProviderRef(&present.*, allocator);
+    }
+    if (value.model_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.model_display_name) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    freeUsageMetricsModelMetric(&value.metrics, allocator);
+}
+
+fn freeUsageMetricsAgentMetric(value: *UsageMetricsAgentMetric, allocator: std.mem.Allocator) void {
+    if (value.agent_name) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.agent_display_name) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    {
+        var iterator = value.model_metrics.map.iterator();
+        while (iterator.next()) |entry| {
+            wipeString(entry.key_ptr.*);
+            allocator.free(@constCast(entry.key_ptr.*));
+            freeUsageMetricsModelMetric(&entry.value_ptr.*, allocator);
+        }
+        value.model_metrics.deinit(allocator);
+    }
+}
+
+fn freeUsageGetMetricsResult(value: *UsageGetMetricsResult, allocator: std.mem.Allocator) void {
+    if (value.ai_credits_status) |*present| {
+        freeAiCreditsStatus(&present.*, allocator);
+    }
+    if (value.token_details) |*present| {
+        {
+            var iterator = present.*.map.iterator();
+            while (iterator.next()) |entry| {
+                wipeString(entry.key_ptr.*);
+                allocator.free(@constCast(entry.key_ptr.*));
+                freeUsageMetricsTokenDetail(&entry.value_ptr.*, allocator);
+            }
+            present.*.deinit(allocator);
+        }
+    }
+    wipeString(value.session_start_time);
+    allocator.free(@constCast(value.session_start_time));
+    freeUsageMetricsCodeChanges(&value.code_changes, allocator);
+    {
+        var iterator = value.model_metrics.map.iterator();
+        while (iterator.next()) |entry| {
+            wipeString(entry.key_ptr.*);
+            allocator.free(@constCast(entry.key_ptr.*));
+            freeUsageMetricsModelMetric(&entry.value_ptr.*, allocator);
+        }
+        value.model_metrics.deinit(allocator);
+    }
+    if (value.provider_model_metrics) |*present| {
+        for (@constCast(present.*)) |*item| {
+            freeUsageMetricsProviderModelMetric(&item.*, allocator);
+        }
+        allocator.free(@constCast(present.*));
+    }
+    if (value.agent_metrics) |*present| {
+        {
+            var iterator = present.*.map.iterator();
+            while (iterator.next()) |entry| {
+                wipeString(entry.key_ptr.*);
+                allocator.free(@constCast(entry.key_ptr.*));
+                freeUsageMetricsAgentMetric(&entry.value_ptr.*, allocator);
+            }
+            present.*.deinit(allocator);
+        }
+    }
+    if (value.current_model) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+}
+
 fn freeShutdownType(value: *ShutdownType, _: std.mem.Allocator) void {
     _ = value;
 }
@@ -32212,6 +34775,25 @@ fn freeShutdownAgentMetric(value: *ShutdownAgentMetric, allocator: std.mem.Alloc
 }
 
 fn freeShutdownData(value: *ShutdownData, allocator: std.mem.Allocator) void {
+    if (value.accounting_snapshot) |*present| {
+        freeUsageGetMetricsResult(&present.*, allocator);
+    }
+    if (value.provider_model_metrics) |*present| {
+        for (@constCast(present.*)) |*item| {
+            freeUsageMetricsProviderModelMetric(&item.*, allocator);
+        }
+        allocator.free(@constCast(present.*));
+    }
+    if (value.usage_accounting_watermarks) |*present| {
+        {
+            var iterator = present.*.map.iterator();
+            while (iterator.next()) |entry| {
+                wipeString(entry.key_ptr.*);
+                allocator.free(@constCast(entry.key_ptr.*));
+            }
+            present.*.deinit(allocator);
+        }
+    }
     freeShutdownType(&value.shutdown_type, allocator);
     if (value.error_reason) |*present| {
         wipeString(present.*);
@@ -32328,6 +34910,10 @@ fn freeStartData(value: *StartData, allocator: std.mem.Allocator) void {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.provider_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.reasoning_effort) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
@@ -32412,6 +34998,25 @@ fn freeUsageCheckpointModelCacheState(value: *UsageCheckpointModelCacheState, al
 }
 
 fn freeUsageCheckpointData(value: *UsageCheckpointData, allocator: std.mem.Allocator) void {
+    if (value.accounting_snapshot) |*present| {
+        freeUsageGetMetricsResult(&present.*, allocator);
+    }
+    if (value.provider_model_metrics) |*present| {
+        for (@constCast(present.*)) |*item| {
+            freeUsageMetricsProviderModelMetric(&item.*, allocator);
+        }
+        allocator.free(@constCast(present.*));
+    }
+    if (value.usage_accounting_watermarks) |*present| {
+        {
+            var iterator = present.*.map.iterator();
+            while (iterator.next()) |entry| {
+                wipeString(entry.key_ptr.*);
+                allocator.free(@constCast(entry.key_ptr.*));
+            }
+            present.*.deinit(allocator);
+        }
+    }
     if (value.model_cache_state) |*present| {
         for (@constCast(present.*)) |*item| {
             freeUsageCheckpointModelCacheState(&item.*, allocator);
@@ -32429,6 +35034,10 @@ fn freeUsageCheckpointData(value: *UsageCheckpointData, allocator: std.mem.Alloc
 fn freeUsageInfoData(value: *UsageInfoData, allocator: std.mem.Allocator) void {
     _ = value;
     _ = allocator;
+}
+
+fn freeUsageAccountingRecordData(value: *UsageAccountingRecordData, allocator: std.mem.Allocator) void {
+    freeAssistantUsageData(&value.usage, allocator);
 }
 
 fn freeWarningData(value: *WarningData, allocator: std.mem.Allocator) void {
@@ -33815,6 +36424,9 @@ fn wipeAssistantMessageDataFields(value: *AssistantMessage) void {
     if (value.model) |*present| {
         wipeString(present.*);
     }
+    if (value.provider_id) |*present| {
+        wipeString(present.*);
+    }
     wipeString(value.content);
     if (value.tool_requests) |*present| {
         for (@constCast(present.*)) |*item| {
@@ -33971,6 +36583,12 @@ fn wipePermissionRequestedDataFields(value: *PermissionRequested) void {
     if (value.agent_mode) |*present| {
         wipeSessionMode(&present.*);
     }
+    if (value.owner_session_id) |*present| {
+        wipeString(present.*);
+    }
+    if (value.owner_agent_id) |*present| {
+        wipeString(present.*);
+    }
     if (value.risk_assessment) |*present| {
         wipeJsonValue(&present.*);
     }
@@ -33982,6 +36600,12 @@ fn wipePermissionRequestedDataFields(value: *PermissionRequested) void {
 fn wipeErrorDataFields(value: *SessionError) void {
     wipeString(value.error_type);
     if (value.error_code) |*present| {
+        wipeString(present.*);
+    }
+    if (value.provider_error_type) |*present| {
+        wipeString(present.*);
+    }
+    if (value.provider_error_param) |*present| {
         wipeString(present.*);
     }
     wipeString(value.message);
@@ -34021,6 +36645,10 @@ fn freeAssistantMessageDataFields(
         allocator.free(@constCast(present.*));
     }
     if (value.model) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.provider_id) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
@@ -34247,6 +36875,14 @@ fn freePermissionRequestedDataFields(
     if (value.agent_mode) |*present| {
         freeSessionMode(&present.*, allocator);
     }
+    if (value.owner_session_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.owner_agent_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.risk_assessment) |*present| {
         freeJsonValue(&present.*, allocator);
     }
@@ -34263,6 +36899,14 @@ fn freeErrorDataFields(
     wipeString(value.error_type);
     allocator.free(@constCast(value.error_type));
     if (value.error_code) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.provider_error_type) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.provider_error_param) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
@@ -34339,6 +36983,7 @@ fn parseAssistantMessage(
         .message_id = parsed.message_id,
         .originating_message_id = parsed.originating_message_id,
         .model = parsed.model,
+        .provider_id = parsed.provider_id,
         .content = parsed.content,
         .tool_requests = parsed.tool_requests,
         .reasoning_opaque = parsed.reasoning_opaque,
@@ -34586,6 +37231,8 @@ fn parsePermissionRequested(
         .prompt_request = parsed.prompt_request,
         .permission_mode = parsed.permission_mode,
         .agent_mode = parsed.agent_mode,
+        .owner_session_id = parsed.owner_session_id,
+        .owner_agent_id = parsed.owner_agent_id,
         .risk_assessment = parsed.risk_assessment,
         .resolved_by_hook = parsed.resolved_by_hook,
         .recovery_episode_id = parsed.recovery_episode_id,
@@ -34609,6 +37256,8 @@ fn parseSessionError(
     return .{
         .error_type = parsed.error_type,
         .error_code = parsed.error_code,
+        .provider_error_type = parsed.provider_error_type,
+        .provider_error_param = parsed.provider_error_param,
         .eligible_for_auto_switch = parsed.eligible_for_auto_switch,
         .message = parsed.message,
         .remediation = parsed.remediation,
@@ -34738,6 +37387,7 @@ fn tagFromDiscriminator(wire: []const u8) ?SessionEventTag {
     if (std.mem.eql(u8, wire, "session.idle")) return .session_idle;
     if (std.mem.eql(u8, wire, "session.indexed_search")) return .session_indexed_search;
     if (std.mem.eql(u8, wire, "session.info")) return .session_info;
+    if (std.mem.eql(u8, wire, "session.managed_plugin_progress")) return .session_managed_plugin_progress;
     if (std.mem.eql(u8, wire, "session.managed_settings_enforced")) return .session_managed_settings_enforced;
     if (std.mem.eql(u8, wire, "session.managed_settings_resolved")) return .session_managed_settings_resolved;
     if (std.mem.eql(u8, wire, "session.mcp_server_needs_reconnect")) return .session_mcp_server_needs_reconnect;
@@ -34752,6 +37402,7 @@ fn tagFromDiscriminator(wire: []const u8) ?SessionEventTag {
     if (std.mem.eql(u8, wire, "session.permission_recovery")) return .session_permission_recovery;
     if (std.mem.eql(u8, wire, "session.permissions_changed")) return .session_permissions_changed;
     if (std.mem.eql(u8, wire, "session.plan_changed")) return .session_plan_changed;
+    if (std.mem.eql(u8, wire, "session.quota_observation")) return .session_quota_observation;
     if (std.mem.eql(u8, wire, "session.remote_steerable_changed")) return .session_remote_steerable_changed;
     if (std.mem.eql(u8, wire, "session.resume")) return .session_resume;
     if (std.mem.eql(u8, wire, "session.schedule_cancelled")) return .session_schedule_cancelled;
@@ -34769,6 +37420,7 @@ fn tagFromDiscriminator(wire: []const u8) ?SessionEventTag {
     if (std.mem.eql(u8, wire, "session.truncation")) return .session_truncation;
     if (std.mem.eql(u8, wire, "session.usage_checkpoint")) return .session_usage_checkpoint;
     if (std.mem.eql(u8, wire, "session.usage_info")) return .session_usage_info;
+    if (std.mem.eql(u8, wire, "session.usage_record")) return .session_usage_record;
     if (std.mem.eql(u8, wire, "session.warning")) return .session_warning;
     if (std.mem.eql(u8, wire, "session.workspace_file_changed")) return .session_workspace_file_changed;
     if (std.mem.eql(u8, wire, "session_limits_exhausted.completed")) return .session_limits_exhausted_completed;
@@ -35673,6 +38325,16 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
                 .arena = arena,
             } };
         },
+        .session_managed_plugin_progress => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseManagedPluginProgressData(arena.allocator(), data_value);
+            return .{ .session_managed_plugin_progress = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
         .session_managed_settings_enforced => {
             var arena = std.heap.ArenaAllocator.init(allocator);
             errdefer arena.deinit();
@@ -35808,6 +38470,16 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
             errdefer arena.deinit();
             const typed = try parsePlanChangedData(arena.allocator(), data_value);
             return .{ .session_plan_changed = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
+        .session_quota_observation => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseProviderQuotaObservationData(arena.allocator(), data_value);
+            return .{ .session_quota_observation = .{
                 .data = typed,
                 .data_json = raw.takeData(),
                 .arena = arena,
@@ -35978,6 +38650,16 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
             errdefer arena.deinit();
             const typed = try parseUsageInfoData(arena.allocator(), data_value);
             return .{ .session_usage_info = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
+        .session_usage_record => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseUsageAccountingRecordData(arena.allocator(), data_value);
+            return .{ .session_usage_record = .{
                 .data = typed,
                 .data_json = raw.takeData(),
                 .arena = arena,
@@ -36356,8 +39038,8 @@ const pinned_event_samples = [_]EventSample{
     .{ .json = "{\"type\":\"sampling.requested\",\"data\":{\"requestId\":\"\",\"serverName\":\"\",\"mcpRequestId\":null}}", .tag = .sampling_requested },
     .{ .json = "{\"type\":\"sandbox.decision\",\"data\":{\"kind\":\"policy_resolved\",\"control\":\"process\",\"outcome\":\"resolved\",\"platform\":\"macos\",\"backend\":\"seatbelt\",\"policySource\":\"default_policy\",\"enforcementPoint\":\"shell\",\"readwritePathsCount\":0,\"readonlyPathsCount\":0,\"deniedPathsCount\":0,\"addCurrentWorkingDirectory\":false,\"allowOutbound\":false,\"allowLocalNetwork\":false,\"proxyMode\":\"none\",\"allowBypass\":false,\"gitAuth\":false,\"ghAuth\":false,\"keychainAccess\":false}}", .tag = .sandbox_decision },
     .{ .json = "{\"type\":\"session.auto_mode_resolved\",\"data\":{\"chosenModel\":\"\"}}", .tag = .session_auto_mode_resolved },
-    .{ .json = "{\"type\":\"session.auto_tier_recommendation\",\"data\":{\"recommendedAutoTier\":\"efficiency\"}}", .tag = .session_auto_tier_recommendation },
-    .{ .json = "{\"type\":\"session.auto_tier_switch_failed\",\"data\":{\"requestedAutoTier\":\"efficiency\",\"reason\":\"policy_rejected\"}}", .tag = .session_auto_tier_switch_failed },
+    .{ .json = "{\"type\":\"session.auto_tier_recommendation\",\"data\":{\"recommendedAutoTier\":\"x\"}}", .tag = .session_auto_tier_recommendation },
+    .{ .json = "{\"type\":\"session.auto_tier_switch_failed\",\"data\":{\"requestedAutoTier\":\"x\",\"reason\":\"policy_rejected\"}}", .tag = .session_auto_tier_switch_failed },
     .{ .json = "{\"type\":\"session.autopilot_objective_changed\",\"data\":{\"operation\":\"create\"}}", .tag = .session_autopilot_objective_changed },
     .{ .json = "{\"type\":\"session.background_tasks_changed\",\"data\":{}}", .tag = .session_background_tasks_changed },
     .{ .json = "{\"type\":\"session.binary_asset\",\"data\":{\"assetId\":\"\",\"type\":\"image\",\"mimeType\":\"\",\"byteLength\":0,\"data\":\"\"}}", .tag = .session_binary_asset },
@@ -36388,6 +39070,7 @@ const pinned_event_samples = [_]EventSample{
     .{ .json = "{\"type\":\"session.idle\",\"data\":{}}", .tag = .session_idle },
     .{ .json = "{\"type\":\"session.indexed_search\",\"data\":{\"kind\":\"status\",\"state\":\"disabled\"}}", .tag = .session_indexed_search },
     .{ .json = "{\"type\":\"session.info\",\"data\":{\"infoType\":\"\",\"message\":\"\"}}", .tag = .session_info },
+    .{ .json = "{\"type\":\"session.managed_plugin_progress\",\"data\":{\"phase\":\"initializing\",\"pluginSpecs\":[]}}", .tag = .session_managed_plugin_progress },
     .{ .json = "{\"type\":\"session.managed_settings_enforced\",\"data\":{\"action\":\"bypass_permissions_blocked\",\"setting\":\"\",\"failClosed\":false,\"message\":\"\"}}", .tag = .session_managed_settings_enforced },
     .{ .json = "{\"type\":\"session.managed_settings_resolved\",\"data\":{\"source\":\"server\",\"serverManaged\":false,\"deviceManaged\":false,\"failClosed\":false,\"bypassPermissionsDisabled\":false,\"managedKeys\":[]}}", .tag = .session_managed_settings_resolved },
     .{ .json = "{\"type\":\"session.mcp_server_needs_reconnect\",\"data\":{\"serverName\":\"\"}}", .tag = .session_mcp_server_needs_reconnect },
@@ -36402,6 +39085,7 @@ const pinned_event_samples = [_]EventSample{
     .{ .json = "{\"type\":\"session.permission_recovery\",\"data\":{\"episodeId\":\"\",\"status\":\"recovering\",\"onBlocked\":\"ask\",\"reason\":\"permission_required\",\"maxAttempts\":1,\"attempts\":[]}}", .tag = .session_permission_recovery },
     .{ .json = "{\"type\":\"session.permissions_changed\",\"data\":{}}", .tag = .session_permissions_changed },
     .{ .json = "{\"type\":\"session.plan_changed\",\"data\":{\"operation\":\"create\"}}", .tag = .session_plan_changed },
+    .{ .json = "{\"type\":\"session.quota_observation\",\"data\":{\"observation\":{\"provider\":{\"id\":\"\",\"label\":\"\",\"kind\":\"copilot\"},\"quotaId\":\"\",\"unit\":\"ai_credits\",\"accessState\":\"allowed\",\"capacityState\":\"available\"}}}", .tag = .session_quota_observation },
     .{ .json = "{\"type\":\"session.remote_steerable_changed\",\"data\":{\"remoteSteerable\":false}}", .tag = .session_remote_steerable_changed },
     .{ .json = "{\"type\":\"session.resume\",\"data\":{\"resumeTime\":\"\",\"eventCount\":0}}", .tag = .session_resume },
     .{ .json = "{\"type\":\"session.schedule_cancelled\",\"data\":{\"id\":1}}", .tag = .session_schedule_cancelled },
@@ -36419,6 +39103,7 @@ const pinned_event_samples = [_]EventSample{
     .{ .json = "{\"type\":\"session.truncation\",\"data\":{\"tokenLimit\":0,\"preTruncationTokensInMessages\":0,\"preTruncationMessagesLength\":0,\"postTruncationTokensInMessages\":0,\"postTruncationMessagesLength\":0,\"tokensRemovedDuringTruncation\":0,\"messagesRemovedDuringTruncation\":0,\"performedBy\":\"\"}}", .tag = .session_truncation },
     .{ .json = "{\"type\":\"session.usage_checkpoint\",\"data\":{\"totalNanoAiu\":0}}", .tag = .session_usage_checkpoint },
     .{ .json = "{\"type\":\"session.usage_info\",\"data\":{\"tokenLimit\":0,\"currentTokens\":0,\"messagesLength\":0}}", .tag = .session_usage_info },
+    .{ .json = "{\"type\":\"session.usage_record\",\"data\":{\"usage\":{\"model\":\"\"}}}", .tag = .session_usage_record },
     .{ .json = "{\"type\":\"session.warning\",\"data\":{\"warningType\":\"\",\"message\":\"\"}}", .tag = .session_warning },
     .{ .json = "{\"type\":\"session.workspace_file_changed\",\"data\":{\"path\":\"\",\"operation\":\"create\"}}", .tag = .session_workspace_file_changed },
     .{ .json = "{\"type\":\"session_limits_exhausted.completed\",\"data\":{\"requestId\":\"\",\"response\":{\"action\":\"add\"}}}", .tag = .session_limits_exhausted_completed },
@@ -36571,6 +39256,7 @@ const malformed_event_samples = [_][]const u8{
     "{\"type\":\"session.fusion_route_started\",\"data\":{\"turnKind\":\"user\"}}",
     "{\"type\":\"session.handoff\",\"data\":{\"sourceType\":\"remote\"}}",
     "{\"type\":\"session.info\",\"data\":{\"message\":\"\"}}",
+    "{\"type\":\"session.managed_plugin_progress\",\"data\":{\"pluginSpecs\":[]}}",
     "{\"type\":\"session.managed_settings_enforced\",\"data\":{\"setting\":\"\",\"failClosed\":false,\"message\":\"\"}}",
     "{\"type\":\"session.managed_settings_resolved\",\"data\":{\"serverManaged\":false,\"deviceManaged\":false,\"failClosed\":false,\"bypassPermissionsDisabled\":false,\"managedKeys\":[]}}",
     "{\"type\":\"session.mcp_server_needs_reconnect\",\"data\":{}}",
@@ -36583,6 +39269,7 @@ const malformed_event_samples = [_][]const u8{
     "{\"type\":\"session.model_deselected\",\"data\":{\"reason\":\"provider_withdrawn\"}}",
     "{\"type\":\"session.permission_recovery\",\"data\":{\"status\":\"recovering\",\"onBlocked\":\"ask\",\"reason\":\"permission_required\",\"maxAttempts\":1,\"attempts\":[]}}",
     "{\"type\":\"session.plan_changed\",\"data\":{}}",
+    "{\"type\":\"session.quota_observation\",\"data\":{}}",
     "{\"type\":\"session.remote_steerable_changed\",\"data\":{}}",
     "{\"type\":\"session.resume\",\"data\":{\"eventCount\":0}}",
     "{\"type\":\"session.schedule_cancelled\",\"data\":{}}",
@@ -36598,6 +39285,7 @@ const malformed_event_samples = [_][]const u8{
     "{\"type\":\"session.truncation\",\"data\":{\"preTruncationTokensInMessages\":0,\"preTruncationMessagesLength\":0,\"postTruncationTokensInMessages\":0,\"postTruncationMessagesLength\":0,\"tokensRemovedDuringTruncation\":0,\"messagesRemovedDuringTruncation\":0,\"performedBy\":\"\"}}",
     "{\"type\":\"session.usage_checkpoint\",\"data\":{}}",
     "{\"type\":\"session.usage_info\",\"data\":{\"currentTokens\":0,\"messagesLength\":0}}",
+    "{\"type\":\"session.usage_record\",\"data\":{}}",
     "{\"type\":\"session.warning\",\"data\":{\"message\":\"\"}}",
     "{\"type\":\"session.workspace_file_changed\",\"data\":{\"operation\":\"create\"}}",
     "{\"type\":\"session_limits_exhausted.completed\",\"data\":{\"response\":{\"action\":\"add\"}}}",
