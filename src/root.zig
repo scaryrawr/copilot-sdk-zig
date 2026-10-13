@@ -99,6 +99,7 @@ pub const CreateSessionConfig = session.CreateSessionConfig;
 pub const ResumeSessionConfig = session.ResumeSessionConfig;
 pub const JoinSessionConfig = session.JoinSessionConfig;
 pub const CustomAgentConfig = session.CustomAgentConfig;
+pub const CustomAgentHook = session.CustomAgentHook;
 pub const DefaultAgentConfig = session.DefaultAgentConfig;
 pub const InitialAgent = session.InitialAgent;
 pub const ReasoningEffort = session.ReasoningEffort;
@@ -298,6 +299,7 @@ test "root declarations compile" {
     _ = provider;
     _ = extensibility;
     _ = CustomAgentConfig;
+    _ = CustomAgentHook;
     _ = DefaultAgentConfig;
     _ = InitialAgent;
     _ = ReasoningEffort;

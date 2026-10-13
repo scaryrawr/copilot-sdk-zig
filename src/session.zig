@@ -27,6 +27,12 @@ pub const CustomAgentConfig = struct {
     skills: ?[]const []const u8 = null,
     model: ?[]const u8 = null,
     reasoning_effort: ?ReasoningEffort = null,
+    hooks: ?[]const CustomAgentHook = null,
+};
+
+pub const CustomAgentHook = struct {
+    event: []const u8,
+    actions: []const std.json.ObjectMap,
 };
 
 pub const DefaultAgentConfig = struct {
@@ -702,12 +708,7 @@ pub const Attachment = union(enum) {
     };
 };
 
-pub const AutoTier = enum {
-    efficiency,
-    balance,
-    intelligence,
-    fast,
-};
+pub const AutoTier = @import("auto_tier.zig").AutoTier;
 
 pub const ReasoningSummary = enum {
     none,
@@ -1367,6 +1368,40 @@ test "raw rich and unknown events outlive the source JSON tree" {
     try std.testing.expectEqual(.unknown, std.meta.activeTag(future));
     try std.testing.expectEqualStrings("future.event", future.unknown.event_type);
     try std.testing.expectEqualStrings("{\"answer\":42}", future.rawData());
+}
+
+test "generated auto-tier events own extensible strings and reject invalid identifiers" {
+    const allocator = std.testing.allocator;
+    var recommendation_json = try std.json.parseFromSlice(std.json.Value, allocator,
+        \\{"type":"session.auto_tier_recommendation","data":{"recommendedAutoTier":"provider preference"}}
+    , .{});
+    var recommendation = try parseEvent(allocator, recommendation_json.value);
+    recommendation_json.deinit();
+    defer recommendation.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "provider preference",
+        recommendation.session_auto_tier_recommendation.data.recommended_auto_tier,
+    );
+    var switch_json = try std.json.parseFromSlice(std.json.Value, allocator,
+        \\{"type":"session.auto_tier_switch_failed","data":{"requestedAutoTier":"provider-speed","reason":"policy_rejected"}}
+    , .{});
+    var switch_event = try parseEvent(allocator, switch_json.value);
+    switch_json.deinit();
+    defer switch_event.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "provider-speed",
+        switch_event.session_auto_tier_switch_failed.data.requested_auto_tier.?,
+    );
+    for ([_][]const u8{ "", "white space", "tier\t", "\x00", "\xc2\x85", "\xc2\xa0", "\xe2\x80\xa8", "\xef\xbb\xbf" }) |identifier| {
+        const encoded = try std.json.Stringify.valueAlloc(allocator, .{
+            .type = "session.auto_tier_switch_failed",
+            .data = .{ .requestedAutoTier = identifier, .reason = "policy_rejected" },
+        }, .{});
+        defer allocator.free(encoded);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
+        defer parsed.deinit();
+        try std.testing.expectError(error.InvalidSessionEvent, parseEvent(allocator, parsed.value));
+    }
 }
 
 test "generated payloads expose nested arrays enums unions and opaque values" {

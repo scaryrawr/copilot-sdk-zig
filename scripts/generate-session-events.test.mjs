@@ -52,12 +52,12 @@ function reachablePayloadDefinitions(value) {
   return seen;
 }
 
-test("the pinned schema renders 156 explicit event tags", () => {
+test("the pinned schema renders 159 explicit event tags", () => {
   const value = schema();
   const { entries } = buildRegistry(value);
   const rendered = renderSessionEvents(value);
 
-  assert.equal(entries.length, 156);
+  assert.equal(entries.length, 159);
   assert.doesNotMatch(rendered, /Schema sha256|Discriminators:|Regenerate with:|Source:/);
   assert.match(rendered, /pub const SessionEvent = union\(enum\)/);
   assert.match(rendered, /mcp_oauth_required: McpOauthRequired/);
@@ -77,6 +77,7 @@ test("objects containing only inline enums retain the parser allocator", () => {
   data.properties.inlineEnum = { type: "string", enum: ["one", "two"] };
   data.required = ["inlineEnum"];
   data.properties = { inlineEnum: data.properties.inlineEnum };
+  delete data["x-legacy-parameters"];
   const rendered = renderSessionEvents(value);
   assert.match(rendered, /fn parseStartData\(allocator: std\.mem\.Allocator,/);
   assert.match(rendered, /parseStartDataInlineEnum\(allocator,/);
@@ -145,6 +146,68 @@ test("unsupported reachable schema constructs fail with their path", () => {
   );
 });
 
+test("extensible enum suggestions generate open strings with length constraints", () => {
+  const value = schema();
+  value.definitions.RecommendedAutoTier = {
+    type: "string",
+    minLength: 1,
+    "x-extensible-enum": ["efficiency", "balance", "intelligence"],
+  };
+  const rendered = renderSessionEvents(value);
+  assert.match(rendered, /pub const RecommendedAutoTier = \[\]const u8;/);
+  assert.match(
+    rendered,
+    /fn parseRecommendedAutoTier[^]*?return try parseString\(allocator, value, 1, null\);/,
+  );
+});
+
+test("malformed extensible enum suggestions fail rather than changing string constraints", () => {
+  for (const mutation of [
+    { "x-extensible-enum": true },
+    { "x-extensible-enum": [] },
+    { "x-extensible-enum": ["balance", "balance"] },
+    { "x-extensible-enum": ["balance", 1] },
+    { enum: ["balance"] },
+    { type: "number" },
+  ]) {
+    const value = schema();
+    value.definitions.RecommendedAutoTier = {
+      type: "string",
+      minLength: 1,
+      "x-extensible-enum": ["balance"],
+      ...mutation,
+    };
+    assert.throws(
+      () => buildRegistry(value),
+      /unsupported extensible enum at #\/definitions\/RecommendedAutoTier/,
+    );
+  }
+});
+
+test("routing identifiers retain their exact whitespace and control-character pattern", () => {
+  const value = schema();
+  const rendered = renderSessionEvents(value);
+  assert.match(
+    rendered,
+    /fn parseAutoTier[^]*?return try parseRoutingIdentifier\(allocator, value, 1, null\);/,
+  );
+  value.definitions.AutoTier.pattern = ".*";
+  assert.throws(
+    () => buildRegistry(value),
+    /unsupported schema keyword pattern at #\/definitions\/AutoTier/,
+  );
+});
+
+test("legacy parameter annotations preserve property validation", () => {
+  const value = schema();
+  const { entries } = buildRegistry(value);
+  const start = entries.find((entry) => entry.discriminator === "session.start");
+  assert.equal(start.dataModel.fields.find((field) => field.wire === "sessionId").required, true);
+  for (const fields of [["undeclared"], ["sessionId", "sessionId"], true]) {
+    value.definitions.StartData["x-legacy-parameters"] = fields;
+    assert.throws(() => buildRegistry(value), /unsupported legacy parameters at #\/definitions\/StartData/);
+  }
+});
 test("not-required constraints ignore null optional representations", () => {
   const rendered = renderSessionEvents(schema());
   assert.match(

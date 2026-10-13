@@ -106,6 +106,7 @@
         "provider": "ref:ModelProviderRef",
         "supportedContextTiers": "array:string",
         "supportedReasoningEfforts": "array:string",
+        "vendor": "string",
         "warningMessages": "array:ref:ModelMessage",
         "warningText": "ref:ModelWarningText"
       },

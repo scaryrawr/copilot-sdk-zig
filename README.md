@@ -370,6 +370,15 @@ empty string, an empty slice, or an empty nested struct remains present in the
 request. In particular, `.additional_directories = &.{}` sends
 `"additionalDirectories":[]`.
 
+`AutoTier` retains the `.efficiency`, `.balance`, `.intelligence`, and `.fast`
+presets and accepts provider identifiers through `AutoTier.init(identifier)`.
+The initializer borrows the identifier. Identifiers must be nonempty and
+contain no whitespace or control characters.
+`Session.setAutoTier` returns an owned `std.json.Parsed(AutoTierSwitchResult)`.
+Call `deinit()` on the result after reading its `.value`.
+`Session.setAutoTierDetailed` wraps the same owned result in its `.success`
+branch.
+
 Configure runtime telemetry on a child connection:
 
 ```zig
@@ -717,6 +726,12 @@ grants no tools. Null optional slices omit their wire fields, while explicit
 empty slices remain empty arrays or maps. The SDK rejects duplicate custom
 agent names and an initial custom-agent name that is not in `custom_agents`
 before it changes local session state or sends a lifecycle request.
+
+Custom-agent `.hooks` accepts a slice of `CustomAgentHook` entries. Each entry
+names an event and supplies an array of action objects as `std.json.ObjectMap`
+values. The SDK borrows these objects until the lifecycle call returns.
+Null omits `hooks`, and an empty slice sends an empty object.
+Duplicate event names are rejected before the SDK sends a request.
 
 ## List available models
 
