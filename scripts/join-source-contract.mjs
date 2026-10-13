@@ -59,13 +59,27 @@ export function verifyJoinSessionSourceContract(typesSource, extensionSource) {
   }
   visit(functions[0].body);
   assert.equal(bindings.length, 1, "joinSession config destructuring changed");
+  const strippedBindings = new Map();
   for (const field of omitted) {
+    const binding = bindings[0].find((binding) => binding.propertyName?.getText(sourceFile) === field);
     assert(
-      bindings[0].some((binding) => binding.propertyName?.getText(sourceFile) === field),
+      binding && ts.isIdentifier(binding.name),
       `joinSession must strip owner-only ${field}`,
     );
+    strippedBindings.set(binding.name.text, binding.name);
   }
   function rejectOwnerOnlyForwarding(node) {
+    if (
+      ts.isIdentifier(node) && strippedBindings.has(node.text) &&
+      strippedBindings.get(node.text) !== node
+    ) {
+      assert(
+        ts.isVoidExpression(node.parent) &&
+          node.parent.expression === node &&
+          ts.isExpressionStatement(node.parent.parent),
+        `joinSession must not reuse stripped owner-only ${node.text}`,
+      );
+    }
     if (
       ts.isSpreadAssignment(node) &&
       node.expression.getText(sourceFile) === "config"

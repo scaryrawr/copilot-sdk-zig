@@ -24,6 +24,8 @@ export async function joinSession(config: JoinSessionConfig = {}) {
     ${ownerOnly.map(([name]) => `${name}: _stripped${name},`).join("\n")}
     workflows, requestedEnvironmentVariables, ...rest
   } = config as JoinSessionConfig & { extensionSdkPath?: string };
+  void _stripped;
+  ${ownerOnly.map(([name]) => `void _stripped${name};`).join("\n")}
   return client.resumeSessionForExtension(sessionId, { ...rest });
 }
 `;
@@ -63,6 +65,18 @@ test("join guards reject missing exclusions, owner-only redeclarations, and miss
         types, extension.replace("{ ...rest }", `{ ...rest, ${field}: ${access} }`),
       ), /must not forward owner-only/);
     }
+    const local = field === "extensionSdkPath" ? "_stripped" : `_stripped${field}`;
+    for (const forwarded of [
+      `{ ...rest, ${field}: ${local} }`,
+      `{ ...rest, [event]: ${local} }`,
+    ]) {
+      assert.throws(() => verifyJoinSessionSourceContract(
+        types, extension.replace("{ ...rest }", forwarded),
+      ), /must not reuse stripped owner-only/);
+    }
+    assert.throws(() => verifyJoinSessionSourceContract(
+      types, extension.replace("return client.", `const leaked = ${local}; return client.`),
+    ), /must not reuse stripped owner-only/);
   }
   assert.throws(() => verifyJoinSessionSourceContract(
     types.replace("imageGeneration?: ImageGenerationConfig", "imageGeneration?: unknown"),

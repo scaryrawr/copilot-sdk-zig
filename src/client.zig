@@ -4081,12 +4081,12 @@ pub const Client = struct {
         comptime failure_policy: FailurePolicy,
         config: session_types.CreateSessionConfig,
     ) errors.DetailedError!PolicyResult(failure_policy, Session) {
-        validateLifecycleConfig(config) catch |err|
+        if (validateLifecycleConfig(config)) |failure|
             return .{ .failure = try policyFailure(
                 failure_policy,
-                err,
+                failure.native_error,
                 recordInvalidConfig,
-                .{ self.allocator, "github_authentication", err },
+                .{ self.allocator, failure.field, failure.native_error },
             ) };
         validateSessionMode(self.mode, config.available_tools) catch |err|
             return .{ .failure = try policyFailure(
@@ -4484,12 +4484,12 @@ pub const Client = struct {
         requested_environment_variables: []const []const u8,
         workflows: ?[]const workflow_types.WorkflowDefinition,
     ) errors.DetailedError!PolicyResult(failure_policy, Session) {
-        validateLifecycleConfig(config) catch |err|
+        if (validateLifecycleConfig(config)) |failure|
             return .{ .failure = try policyFailure(
                 failure_policy,
-                err,
+                failure.native_error,
                 recordInvalidConfig,
-                .{ self.allocator, "github_authentication", err },
+                .{ self.allocator, failure.field, failure.native_error },
             ) };
         validateSessionMode(self.mode, config.available_tools) catch |err|
             return .{ .failure = try policyFailure(
@@ -16831,12 +16831,24 @@ fn managedSettingsEnabled(config: anytype) bool {
     return enabled or injected;
 }
 
-fn validateLifecycleConfig(config: anytype) !void {
+const LifecycleConfigFailure = struct {
+    field: []const u8,
+    native_error: anyerror,
+};
+
+fn validateLifecycleConfig(config: anytype) ?LifecycleConfigFailure {
     if (config.capi) |capi| {
-        if (capi.auto_tier) |tier| _ = try session_types.AutoTier.init(tier.wireName());
+        if (capi.auto_tier) |tier| {
+            _ = session_types.AutoTier.init(tier.wireName()) catch |err|
+                return .{ .field = "capi.auto_tier", .native_error = err };
+        }
     }
     if (config.git_hub_token != null and config.git_hub_token_provider != null)
-        return error.ConflictingGitHubAuthentication;
+        return .{
+            .field = "github_authentication",
+            .native_error = error.ConflictingGitHubAuthentication,
+        };
+    return null;
 }
 
 fn validateExpAssignments(value: session_types.CopilotExpAssignmentResponse) !void {
@@ -31268,6 +31280,48 @@ test "workflow combinators propagate nested RPC failures" {
         "WorkflowTransportFailure",
         response.get("error").?.object.get("message").?.string,
     );
+}
+
+test "lifecycle configuration failures identify auto tier and authentication fields" {
+    const allocator = std.testing.allocator;
+    var client = Client{ .allocator = allocator, .io = undefined };
+    const cases = [_]struct {
+        config: session_types.CreateSessionConfig,
+        field: []const u8,
+        native_error: anyerror,
+    }{
+        .{
+            .config = .{ .capi = .{ .auto_tier = .{ .custom = "white space" } } },
+            .field = "capi.auto_tier",
+            .native_error = error.InvalidAutoTier,
+        },
+        .{
+            .config = .{
+                .git_hub_token = "test-token",
+                .git_hub_token_provider = .{ .callback = testGitHubTokenProvider },
+            },
+            .field = "github_authentication",
+            .native_error = error.ConflictingGitHubAuthentication,
+        },
+    };
+    for (cases) |case| {
+        for ([_]bool{ true, false }) |create| {
+            const result = if (create)
+                try client.createSessionDetailed(case.config)
+            else
+                try client.resumeSessionDetailed("invalid-config", resumeConfigFromCreate(case.config));
+            var failure = switch (result) {
+                .success => return error.TestExpectedFailure,
+                .failure => |value| value,
+            };
+            defer failure.deinit();
+            try std.testing.expectEqual(case.native_error, failure.native_error);
+            try std.testing.expectEqualStrings(case.field, failure.detail.client.invalid_config.field.?);
+        }
+    }
+    try std.testing.expectEqual(@as(u64, 1), client.next_request_id);
+    try std.testing.expectEqual(@as(usize, 0), client.sessions.items.len);
+    try std.testing.expect(client.pending_extension_runtime == null);
 }
 
 test "custom agent validation precedes lifecycle state and RPC writes" {
