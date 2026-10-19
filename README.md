@@ -1226,6 +1226,10 @@ SDK protocol version, the exact Copilot CLI version from the upstream Node
 package manifest, the verified CLI release asset, and SHA-256 digests for the
 asset and both schema snapshots.
 
+CLI version resolution uses `copilotCliVersion` from the upstream Node package
+manifest without requiring a lockfile. Older commits without that field use the
+exact `@github/copilot` version from `nodejs/package-lock.json` instead.
+
 The sync script downloads the Linux x64 package from the corresponding
 `github/copilot-cli` release and verifies it against the release's
 `SHA256SUMS.txt`. It copies only `api.schema.json` and
