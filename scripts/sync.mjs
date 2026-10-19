@@ -38,6 +38,7 @@ import {
   registeredStringCallbacks,
 } from "./typescript-contract.mjs";
 import { parseSyncArgs } from "./sync-args.mjs";
+import { resolveCliPackageVersion } from "./upstream-cli-version.mjs";
 import { verifyWorkflowOptionsSourceContract } from "./workflow-source-contract.mjs";
 import { verifySubagentHooksSourceContract } from "./hook-source-contract.mjs";
 import { joinOwnerOnlyFields, verifyJoinSessionSourceContract } from "./join-source-contract.mjs";
@@ -2476,7 +2477,6 @@ async function synchronize(explicitCommit, ifPublished = false) {
   const [
     protocol,
     packageManifest,
-    lock,
     nodeClient,
     nodeSession,
     nodeTypes,
@@ -2489,7 +2489,6 @@ async function synchronize(explicitCommit, ifPublished = false) {
   ] = await Promise.all([
     fetchJson(rawUrl(commit, "sdk-protocol-version.json")),
     fetchJson(rawUrl(commit, "nodejs/package.json")),
-    fetchJson(rawUrl(commit, "nodejs/package-lock.json")),
     fetchText(rawUrl(commit, "nodejs/src/client.ts")),
     fetchText(rawUrl(commit, "nodejs/src/session.ts")),
     fetchText(rawUrl(commit, "nodejs/src/types.ts")),
@@ -2500,14 +2499,11 @@ async function synchronize(explicitCommit, ifPublished = false) {
     fetchText(rawUrl(publicSdkCommit, "nodejs/src/types.ts")),
     fetchText(rawUrl(publicSdkCommit, "nodejs/src/extension.ts")),
   ]);
-  const cliPackageVersion =
-    packageManifest.copilotCliVersion ??
-    lock.packages?.["node_modules/@github/copilot"]?.version;
-  assert(Number.isSafeInteger(protocol.version), "upstream protocol version is invalid");
-  assert(
-    /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(cliPackageVersion),
-    "upstream package manifest has no exact Copilot CLI version",
+  const cliPackageVersion = await resolveCliPackageVersion(
+    packageManifest,
+    () => fetchJson(rawUrl(commit, "nodejs/package-lock.json")),
   );
+  assert(Number.isSafeInteger(protocol.version), "upstream protocol version is invalid");
   verifyPinnedSourceContracts(
     commit,
     nodeClient,
