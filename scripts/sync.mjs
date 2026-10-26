@@ -500,6 +500,11 @@ function verifyCustomAgentSourceContract(
   verifyCustomAgentConfigurationSourceContract(typesSource);
   const zigAgent = zigStructFields(zigSessionSource, "CustomAgentConfig");
   assert(
+    zigAgent.model_policy?.type === "?AgentModelPolicy" &&
+      zigAgent.model_policy?.default === "null",
+    "Zig CustomAgentConfig.model_policy changed",
+  );
+  assert(
     zigAgent.hooks?.type === "?[]const CustomAgentHook" &&
       zigAgent.hooks?.default === "null",
     "Zig CustomAgentConfig.hooks changed",
@@ -513,8 +518,10 @@ function verifyCustomAgentSourceContract(
     "Zig CustomAgentHook",
   );
   requireSourceFragments(zigClientSource, [
+    "modelPolicy: ?session_types.AgentModelPolicy",
+    ".modelPolicy = agent.model_policy",
     ".hooks = if (agent.hooks) |hooks| WireCustomAgentHooks{ .values = hooks } else null",
-  ], "Zig custom agent hook lowering");
+  ], "Zig custom agent lowering");
 
   requireExactPropertySignatures(
     interfacePropertySignatures(typesSource, "DefaultAgentConfig"),
@@ -597,6 +604,7 @@ function verifyCustomAgentSourceContract(
 
 function verifyStableSessionRuntimeSourceContract(clientSource, typesSource) {
   const base = interfacePropertySignatures(typesSource, "SessionConfigBase");
+  const memory = interfacePropertySignatures(typesSource, "MemoryConfiguration");
   for (const [name, signature] of Object.entries(expectedStableSessionRuntimeFields)) {
     assert(base[name] === signature, `SessionConfigBase.${name} changed`);
   }
@@ -612,7 +620,12 @@ function verifyStableSessionRuntimeSourceContract(clientSource, typesSource) {
       backgroundCompactionThreshold: "optional:number",
       bufferExhaustionThreshold: "optional:number",
     }],
-    ["MemoryConfiguration", { enabled: "required:boolean" }],
+    ["MemoryConfiguration", {
+      enabled: "required:boolean",
+      ...(Object.hasOwn(memory, "mode")
+        ? { mode: 'optional:"system-prompt"|"user-prompt"' }
+        : {}),
+    }],
     ["CapiSessionOptions", {
       autoTier: "optional:AutoTier",
       enableWebSocketResponses: "optional:boolean",
@@ -678,6 +691,7 @@ function verifyStableSessionRuntimeSourceContract(clientSource, typesSource) {
       ".backgroundCompactionThreshold = value.background_compaction_threshold",
       ".bufferExhaustionThreshold = value.buffer_exhaustion_threshold",
       ".memory = if (config.memory)",
+      ".mode = value.mode",
       ".skipEmbeddingRetrieval = config.skip_embedding_retrieval",
       ".embeddingCacheStorage = if (config.embedding_cache_storage)",
       ".persistent => .persistent",
@@ -1331,7 +1345,6 @@ function expectedStableParityContract(protocolCommit) {
         "onAutoModeSwitchRequest",
         "gitHubToken",
         "gitHubTokenProvider",
-        "remoteSession",
         "enableSessionTelemetry",
         "enableFileChangeTracking",
         "coauthorEnabled",
@@ -1368,7 +1381,6 @@ function expectedStableParityContract(protocolCommit) {
     },
     enums: {
       askUserVariant: ["legacy", "elicitation"],
-      remoteSession: ["off", "export", "on"],
       autoModeSwitch: ["yes", "yes_always", "no"],
       exitPlanMode: ["exit_only", "interactive", "autopilot", "autopilot_fleet"],
     },
@@ -1410,7 +1422,6 @@ function verifyStableParitySourceContract(
     onAutoModeSwitchRequest: "optional:AutoModeSwitchHandler",
     gitHubToken: "optional:string",
     gitHubTokenProvider: "optional:GitHubTokenProvider",
-    remoteSession: "optional:RemoteSessionMode",
     enableSessionTelemetry: "optional:boolean",
     enableFileChangeTracking: "optional:boolean",
     coauthorEnabled: "optional:boolean",
@@ -1567,7 +1578,6 @@ function verifyStableParitySourceContract(
     includeSubAgentStreamingEvents: "config.includeSubAgentStreamingEvents??true",
     gitHubToken: "config.gitHubToken",
     gitHubTokenProviderRegistrationId: "gitHubTokenProviderRegistrationId",
-    remoteSession: "config.remoteSession",
     featureFlags: "config.featureFlags",
     expAssignments: "config.expAssignments",
   };
@@ -2014,6 +2024,10 @@ function writeCompatibility() {
     status: "supported",
     contract: { ref: "ProviderConfigModelProvider" },
   };
+  compatibility.providerConfig.properties.apiKeyCommand = {
+    status: "supported",
+    contract: { type: "string" },
+  };
   writeFileSync(compatibilityPath, `${JSON.stringify(compatibility, null, 2)}\n`);
 }
 
@@ -2109,9 +2123,9 @@ function verifyCompatibility(apiSchema, eventSchema) {
   }
   for (const contract of [
     {
-      schema: "RemoteSessionMode",
-      zig: "RemoteSessionMode",
-      tags: ["off", "export", "on"],
+      schema: "MemoryMode",
+      zig: "MemoryMode",
+      tags: ["system-prompt", "user-prompt"],
     },
     {
       schema: "UIAutoModeSwitchResponse",

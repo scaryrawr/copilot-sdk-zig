@@ -1,13 +1,13 @@
 {
   "upstreamRepository": "github/copilot-sdk",
   "upstreamRef": "main",
-  "upstreamCommit": "b19d3ef043ebfeaeb794339173c39ad6c8eb29ca",
+  "upstreamCommit": "c57638f4a7ce2255a34192d5035932d0e109bbdd",
   "sdkProtocolVersion": 3,
-  "cliPackageVersion": "1.0.97-2",
-  "cliReleaseAsset": "github-copilot-1.0.97-2-linux-x64.tgz",
-  "cliReleaseAssetDigest": "sha256:487f7c647d641bf69da3dd0b56f4b4f88f144596f63f2a37ab221b331b987765",
+  "cliPackageVersion": "1.0.104-3",
+  "cliReleaseAsset": "github-copilot-1.0.104-3-linux-x64.tgz",
+  "cliReleaseAssetDigest": "sha256:2050a88ff44d57b386cc2d10725eef8d72a5f742740f7472e08bdeccbdc3368b",
   "schemaDigests": {
-    "api.schema.json": "sha256:b4a368552e04cf508301897fd2c19534462f0e31505a5ad72b5b49274889a609",
-    "session-events.schema.json": "sha256:e070df1ff16e3b5f62859f23fa5d6debfbc0eb72871642d0e88eaa1764f56825"
+    "api.schema.json": "sha256:93d608f6ace31d1f5136629d082b85ce41cafa43953ba0927f3b8eb94457f632",
+    "session-events.schema.json": "sha256:6c3e06b5f7d8c846e0a6548e33fbd94dd5a2e7a30226fe4a02e8943a5a24be2f"
   }
 }

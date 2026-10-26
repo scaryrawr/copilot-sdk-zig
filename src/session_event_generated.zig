@@ -129,6 +129,7 @@ pub const FusionPhaseCompletedData = struct {
     projection_message: ?std.json.Value = null,
     projection_mode: ?FusionProjectionMode = null,
     staged_terminal: ?FusionStagedTerminal = null,
+    ended_with_background_work: ?bool = null,
 };
 
 pub const FusionPhaseFailedData = struct {
@@ -398,6 +399,11 @@ pub const ModelCallRequestBodyEncoding = enum {
     zstd,
 };
 
+pub const ModelCallRequestBodyCompressionFallback = enum {
+    retried,
+    disabled,
+};
+
 pub const ModelCallWebSocketFallbackReason = enum {
     connect_failed,
     connection_unavailable,
@@ -486,6 +492,7 @@ pub const AssistantUsageData = struct {
     is_byok: ?bool = null,
     byok_kind: ?[]const u8 = null,
     model_provider: ?[]const u8 = null,
+    provider_type: ?[]const u8 = null,
     is_auto: ?bool = null,
     max_prompt_tokens: ?u64 = null,
     max_output_tokens: ?u64 = null,
@@ -495,6 +502,9 @@ pub const AssistantUsageData = struct {
     request_body_bytes: ?u64 = null,
     request_body_wire_bytes: ?u64 = null,
     request_body_encoding: ?ModelCallRequestBodyEncoding = null,
+    request_body_compression_fallback: ?ModelCallRequestBodyCompressionFallback = null,
+    request_body_compression_fallback_from: ?ModelCallRequestBodyEncoding = null,
+    request_body_compression_rejected_status: ?u64 = null,
     websocket_fallback_reason: ?ModelCallWebSocketFallbackReason = null,
     websocket_fallback_after_ms: ?u64 = null,
     websocket_fallback_error_kind: ?ModelCallWebSocketFallbackErrorKind = null,
@@ -514,8 +524,12 @@ pub const AssistantUsageData = struct {
     reasoning_summary: ?ReasoningSummary = null,
     available_tool_count: ?u64 = null,
     tool_token_count: ?u64 = null,
+    custom_tool_call_count: ?u64 = null,
+    unmatched_tool_result_count: ?u64 = null,
+    orphan_tool_call_count: ?u64 = null,
     frontier_source: ?[]const u8 = null,
     cache_ttl_seconds: ?u64 = null,
+    cache_policy_ttl_seconds: ?u64 = null,
     cache_details_reported: ?bool = null,
     num_tool_calls: ?u64 = null,
     tool_counts: ?std.json.ArrayHashMap(i64) = null,
@@ -725,6 +739,36 @@ pub const HumanResponseRecordedData = struct {
     response: HumanResponseRecordedResponse,
 };
 
+pub const InstructionUpdateAuthority = enum {
+    runtime,
+    host,
+    managed_policy,
+};
+
+pub const InstructionUpdateLifetime = enum {
+    persistent,
+    turn,
+};
+
+pub const InstructionUpdateBoundary = enum {
+    after_tool_results,
+    next_model_request,
+};
+
+pub const InstructionUpdateFallback = enum {
+    rebuild_system_prompt,
+    reject,
+};
+
+pub const InstructionUpdateData = struct {
+    content: []const u8,
+    authority: InstructionUpdateAuthority,
+    lifetime: InstructionUpdateLifetime,
+    boundary: InstructionUpdateBoundary,
+    fallback: InstructionUpdateFallback,
+    name: ?[]const u8 = null,
+};
+
 pub const McpHeadersRefreshCompletedOutcome = enum {
     headers,
     none,
@@ -758,6 +802,18 @@ pub const McpOauthCompletionOutcome = enum {
 pub const McpOauthCompletedData = struct {
     request_id: []const u8,
     outcome: McpOauthCompletionOutcome,
+};
+
+pub const McpOauthRecoveryCompletedOutcome = enum {
+    succeeded,
+    cancelled,
+    failed,
+};
+
+pub const McpOauthRecoveryCompletedData = struct {
+    request_id: []const u8,
+    server_name: []const u8,
+    outcome: McpOauthRecoveryCompletedOutcome,
 };
 
 pub const McpOauthRequiredStaticClientConfig = struct {
@@ -801,6 +857,7 @@ pub const McpOauthRequiredData = struct {
     http_response: ?McpOauthHttpResponse = null,
     resource_metadata: ?[]const u8 = null,
     reason: McpOauthRequestReason,
+    runtime_refresh_supported: ?bool = null,
 };
 
 pub const McpListChangedData = struct {
@@ -852,6 +909,9 @@ pub const ModelCallFailureRequestFingerprint = struct {
     tool_result_message_count: u64,
     tool_call_count: u64,
     nameless_tool_call_count: u64,
+    custom_tool_call_count: ?u64 = null,
+    unmatched_tool_result_count: ?u64 = null,
+    orphan_tool_call_count: ?u64 = null,
     image_part_count: u64,
     image_parts_missing_media_type: u64,
     image_bytes: ?u64 = null,
@@ -876,6 +936,9 @@ pub const ModelCallFailureData = struct {
     request_body_bytes: ?u64 = null,
     request_body_wire_bytes: ?u64 = null,
     request_body_encoding: ?ModelCallRequestBodyEncoding = null,
+    request_body_compression_fallback: ?ModelCallRequestBodyCompressionFallback = null,
+    request_body_compression_fallback_from: ?ModelCallRequestBodyEncoding = null,
+    request_body_compression_rejected_status: ?u64 = null,
     retry_attempt: ?u64 = null,
     websocket_fallback_reason: ?ModelCallWebSocketFallbackReason = null,
     websocket_fallback_after_ms: ?u64 = null,
@@ -889,6 +952,7 @@ pub const ModelCallFailureData = struct {
     is_byok: ?bool = null,
     byok_kind: ?[]const u8 = null,
     model_provider: ?[]const u8 = null,
+    provider_type: ?[]const u8 = null,
     is_auto: ?bool = null,
     reasoning_effort: ?[]const u8 = null,
     interaction_type: ?[]const u8 = null,
@@ -1356,6 +1420,7 @@ pub const PermissionApprovalEvaluationReasonCode = enum {
     inactive,
     authorization_history_incomplete,
     managed_approval_required,
+    extension_permission_access,
     sandbox_bypass,
     action_too_long,
     path_not_authorized,
@@ -1426,6 +1491,7 @@ pub const AssistedApprovalJudgeFailureReason = enum {
 };
 
 pub const PermissionAssistedApproval = struct {
+    evaluation_id: ?[]const u8 = null,
     evaluation: ?PermissionApprovalEvaluation = null,
     recommendation: AssistedApprovalRecommendation,
     reason: ?[]const u8 = null,
@@ -1723,6 +1789,7 @@ pub const PermissionRequestedData = struct {
     risk_assessment: ?std.json.Value = null,
     resolved_by_hook: ?bool = null,
     recovery_episode_id: ?[]const u8 = null,
+    fusion: ?FusionAttribution = null,
 };
 
 pub const PromptCacheBreakData = struct {
@@ -2066,6 +2133,11 @@ pub const AutopilotObjectiveChangedData = struct {
     status: ?AutopilotObjectiveChangedStatus = null,
 };
 
+pub const AutopilotStoppedData = struct {
+    reason: []const u8,
+    request_id: ?[]const u8 = null,
+};
+
 pub const BackgroundTasksChangedData = struct {};
 
 pub const BinaryAssetType = enum {
@@ -2184,19 +2256,43 @@ pub const CompactionTrigger = enum {
     model_switch,
 };
 
+pub const CompactionCompleteSummarizerProgress = struct {
+    duration_ms: u64,
+    attempt_count: u64,
+    attempt_age_ms: ?u64 = null,
+    attempt_settled: ?bool = null,
+    time_to_first_token_ms: ?u64 = null,
+    time_to_first_output_ms: ?u64 = null,
+    time_to_first_answer_output_ms: ?u64 = null,
+    stream_event_count: u64,
+    output_event_count: u64,
+    max_stream_event_gap_ms: ?u64 = null,
+    max_output_gap_before_answer_ms: ?u64 = null,
+    max_output_gap_after_answer_ms: ?u64 = null,
+    idle_ms: ?u64 = null,
+    since_last_output_ms: ?u64 = null,
+    input_shrunk: ?bool = null,
+};
+
 pub const CompactionCompleteData = struct {
     success: bool,
+    outcome: ?[]const u8 = null,
+    outcome_reason: ?[]const u8 = null,
+    failure_reason: ?[]const u8 = null,
+    compaction_attempt_id: ?[]const u8 = null,
+    model: ?[]const u8 = null,
+    initial_model: ?[]const u8 = null,
     error_: ?[]const u8 = null,
     pre_compaction_tokens: ?u64 = null,
     post_compaction_tokens: ?u64 = null,
     pre_compaction_messages_length: ?u64 = null,
     messages_removed: ?u64 = null,
     tokens_removed: ?u64 = null,
+    token_accounting_basis: ?[]const u8 = null,
     custom_instructions: ?[]const u8 = null,
     summary_content: ?[]const u8 = null,
     responses_reasoning: ?ResponsesReasoning = null,
     active_workflow_summary: ?[]const u8 = null,
-    active_factory_summary: ?[]const u8 = null,
     behavior_model_id: ?[]const u8 = null,
     checkpoint_number: ?u64 = null,
     checkpoint_path: ?[]const u8 = null,
@@ -2208,16 +2304,22 @@ pub const CompactionCompleteData = struct {
     tool_definitions_tokens: ?u64 = null,
     status_code: ?u64 = null,
     token_limit: ?u64 = null,
+    target_prompt_token_limit: ?u64 = null,
+    switch_target_model: ?[]const u8 = null,
     trigger: ?CompactionTrigger = null,
+    summarizer_progress: ?CompactionCompleteSummarizerProgress = null,
 };
 
 pub const CompactionStartData = struct {
+    compaction_attempt_id: ?[]const u8 = null,
     model: ?[]const u8 = null,
     system_tokens: ?u64 = null,
     conversation_tokens: ?u64 = null,
     tool_definitions_tokens: ?u64 = null,
     current_tokens: ?u64 = null,
     token_limit: ?u64 = null,
+    target_prompt_token_limit: ?u64 = null,
+    switch_target_model: ?[]const u8 = null,
     trigger: ?CompactionTrigger = null,
 };
 
@@ -2327,6 +2429,7 @@ pub const RemediationAction = enum {
 };
 
 pub const ErrorData = struct {
+    originating_message_id: ?[]const u8 = null,
     error_type: []const u8,
     error_code: ?[]const u8 = null,
     provider_error_type: ?[]const u8 = null,
@@ -2605,6 +2708,7 @@ pub const FusionCompletedData = struct {
     cache_write_tokens: ?u64 = null,
     total_nano_aiu: f64,
     duration_ms: f64,
+    awaiting_background_work: ?bool = null,
 };
 
 pub const FusionHandoffData = struct {
@@ -2656,6 +2760,7 @@ pub const FusionResolvedData = struct {
     policy_version: ?[]const u8 = null,
     model_universe_version: ?[]const u8 = null,
     rule_id: ?[]const u8 = null,
+    selected_rule_id: ?[]const u8 = null,
     rule_index: ?u64 = null,
     rule_name: ?[]const u8 = null,
     scores: ?FusionScores = null,
@@ -2675,6 +2780,7 @@ pub const FusionResolvedData = struct {
 
 pub const FusionRouteFailedData = struct {
     attempt_id: []const u8,
+    fusion_id: ?[]const u8 = null,
     synthetic_model: []const u8,
     policy: []const u8,
     reason: []const u8,
@@ -2899,6 +3005,11 @@ pub const McpServerStatusChangedData = struct {
     config_source: ?[]const u8 = null,
 };
 
+pub const McpServerToolsLoadedData = struct {
+    server_name: []const u8,
+    tool_count: i64,
+};
+
 pub const McpServerSource = enum {
     user,
     workspace,
@@ -2945,6 +3056,7 @@ pub const ModeChangedData = struct {
 pub const ModeNoticeDeliveredData = struct {
     mode: SessionMode,
     content: ?[]const u8 = null,
+    instruction_update_persisted: ?bool = null,
 };
 
 pub const Verbosity = enum {
@@ -3130,6 +3242,10 @@ pub const RemoteSteerableChangedData = struct {
     remote_steerable: bool,
 };
 
+pub const RequestBodyCompressionDisabledData = struct {
+    encoding: ?ModelCallRequestBodyEncoding = null,
+};
+
 pub const SessionLimitsConfig = struct {
     max_ai_credits: ?f64 = null,
 };
@@ -3299,6 +3415,7 @@ pub const ShutdownAgentMetric = struct {
 };
 
 pub const ShutdownData = struct {
+    tool_usage_request_ids: ?[]const []const u8 = null,
     accounting_snapshot: ?UsageGetMetricsResult = null,
     provider_model_metrics: ?[]const UsageMetricsProviderModelMetric = null,
     usage_accounting_watermarks: ?std.json.ArrayHashMap(u64) = null,
@@ -3427,6 +3544,7 @@ pub const UsageCheckpointModelCacheState = struct {
 };
 
 pub const UsageCheckpointData = struct {
+    tool_usage_request_ids: ?[]const []const u8 = null,
     total_nano_aiu: f64,
     accounting_snapshot: ?UsageGetMetricsResult = null,
     provider_model_metrics: ?[]const UsageMetricsProviderModelMetric = null,
@@ -3453,6 +3571,7 @@ pub const UsageAccountingRecordData = struct {
 pub const WarningData = struct {
     warning_type: []const u8,
     message: []const u8,
+    originating_message_id: ?[]const u8 = null,
     url: ?[]const u8 = null,
     remediation: ?RemediationAction = null,
 };
@@ -3618,7 +3737,6 @@ pub const SubagentStartedData = struct {
     model: ?[]const u8 = null,
     task_model_source: ?SubagentTaskModelSource = null,
     model_selection_source: ?SubagentModelSelectionSource = null,
-    factory_run_id: ?[]const u8 = null,
     workflow_run_id: ?[]const u8 = null,
     parent_id: ?[]const u8 = null,
     resumable: ?bool = null,
@@ -3760,6 +3878,25 @@ pub const SystemNotificationData = struct {
     content: []const u8,
     kind: SystemNotification,
     responses_reasoning: ?ResponsesReasoning = null,
+};
+
+pub const ToolExecutionUsageTokenDetails = struct {
+    image_tokens: u64,
+    text_tokens: u64,
+};
+
+pub const ToolExecutionUsage = struct {
+    request_id: []const u8,
+    model: []const u8,
+    provider: ?ModelProviderRef = null,
+    accounting: ?UsageAccountingIdentity = null,
+    input_tokens: ?u64 = null,
+    output_tokens: ?u64 = null,
+    total_tokens: ?u64 = null,
+    input_tokens_details: ?ToolExecutionUsageTokenDetails = null,
+    output_tokens_details: ?ToolExecutionUsageTokenDetails = null,
+    copilot_usage: ?AssistantUsageCopilotUsage = null,
+    quota_snapshots: ?std.json.ArrayHashMap(std.json.Value) = null,
 };
 
 pub const ToolExecutionCompleteContentText = struct {
@@ -4003,6 +4140,7 @@ pub const ToolExecutionCompleteData = struct {
     tool_call_id: []const u8,
     success: bool,
     model: ?[]const u8 = null,
+    tool_usage: ?ToolExecutionUsage = null,
     mcp_meta: ?std.json.Value = null,
     interaction_id: ?[]const u8 = null,
     rte: ?bool = null,
@@ -4087,6 +4225,7 @@ pub const ToolShellOutputData = struct {
     stream: ?ToolShellOutputStream = null,
     text: []const u8,
     sequence: u64,
+    fusion: ?FusionAttribution = null,
 };
 
 pub const ToolUserRequestedData = struct {
@@ -4233,9 +4372,11 @@ pub const HookEndEventPayload = OwnedPayload(HookEndData, wipeHookEndData);
 pub const HookProgressEventPayload = OwnedPayload(HookProgressData, wipeHookProgressData);
 pub const HookStartEventPayload = OwnedPayload(HookStartData, wipeHookStartData);
 pub const HumanResponseRecordedEventPayload = OwnedPayload(HumanResponseRecordedData, wipeHumanResponseRecordedData);
+pub const InstructionUpdateEventPayload = OwnedPayload(InstructionUpdateData, wipeInstructionUpdateData);
 pub const McpHeadersRefreshCompletedEventPayload = OwnedPayload(McpHeadersRefreshCompletedData, wipeMcpHeadersRefreshCompletedData);
 pub const McpHeadersRefreshRequiredEventPayload = OwnedPayload(McpHeadersRefreshRequiredData, wipeMcpHeadersRefreshRequiredData);
 pub const McpOauthCompletedEventPayload = OwnedPayload(McpOauthCompletedData, wipeMcpOauthCompletedData);
+pub const McpOauthRecoveryCompletedEventPayload = OwnedPayload(McpOauthRecoveryCompletedData, wipeMcpOauthRecoveryCompletedData);
 pub const McpPromptsListChangedEventPayload = OwnedPayload(McpListChangedData, wipeMcpListChangedData);
 pub const McpResourcesListChangedEventPayload = OwnedPayload(McpListChangedData, wipeMcpListChangedData);
 pub const McpToolsListChangedEventPayload = OwnedPayload(McpListChangedData, wipeMcpListChangedData);
@@ -4260,6 +4401,7 @@ pub const AutoModeResolvedEventPayload = OwnedPayload(AutoModeResolvedData, wipe
 pub const AutoTierRecommendationEventPayload = OwnedPayload(AutoTierRecommendationData, wipeAutoTierRecommendationData);
 pub const AutoTierSwitchFailedEventPayload = OwnedPayload(AutoTierSwitchFailedData, wipeAutoTierSwitchFailedData);
 pub const AutopilotObjectiveChangedEventPayload = OwnedPayload(AutopilotObjectiveChangedData, wipeAutopilotObjectiveChangedData);
+pub const AutopilotStoppedEventPayload = OwnedPayload(AutopilotStoppedData, wipeAutopilotStoppedData);
 pub const BackgroundTasksChangedEventPayload = OwnedPayload(BackgroundTasksChangedData, wipeBackgroundTasksChangedData);
 pub const BinaryAssetEventPayload = OwnedPayload(BinaryAssetData, wipeBinaryAssetData);
 pub const CanvasClosedEventPayload = OwnedPayload(CanvasClosedData, wipeCanvasClosedData);
@@ -4293,6 +4435,7 @@ pub const ManagedSettingsResolvedEventPayload = OwnedPayload(ManagedSettingsReso
 pub const McpServerNeedsReconnectEventPayload = OwnedPayload(McpServerNeedsReconnectData, wipeMcpServerNeedsReconnectData);
 pub const McpServerRemovedEventPayload = OwnedPayload(McpServerRemovedData, wipeMcpServerRemovedData);
 pub const McpServerStatusChangedEventPayload = OwnedPayload(McpServerStatusChangedData, wipeMcpServerStatusChangedData);
+pub const McpServerToolsLoadedEventPayload = OwnedPayload(McpServerToolsLoadedData, wipeMcpServerToolsLoadedData);
 pub const McpServersLoadedEventPayload = OwnedPayload(McpServersLoadedData, wipeMcpServersLoadedData);
 pub const MemoryChangedEventPayload = OwnedPayload(MemoryChangedData, wipeMemoryChangedData);
 pub const ModeChangedEventPayload = OwnedPayload(ModeChangedData, wipeModeChangedData);
@@ -4304,6 +4447,7 @@ pub const PermissionsChangedEventPayload = OwnedPayload(PermissionsChangedData, 
 pub const PlanChangedEventPayload = OwnedPayload(PlanChangedData, wipePlanChangedData);
 pub const ProviderQuotaObservationEventPayload = OwnedPayload(ProviderQuotaObservationData, wipeProviderQuotaObservationData);
 pub const RemoteSteerableChangedEventPayload = OwnedPayload(RemoteSteerableChangedData, wipeRemoteSteerableChangedData);
+pub const RequestBodyCompressionDisabledEventPayload = OwnedPayload(RequestBodyCompressionDisabledData, wipeRequestBodyCompressionDisabledData);
 pub const ResumeEventPayload = OwnedPayload(ResumeData, wipeResumeData);
 pub const ScheduleCancelledEventPayload = OwnedPayload(ScheduleCancelledData, wipeScheduleCancelledData);
 pub const ScheduleCreatedEventPayload = OwnedPayload(ScheduleCreatedData, wipeScheduleCreatedData);
@@ -4549,6 +4693,7 @@ pub const McpOauthRequired = struct {
     http_response: ?McpOauthHttpResponse = null,
     resource_metadata: ?[]const u8 = null,
     reason: McpOauthRequestReason,
+    runtime_refresh_supported: ?bool = null,
     automatic_handling: payloads.AutomaticInteractionHandling = .not_configured,
     raw: payloads.RawEvent = .{},
     arena: ?std.heap.ArenaAllocator = null,
@@ -4577,6 +4722,7 @@ pub const PermissionRequested = struct {
     risk_assessment: ?std.json.Value = null,
     resolved_by_hook: ?bool = null,
     recovery_episode_id: ?[]const u8 = null,
+    fusion: ?FusionAttribution = null,
     permission_request_json: []u8,
     managed_approval_required: bool = false,
     automatic_handling: payloads.AutomaticPermissionHandling = .not_configured,
@@ -4620,6 +4766,7 @@ pub const PermissionRequested = struct {
 };
 
 pub const SessionError = struct {
+    originating_message_id: ?[]const u8 = null,
     error_type: []const u8,
     error_code: ?[]const u8 = null,
     provider_error_type: ?[]const u8 = null,
@@ -4705,9 +4852,11 @@ pub const SessionEvent = union(enum) {
     hook_progress: HookProgressEventPayload,
     hook_start: HookStartEventPayload,
     human_response_recorded: HumanResponseRecordedEventPayload,
+    instruction_update: InstructionUpdateEventPayload,
     mcp_headers_refresh_completed: McpHeadersRefreshCompletedEventPayload,
     mcp_headers_refresh_required: McpHeadersRefreshRequiredEventPayload,
     mcp_oauth_completed: McpOauthCompletedEventPayload,
+    mcp_oauth_recovery_completed: McpOauthRecoveryCompletedEventPayload,
     mcp_oauth_required: McpOauthRequired,
     mcp_prompts_list_changed: McpPromptsListChangedEventPayload,
     mcp_resources_list_changed: McpResourcesListChangedEventPayload,
@@ -4734,6 +4883,7 @@ pub const SessionEvent = union(enum) {
     session_auto_tier_recommendation: AutoTierRecommendationEventPayload,
     session_auto_tier_switch_failed: AutoTierSwitchFailedEventPayload,
     session_autopilot_objective_changed: AutopilotObjectiveChangedEventPayload,
+    session_autopilot_stopped: AutopilotStoppedEventPayload,
     session_background_tasks_changed: BackgroundTasksChangedEventPayload,
     session_binary_asset: BinaryAssetEventPayload,
     session_canvas_closed: CanvasClosedEventPayload,
@@ -4769,6 +4919,7 @@ pub const SessionEvent = union(enum) {
     session_mcp_server_needs_reconnect: McpServerNeedsReconnectEventPayload,
     session_mcp_server_removed: McpServerRemovedEventPayload,
     session_mcp_server_status_changed: McpServerStatusChangedEventPayload,
+    session_mcp_server_tools_loaded: McpServerToolsLoadedEventPayload,
     session_mcp_servers_loaded: McpServersLoadedEventPayload,
     session_memory_changed: MemoryChangedEventPayload,
     session_mode_changed: ModeChangedEventPayload,
@@ -4780,6 +4931,7 @@ pub const SessionEvent = union(enum) {
     session_plan_changed: PlanChangedEventPayload,
     session_quota_observation: ProviderQuotaObservationEventPayload,
     session_remote_steerable_changed: RemoteSteerableChangedEventPayload,
+    session_request_body_compression_disabled: RequestBodyCompressionDisabledEventPayload,
     session_resume: ResumeEventPayload,
     session_schedule_cancelled: ScheduleCancelledEventPayload,
     session_schedule_created: ScheduleCreatedEventPayload,
@@ -4868,9 +5020,11 @@ pub const SessionEvent = union(enum) {
             .hook_progress => "hook.progress",
             .hook_start => "hook.start",
             .human_response_recorded => "human_response.recorded",
+            .instruction_update => "instruction.update",
             .mcp_headers_refresh_completed => "mcp.headers_refresh_completed",
             .mcp_headers_refresh_required => "mcp.headers_refresh_required",
             .mcp_oauth_completed => "mcp.oauth_completed",
+            .mcp_oauth_recovery_completed => "mcp.oauth_recovery_completed",
             .mcp_oauth_required => "mcp.oauth_required",
             .mcp_prompts_list_changed => "mcp.prompts.list_changed",
             .mcp_resources_list_changed => "mcp.resources.list_changed",
@@ -4897,6 +5051,7 @@ pub const SessionEvent = union(enum) {
             .session_auto_tier_recommendation => "session.auto_tier_recommendation",
             .session_auto_tier_switch_failed => "session.auto_tier_switch_failed",
             .session_autopilot_objective_changed => "session.autopilot_objective_changed",
+            .session_autopilot_stopped => "session.autopilot_stopped",
             .session_background_tasks_changed => "session.background_tasks_changed",
             .session_binary_asset => "session.binary_asset",
             .session_canvas_closed => "session.canvas.closed",
@@ -4932,6 +5087,7 @@ pub const SessionEvent = union(enum) {
             .session_mcp_server_needs_reconnect => "session.mcp_server_needs_reconnect",
             .session_mcp_server_removed => "session.mcp_server_removed",
             .session_mcp_server_status_changed => "session.mcp_server_status_changed",
+            .session_mcp_server_tools_loaded => "session.mcp_server_tools_loaded",
             .session_mcp_servers_loaded => "session.mcp_servers_loaded",
             .session_memory_changed => "session.memory_changed",
             .session_mode_changed => "session.mode_changed",
@@ -4943,6 +5099,7 @@ pub const SessionEvent = union(enum) {
             .session_plan_changed => "session.plan_changed",
             .session_quota_observation => "session.quota_observation",
             .session_remote_steerable_changed => "session.remote_steerable_changed",
+            .session_request_body_compression_disabled => "session.request_body_compression_disabled",
             .session_resume => "session.resume",
             .session_schedule_cancelled => "session.schedule_cancelled",
             .session_schedule_created => "session.schedule_created",
@@ -5033,9 +5190,11 @@ pub const SessionEvent = union(enum) {
             .hook_progress => |value| value.data_json,
             .hook_start => |value| value.data_json,
             .human_response_recorded => |value| value.data_json,
+            .instruction_update => |value| value.data_json,
             .mcp_headers_refresh_completed => |value| value.data_json,
             .mcp_headers_refresh_required => |value| value.data_json,
             .mcp_oauth_completed => |value| value.data_json,
+            .mcp_oauth_recovery_completed => |value| value.data_json,
             .mcp_oauth_required => |value| value.raw.data_json,
             .mcp_prompts_list_changed => |value| value.data_json,
             .mcp_resources_list_changed => |value| value.data_json,
@@ -5062,6 +5221,7 @@ pub const SessionEvent = union(enum) {
             .session_auto_tier_recommendation => |value| value.data_json,
             .session_auto_tier_switch_failed => |value| value.data_json,
             .session_autopilot_objective_changed => |value| value.data_json,
+            .session_autopilot_stopped => |value| value.data_json,
             .session_background_tasks_changed => |value| value.data_json,
             .session_binary_asset => |value| value.data_json,
             .session_canvas_closed => |value| value.data_json,
@@ -5097,6 +5257,7 @@ pub const SessionEvent = union(enum) {
             .session_mcp_server_needs_reconnect => |value| value.data_json,
             .session_mcp_server_removed => |value| value.data_json,
             .session_mcp_server_status_changed => |value| value.data_json,
+            .session_mcp_server_tools_loaded => |value| value.data_json,
             .session_mcp_servers_loaded => |value| value.data_json,
             .session_memory_changed => |value| value.data_json,
             .session_mode_changed => |value| value.data_json,
@@ -5108,6 +5269,7 @@ pub const SessionEvent = union(enum) {
             .session_plan_changed => |value| value.data_json,
             .session_quota_observation => |value| value.data_json,
             .session_remote_steerable_changed => |value| value.data_json,
+            .session_request_body_compression_disabled => |value| value.data_json,
             .session_resume => |value| value.data_json,
             .session_schedule_cancelled => |value| value.data_json,
             .session_schedule_created => |value| value.data_json,
@@ -5198,9 +5360,11 @@ pub const SessionEvent = union(enum) {
             .hook_progress => |*value| value.deinit(allocator),
             .hook_start => |*value| value.deinit(allocator),
             .human_response_recorded => |*value| value.deinit(allocator),
+            .instruction_update => |*value| value.deinit(allocator),
             .mcp_headers_refresh_completed => |*value| value.deinit(allocator),
             .mcp_headers_refresh_required => |*value| value.deinit(allocator),
             .mcp_oauth_completed => |*value| value.deinit(allocator),
+            .mcp_oauth_recovery_completed => |*value| value.deinit(allocator),
             .mcp_oauth_required => |*value| value.deinit(allocator),
             .mcp_prompts_list_changed => |*value| value.deinit(allocator),
             .mcp_resources_list_changed => |*value| value.deinit(allocator),
@@ -5227,6 +5391,7 @@ pub const SessionEvent = union(enum) {
             .session_auto_tier_recommendation => |*value| value.deinit(allocator),
             .session_auto_tier_switch_failed => |*value| value.deinit(allocator),
             .session_autopilot_objective_changed => |*value| value.deinit(allocator),
+            .session_autopilot_stopped => |*value| value.deinit(allocator),
             .session_background_tasks_changed => |*value| value.deinit(allocator),
             .session_binary_asset => |*value| value.deinit(allocator),
             .session_canvas_closed => |*value| value.deinit(allocator),
@@ -5262,6 +5427,7 @@ pub const SessionEvent = union(enum) {
             .session_mcp_server_needs_reconnect => |*value| value.deinit(allocator),
             .session_mcp_server_removed => |*value| value.deinit(allocator),
             .session_mcp_server_status_changed => |*value| value.deinit(allocator),
+            .session_mcp_server_tools_loaded => |*value| value.deinit(allocator),
             .session_mcp_servers_loaded => |*value| value.deinit(allocator),
             .session_memory_changed => |*value| value.deinit(allocator),
             .session_mode_changed => |*value| value.deinit(allocator),
@@ -5273,6 +5439,7 @@ pub const SessionEvent = union(enum) {
             .session_plan_changed => |*value| value.deinit(allocator),
             .session_quota_observation => |*value| value.deinit(allocator),
             .session_remote_steerable_changed => |*value| value.deinit(allocator),
+            .session_request_body_compression_disabled => |*value| value.deinit(allocator),
             .session_resume => |*value| value.deinit(allocator),
             .session_schedule_cancelled => |*value| value.deinit(allocator),
             .session_schedule_created => |*value| value.deinit(allocator),
@@ -5370,9 +5537,11 @@ pub const pinned_discriminators = [_]RegistryEntry{
     .{ .wire = "hook.progress", .tag = .hook_progress },
     .{ .wire = "hook.start", .tag = .hook_start },
     .{ .wire = "human_response.recorded", .tag = .human_response_recorded },
+    .{ .wire = "instruction.update", .tag = .instruction_update },
     .{ .wire = "mcp.headers_refresh_completed", .tag = .mcp_headers_refresh_completed },
     .{ .wire = "mcp.headers_refresh_required", .tag = .mcp_headers_refresh_required },
     .{ .wire = "mcp.oauth_completed", .tag = .mcp_oauth_completed },
+    .{ .wire = "mcp.oauth_recovery_completed", .tag = .mcp_oauth_recovery_completed },
     .{ .wire = "mcp.oauth_required", .tag = .mcp_oauth_required },
     .{ .wire = "mcp.prompts.list_changed", .tag = .mcp_prompts_list_changed },
     .{ .wire = "mcp.resources.list_changed", .tag = .mcp_resources_list_changed },
@@ -5399,6 +5568,7 @@ pub const pinned_discriminators = [_]RegistryEntry{
     .{ .wire = "session.auto_tier_recommendation", .tag = .session_auto_tier_recommendation },
     .{ .wire = "session.auto_tier_switch_failed", .tag = .session_auto_tier_switch_failed },
     .{ .wire = "session.autopilot_objective_changed", .tag = .session_autopilot_objective_changed },
+    .{ .wire = "session.autopilot_stopped", .tag = .session_autopilot_stopped },
     .{ .wire = "session.background_tasks_changed", .tag = .session_background_tasks_changed },
     .{ .wire = "session.binary_asset", .tag = .session_binary_asset },
     .{ .wire = "session.canvas.closed", .tag = .session_canvas_closed },
@@ -5434,6 +5604,7 @@ pub const pinned_discriminators = [_]RegistryEntry{
     .{ .wire = "session.mcp_server_needs_reconnect", .tag = .session_mcp_server_needs_reconnect },
     .{ .wire = "session.mcp_server_removed", .tag = .session_mcp_server_removed },
     .{ .wire = "session.mcp_server_status_changed", .tag = .session_mcp_server_status_changed },
+    .{ .wire = "session.mcp_server_tools_loaded", .tag = .session_mcp_server_tools_loaded },
     .{ .wire = "session.mcp_servers_loaded", .tag = .session_mcp_servers_loaded },
     .{ .wire = "session.memory_changed", .tag = .session_memory_changed },
     .{ .wire = "session.mode_changed", .tag = .session_mode_changed },
@@ -5445,6 +5616,7 @@ pub const pinned_discriminators = [_]RegistryEntry{
     .{ .wire = "session.plan_changed", .tag = .session_plan_changed },
     .{ .wire = "session.quota_observation", .tag = .session_quota_observation },
     .{ .wire = "session.remote_steerable_changed", .tag = .session_remote_steerable_changed },
+    .{ .wire = "session.request_body_compression_disabled", .tag = .session_request_body_compression_disabled },
     .{ .wire = "session.resume", .tag = .session_resume },
     .{ .wire = "session.schedule_cancelled", .tag = .session_schedule_cancelled },
     .{ .wire = "session.schedule_created", .tag = .session_schedule_created },
@@ -7508,6 +7680,24 @@ fn parseShutdownAgentMetricModelMetricsMap(allocator: std.mem.Allocator, value: 
     return result;
 }
 
+fn parseShutdownDataToolUsageRequestIdsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc([]const u8, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeString(item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseString(allocator, item, null, null);
+        initialized += 1;
+    }
+    return result;
+}
+
 fn parseShutdownDataProviderModelMetricsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const UsageMetricsProviderModelMetric {
     const source = switch (value) {
         .array => |array| array.items,
@@ -7673,6 +7863,24 @@ fn parseGitHubMcpToolConfigAdditionalToolsetsArray(allocator: std.mem.Allocator,
 }
 
 fn parseGitHubMcpToolConfigAdditionalToolsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc([]const u8, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeString(item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseString(allocator, item, null, null);
+        initialized += 1;
+    }
+    return result;
+}
+
+fn parseUsageCheckpointDataToolUsageRequestIdsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
     const source = switch (value) {
         .array => |array| array.items,
         else => return error.InvalidSessionEvent,
@@ -7856,6 +8064,30 @@ fn parseSystemMessageDataContentBlocksArray(allocator: std.mem.Allocator, value:
     for (source, result) |item, *destination| {
         destination.* = try parseSystemMessageContentBlock(allocator, item);
         initialized += 1;
+    }
+    return result;
+}
+
+fn parseToolExecutionUsageQuotaSnapshotsMap(allocator: std.mem.Allocator, value: std.json.Value) !std.json.ArrayHashMap(std.json.Value) {
+    const source = try payloads.requiredObject(value);
+    var result: std.json.ArrayHashMap(std.json.Value) = .{};
+    errdefer {
+        var cleanup_iterator = result.map.iterator();
+        while (cleanup_iterator.next()) |entry| {
+            wipeString(entry.key_ptr.*);
+            wipeJsonValue(&entry.value_ptr.*);
+        }
+    }
+    var iterator = source.iterator();
+    while (iterator.next()) |entry| {
+        const key = try allocator.dupe(u8, entry.key_ptr.*);
+        errdefer wipeString(key);
+        const parsed_value = try cloneJsonValue(allocator, entry.value_ptr.*);
+        errdefer {
+            var cleanup_value = parsed_value;
+            wipeJsonValue(&cleanup_value);
+        }
+        try result.map.put(allocator, key, parsed_value);
     }
     return result;
 }
@@ -8666,6 +8898,7 @@ fn parseFusionPhaseCompletedData(allocator: std.mem.Allocator, value: std.json.V
             wipeFusionStagedTerminal(&present.*);
         }
     }
+    const parsed_ended_with_background_work = if (object.get("endedWithBackgroundWork")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .fusion_id = parsed_fusion_id,
         .phase_id = parsed_phase_id,
@@ -8682,6 +8915,7 @@ fn parseFusionPhaseCompletedData(allocator: std.mem.Allocator, value: std.json.V
         .projection_message = parsed_projection_message,
         .projection_mode = parsed_projection_mode,
         .staged_terminal = parsed_staged_terminal,
+        .ended_with_background_work = parsed_ended_with_background_work,
     };
 }
 
@@ -9838,6 +10072,13 @@ fn parseModelCallRequestBodyEncoding(_: std.mem.Allocator, value: std.json.Value
     return error.InvalidSessionEvent;
 }
 
+fn parseModelCallRequestBodyCompressionFallback(_: std.mem.Allocator, value: std.json.Value) !ModelCallRequestBodyCompressionFallback {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "retried")) return .retried;
+    if (std.mem.eql(u8, wire, "disabled")) return .disabled;
+    return error.InvalidSessionEvent;
+}
+
 fn parseModelCallWebSocketFallbackReason(_: std.mem.Allocator, value: std.json.Value) !ModelCallWebSocketFallbackReason {
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "connect_failed")) return .connect_failed;
@@ -10063,6 +10304,13 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
             wipeString(present.*);
         }
     }
+    const parsed_provider_type = if (object.get("providerType")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_provider_type = parsed_provider_type;
+        if (cleanup_provider_type) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_is_auto = if (object.get("isAuto")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_max_prompt_tokens = if (object.get("maxPromptTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_max_output_tokens = if (object.get("maxOutputTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
@@ -10084,6 +10332,21 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
             wipeModelCallRequestBodyEncoding(&present.*);
         }
     }
+    const parsed_request_body_compression_fallback = if (object.get("requestBodyCompressionFallback")) |field_value| if ((field_value) == .null) null else try parseModelCallRequestBodyCompressionFallback(allocator, field_value) else null;
+    errdefer {
+        var cleanup_request_body_compression_fallback = parsed_request_body_compression_fallback;
+        if (cleanup_request_body_compression_fallback) |*present| {
+            wipeModelCallRequestBodyCompressionFallback(&present.*);
+        }
+    }
+    const parsed_request_body_compression_fallback_from = if (object.get("requestBodyCompressionFallbackFrom")) |field_value| if ((field_value) == .null) null else try parseModelCallRequestBodyEncoding(allocator, field_value) else null;
+    errdefer {
+        var cleanup_request_body_compression_fallback_from = parsed_request_body_compression_fallback_from;
+        if (cleanup_request_body_compression_fallback_from) |*present| {
+            wipeModelCallRequestBodyEncoding(&present.*);
+        }
+    }
+    const parsed_request_body_compression_rejected_status = if (object.get("requestBodyCompressionRejectedStatus")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, 999) else null;
     const parsed_websocket_fallback_reason = if (object.get("websocketFallbackReason")) |field_value| if ((field_value) == .null) null else try parseModelCallWebSocketFallbackReason(allocator, field_value) else null;
     errdefer {
         var cleanup_websocket_fallback_reason = parsed_websocket_fallback_reason;
@@ -10175,6 +10438,9 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
     }
     const parsed_available_tool_count = if (object.get("availableToolCount")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_tool_token_count = if (object.get("toolTokenCount")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_custom_tool_call_count = if (object.get("customToolCallCount")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_unmatched_tool_result_count = if (object.get("unmatchedToolResultCount")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_orphan_tool_call_count = if (object.get("orphanToolCallCount")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_frontier_source = if (object.get("frontierSource")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_frontier_source = parsed_frontier_source;
@@ -10183,6 +10449,7 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
         }
     }
     const parsed_cache_ttl_seconds = if (object.get("cacheTtlSeconds")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_cache_policy_ttl_seconds = if (object.get("cachePolicyTtlSeconds")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 1, null, null) else null;
     const parsed_cache_details_reported = if (object.get("cacheDetailsReported")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_num_tool_calls = if (object.get("numToolCalls")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_tool_counts = if (object.get("toolCounts")) |field_value| if ((field_value) == .null) null else try parseAssistantUsageDataToolCountsMap(allocator, field_value) else null;
@@ -10236,6 +10503,7 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
         .is_byok = parsed_is_byok,
         .byok_kind = parsed_byok_kind,
         .model_provider = parsed_model_provider,
+        .provider_type = parsed_provider_type,
         .is_auto = parsed_is_auto,
         .max_prompt_tokens = parsed_max_prompt_tokens,
         .max_output_tokens = parsed_max_output_tokens,
@@ -10245,6 +10513,9 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
         .request_body_bytes = parsed_request_body_bytes,
         .request_body_wire_bytes = parsed_request_body_wire_bytes,
         .request_body_encoding = parsed_request_body_encoding,
+        .request_body_compression_fallback = parsed_request_body_compression_fallback,
+        .request_body_compression_fallback_from = parsed_request_body_compression_fallback_from,
+        .request_body_compression_rejected_status = parsed_request_body_compression_rejected_status,
         .websocket_fallback_reason = parsed_websocket_fallback_reason,
         .websocket_fallback_after_ms = parsed_websocket_fallback_after_ms,
         .websocket_fallback_error_kind = parsed_websocket_fallback_error_kind,
@@ -10264,8 +10535,12 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
         .reasoning_summary = parsed_reasoning_summary,
         .available_tool_count = parsed_available_tool_count,
         .tool_token_count = parsed_tool_token_count,
+        .custom_tool_call_count = parsed_custom_tool_call_count,
+        .unmatched_tool_result_count = parsed_unmatched_tool_result_count,
+        .orphan_tool_call_count = parsed_orphan_tool_call_count,
         .frontier_source = parsed_frontier_source,
         .cache_ttl_seconds = parsed_cache_ttl_seconds,
+        .cache_policy_ttl_seconds = parsed_cache_policy_ttl_seconds,
         .cache_details_reported = parsed_cache_details_reported,
         .num_tool_calls = parsed_num_tool_calls,
         .tool_counts = parsed_tool_counts,
@@ -11082,6 +11357,80 @@ fn parseHumanResponseRecordedData(allocator: std.mem.Allocator, value: std.json.
     };
 }
 
+fn parseInstructionUpdateAuthority(_: std.mem.Allocator, value: std.json.Value) !InstructionUpdateAuthority {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "runtime")) return .runtime;
+    if (std.mem.eql(u8, wire, "host")) return .host;
+    if (std.mem.eql(u8, wire, "managedPolicy")) return .managed_policy;
+    return error.InvalidSessionEvent;
+}
+
+fn parseInstructionUpdateLifetime(_: std.mem.Allocator, value: std.json.Value) !InstructionUpdateLifetime {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "persistent")) return .persistent;
+    if (std.mem.eql(u8, wire, "turn")) return .turn;
+    return error.InvalidSessionEvent;
+}
+
+fn parseInstructionUpdateBoundary(_: std.mem.Allocator, value: std.json.Value) !InstructionUpdateBoundary {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "afterToolResults")) return .after_tool_results;
+    if (std.mem.eql(u8, wire, "nextModelRequest")) return .next_model_request;
+    return error.InvalidSessionEvent;
+}
+
+fn parseInstructionUpdateFallback(_: std.mem.Allocator, value: std.json.Value) !InstructionUpdateFallback {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "rebuildSystemPrompt")) return .rebuild_system_prompt;
+    if (std.mem.eql(u8, wire, "reject")) return .reject;
+    return error.InvalidSessionEvent;
+}
+
+fn parseInstructionUpdateData(allocator: std.mem.Allocator, value: std.json.Value) !InstructionUpdateData {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_content = try parseString(allocator, object.get("content") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_content = parsed_content;
+        wipeString(cleanup_content);
+    }
+    const parsed_authority = try parseInstructionUpdateAuthority(allocator, object.get("authority") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_authority = parsed_authority;
+        wipeInstructionUpdateAuthority(&cleanup_authority);
+    }
+    const parsed_lifetime = try parseInstructionUpdateLifetime(allocator, object.get("lifetime") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_lifetime = parsed_lifetime;
+        wipeInstructionUpdateLifetime(&cleanup_lifetime);
+    }
+    const parsed_boundary = try parseInstructionUpdateBoundary(allocator, object.get("boundary") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_boundary = parsed_boundary;
+        wipeInstructionUpdateBoundary(&cleanup_boundary);
+    }
+    const parsed_fallback = try parseInstructionUpdateFallback(allocator, object.get("fallback") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_fallback = parsed_fallback;
+        wipeInstructionUpdateFallback(&cleanup_fallback);
+    }
+    const parsed_name = if (object.get("name")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_name = parsed_name;
+        if (cleanup_name) |*present| {
+            wipeString(present.*);
+        }
+    }
+    return .{
+        .content = parsed_content,
+        .authority = parsed_authority,
+        .lifetime = parsed_lifetime,
+        .boundary = parsed_boundary,
+        .fallback = parsed_fallback,
+        .name = parsed_name,
+    };
+}
+
 fn parseMcpHeadersRefreshCompletedOutcome(_: std.mem.Allocator, value: std.json.Value) !McpHeadersRefreshCompletedOutcome {
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "headers")) return .headers;
@@ -11171,6 +11520,39 @@ fn parseMcpOauthCompletedData(allocator: std.mem.Allocator, value: std.json.Valu
     }
     return .{
         .request_id = parsed_request_id,
+        .outcome = parsed_outcome,
+    };
+}
+
+fn parseMcpOauthRecoveryCompletedOutcome(_: std.mem.Allocator, value: std.json.Value) !McpOauthRecoveryCompletedOutcome {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "succeeded")) return .succeeded;
+    if (std.mem.eql(u8, wire, "cancelled")) return .cancelled;
+    if (std.mem.eql(u8, wire, "failed")) return .failed;
+    return error.InvalidSessionEvent;
+}
+
+fn parseMcpOauthRecoveryCompletedData(allocator: std.mem.Allocator, value: std.json.Value) !McpOauthRecoveryCompletedData {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_request_id = parsed_request_id;
+        wipeString(cleanup_request_id);
+    }
+    const parsed_server_name = try parseString(allocator, object.get("serverName") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_server_name = parsed_server_name;
+        wipeString(cleanup_server_name);
+    }
+    const parsed_outcome = try parseMcpOauthRecoveryCompletedOutcome(allocator, object.get("outcome") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_outcome = parsed_outcome;
+        wipeMcpOauthRecoveryCompletedOutcome(&cleanup_outcome);
+    }
+    return .{
+        .request_id = parsed_request_id,
+        .server_name = parsed_server_name,
         .outcome = parsed_outcome,
     };
 }
@@ -11349,6 +11731,7 @@ fn parseMcpOauthRequiredData(allocator: std.mem.Allocator, value: std.json.Value
         var cleanup_reason = parsed_reason;
         wipeMcpOauthRequestReason(&cleanup_reason);
     }
+    const parsed_runtime_refresh_supported = if (object.get("runtimeRefreshSupported")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .request_id = parsed_request_id,
         .server_name = parsed_server_name,
@@ -11358,6 +11741,7 @@ fn parseMcpOauthRequiredData(allocator: std.mem.Allocator, value: std.json.Value
         .http_response = parsed_http_response,
         .resource_metadata = parsed_resource_metadata,
         .reason = parsed_reason,
+        .runtime_refresh_supported = parsed_runtime_refresh_supported,
     };
 }
 
@@ -11523,6 +11907,9 @@ fn parseModelCallFailureRequestFingerprint(allocator: std.mem.Allocator, value: 
     const parsed_tool_result_message_count = try parseInteger(u64, object.get("toolResultMessageCount") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_tool_call_count = try parseInteger(u64, object.get("toolCallCount") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_nameless_tool_call_count = try parseInteger(u64, object.get("namelessToolCallCount") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_custom_tool_call_count = if (object.get("customToolCallCount")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_unmatched_tool_result_count = if (object.get("unmatchedToolResultCount")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_orphan_tool_call_count = if (object.get("orphanToolCallCount")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_image_part_count = try parseInteger(u64, object.get("imagePartCount") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_image_parts_missing_media_type = try parseInteger(u64, object.get("imagePartsMissingMediaType") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_image_bytes = if (object.get("imageBytes")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
@@ -11540,6 +11927,9 @@ fn parseModelCallFailureRequestFingerprint(allocator: std.mem.Allocator, value: 
         .tool_result_message_count = parsed_tool_result_message_count,
         .tool_call_count = parsed_tool_call_count,
         .nameless_tool_call_count = parsed_nameless_tool_call_count,
+        .custom_tool_call_count = parsed_custom_tool_call_count,
+        .unmatched_tool_result_count = parsed_unmatched_tool_result_count,
+        .orphan_tool_call_count = parsed_orphan_tool_call_count,
         .image_part_count = parsed_image_part_count,
         .image_parts_missing_media_type = parsed_image_parts_missing_media_type,
         .image_bytes = parsed_image_bytes,
@@ -11627,6 +12017,21 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
             wipeModelCallRequestBodyEncoding(&present.*);
         }
     }
+    const parsed_request_body_compression_fallback = if (object.get("requestBodyCompressionFallback")) |field_value| if ((field_value) == .null) null else try parseModelCallRequestBodyCompressionFallback(allocator, field_value) else null;
+    errdefer {
+        var cleanup_request_body_compression_fallback = parsed_request_body_compression_fallback;
+        if (cleanup_request_body_compression_fallback) |*present| {
+            wipeModelCallRequestBodyCompressionFallback(&present.*);
+        }
+    }
+    const parsed_request_body_compression_fallback_from = if (object.get("requestBodyCompressionFallbackFrom")) |field_value| if ((field_value) == .null) null else try parseModelCallRequestBodyEncoding(allocator, field_value) else null;
+    errdefer {
+        var cleanup_request_body_compression_fallback_from = parsed_request_body_compression_fallback_from;
+        if (cleanup_request_body_compression_fallback_from) |*present| {
+            wipeModelCallRequestBodyEncoding(&present.*);
+        }
+    }
+    const parsed_request_body_compression_rejected_status = if (object.get("requestBodyCompressionRejectedStatus")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, 999) else null;
     const parsed_retry_attempt = if (object.get("retryAttempt")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_websocket_fallback_reason = if (object.get("websocketFallbackReason")) |field_value| if ((field_value) == .null) null else try parseModelCallWebSocketFallbackReason(allocator, field_value) else null;
     errdefer {
@@ -11661,6 +12066,13 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
     errdefer {
         var cleanup_model_provider = parsed_model_provider;
         if (cleanup_model_provider) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_provider_type = if (object.get("providerType")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_provider_type = parsed_provider_type;
+        if (cleanup_provider_type) |*present| {
             wipeString(present.*);
         }
     }
@@ -11755,6 +12167,9 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
         .request_body_bytes = parsed_request_body_bytes,
         .request_body_wire_bytes = parsed_request_body_wire_bytes,
         .request_body_encoding = parsed_request_body_encoding,
+        .request_body_compression_fallback = parsed_request_body_compression_fallback,
+        .request_body_compression_fallback_from = parsed_request_body_compression_fallback_from,
+        .request_body_compression_rejected_status = parsed_request_body_compression_rejected_status,
         .retry_attempt = parsed_retry_attempt,
         .websocket_fallback_reason = parsed_websocket_fallback_reason,
         .websocket_fallback_after_ms = parsed_websocket_fallback_after_ms,
@@ -11768,6 +12183,7 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
         .is_byok = parsed_is_byok,
         .byok_kind = parsed_byok_kind,
         .model_provider = parsed_model_provider,
+        .provider_type = parsed_provider_type,
         .is_auto = parsed_is_auto,
         .reasoning_effort = parsed_reasoning_effort,
         .interaction_type = parsed_interaction_type,
@@ -13338,6 +13754,7 @@ fn parsePermissionApprovalEvaluationReasonCode(_: std.mem.Allocator, value: std.
     if (std.mem.eql(u8, wire, "inactive")) return .inactive;
     if (std.mem.eql(u8, wire, "authorization-history-incomplete")) return .authorization_history_incomplete;
     if (std.mem.eql(u8, wire, "managed-approval-required")) return .managed_approval_required;
+    if (std.mem.eql(u8, wire, "extension-permission-access")) return .extension_permission_access;
     if (std.mem.eql(u8, wire, "sandbox-bypass")) return .sandbox_bypass;
     if (std.mem.eql(u8, wire, "action-too-long")) return .action_too_long;
     if (std.mem.eql(u8, wire, "path-not-authorized")) return .path_not_authorized;
@@ -13427,6 +13844,13 @@ fn parseAssistedApprovalJudgeFailureReason(_: std.mem.Allocator, value: std.json
 fn parsePermissionAssistedApproval(allocator: std.mem.Allocator, value: std.json.Value) !PermissionAssistedApproval {
     const object = try payloads.requiredObject(value);
 
+    const parsed_evaluation_id = if (object.get("evaluationId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_evaluation_id = parsed_evaluation_id;
+        if (cleanup_evaluation_id) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_evaluation = if (object.get("evaluation")) |field_value| if ((field_value) == .null) null else try parsePermissionApprovalEvaluation(allocator, field_value) else null;
     errdefer {
         var cleanup_evaluation = parsed_evaluation;
@@ -13461,6 +13885,7 @@ fn parsePermissionAssistedApproval(allocator: std.mem.Allocator, value: std.json
         }
     }
     return .{
+        .evaluation_id = parsed_evaluation_id,
         .evaluation = parsed_evaluation,
         .recommendation = parsed_recommendation,
         .reason = parsed_reason,
@@ -14749,6 +15174,13 @@ fn parsePermissionRequestedData(allocator: std.mem.Allocator, value: std.json.Va
             wipeString(present.*);
         }
     }
+    const parsed_fusion = if (object.get("fusion")) |field_value| if ((field_value) == .null) null else try parseFusionAttribution(allocator, field_value) else null;
+    errdefer {
+        var cleanup_fusion = parsed_fusion;
+        if (cleanup_fusion) |*present| {
+            wipeFusionAttribution(&present.*);
+        }
+    }
     return .{
         .request_id = parsed_request_id,
         .permission_request = parsed_permission_request,
@@ -14760,6 +15192,7 @@ fn parsePermissionRequestedData(allocator: std.mem.Allocator, value: std.json.Va
         .risk_assessment = parsed_risk_assessment,
         .resolved_by_hook = parsed_resolved_by_hook,
         .recovery_episode_id = parsed_recovery_episode_id,
+        .fusion = parsed_fusion,
     };
 }
 
@@ -16018,6 +16451,27 @@ fn parseAutopilotObjectiveChangedData(allocator: std.mem.Allocator, value: std.j
     };
 }
 
+fn parseAutopilotStoppedData(allocator: std.mem.Allocator, value: std.json.Value) !AutopilotStoppedData {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_reason = try parseString(allocator, object.get("reason") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_reason = parsed_reason;
+        wipeString(cleanup_reason);
+    }
+    const parsed_request_id = if (object.get("requestId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_request_id = parsed_request_id;
+        if (cleanup_request_id) |*present| {
+            wipeString(present.*);
+        }
+    }
+    return .{
+        .reason = parsed_reason,
+        .request_id = parsed_request_id,
+    };
+}
+
 fn parseBackgroundTasksChangedData(_: std.mem.Allocator, value: std.json.Value) !BackgroundTasksChangedData {
     _ = try payloads.requiredObject(value);
 
@@ -16532,10 +16986,89 @@ fn parseCompactionTrigger(_: std.mem.Allocator, value: std.json.Value) !Compacti
     return error.InvalidSessionEvent;
 }
 
+fn parseCompactionCompleteSummarizerProgress(_: std.mem.Allocator, value: std.json.Value) !CompactionCompleteSummarizerProgress {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_duration_ms = try parseInteger(u64, object.get("durationMs") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_attempt_count = try parseInteger(u64, object.get("attemptCount") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_attempt_age_ms = if (object.get("attemptAgeMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_attempt_settled = if (object.get("attemptSettled")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_time_to_first_token_ms = if (object.get("timeToFirstTokenMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_time_to_first_output_ms = if (object.get("timeToFirstOutputMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_time_to_first_answer_output_ms = if (object.get("timeToFirstAnswerOutputMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_stream_event_count = try parseInteger(u64, object.get("streamEventCount") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_output_event_count = try parseInteger(u64, object.get("outputEventCount") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_max_stream_event_gap_ms = if (object.get("maxStreamEventGapMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_max_output_gap_before_answer_ms = if (object.get("maxOutputGapBeforeAnswerMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_max_output_gap_after_answer_ms = if (object.get("maxOutputGapAfterAnswerMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_idle_ms = if (object.get("idleMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_since_last_output_ms = if (object.get("sinceLastOutputMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_input_shrunk = if (object.get("inputShrunk")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    return .{
+        .duration_ms = parsed_duration_ms,
+        .attempt_count = parsed_attempt_count,
+        .attempt_age_ms = parsed_attempt_age_ms,
+        .attempt_settled = parsed_attempt_settled,
+        .time_to_first_token_ms = parsed_time_to_first_token_ms,
+        .time_to_first_output_ms = parsed_time_to_first_output_ms,
+        .time_to_first_answer_output_ms = parsed_time_to_first_answer_output_ms,
+        .stream_event_count = parsed_stream_event_count,
+        .output_event_count = parsed_output_event_count,
+        .max_stream_event_gap_ms = parsed_max_stream_event_gap_ms,
+        .max_output_gap_before_answer_ms = parsed_max_output_gap_before_answer_ms,
+        .max_output_gap_after_answer_ms = parsed_max_output_gap_after_answer_ms,
+        .idle_ms = parsed_idle_ms,
+        .since_last_output_ms = parsed_since_last_output_ms,
+        .input_shrunk = parsed_input_shrunk,
+    };
+}
+
 fn parseCompactionCompleteData(allocator: std.mem.Allocator, value: std.json.Value) !CompactionCompleteData {
     const object = try payloads.requiredObject(value);
 
     const parsed_success = try parseBool(object.get("success") orelse return error.InvalidSessionEvent);
+    const parsed_outcome = if (object.get("outcome")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_outcome = parsed_outcome;
+        if (cleanup_outcome) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_outcome_reason = if (object.get("outcomeReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_outcome_reason = parsed_outcome_reason;
+        if (cleanup_outcome_reason) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_failure_reason = if (object.get("failureReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_failure_reason = parsed_failure_reason;
+        if (cleanup_failure_reason) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_compaction_attempt_id = if (object.get("compactionAttemptId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_compaction_attempt_id = parsed_compaction_attempt_id;
+        if (cleanup_compaction_attempt_id) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_model = parsed_model;
+        if (cleanup_model) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_initial_model = if (object.get("initialModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_initial_model = parsed_initial_model;
+        if (cleanup_initial_model) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_error_ = if (object.get("error")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_error_ = parsed_error_;
@@ -16548,6 +17081,13 @@ fn parseCompactionCompleteData(allocator: std.mem.Allocator, value: std.json.Val
     const parsed_pre_compaction_messages_length = if (object.get("preCompactionMessagesLength")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_messages_removed = if (object.get("messagesRemoved")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_tokens_removed = if (object.get("tokensRemoved")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_token_accounting_basis = if (object.get("tokenAccountingBasis")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_token_accounting_basis = parsed_token_accounting_basis;
+        if (cleanup_token_accounting_basis) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_custom_instructions = if (object.get("customInstructions")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_custom_instructions = parsed_custom_instructions;
@@ -16573,13 +17113,6 @@ fn parseCompactionCompleteData(allocator: std.mem.Allocator, value: std.json.Val
     errdefer {
         var cleanup_active_workflow_summary = parsed_active_workflow_summary;
         if (cleanup_active_workflow_summary) |*present| {
-            wipeString(present.*);
-        }
-    }
-    const parsed_active_factory_summary = if (object.get("activeFactorySummary")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
-    errdefer {
-        var cleanup_active_factory_summary = parsed_active_factory_summary;
-        if (cleanup_active_factory_summary) |*present| {
             wipeString(present.*);
         }
     }
@@ -16624,6 +17157,14 @@ fn parseCompactionCompleteData(allocator: std.mem.Allocator, value: std.json.Val
     const parsed_tool_definitions_tokens = if (object.get("toolDefinitionsTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_status_code = if (object.get("statusCode")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_token_limit = if (object.get("tokenLimit")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_target_prompt_token_limit = if (object.get("targetPromptTokenLimit")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_switch_target_model = if (object.get("switchTargetModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_switch_target_model = parsed_switch_target_model;
+        if (cleanup_switch_target_model) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_trigger = if (object.get("trigger")) |field_value| if ((field_value) == .null) null else try parseCompactionTrigger(allocator, field_value) else null;
     errdefer {
         var cleanup_trigger = parsed_trigger;
@@ -16631,19 +17172,32 @@ fn parseCompactionCompleteData(allocator: std.mem.Allocator, value: std.json.Val
             wipeCompactionTrigger(&present.*);
         }
     }
+    const parsed_summarizer_progress = if (object.get("summarizerProgress")) |field_value| if ((field_value) == .null) null else try parseCompactionCompleteSummarizerProgress(allocator, field_value) else null;
+    errdefer {
+        var cleanup_summarizer_progress = parsed_summarizer_progress;
+        if (cleanup_summarizer_progress) |*present| {
+            wipeCompactionCompleteSummarizerProgress(&present.*);
+        }
+    }
     return .{
         .success = parsed_success,
+        .outcome = parsed_outcome,
+        .outcome_reason = parsed_outcome_reason,
+        .failure_reason = parsed_failure_reason,
+        .compaction_attempt_id = parsed_compaction_attempt_id,
+        .model = parsed_model,
+        .initial_model = parsed_initial_model,
         .error_ = parsed_error_,
         .pre_compaction_tokens = parsed_pre_compaction_tokens,
         .post_compaction_tokens = parsed_post_compaction_tokens,
         .pre_compaction_messages_length = parsed_pre_compaction_messages_length,
         .messages_removed = parsed_messages_removed,
         .tokens_removed = parsed_tokens_removed,
+        .token_accounting_basis = parsed_token_accounting_basis,
         .custom_instructions = parsed_custom_instructions,
         .summary_content = parsed_summary_content,
         .responses_reasoning = parsed_responses_reasoning,
         .active_workflow_summary = parsed_active_workflow_summary,
-        .active_factory_summary = parsed_active_factory_summary,
         .behavior_model_id = parsed_behavior_model_id,
         .checkpoint_number = parsed_checkpoint_number,
         .checkpoint_path = parsed_checkpoint_path,
@@ -16655,13 +17209,23 @@ fn parseCompactionCompleteData(allocator: std.mem.Allocator, value: std.json.Val
         .tool_definitions_tokens = parsed_tool_definitions_tokens,
         .status_code = parsed_status_code,
         .token_limit = parsed_token_limit,
+        .target_prompt_token_limit = parsed_target_prompt_token_limit,
+        .switch_target_model = parsed_switch_target_model,
         .trigger = parsed_trigger,
+        .summarizer_progress = parsed_summarizer_progress,
     };
 }
 
 fn parseCompactionStartData(allocator: std.mem.Allocator, value: std.json.Value) !CompactionStartData {
     const object = try payloads.requiredObject(value);
 
+    const parsed_compaction_attempt_id = if (object.get("compactionAttemptId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_compaction_attempt_id = parsed_compaction_attempt_id;
+        if (cleanup_compaction_attempt_id) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_model = parsed_model;
@@ -16674,6 +17238,14 @@ fn parseCompactionStartData(allocator: std.mem.Allocator, value: std.json.Value)
     const parsed_tool_definitions_tokens = if (object.get("toolDefinitionsTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_current_tokens = if (object.get("currentTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_token_limit = if (object.get("tokenLimit")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_target_prompt_token_limit = if (object.get("targetPromptTokenLimit")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_switch_target_model = if (object.get("switchTargetModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_switch_target_model = parsed_switch_target_model;
+        if (cleanup_switch_target_model) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_trigger = if (object.get("trigger")) |field_value| if ((field_value) == .null) null else try parseCompactionTrigger(allocator, field_value) else null;
     errdefer {
         var cleanup_trigger = parsed_trigger;
@@ -16682,12 +17254,15 @@ fn parseCompactionStartData(allocator: std.mem.Allocator, value: std.json.Value)
         }
     }
     return .{
+        .compaction_attempt_id = parsed_compaction_attempt_id,
         .model = parsed_model,
         .system_tokens = parsed_system_tokens,
         .conversation_tokens = parsed_conversation_tokens,
         .tool_definitions_tokens = parsed_tool_definitions_tokens,
         .current_tokens = parsed_current_tokens,
         .token_limit = parsed_token_limit,
+        .target_prompt_token_limit = parsed_target_prompt_token_limit,
+        .switch_target_model = parsed_switch_target_model,
         .trigger = parsed_trigger,
     };
 }
@@ -17066,6 +17641,13 @@ fn parseRemediationAction(_: std.mem.Allocator, value: std.json.Value) !Remediat
 fn parseErrorData(allocator: std.mem.Allocator, value: std.json.Value) !ErrorData {
     const object = try payloads.requiredObject(value);
 
+    const parsed_originating_message_id = if (object.get("originatingMessageId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_originating_message_id = parsed_originating_message_id;
+        if (cleanup_originating_message_id) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_error_type = try parseString(allocator, object.get("errorType") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_error_type = parsed_error_type;
@@ -17135,6 +17717,7 @@ fn parseErrorData(allocator: std.mem.Allocator, value: std.json.Value) !ErrorDat
         }
     }
     return .{
+        .originating_message_id = parsed_originating_message_id,
         .error_type = parsed_error_type,
         .error_code = parsed_error_code,
         .provider_error_type = parsed_provider_error_type,
@@ -18144,6 +18727,7 @@ fn parseFusionCompletedData(allocator: std.mem.Allocator, value: std.json.Value)
     const parsed_cache_write_tokens = if (object.get("cacheWriteTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_total_nano_aiu = try parseNumber(object.get("totalNanoAiu") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_duration_ms = try parseNumber(object.get("durationMs") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_awaiting_background_work = if (object.get("awaitingBackgroundWork")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .fusion_id = parsed_fusion_id,
         .commit_id = parsed_commit_id,
@@ -18163,6 +18747,7 @@ fn parseFusionCompletedData(allocator: std.mem.Allocator, value: std.json.Value)
         .cache_write_tokens = parsed_cache_write_tokens,
         .total_nano_aiu = parsed_total_nano_aiu,
         .duration_ms = parsed_duration_ms,
+        .awaiting_background_work = parsed_awaiting_background_work,
     };
 }
 
@@ -18357,6 +18942,13 @@ fn parseFusionResolvedData(allocator: std.mem.Allocator, value: std.json.Value) 
             wipeString(present.*);
         }
     }
+    const parsed_selected_rule_id = if (object.get("selectedRuleId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_selected_rule_id = parsed_selected_rule_id;
+        if (cleanup_selected_rule_id) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_rule_index = if (object.get("ruleIndex")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_rule_name = if (object.get("ruleName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
@@ -18457,6 +19049,7 @@ fn parseFusionResolvedData(allocator: std.mem.Allocator, value: std.json.Value) 
         .policy_version = parsed_policy_version,
         .model_universe_version = parsed_model_universe_version,
         .rule_id = parsed_rule_id,
+        .selected_rule_id = parsed_selected_rule_id,
         .rule_index = parsed_rule_index,
         .rule_name = parsed_rule_name,
         .scores = parsed_scores,
@@ -18482,6 +19075,13 @@ fn parseFusionRouteFailedData(allocator: std.mem.Allocator, value: std.json.Valu
     errdefer {
         const cleanup_attempt_id = parsed_attempt_id;
         wipeString(cleanup_attempt_id);
+    }
+    const parsed_fusion_id = if (object.get("fusionId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_fusion_id = parsed_fusion_id;
+        if (cleanup_fusion_id) |*present| {
+            wipeString(present.*);
+        }
     }
     const parsed_synthetic_model = try parseString(allocator, object.get("syntheticModel") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
@@ -18513,6 +19113,7 @@ fn parseFusionRouteFailedData(allocator: std.mem.Allocator, value: std.json.Valu
     const parsed_routing_latency_ms = if (object.get("routingLatencyMs")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
     return .{
         .attempt_id = parsed_attempt_id,
+        .fusion_id = parsed_fusion_id,
         .synthetic_model = parsed_synthetic_model,
         .policy = parsed_policy,
         .reason = parsed_reason,
@@ -19139,6 +19740,21 @@ fn parseMcpServerStatusChangedData(allocator: std.mem.Allocator, value: std.json
     };
 }
 
+fn parseMcpServerToolsLoadedData(allocator: std.mem.Allocator, value: std.json.Value) !McpServerToolsLoadedData {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_server_name = try parseString(allocator, object.get("serverName") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_server_name = parsed_server_name;
+        wipeString(cleanup_server_name);
+    }
+    const parsed_tool_count = try parseInteger(i64, object.get("toolCount") orelse return error.InvalidSessionEvent, null, null, null);
+    return .{
+        .server_name = parsed_server_name,
+        .tool_count = parsed_tool_count,
+    };
+}
+
 fn parseMcpServerSource(_: std.mem.Allocator, value: std.json.Value) !McpServerSource {
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "user")) return .user;
@@ -19304,9 +19920,11 @@ fn parseModeNoticeDeliveredData(allocator: std.mem.Allocator, value: std.json.Va
             wipeString(present.*);
         }
     }
+    const parsed_instruction_update_persisted = if (object.get("instructionUpdatePersisted")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .mode = parsed_mode,
         .content = parsed_content,
+        .instruction_update_persisted = parsed_instruction_update_persisted,
     };
 }
 
@@ -19861,6 +20479,21 @@ fn parseRemoteSteerableChangedData(_: std.mem.Allocator, value: std.json.Value) 
     const parsed_remote_steerable = try parseBool(object.get("remoteSteerable") orelse return error.InvalidSessionEvent);
     return .{
         .remote_steerable = parsed_remote_steerable,
+    };
+}
+
+fn parseRequestBodyCompressionDisabledData(allocator: std.mem.Allocator, value: std.json.Value) !RequestBodyCompressionDisabledData {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_encoding = if (object.get("encoding")) |field_value| if ((field_value) == .null) null else try parseModelCallRequestBodyEncoding(allocator, field_value) else null;
+    errdefer {
+        var cleanup_encoding = parsed_encoding;
+        if (cleanup_encoding) |*present| {
+            wipeModelCallRequestBodyEncoding(&present.*);
+        }
+    }
+    return .{
+        .encoding = parsed_encoding,
     };
 }
 
@@ -20502,6 +21135,15 @@ fn parseShutdownAgentMetric(allocator: std.mem.Allocator, value: std.json.Value)
 fn parseShutdownData(allocator: std.mem.Allocator, value: std.json.Value) !ShutdownData {
     const object = try payloads.requiredObject(value);
 
+    const parsed_tool_usage_request_ids = if (object.get("toolUsageRequestIds")) |field_value| if ((field_value) == .null) null else try parseShutdownDataToolUsageRequestIdsArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_tool_usage_request_ids = parsed_tool_usage_request_ids;
+        if (cleanup_tool_usage_request_ids) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipeString(item.*);
+            }
+        }
+    }
     const parsed_accounting_snapshot = if (object.get("accountingSnapshot")) |field_value| if ((field_value) == .null) null else try parseUsageGetMetricsResult(allocator, field_value) else null;
     errdefer {
         var cleanup_accounting_snapshot = parsed_accounting_snapshot;
@@ -20601,6 +21243,7 @@ fn parseShutdownData(allocator: std.mem.Allocator, value: std.json.Value) !Shutd
     const parsed_conversation_tokens = if (object.get("conversationTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_tool_definitions_tokens = if (object.get("toolDefinitionsTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     return .{
+        .tool_usage_request_ids = parsed_tool_usage_request_ids,
         .accounting_snapshot = parsed_accounting_snapshot,
         .provider_model_metrics = parsed_provider_model_metrics,
         .usage_accounting_watermarks = parsed_usage_accounting_watermarks,
@@ -21033,6 +21676,15 @@ fn parseUsageCheckpointModelCacheState(allocator: std.mem.Allocator, value: std.
 fn parseUsageCheckpointData(allocator: std.mem.Allocator, value: std.json.Value) !UsageCheckpointData {
     const object = try payloads.requiredObject(value);
 
+    const parsed_tool_usage_request_ids = if (object.get("toolUsageRequestIds")) |field_value| if ((field_value) == .null) null else try parseUsageCheckpointDataToolUsageRequestIdsArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_tool_usage_request_ids = parsed_tool_usage_request_ids;
+        if (cleanup_tool_usage_request_ids) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipeString(item.*);
+            }
+        }
+    }
     const parsed_total_nano_aiu = try parseNumber(object.get("totalNanoAiu") orelse return error.InvalidSessionEvent, 0, null, null);
     const parsed_accounting_snapshot = if (object.get("accountingSnapshot")) |field_value| if ((field_value) == .null) null else try parseUsageGetMetricsResult(allocator, field_value) else null;
     errdefer {
@@ -21082,6 +21734,7 @@ fn parseUsageCheckpointData(allocator: std.mem.Allocator, value: std.json.Value)
         }
     }
     return .{
+        .tool_usage_request_ids = parsed_tool_usage_request_ids,
         .total_nano_aiu = parsed_total_nano_aiu,
         .accounting_snapshot = parsed_accounting_snapshot,
         .provider_model_metrics = parsed_provider_model_metrics,
@@ -21139,6 +21792,13 @@ fn parseWarningData(allocator: std.mem.Allocator, value: std.json.Value) !Warnin
         const cleanup_message = parsed_message;
         wipeString(cleanup_message);
     }
+    const parsed_originating_message_id = if (object.get("originatingMessageId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_originating_message_id = parsed_originating_message_id;
+        if (cleanup_originating_message_id) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_url = if (object.get("url")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_url = parsed_url;
@@ -21156,6 +21816,7 @@ fn parseWarningData(allocator: std.mem.Allocator, value: std.json.Value) !Warnin
     return .{
         .warning_type = parsed_warning_type,
         .message = parsed_message,
+        .originating_message_id = parsed_originating_message_id,
         .url = parsed_url,
         .remediation = parsed_remediation,
     };
@@ -21808,13 +22469,6 @@ fn parseSubagentStartedData(allocator: std.mem.Allocator, value: std.json.Value)
             wipeSubagentModelSelectionSource(&present.*);
         }
     }
-    const parsed_factory_run_id = if (object.get("factoryRunId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
-    errdefer {
-        var cleanup_factory_run_id = parsed_factory_run_id;
-        if (cleanup_factory_run_id) |*present| {
-            wipeString(present.*);
-        }
-    }
     const parsed_workflow_run_id = if (object.get("workflowRunId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_workflow_run_id = parsed_workflow_run_id;
@@ -21852,7 +22506,6 @@ fn parseSubagentStartedData(allocator: std.mem.Allocator, value: std.json.Value)
         .model = parsed_model,
         .task_model_source = parsed_task_model_source,
         .model_selection_source = parsed_model_selection_source,
-        .factory_run_id = parsed_factory_run_id,
         .workflow_run_id = parsed_workflow_run_id,
         .parent_id = parsed_parent_id,
         .resumable = parsed_resumable,
@@ -22382,6 +23035,96 @@ fn parseSystemNotificationData(allocator: std.mem.Allocator, value: std.json.Val
         .content = parsed_content,
         .kind = parsed_kind,
         .responses_reasoning = parsed_responses_reasoning,
+    };
+}
+
+fn parseToolExecutionUsageTokenDetails(_: std.mem.Allocator, value: std.json.Value) !ToolExecutionUsageTokenDetails {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_image_tokens = try parseInteger(u64, object.get("imageTokens") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_text_tokens = try parseInteger(u64, object.get("textTokens") orelse return error.InvalidSessionEvent, 0, null, null);
+    return .{
+        .image_tokens = parsed_image_tokens,
+        .text_tokens = parsed_text_tokens,
+    };
+}
+
+fn parseToolExecutionUsage(allocator: std.mem.Allocator, value: std.json.Value) !ToolExecutionUsage {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_request_id = try parseString(allocator, object.get("requestId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_request_id = parsed_request_id;
+        wipeString(cleanup_request_id);
+    }
+    const parsed_model = try parseString(allocator, object.get("model") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_model = parsed_model;
+        wipeString(cleanup_model);
+    }
+    const parsed_provider = if (object.get("provider")) |field_value| if ((field_value) == .null) null else try parseModelProviderRef(allocator, field_value) else null;
+    errdefer {
+        var cleanup_provider = parsed_provider;
+        if (cleanup_provider) |*present| {
+            wipeModelProviderRef(&present.*);
+        }
+    }
+    const parsed_accounting = if (object.get("accounting")) |field_value| if ((field_value) == .null) null else try parseUsageAccountingIdentity(allocator, field_value) else null;
+    errdefer {
+        var cleanup_accounting = parsed_accounting;
+        if (cleanup_accounting) |*present| {
+            wipeUsageAccountingIdentity(&present.*);
+        }
+    }
+    const parsed_input_tokens = if (object.get("inputTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_output_tokens = if (object.get("outputTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_total_tokens = if (object.get("totalTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_input_tokens_details = if (object.get("inputTokensDetails")) |field_value| if ((field_value) == .null) null else try parseToolExecutionUsageTokenDetails(allocator, field_value) else null;
+    errdefer {
+        var cleanup_input_tokens_details = parsed_input_tokens_details;
+        if (cleanup_input_tokens_details) |*present| {
+            wipeToolExecutionUsageTokenDetails(&present.*);
+        }
+    }
+    const parsed_output_tokens_details = if (object.get("outputTokensDetails")) |field_value| if ((field_value) == .null) null else try parseToolExecutionUsageTokenDetails(allocator, field_value) else null;
+    errdefer {
+        var cleanup_output_tokens_details = parsed_output_tokens_details;
+        if (cleanup_output_tokens_details) |*present| {
+            wipeToolExecutionUsageTokenDetails(&present.*);
+        }
+    }
+    const parsed_copilot_usage = if (object.get("copilotUsage")) |field_value| if ((field_value) == .null) null else try parseAssistantUsageCopilotUsage(allocator, field_value) else null;
+    errdefer {
+        var cleanup_copilot_usage = parsed_copilot_usage;
+        if (cleanup_copilot_usage) |*present| {
+            wipeAssistantUsageCopilotUsage(&present.*);
+        }
+    }
+    const parsed_quota_snapshots = if (object.get("quotaSnapshots")) |field_value| if ((field_value) == .null) null else try parseToolExecutionUsageQuotaSnapshotsMap(allocator, field_value) else null;
+    errdefer {
+        var cleanup_quota_snapshots = parsed_quota_snapshots;
+        if (cleanup_quota_snapshots) |*present| {
+            {
+                var iterator = present.*.map.iterator();
+                while (iterator.next()) |entry| {
+                    wipeString(entry.key_ptr.*);
+                    wipeJsonValue(&entry.value_ptr.*);
+                }
+            }
+        }
+    }
+    return .{
+        .request_id = parsed_request_id,
+        .model = parsed_model,
+        .provider = parsed_provider,
+        .accounting = parsed_accounting,
+        .input_tokens = parsed_input_tokens,
+        .output_tokens = parsed_output_tokens,
+        .total_tokens = parsed_total_tokens,
+        .input_tokens_details = parsed_input_tokens_details,
+        .output_tokens_details = parsed_output_tokens_details,
+        .copilot_usage = parsed_copilot_usage,
+        .quota_snapshots = parsed_quota_snapshots,
     };
 }
 
@@ -23389,6 +24132,13 @@ fn parseToolExecutionCompleteData(allocator: std.mem.Allocator, value: std.json.
             wipeString(present.*);
         }
     }
+    const parsed_tool_usage = if (object.get("toolUsage")) |field_value| if ((field_value) == .null) null else try parseToolExecutionUsage(allocator, field_value) else null;
+    errdefer {
+        var cleanup_tool_usage = parsed_tool_usage;
+        if (cleanup_tool_usage) |*present| {
+            wipeToolExecutionUsage(&present.*);
+        }
+    }
     const parsed_mcp_meta = if (object.get("mcpMeta")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_mcp_meta = parsed_mcp_meta;
@@ -23481,6 +24231,7 @@ fn parseToolExecutionCompleteData(allocator: std.mem.Allocator, value: std.json.
         .tool_call_id = parsed_tool_call_id,
         .success = parsed_success,
         .model = parsed_model,
+        .tool_usage = parsed_tool_usage,
         .mcp_meta = parsed_mcp_meta,
         .interaction_id = parsed_interaction_id,
         .rte = parsed_rte,
@@ -23801,11 +24552,19 @@ fn parseToolShellOutputData(allocator: std.mem.Allocator, value: std.json.Value)
         wipeString(cleanup_text);
     }
     const parsed_sequence = try parseInteger(u64, object.get("sequence") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_fusion = if (object.get("fusion")) |field_value| if ((field_value) == .null) null else try parseFusionAttribution(allocator, field_value) else null;
+    errdefer {
+        var cleanup_fusion = parsed_fusion;
+        if (cleanup_fusion) |*present| {
+            wipeFusionAttribution(&present.*);
+        }
+    }
     return .{
         .tool_call_id = parsed_tool_call_id,
         .stream = parsed_stream,
         .text = parsed_text,
         .sequence = parsed_sequence,
+        .fusion = parsed_fusion,
     };
 }
 
@@ -24708,6 +25467,10 @@ fn wipeModelCallRequestBodyEncoding(value: *ModelCallRequestBodyEncoding) void {
     _ = value;
 }
 
+fn wipeModelCallRequestBodyCompressionFallback(value: *ModelCallRequestBodyCompressionFallback) void {
+    _ = value;
+}
+
 fn wipeModelCallWebSocketFallbackReason(value: *ModelCallWebSocketFallbackReason) void {
     _ = value;
 }
@@ -24782,10 +25545,19 @@ fn wipeAssistantUsageData(value: *AssistantUsageData) void {
     if (value.model_provider) |*present| {
         wipeString(present.*);
     }
+    if (value.provider_type) |*present| {
+        wipeString(present.*);
+    }
     if (value.transport) |*present| {
         wipeAssistantUsageTransport(&present.*);
     }
     if (value.request_body_encoding) |*present| {
+        wipeModelCallRequestBodyEncoding(&present.*);
+    }
+    if (value.request_body_compression_fallback) |*present| {
+        wipeModelCallRequestBodyCompressionFallback(&present.*);
+    }
+    if (value.request_body_compression_fallback_from) |*present| {
         wipeModelCallRequestBodyEncoding(&present.*);
     }
     if (value.websocket_fallback_reason) |*present| {
@@ -25124,6 +25896,33 @@ fn wipeHumanResponseRecordedData(value: *HumanResponseRecordedData) void {
     wipeHumanResponseRecordedResponse(&value.response);
 }
 
+fn wipeInstructionUpdateAuthority(value: *InstructionUpdateAuthority) void {
+    _ = value;
+}
+
+fn wipeInstructionUpdateLifetime(value: *InstructionUpdateLifetime) void {
+    _ = value;
+}
+
+fn wipeInstructionUpdateBoundary(value: *InstructionUpdateBoundary) void {
+    _ = value;
+}
+
+fn wipeInstructionUpdateFallback(value: *InstructionUpdateFallback) void {
+    _ = value;
+}
+
+fn wipeInstructionUpdateData(value: *InstructionUpdateData) void {
+    wipeString(value.content);
+    wipeInstructionUpdateAuthority(&value.authority);
+    wipeInstructionUpdateLifetime(&value.lifetime);
+    wipeInstructionUpdateBoundary(&value.boundary);
+    wipeInstructionUpdateFallback(&value.fallback);
+    if (value.name) |*present| {
+        wipeString(present.*);
+    }
+}
+
 fn wipeMcpHeadersRefreshCompletedOutcome(value: *McpHeadersRefreshCompletedOutcome) void {
     _ = value;
 }
@@ -25151,6 +25950,16 @@ fn wipeMcpOauthCompletionOutcome(value: *McpOauthCompletionOutcome) void {
 fn wipeMcpOauthCompletedData(value: *McpOauthCompletedData) void {
     wipeString(value.request_id);
     wipeMcpOauthCompletionOutcome(&value.outcome);
+}
+
+fn wipeMcpOauthRecoveryCompletedOutcome(value: *McpOauthRecoveryCompletedOutcome) void {
+    _ = value;
+}
+
+fn wipeMcpOauthRecoveryCompletedData(value: *McpOauthRecoveryCompletedData) void {
+    wipeString(value.request_id);
+    wipeString(value.server_name);
+    wipeMcpOauthRecoveryCompletedOutcome(&value.outcome);
 }
 
 fn wipeMcpOauthRequiredStaticClientConfig(value: *McpOauthRequiredStaticClientConfig) void {
@@ -25318,6 +26127,12 @@ fn wipeModelCallFailureData(value: *ModelCallFailureData) void {
     if (value.request_body_encoding) |*present| {
         wipeModelCallRequestBodyEncoding(&present.*);
     }
+    if (value.request_body_compression_fallback) |*present| {
+        wipeModelCallRequestBodyCompressionFallback(&present.*);
+    }
+    if (value.request_body_compression_fallback_from) |*present| {
+        wipeModelCallRequestBodyEncoding(&present.*);
+    }
     if (value.websocket_fallback_reason) |*present| {
         wipeModelCallWebSocketFallbackReason(&present.*);
     }
@@ -25328,6 +26143,9 @@ fn wipeModelCallFailureData(value: *ModelCallFailureData) void {
         wipeString(present.*);
     }
     if (value.model_provider) |*present| {
+        wipeString(present.*);
+    }
+    if (value.provider_type) |*present| {
         wipeString(present.*);
     }
     if (value.reasoning_effort) |*present| {
@@ -25937,6 +26755,9 @@ fn wipeAssistedApprovalJudgeFailureReason(value: *AssistedApprovalJudgeFailureRe
 }
 
 fn wipePermissionAssistedApproval(value: *PermissionAssistedApproval) void {
+    if (value.evaluation_id) |*present| {
+        wipeString(present.*);
+    }
     if (value.evaluation) |*present| {
         wipePermissionApprovalEvaluation(&present.*);
     }
@@ -26425,6 +27246,9 @@ fn wipePermissionRequestedData(value: *PermissionRequestedData) void {
     if (value.recovery_episode_id) |*present| {
         wipeString(present.*);
     }
+    if (value.fusion) |*present| {
+        wipeFusionAttribution(&present.*);
+    }
 }
 
 fn wipePromptCacheBreakData(value: *PromptCacheBreakData) void {
@@ -26864,6 +27688,13 @@ fn wipeAutopilotObjectiveChangedData(value: *AutopilotObjectiveChangedData) void
     }
 }
 
+fn wipeAutopilotStoppedData(value: *AutopilotStoppedData) void {
+    wipeString(value.reason);
+    if (value.request_id) |*present| {
+        wipeString(present.*);
+    }
+}
+
 fn wipeBackgroundTasksChangedData(value: *BackgroundTasksChangedData) void {
     _ = value;
 }
@@ -27028,8 +27859,33 @@ fn wipeCompactionTrigger(value: *CompactionTrigger) void {
     _ = value;
 }
 
+fn wipeCompactionCompleteSummarizerProgress(value: *CompactionCompleteSummarizerProgress) void {
+    _ = value;
+}
+
 fn wipeCompactionCompleteData(value: *CompactionCompleteData) void {
+    if (value.outcome) |*present| {
+        wipeString(present.*);
+    }
+    if (value.outcome_reason) |*present| {
+        wipeString(present.*);
+    }
+    if (value.failure_reason) |*present| {
+        wipeString(present.*);
+    }
+    if (value.compaction_attempt_id) |*present| {
+        wipeString(present.*);
+    }
+    if (value.model) |*present| {
+        wipeString(present.*);
+    }
+    if (value.initial_model) |*present| {
+        wipeString(present.*);
+    }
     if (value.error_) |*present| {
+        wipeString(present.*);
+    }
+    if (value.token_accounting_basis) |*present| {
         wipeString(present.*);
     }
     if (value.custom_instructions) |*present| {
@@ -27042,9 +27898,6 @@ fn wipeCompactionCompleteData(value: *CompactionCompleteData) void {
         wipeResponsesReasoning(&present.*);
     }
     if (value.active_workflow_summary) |*present| {
-        wipeString(present.*);
-    }
-    if (value.active_factory_summary) |*present| {
         wipeString(present.*);
     }
     if (value.behavior_model_id) |*present| {
@@ -27062,13 +27915,25 @@ fn wipeCompactionCompleteData(value: *CompactionCompleteData) void {
     if (value.service_request_id) |*present| {
         wipeString(present.*);
     }
+    if (value.switch_target_model) |*present| {
+        wipeString(present.*);
+    }
     if (value.trigger) |*present| {
         wipeCompactionTrigger(&present.*);
+    }
+    if (value.summarizer_progress) |*present| {
+        wipeCompactionCompleteSummarizerProgress(&present.*);
     }
 }
 
 fn wipeCompactionStartData(value: *CompactionStartData) void {
+    if (value.compaction_attempt_id) |*present| {
+        wipeString(present.*);
+    }
     if (value.model) |*present| {
+        wipeString(present.*);
+    }
+    if (value.switch_target_model) |*present| {
         wipeString(present.*);
     }
     if (value.trigger) |*present| {
@@ -27209,6 +28074,9 @@ fn wipeRemediationAction(value: *RemediationAction) void {
 }
 
 fn wipeErrorData(value: *ErrorData) void {
+    if (value.originating_message_id) |*present| {
+        wipeString(present.*);
+    }
     wipeString(value.error_type);
     if (value.error_code) |*present| {
         wipeString(present.*);
@@ -27612,6 +28480,9 @@ fn wipeFusionResolvedData(value: *FusionResolvedData) void {
     if (value.rule_id) |*present| {
         wipeString(present.*);
     }
+    if (value.selected_rule_id) |*present| {
+        wipeString(present.*);
+    }
     if (value.rule_name) |*present| {
         wipeString(present.*);
     }
@@ -27651,6 +28522,9 @@ fn wipeFusionResolvedData(value: *FusionResolvedData) void {
 
 fn wipeFusionRouteFailedData(value: *FusionRouteFailedData) void {
     wipeString(value.attempt_id);
+    if (value.fusion_id) |*present| {
+        wipeString(present.*);
+    }
     wipeString(value.synthetic_model);
     wipeString(value.policy);
     wipeString(value.reason);
@@ -27865,6 +28739,10 @@ fn wipeMcpServerStatusChangedData(value: *McpServerStatusChangedData) void {
     if (value.config_source) |*present| {
         wipeString(present.*);
     }
+}
+
+fn wipeMcpServerToolsLoadedData(value: *McpServerToolsLoadedData) void {
+    wipeString(value.server_name);
 }
 
 fn wipeMcpServerSource(value: *McpServerSource) void {
@@ -28119,6 +28997,12 @@ fn wipeRemoteSteerableChangedData(value: *RemoteSteerableChangedData) void {
     _ = value;
 }
 
+fn wipeRequestBodyCompressionDisabledData(value: *RequestBodyCompressionDisabledData) void {
+    if (value.encoding) |*present| {
+        wipeModelCallRequestBodyEncoding(&present.*);
+    }
+}
+
 fn wipeSessionLimitsConfig(value: *SessionLimitsConfig) void {
     _ = value;
 }
@@ -28354,6 +29238,11 @@ fn wipeShutdownAgentMetric(value: *ShutdownAgentMetric) void {
 }
 
 fn wipeShutdownData(value: *ShutdownData) void {
+    if (value.tool_usage_request_ids) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+        }
+    }
     if (value.accounting_snapshot) |*present| {
         wipeUsageGetMetricsResult(&present.*);
     }
@@ -28536,6 +29425,11 @@ fn wipeUsageCheckpointModelCacheState(value: *UsageCheckpointModelCacheState) vo
 }
 
 fn wipeUsageCheckpointData(value: *UsageCheckpointData) void {
+    if (value.tool_usage_request_ids) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+        }
+    }
     if (value.accounting_snapshot) |*present| {
         wipeUsageGetMetricsResult(&present.*);
     }
@@ -28575,6 +29469,9 @@ fn wipeUsageAccountingRecordData(value: *UsageAccountingRecordData) void {
 fn wipeWarningData(value: *WarningData) void {
     wipeString(value.warning_type);
     wipeString(value.message);
+    if (value.originating_message_id) |*present| {
+        wipeString(present.*);
+    }
     if (value.url) |*present| {
         wipeString(present.*);
     }
@@ -28788,9 +29685,6 @@ fn wipeSubagentStartedData(value: *SubagentStartedData) void {
     if (value.model_selection_source) |*present| {
         wipeSubagentModelSelectionSource(&present.*);
     }
-    if (value.factory_run_id) |*present| {
-        wipeString(present.*);
-    }
     if (value.workflow_run_id) |*present| {
         wipeString(present.*);
     }
@@ -28997,6 +29891,39 @@ fn wipeSystemNotificationData(value: *SystemNotificationData) void {
     wipeSystemNotification(&value.kind);
     if (value.responses_reasoning) |*present| {
         wipeResponsesReasoning(&present.*);
+    }
+}
+
+fn wipeToolExecutionUsageTokenDetails(value: *ToolExecutionUsageTokenDetails) void {
+    _ = value;
+}
+
+fn wipeToolExecutionUsage(value: *ToolExecutionUsage) void {
+    wipeString(value.request_id);
+    wipeString(value.model);
+    if (value.provider) |*present| {
+        wipeModelProviderRef(&present.*);
+    }
+    if (value.accounting) |*present| {
+        wipeUsageAccountingIdentity(&present.*);
+    }
+    if (value.input_tokens_details) |*present| {
+        wipeToolExecutionUsageTokenDetails(&present.*);
+    }
+    if (value.output_tokens_details) |*present| {
+        wipeToolExecutionUsageTokenDetails(&present.*);
+    }
+    if (value.copilot_usage) |*present| {
+        wipeAssistantUsageCopilotUsage(&present.*);
+    }
+    if (value.quota_snapshots) |*present| {
+        {
+            var iterator = present.*.map.iterator();
+            while (iterator.next()) |entry| {
+                wipeString(entry.key_ptr.*);
+                wipeJsonValue(&entry.value_ptr.*);
+            }
+        }
     }
 }
 
@@ -29406,6 +30333,9 @@ fn wipeToolExecutionCompleteData(value: *ToolExecutionCompleteData) void {
     if (value.model) |*present| {
         wipeString(present.*);
     }
+    if (value.tool_usage) |*present| {
+        wipeToolExecutionUsage(&present.*);
+    }
     if (value.mcp_meta) |*present| {
         wipeJsonValue(&present.*);
     }
@@ -29556,6 +30486,9 @@ fn wipeToolShellOutputData(value: *ToolShellOutputData) void {
         wipeToolShellOutputStream(&present.*);
     }
     wipeString(value.text);
+    if (value.fusion) |*present| {
+        wipeFusionAttribution(&present.*);
+    }
 }
 
 fn wipeToolUserRequestedData(value: *ToolUserRequestedData) void {
@@ -30336,6 +31269,10 @@ fn freeModelCallRequestBodyEncoding(value: *ModelCallRequestBodyEncoding, _: std
     _ = value;
 }
 
+fn freeModelCallRequestBodyCompressionFallback(value: *ModelCallRequestBodyCompressionFallback, _: std.mem.Allocator) void {
+    _ = value;
+}
+
 fn freeModelCallWebSocketFallbackReason(value: *ModelCallWebSocketFallbackReason, _: std.mem.Allocator) void {
     _ = value;
 }
@@ -30424,10 +31361,20 @@ fn freeAssistantUsageData(value: *AssistantUsageData, allocator: std.mem.Allocat
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.provider_type) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.transport) |*present| {
         freeAssistantUsageTransport(&present.*, allocator);
     }
     if (value.request_body_encoding) |*present| {
+        freeModelCallRequestBodyEncoding(&present.*, allocator);
+    }
+    if (value.request_body_compression_fallback) |*present| {
+        freeModelCallRequestBodyCompressionFallback(&present.*, allocator);
+    }
+    if (value.request_body_compression_fallback_from) |*present| {
         freeModelCallRequestBodyEncoding(&present.*, allocator);
     }
     if (value.websocket_fallback_reason) |*present| {
@@ -30846,6 +31793,35 @@ fn freeHumanResponseRecordedData(value: *HumanResponseRecordedData, allocator: s
     freeHumanResponseRecordedResponse(&value.response, allocator);
 }
 
+fn freeInstructionUpdateAuthority(value: *InstructionUpdateAuthority, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeInstructionUpdateLifetime(value: *InstructionUpdateLifetime, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeInstructionUpdateBoundary(value: *InstructionUpdateBoundary, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeInstructionUpdateFallback(value: *InstructionUpdateFallback, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeInstructionUpdateData(value: *InstructionUpdateData, allocator: std.mem.Allocator) void {
+    wipeString(value.content);
+    allocator.free(@constCast(value.content));
+    freeInstructionUpdateAuthority(&value.authority, allocator);
+    freeInstructionUpdateLifetime(&value.lifetime, allocator);
+    freeInstructionUpdateBoundary(&value.boundary, allocator);
+    freeInstructionUpdateFallback(&value.fallback, allocator);
+    if (value.name) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+}
+
 fn freeMcpHeadersRefreshCompletedOutcome(value: *McpHeadersRefreshCompletedOutcome, _: std.mem.Allocator) void {
     _ = value;
 }
@@ -30878,6 +31854,18 @@ fn freeMcpOauthCompletedData(value: *McpOauthCompletedData, allocator: std.mem.A
     wipeString(value.request_id);
     allocator.free(@constCast(value.request_id));
     freeMcpOauthCompletionOutcome(&value.outcome, allocator);
+}
+
+fn freeMcpOauthRecoveryCompletedOutcome(value: *McpOauthRecoveryCompletedOutcome, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeMcpOauthRecoveryCompletedData(value: *McpOauthRecoveryCompletedData, allocator: std.mem.Allocator) void {
+    wipeString(value.request_id);
+    allocator.free(@constCast(value.request_id));
+    wipeString(value.server_name);
+    allocator.free(@constCast(value.server_name));
+    freeMcpOauthRecoveryCompletedOutcome(&value.outcome, allocator);
 }
 
 fn freeMcpOauthRequiredStaticClientConfig(value: *McpOauthRequiredStaticClientConfig, allocator: std.mem.Allocator) void {
@@ -31078,6 +32066,12 @@ fn freeModelCallFailureData(value: *ModelCallFailureData, allocator: std.mem.All
     if (value.request_body_encoding) |*present| {
         freeModelCallRequestBodyEncoding(&present.*, allocator);
     }
+    if (value.request_body_compression_fallback) |*present| {
+        freeModelCallRequestBodyCompressionFallback(&present.*, allocator);
+    }
+    if (value.request_body_compression_fallback_from) |*present| {
+        freeModelCallRequestBodyEncoding(&present.*, allocator);
+    }
     if (value.websocket_fallback_reason) |*present| {
         freeModelCallWebSocketFallbackReason(&present.*, allocator);
     }
@@ -31089,6 +32083,10 @@ fn freeModelCallFailureData(value: *ModelCallFailureData, allocator: std.mem.All
         allocator.free(@constCast(present.*));
     }
     if (value.model_provider) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.provider_type) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
@@ -31832,6 +32830,10 @@ fn freeAssistedApprovalJudgeFailureReason(value: *AssistedApprovalJudgeFailureRe
 }
 
 fn freePermissionAssistedApproval(value: *PermissionAssistedApproval, allocator: std.mem.Allocator) void {
+    if (value.evaluation_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.evaluation) |*present| {
         freePermissionApprovalEvaluation(&present.*, allocator);
     }
@@ -32435,6 +33437,9 @@ fn freePermissionRequestedData(value: *PermissionRequestedData, allocator: std.m
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.fusion) |*present| {
+        freeFusionAttribution(&present.*, allocator);
+    }
 }
 
 fn freePromptCacheBreakData(value: *PromptCacheBreakData, allocator: std.mem.Allocator) void {
@@ -32954,6 +33959,15 @@ fn freeAutopilotObjectiveChangedData(value: *AutopilotObjectiveChangedData, allo
     }
 }
 
+fn freeAutopilotStoppedData(value: *AutopilotStoppedData, allocator: std.mem.Allocator) void {
+    wipeString(value.reason);
+    allocator.free(@constCast(value.reason));
+    if (value.request_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+}
+
 fn freeBackgroundTasksChangedData(value: *BackgroundTasksChangedData, allocator: std.mem.Allocator) void {
     _ = value;
     _ = allocator;
@@ -33165,8 +34179,41 @@ fn freeCompactionTrigger(value: *CompactionTrigger, _: std.mem.Allocator) void {
     _ = value;
 }
 
+fn freeCompactionCompleteSummarizerProgress(value: *CompactionCompleteSummarizerProgress, allocator: std.mem.Allocator) void {
+    _ = value;
+    _ = allocator;
+}
+
 fn freeCompactionCompleteData(value: *CompactionCompleteData, allocator: std.mem.Allocator) void {
+    if (value.outcome) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.outcome_reason) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.failure_reason) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.compaction_attempt_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.model) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.initial_model) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.error_) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.token_accounting_basis) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
@@ -33182,10 +34229,6 @@ fn freeCompactionCompleteData(value: *CompactionCompleteData, allocator: std.mem
         freeResponsesReasoning(&present.*, allocator);
     }
     if (value.active_workflow_summary) |*present| {
-        wipeString(present.*);
-        allocator.free(@constCast(present.*));
-    }
-    if (value.active_factory_summary) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
@@ -33208,13 +34251,28 @@ fn freeCompactionCompleteData(value: *CompactionCompleteData, allocator: std.mem
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.switch_target_model) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.trigger) |*present| {
         freeCompactionTrigger(&present.*, allocator);
+    }
+    if (value.summarizer_progress) |*present| {
+        freeCompactionCompleteSummarizerProgress(&present.*, allocator);
     }
 }
 
 fn freeCompactionStartData(value: *CompactionStartData, allocator: std.mem.Allocator) void {
+    if (value.compaction_attempt_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.model) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.switch_target_model) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
@@ -33389,6 +34447,10 @@ fn freeRemediationAction(value: *RemediationAction, _: std.mem.Allocator) void {
 }
 
 fn freeErrorData(value: *ErrorData, allocator: std.mem.Allocator) void {
+    if (value.originating_message_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     wipeString(value.error_type);
     allocator.free(@constCast(value.error_type));
     if (value.error_code) |*present| {
@@ -33907,6 +34969,10 @@ fn freeFusionResolvedData(value: *FusionResolvedData, allocator: std.mem.Allocat
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.selected_rule_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.rule_name) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
@@ -33957,6 +35023,10 @@ fn freeFusionResolvedData(value: *FusionResolvedData, allocator: std.mem.Allocat
 fn freeFusionRouteFailedData(value: *FusionRouteFailedData, allocator: std.mem.Allocator) void {
     wipeString(value.attempt_id);
     allocator.free(@constCast(value.attempt_id));
+    if (value.fusion_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     wipeString(value.synthetic_model);
     allocator.free(@constCast(value.synthetic_model));
     wipeString(value.policy);
@@ -34209,6 +35279,11 @@ fn freeMcpServerStatusChangedData(value: *McpServerStatusChangedData, allocator:
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+}
+
+fn freeMcpServerToolsLoadedData(value: *McpServerToolsLoadedData, allocator: std.mem.Allocator) void {
+    wipeString(value.server_name);
+    allocator.free(@constCast(value.server_name));
 }
 
 fn freeMcpServerSource(value: *McpServerSource, _: std.mem.Allocator) void {
@@ -34494,6 +35569,12 @@ fn freeRemoteSteerableChangedData(value: *RemoteSteerableChangedData, allocator:
     _ = allocator;
 }
 
+fn freeRequestBodyCompressionDisabledData(value: *RequestBodyCompressionDisabledData, allocator: std.mem.Allocator) void {
+    if (value.encoding) |*present| {
+        freeModelCallRequestBodyEncoding(&present.*, allocator);
+    }
+}
+
 fn freeSessionLimitsConfig(value: *SessionLimitsConfig, allocator: std.mem.Allocator) void {
     _ = value;
     _ = allocator;
@@ -34775,6 +35856,13 @@ fn freeShutdownAgentMetric(value: *ShutdownAgentMetric, allocator: std.mem.Alloc
 }
 
 fn freeShutdownData(value: *ShutdownData, allocator: std.mem.Allocator) void {
+    if (value.tool_usage_request_ids) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+            allocator.free(@constCast(item.*));
+        }
+        allocator.free(@constCast(present.*));
+    }
     if (value.accounting_snapshot) |*present| {
         freeUsageGetMetricsResult(&present.*, allocator);
     }
@@ -34998,6 +36086,13 @@ fn freeUsageCheckpointModelCacheState(value: *UsageCheckpointModelCacheState, al
 }
 
 fn freeUsageCheckpointData(value: *UsageCheckpointData, allocator: std.mem.Allocator) void {
+    if (value.tool_usage_request_ids) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeString(item.*);
+            allocator.free(@constCast(item.*));
+        }
+        allocator.free(@constCast(present.*));
+    }
     if (value.accounting_snapshot) |*present| {
         freeUsageGetMetricsResult(&present.*, allocator);
     }
@@ -35045,6 +36140,10 @@ fn freeWarningData(value: *WarningData, allocator: std.mem.Allocator) void {
     allocator.free(@constCast(value.warning_type));
     wipeString(value.message);
     allocator.free(@constCast(value.message));
+    if (value.originating_message_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.url) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
@@ -35320,10 +36419,6 @@ fn freeSubagentStartedData(value: *SubagentStartedData, allocator: std.mem.Alloc
     if (value.model_selection_source) |*present| {
         freeSubagentModelSelectionSource(&present.*, allocator);
     }
-    if (value.factory_run_id) |*present| {
-        wipeString(present.*);
-        allocator.free(@constCast(present.*));
-    }
     if (value.workflow_run_id) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
@@ -35579,6 +36674,44 @@ fn freeSystemNotificationData(value: *SystemNotificationData, allocator: std.mem
     freeSystemNotification(&value.kind, allocator);
     if (value.responses_reasoning) |*present| {
         freeResponsesReasoning(&present.*, allocator);
+    }
+}
+
+fn freeToolExecutionUsageTokenDetails(value: *ToolExecutionUsageTokenDetails, allocator: std.mem.Allocator) void {
+    _ = value;
+    _ = allocator;
+}
+
+fn freeToolExecutionUsage(value: *ToolExecutionUsage, allocator: std.mem.Allocator) void {
+    wipeString(value.request_id);
+    allocator.free(@constCast(value.request_id));
+    wipeString(value.model);
+    allocator.free(@constCast(value.model));
+    if (value.provider) |*present| {
+        freeModelProviderRef(&present.*, allocator);
+    }
+    if (value.accounting) |*present| {
+        freeUsageAccountingIdentity(&present.*, allocator);
+    }
+    if (value.input_tokens_details) |*present| {
+        freeToolExecutionUsageTokenDetails(&present.*, allocator);
+    }
+    if (value.output_tokens_details) |*present| {
+        freeToolExecutionUsageTokenDetails(&present.*, allocator);
+    }
+    if (value.copilot_usage) |*present| {
+        freeAssistantUsageCopilotUsage(&present.*, allocator);
+    }
+    if (value.quota_snapshots) |*present| {
+        {
+            var iterator = present.*.map.iterator();
+            while (iterator.next()) |entry| {
+                wipeString(entry.key_ptr.*);
+                allocator.free(@constCast(entry.key_ptr.*));
+                freeJsonValue(&entry.value_ptr.*, allocator);
+            }
+            present.*.deinit(allocator);
+        }
     }
 }
 
@@ -36073,6 +37206,9 @@ fn freeToolExecutionCompleteData(value: *ToolExecutionCompleteData, allocator: s
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.tool_usage) |*present| {
+        freeToolExecutionUsage(&present.*, allocator);
+    }
     if (value.mcp_meta) |*present| {
         freeJsonValue(&present.*, allocator);
     }
@@ -36251,6 +37387,9 @@ fn freeToolShellOutputData(value: *ToolShellOutputData, allocator: std.mem.Alloc
     }
     wipeString(value.text);
     allocator.free(@constCast(value.text));
+    if (value.fusion) |*present| {
+        freeFusionAttribution(&present.*, allocator);
+    }
 }
 
 fn freeToolUserRequestedData(value: *ToolUserRequestedData, allocator: std.mem.Allocator) void {
@@ -36595,9 +37734,15 @@ fn wipePermissionRequestedDataFields(value: *PermissionRequested) void {
     if (value.recovery_episode_id) |*present| {
         wipeString(present.*);
     }
+    if (value.fusion) |*present| {
+        wipeFusionAttribution(&present.*);
+    }
 }
 
 fn wipeErrorDataFields(value: *SessionError) void {
+    if (value.originating_message_id) |*present| {
+        wipeString(present.*);
+    }
     wipeString(value.error_type);
     if (value.error_code) |*present| {
         wipeString(present.*);
@@ -36890,12 +38035,19 @@ fn freePermissionRequestedDataFields(
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.fusion) |*present| {
+        freeFusionAttribution(&present.*, allocator);
+    }
 }
 
 fn freeErrorDataFields(
     value: *SessionError,
     allocator: std.mem.Allocator,
 ) void {
+    if (value.originating_message_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     wipeString(value.error_type);
     allocator.free(@constCast(value.error_type));
     if (value.error_code) |*present| {
@@ -37166,6 +38318,7 @@ fn parseMcpOauthRequired(
         .http_response = parsed.http_response,
         .resource_metadata = parsed.resource_metadata,
         .reason = parsed.reason,
+        .runtime_refresh_supported = parsed.runtime_refresh_supported,
 
         .raw = raw.take(),
         .arena = arena,
@@ -37236,6 +38389,7 @@ fn parsePermissionRequested(
         .risk_assessment = parsed.risk_assessment,
         .resolved_by_hook = parsed.resolved_by_hook,
         .recovery_episode_id = parsed.recovery_episode_id,
+        .fusion = parsed.fusion,
         .permission_request_json = helper_json,
         .managed_approval_required = try managedApprovalRequired(data),
         .raw = raw.take(),
@@ -37254,6 +38408,7 @@ fn parseSessionError(
     errdefer wipeErrorData(&parsed);
 
     return .{
+        .originating_message_id = parsed.originating_message_id,
         .error_type = parsed.error_type,
         .error_code = parsed.error_code,
         .provider_error_type = parsed.provider_error_type,
@@ -37329,9 +38484,11 @@ fn tagFromDiscriminator(wire: []const u8) ?SessionEventTag {
     if (std.mem.eql(u8, wire, "hook.progress")) return .hook_progress;
     if (std.mem.eql(u8, wire, "hook.start")) return .hook_start;
     if (std.mem.eql(u8, wire, "human_response.recorded")) return .human_response_recorded;
+    if (std.mem.eql(u8, wire, "instruction.update")) return .instruction_update;
     if (std.mem.eql(u8, wire, "mcp.headers_refresh_completed")) return .mcp_headers_refresh_completed;
     if (std.mem.eql(u8, wire, "mcp.headers_refresh_required")) return .mcp_headers_refresh_required;
     if (std.mem.eql(u8, wire, "mcp.oauth_completed")) return .mcp_oauth_completed;
+    if (std.mem.eql(u8, wire, "mcp.oauth_recovery_completed")) return .mcp_oauth_recovery_completed;
     if (std.mem.eql(u8, wire, "mcp.oauth_required")) return .mcp_oauth_required;
     if (std.mem.eql(u8, wire, "mcp.prompts.list_changed")) return .mcp_prompts_list_changed;
     if (std.mem.eql(u8, wire, "mcp.resources.list_changed")) return .mcp_resources_list_changed;
@@ -37358,6 +38515,7 @@ fn tagFromDiscriminator(wire: []const u8) ?SessionEventTag {
     if (std.mem.eql(u8, wire, "session.auto_tier_recommendation")) return .session_auto_tier_recommendation;
     if (std.mem.eql(u8, wire, "session.auto_tier_switch_failed")) return .session_auto_tier_switch_failed;
     if (std.mem.eql(u8, wire, "session.autopilot_objective_changed")) return .session_autopilot_objective_changed;
+    if (std.mem.eql(u8, wire, "session.autopilot_stopped")) return .session_autopilot_stopped;
     if (std.mem.eql(u8, wire, "session.background_tasks_changed")) return .session_background_tasks_changed;
     if (std.mem.eql(u8, wire, "session.binary_asset")) return .session_binary_asset;
     if (std.mem.eql(u8, wire, "session.canvas.closed")) return .session_canvas_closed;
@@ -37393,6 +38551,7 @@ fn tagFromDiscriminator(wire: []const u8) ?SessionEventTag {
     if (std.mem.eql(u8, wire, "session.mcp_server_needs_reconnect")) return .session_mcp_server_needs_reconnect;
     if (std.mem.eql(u8, wire, "session.mcp_server_removed")) return .session_mcp_server_removed;
     if (std.mem.eql(u8, wire, "session.mcp_server_status_changed")) return .session_mcp_server_status_changed;
+    if (std.mem.eql(u8, wire, "session.mcp_server_tools_loaded")) return .session_mcp_server_tools_loaded;
     if (std.mem.eql(u8, wire, "session.mcp_servers_loaded")) return .session_mcp_servers_loaded;
     if (std.mem.eql(u8, wire, "session.memory_changed")) return .session_memory_changed;
     if (std.mem.eql(u8, wire, "session.mode_changed")) return .session_mode_changed;
@@ -37404,6 +38563,7 @@ fn tagFromDiscriminator(wire: []const u8) ?SessionEventTag {
     if (std.mem.eql(u8, wire, "session.plan_changed")) return .session_plan_changed;
     if (std.mem.eql(u8, wire, "session.quota_observation")) return .session_quota_observation;
     if (std.mem.eql(u8, wire, "session.remote_steerable_changed")) return .session_remote_steerable_changed;
+    if (std.mem.eql(u8, wire, "session.request_body_compression_disabled")) return .session_request_body_compression_disabled;
     if (std.mem.eql(u8, wire, "session.resume")) return .session_resume;
     if (std.mem.eql(u8, wire, "session.schedule_cancelled")) return .session_schedule_cancelled;
     if (std.mem.eql(u8, wire, "session.schedule_created")) return .session_schedule_created;
@@ -37781,6 +38941,16 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
                 .arena = arena,
             } };
         },
+        .instruction_update => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseInstructionUpdateData(arena.allocator(), data_value);
+            return .{ .instruction_update = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
         .mcp_headers_refresh_completed => {
             var arena = std.heap.ArenaAllocator.init(allocator);
             errdefer arena.deinit();
@@ -37806,6 +38976,16 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
             errdefer arena.deinit();
             const typed = try parseMcpOauthCompletedData(arena.allocator(), data_value);
             return .{ .mcp_oauth_completed = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
+        .mcp_oauth_recovery_completed => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseMcpOauthRecoveryCompletedData(arena.allocator(), data_value);
+            return .{ .mcp_oauth_recovery_completed = .{
                 .data = typed,
                 .data_json = raw.takeData(),
                 .arena = arena,
@@ -38048,6 +39228,16 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
             errdefer arena.deinit();
             const typed = try parseAutopilotObjectiveChangedData(arena.allocator(), data_value);
             return .{ .session_autopilot_objective_changed = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
+        .session_autopilot_stopped => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseAutopilotStoppedData(arena.allocator(), data_value);
+            return .{ .session_autopilot_stopped = .{
                 .data = typed,
                 .data_json = raw.takeData(),
                 .arena = arena,
@@ -38385,6 +39575,16 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
                 .arena = arena,
             } };
         },
+        .session_mcp_server_tools_loaded => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseMcpServerToolsLoadedData(arena.allocator(), data_value);
+            return .{ .session_mcp_server_tools_loaded = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
         .session_mcp_servers_loaded => {
             var arena = std.heap.ArenaAllocator.init(allocator);
             errdefer arena.deinit();
@@ -38490,6 +39690,16 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
             errdefer arena.deinit();
             const typed = try parseRemoteSteerableChangedData(arena.allocator(), data_value);
             return .{ .session_remote_steerable_changed = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
+        .session_request_body_compression_disabled => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseRequestBodyCompressionDisabledData(arena.allocator(), data_value);
+            return .{ .session_request_body_compression_disabled = .{
                 .data = typed,
                 .data_json = raw.takeData(),
                 .arena = arena,
@@ -39012,9 +40222,11 @@ const pinned_event_samples = [_]EventSample{
     .{ .json = "{\"type\":\"hook.progress\",\"data\":{\"message\":\"\"}}", .tag = .hook_progress },
     .{ .json = "{\"type\":\"hook.start\",\"data\":{\"hookInvocationId\":\"\",\"hookType\":\"\"}}", .tag = .hook_start },
     .{ .json = "{\"type\":\"human_response.recorded\",\"data\":{\"requestId\":\"\",\"actor\":\"human_response\",\"response\":{\"responseKind\":\"ask_user\",\"content\":{},\"message\":\"\",\"requestedSchema\":{\"type\":\"object\",\"properties\":{}}}}}", .tag = .human_response_recorded },
+    .{ .json = "{\"type\":\"instruction.update\",\"data\":{\"content\":\"\",\"authority\":\"runtime\",\"lifetime\":\"persistent\",\"boundary\":\"afterToolResults\",\"fallback\":\"rebuildSystemPrompt\"}}", .tag = .instruction_update },
     .{ .json = "{\"type\":\"mcp.headers_refresh_completed\",\"data\":{\"requestId\":\"\",\"outcome\":\"headers\"}}", .tag = .mcp_headers_refresh_completed },
     .{ .json = "{\"type\":\"mcp.headers_refresh_required\",\"data\":{\"requestId\":\"\",\"serverName\":\"\",\"serverUrl\":\"\",\"reason\":\"startup\"}}", .tag = .mcp_headers_refresh_required },
     .{ .json = "{\"type\":\"mcp.oauth_completed\",\"data\":{\"requestId\":\"\",\"outcome\":\"token\"}}", .tag = .mcp_oauth_completed },
+    .{ .json = "{\"type\":\"mcp.oauth_recovery_completed\",\"data\":{\"requestId\":\"\",\"serverName\":\"\",\"outcome\":\"succeeded\"}}", .tag = .mcp_oauth_recovery_completed },
     .{ .json = "{\"type\":\"mcp.oauth_required\",\"data\":{\"requestId\":\"\",\"serverName\":\"\",\"serverUrl\":\"\",\"reason\":\"initial\"}}", .tag = .mcp_oauth_required },
     .{ .json = "{\"type\":\"mcp.prompts.list_changed\",\"data\":{\"serverName\":\"\"}}", .tag = .mcp_prompts_list_changed },
     .{ .json = "{\"type\":\"mcp.resources.list_changed\",\"data\":{\"serverName\":\"\"}}", .tag = .mcp_resources_list_changed },
@@ -39041,6 +40253,7 @@ const pinned_event_samples = [_]EventSample{
     .{ .json = "{\"type\":\"session.auto_tier_recommendation\",\"data\":{\"recommendedAutoTier\":\"x\"}}", .tag = .session_auto_tier_recommendation },
     .{ .json = "{\"type\":\"session.auto_tier_switch_failed\",\"data\":{\"requestedAutoTier\":\"x\",\"reason\":\"policy_rejected\"}}", .tag = .session_auto_tier_switch_failed },
     .{ .json = "{\"type\":\"session.autopilot_objective_changed\",\"data\":{\"operation\":\"create\"}}", .tag = .session_autopilot_objective_changed },
+    .{ .json = "{\"type\":\"session.autopilot_stopped\",\"data\":{\"reason\":\"\"}}", .tag = .session_autopilot_stopped },
     .{ .json = "{\"type\":\"session.background_tasks_changed\",\"data\":{}}", .tag = .session_background_tasks_changed },
     .{ .json = "{\"type\":\"session.binary_asset\",\"data\":{\"assetId\":\"\",\"type\":\"image\",\"mimeType\":\"\",\"byteLength\":0,\"data\":\"\"}}", .tag = .session_binary_asset },
     .{ .json = "{\"type\":\"session.canvas.closed\",\"data\":{\"instanceId\":\"x\",\"extensionId\":\"\",\"canvasId\":\"\"}}", .tag = .session_canvas_closed },
@@ -39076,6 +40289,7 @@ const pinned_event_samples = [_]EventSample{
     .{ .json = "{\"type\":\"session.mcp_server_needs_reconnect\",\"data\":{\"serverName\":\"\"}}", .tag = .session_mcp_server_needs_reconnect },
     .{ .json = "{\"type\":\"session.mcp_server_removed\",\"data\":{\"serverName\":\"\"}}", .tag = .session_mcp_server_removed },
     .{ .json = "{\"type\":\"session.mcp_server_status_changed\",\"data\":{\"serverName\":\"\",\"status\":\"connected\"}}", .tag = .session_mcp_server_status_changed },
+    .{ .json = "{\"type\":\"session.mcp_server_tools_loaded\",\"data\":{\"serverName\":\"\",\"toolCount\":0}}", .tag = .session_mcp_server_tools_loaded },
     .{ .json = "{\"type\":\"session.mcp_servers_loaded\",\"data\":{\"servers\":[]}}", .tag = .session_mcp_servers_loaded },
     .{ .json = "{\"type\":\"session.memory_changed\",\"data\":{}}", .tag = .session_memory_changed },
     .{ .json = "{\"type\":\"session.mode_changed\",\"data\":{\"previousMode\":\"interactive\",\"newMode\":\"interactive\"}}", .tag = .session_mode_changed },
@@ -39087,6 +40301,7 @@ const pinned_event_samples = [_]EventSample{
     .{ .json = "{\"type\":\"session.plan_changed\",\"data\":{\"operation\":\"create\"}}", .tag = .session_plan_changed },
     .{ .json = "{\"type\":\"session.quota_observation\",\"data\":{\"observation\":{\"provider\":{\"id\":\"\",\"label\":\"\",\"kind\":\"copilot\"},\"quotaId\":\"\",\"unit\":\"ai_credits\",\"accessState\":\"allowed\",\"capacityState\":\"available\"}}}", .tag = .session_quota_observation },
     .{ .json = "{\"type\":\"session.remote_steerable_changed\",\"data\":{\"remoteSteerable\":false}}", .tag = .session_remote_steerable_changed },
+    .{ .json = "{\"type\":\"session.request_body_compression_disabled\",\"data\":{}}", .tag = .session_request_body_compression_disabled },
     .{ .json = "{\"type\":\"session.resume\",\"data\":{\"resumeTime\":\"\",\"eventCount\":0}}", .tag = .session_resume },
     .{ .json = "{\"type\":\"session.schedule_cancelled\",\"data\":{\"id\":1}}", .tag = .session_schedule_cancelled },
     .{ .json = "{\"type\":\"session.schedule_created\",\"data\":{\"id\":1,\"prompt\":\"\"}}", .tag = .session_schedule_created },
@@ -39204,9 +40419,11 @@ const malformed_event_samples = [_][]const u8{
     "{\"type\":\"hook.progress\",\"data\":{}}",
     "{\"type\":\"hook.start\",\"data\":{\"hookType\":\"\"}}",
     "{\"type\":\"human_response.recorded\",\"data\":{\"actor\":\"human_response\",\"response\":{\"responseKind\":\"ask_user\",\"content\":{},\"message\":\"\",\"requestedSchema\":{\"type\":\"object\",\"properties\":{}}}}}",
+    "{\"type\":\"instruction.update\",\"data\":{\"authority\":\"runtime\",\"lifetime\":\"persistent\",\"boundary\":\"afterToolResults\",\"fallback\":\"rebuildSystemPrompt\"}}",
     "{\"type\":\"mcp.headers_refresh_completed\",\"data\":{\"outcome\":\"headers\"}}",
     "{\"type\":\"mcp.headers_refresh_required\",\"data\":{\"serverName\":\"\",\"serverUrl\":\"\",\"reason\":\"startup\"}}",
     "{\"type\":\"mcp.oauth_completed\",\"data\":{\"outcome\":\"token\"}}",
+    "{\"type\":\"mcp.oauth_recovery_completed\",\"data\":{\"serverName\":\"\",\"outcome\":\"succeeded\"}}",
     "{\"type\":\"mcp.oauth_required\",\"data\":{\"serverName\":\"\",\"serverUrl\":\"\",\"reason\":\"initial\"}}",
     "{\"type\":\"mcp.prompts.list_changed\",\"data\":{}}",
     "{\"type\":\"mcp.resources.list_changed\",\"data\":{}}",
@@ -39231,6 +40448,7 @@ const malformed_event_samples = [_][]const u8{
     "{\"type\":\"session.auto_tier_recommendation\",\"data\":{}}",
     "{\"type\":\"session.auto_tier_switch_failed\",\"data\":{\"reason\":\"policy_rejected\"}}",
     "{\"type\":\"session.autopilot_objective_changed\",\"data\":{}}",
+    "{\"type\":\"session.autopilot_stopped\",\"data\":{}}",
     "{\"type\":\"session.binary_asset\",\"data\":{\"type\":\"image\",\"mimeType\":\"\",\"byteLength\":0,\"data\":\"\"}}",
     "{\"type\":\"session.canvas.closed\",\"data\":{\"extensionId\":\"\",\"canvasId\":\"\"}}",
     "{\"type\":\"session.canvas.opened\",\"data\":{\"extensionId\":\"\",\"canvasId\":\"\"}}",
@@ -39262,6 +40480,7 @@ const malformed_event_samples = [_][]const u8{
     "{\"type\":\"session.mcp_server_needs_reconnect\",\"data\":{}}",
     "{\"type\":\"session.mcp_server_removed\",\"data\":{}}",
     "{\"type\":\"session.mcp_server_status_changed\",\"data\":{\"status\":\"connected\"}}",
+    "{\"type\":\"session.mcp_server_tools_loaded\",\"data\":{\"toolCount\":0}}",
     "{\"type\":\"session.mcp_servers_loaded\",\"data\":{}}",
     "{\"type\":\"session.mode_changed\",\"data\":{\"newMode\":\"interactive\"}}",
     "{\"type\":\"session.mode_notice_delivered\",\"data\":{}}",

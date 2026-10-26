@@ -1140,7 +1140,6 @@ pub const ClientOptions = struct {
     use_logged_in_user: ?bool = null,
     telemetry: ?runtime_types.TelemetryConfig = null,
     session_idle_timeout_seconds: u32 = 0,
-    enable_remote_sessions: bool = false,
     on_list_models: ?runtime_types.ModelListCallback = null,
     on_get_trace_context: ?runtime_types.TraceContextCallback = null,
     session_filesystem: ?runtime_types.SessionFilesystemConfig = null,
@@ -2362,7 +2361,6 @@ const ResolvedChild = struct {
     use_logged_in_user: bool = true,
     telemetry: ?runtime_types.TelemetryConfig = null,
     session_idle_timeout_seconds: u32 = 0,
-    enable_remote_sessions: bool = false,
 };
 
 const DefaultConnection = enum {
@@ -2553,7 +2551,6 @@ fn resolveConnection(
             .use_logged_in_user = effective_login,
             .telemetry = options.telemetry,
             .session_idle_timeout_seconds = options.session_idle_timeout_seconds,
-            .enable_remote_sessions = options.enable_remote_sessions,
         },
         .token = options.connection_token,
     } };
@@ -2578,7 +2575,6 @@ fn resolvedChild(
         .use_logged_in_user = effective_login,
         .telemetry = options.telemetry,
         .session_idle_timeout_seconds = options.session_idle_timeout_seconds,
-        .enable_remote_sessions = options.enable_remote_sessions,
     };
 }
 
@@ -2944,9 +2940,6 @@ fn buildRuntimeArgv(
             .{child_runtime.session_idle_timeout_seconds},
         );
         try argv.appendSlice(allocator, &.{ "--session-idle-timeout", timeout });
-    }
-    if (child_runtime.enable_remote_sessions) {
-        try argv.append(allocator, "--remote");
     }
     return argv;
 }
@@ -16221,6 +16214,7 @@ const WireCustomAgent = struct {
     infer: ?bool,
     skills: ?[]const []const u8,
     model: ?[]const u8,
+    modelPolicy: ?session_types.AgentModelPolicy,
     reasoningEffort: ?session_types.ReasoningEffort,
     hooks: ?WireCustomAgentHooks,
 };
@@ -16461,6 +16455,7 @@ const ExtensionWireValues = struct {
                 .infer = agent.infer,
                 .skills = agent.skills,
                 .model = agent.model,
+                .modelPolicy = agent.model_policy,
                 .reasoningEffort = agent.reasoning_effort,
                 .hooks = if (agent.hooks) |hooks| WireCustomAgentHooks{ .values = hooks } else null,
             });
@@ -16667,7 +16662,6 @@ const CreateSessionRequest = struct {
     pluginDirectories: ?[]const []const u8,
     disabledSkills: ?[]const []const u8,
     disabledMcpServers: ?[]const []const u8,
-    remoteSession: ?[]const u8,
     gitHubToken: ?[]const u8,
     gitHubTokenProviderRegistrationId: ?[]const u8,
     cloud: ?WireCloudSessionOptions,
@@ -16753,7 +16747,6 @@ const ResumeSessionRequest = struct {
     disabledMcpServers: ?[]const []const u8,
     openCanvases: ?[]const WireOpenCanvas,
     requestedEnvironmentVariables: ?[]const []const u8,
-    remoteSession: ?[]const u8,
     gitHubToken: ?[]const u8,
     gitHubTokenProviderRegistrationId: ?[]const u8,
     featureFlags: ?std.json.Value,
@@ -16769,6 +16762,7 @@ const ToolFilterPrecedence = enum {
 
 const WireMemoryConfiguration = struct {
     enabled: bool,
+    mode: ?session_types.MemoryMode = null,
 };
 
 const WireLargeOutputConfig = struct {
@@ -16943,7 +16937,6 @@ fn resumeConfigFromCreate(config: session_types.CreateSessionConfig) session_typ
         .enable_file_hooks = config.enable_file_hooks,
         .enable_host_git_operations = config.enable_host_git_operations,
         .enable_session_store = config.enable_session_store,
-        .remote_session = config.remote_session,
         .create_session_filesystem_provider = config.create_session_filesystem_provider,
         .suppress_resume_event = true,
         .extensions = .{
@@ -17022,7 +17015,6 @@ fn resumeConfigFromJoin(config: session_types.JoinSessionConfig) session_types.R
         .enable_file_hooks = config.enable_file_hooks,
         .enable_host_git_operations = config.enable_host_git_operations,
         .enable_session_store = config.enable_session_store,
-        .remote_session = config.remote_session,
         .create_session_filesystem_provider = config.create_session_filesystem_provider,
         .suppress_resume_event = config.suppress_resume_event,
         .continue_pending_work = config.continue_pending_work,
@@ -17256,7 +17248,7 @@ fn buildPreparedCreateSessionRequest(
         .enableSessionStore = config.enable_session_store orelse
             if (mode == .empty) false else null,
         .memory = if (config.memory) |value|
-            .{ .enabled = value.enabled }
+            .{ .enabled = value.enabled, .mode = value.mode }
         else if (mode == .empty)
             .{ .enabled = false }
         else
@@ -17305,7 +17297,6 @@ fn buildPreparedCreateSessionRequest(
         .pluginDirectories = optionalSlice(features.plugin_directories),
         .disabledSkills = optionalSlice(features.skills.disabled),
         .disabledMcpServers = optionalSlice(features.mcp.disabled_servers),
-        .remoteSession = if (config.remote_session) |value| value.wireValue() else null,
         .gitHubToken = config.git_hub_token,
         .gitHubTokenProviderRegistrationId = values.git_hub_token_registration_id,
         .cloud = lowerCloud(config.cloud),
@@ -17431,7 +17422,7 @@ fn buildPreparedResumeSessionRequest(
         .enableSessionStore = config.enable_session_store orelse
             if (mode == .empty) false else null,
         .memory = if (config.memory) |value|
-            .{ .enabled = value.enabled }
+            .{ .enabled = value.enabled, .mode = value.mode }
         else if (mode == .empty)
             .{ .enabled = false }
         else
@@ -17488,7 +17479,6 @@ fn buildPreparedResumeSessionRequest(
         else
             null,
         .requestedEnvironmentVariables = optionalSlice(requested_environment_variables),
-        .remoteSession = if (config.remote_session) |value| value.wireValue() else null,
         .gitHubToken = config.git_hub_token,
         .gitHubTokenProviderRegistrationId = values.git_hub_token_registration_id,
         .featureFlags = values.feature_flags,
@@ -17818,13 +17808,13 @@ test "inactive session slots skip bounded shutdown work" {
     client.releaseInterestsAndDetachSessionsBounded();
 }
 
-test "remote session mode lowers for create and resume and omits null" {
+test "memory mode lowers for create and resume and omits null" {
     const allocator = std.testing.allocator;
     var values = ExtensionWireValues.init(allocator);
     defer values.deinit();
 
     const create = try buildCreateSessionRequest(.{
-        .remote_session = .@"export",
+        .memory = .{ .enabled = true, .mode = .@"user-prompt" },
     }, &.{}, &values);
     const create_json = try std.json.Stringify.valueAlloc(
         allocator,
@@ -17835,12 +17825,12 @@ test "remote session mode lowers for create and resume and omits null" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         create_json,
-        "\"remoteSession\":\"export\"",
+        "\"memory\":{\"enabled\":true,\"mode\":\"user-prompt\"}",
     ) != null);
 
     const resume_request = try buildResumeSessionRequest(
         "session",
-        .{ .remote_session = .on },
+        .{ .memory = .{ .enabled = true, .mode = .@"system-prompt" } },
         &.{},
         &values,
         &.{},
@@ -17854,17 +17844,19 @@ test "remote session mode lowers for create and resume and omits null" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         resume_json,
-        "\"remoteSession\":\"on\"",
+        "\"memory\":{\"enabled\":true,\"mode\":\"system-prompt\"}",
     ) != null);
 
-    const omitted = try buildCreateSessionRequest(.{}, &.{}, &values);
+    const omitted = try buildCreateSessionRequest(.{
+        .memory = .{ .enabled = false },
+    }, &.{}, &values);
     const omitted_json = try std.json.Stringify.valueAlloc(
         allocator,
         omitted,
         .{ .emit_null_optional_fields = false },
     );
     defer allocator.free(omitted_json);
-    try std.testing.expect(std.mem.indexOf(u8, omitted_json, "remoteSession") == null);
+    try std.testing.expect(std.mem.indexOf(u8, omitted_json, "\"memory\":{\"enabled\":false}") != null);
 }
 
 const RpcSuccess = struct {
@@ -17989,7 +17981,6 @@ test "stdio runtime lowers stable argv and environment options" {
             .capture_content = false,
         },
         .session_idle_timeout_seconds = 90,
-        .enable_remote_sessions = true,
     });
     defer client.deinit();
 
@@ -18008,7 +17999,6 @@ test "stdio runtime lowers stable argv and environment options" {
         "COPILOT_SDK_AUTH_TOKEN",
         "--session-idle-timeout",
         "90",
-        "--remote",
     };
     try std.testing.expectEqual(expected.len, args.len);
     for (expected, args) |expected_arg, actual_arg| {
@@ -26165,13 +26155,11 @@ test "review regressions preserve protocol semantics" {
     const mapped = resumeConfigFromCreate(.{
         .model = "model",
         .streaming = true,
-        .remote_session = .@"export",
         .extensions = .{ .extension_sdk_path = "/sdk" },
     });
     try std.testing.expectEqualStrings("model", mapped.model.?);
     try std.testing.expect(mapped.streaming);
     try std.testing.expect(mapped.suppress_resume_event);
-    try std.testing.expectEqual(session_types.RemoteSessionMode.@"export", mapped.remote_session.?);
     try std.testing.expectEqualStrings("/sdk", mapped.extensions.extension_sdk_path.?);
 
     const joined = resumeConfigFromJoin(.{});
@@ -26181,12 +26169,10 @@ test "review regressions preserve protocol semantics" {
     );
     const overridden_join = resumeConfigFromJoin(.{
         .on_permission_request = session_types.approveAll,
-        .remote_session = .on,
     });
     try std.testing.expect(
         overridden_join.on_permission_request.? == session_types.approveAll,
     );
-    try std.testing.expectEqual(session_types.RemoteSessionMode.on, overridden_join.remote_session.?);
 
     const stdio_json = try lowerStdioMcp(allocator, .{
         .command = "server",
@@ -30458,6 +30444,48 @@ test "create resume and parent join lower custom agents to literal lifecycle JSO
         \\{"jsonrpc":"2.0","id":4,"method":"session.model.switchAutoTier","params":{"sessionId":"created","autoTier":"provider-speed"}}
     , tier_body);
     try std.testing.expectEqualStrings("", frames.buffered());
+}
+
+test "custom agent model policy preserves explicit and omitted lifecycle values" {
+    const allocator = std.testing.allocator;
+    const policies = [_]?session_types.AgentModelPolicy{ null, .preferred, .required };
+    for (policies) |policy| {
+        const agents = &[_]session_types.CustomAgentConfig{.{
+            .name = "reviewer",
+            .prompt = "Review.",
+            .model = "model",
+            .model_policy = policy,
+        }};
+        var values = ExtensionWireValues.init(allocator);
+        defer values.deinit();
+        try values.lowerCustomAgents(agents);
+        const create_config: session_types.CreateSessionConfig = .{ .custom_agents = agents };
+        const resume_config = resumeConfigFromCreate(create_config);
+        const join_config = resumeConfigFromJoin(.{ .custom_agents = agents });
+        inline for (.{
+            try buildCreateSessionRequest(create_config, &.{}, &values),
+            try buildResumeSessionRequest("session", resume_config, &.{}, &values, &.{}),
+            try buildResumeSessionRequest("parent", join_config, &.{}, &values, &.{}),
+        }) |request| {
+            const encoded = try std.json.Stringify.valueAlloc(
+                allocator,
+                request,
+                .{ .emit_null_optional_fields = false },
+            );
+            defer allocator.free(encoded);
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
+            defer parsed.deinit();
+            const agent = parsed.value.object.get("customAgents").?.array.items[0].object;
+            if (policy) |expected| {
+                try std.testing.expectEqualStrings(
+                    @tagName(expected),
+                    agent.get("modelPolicy").?.string,
+                );
+            } else {
+                try std.testing.expect(!agent.contains("modelPolicy"));
+            }
+        }
+    }
 }
 
 test "custom agent optional slices preserve omitted and empty values" {

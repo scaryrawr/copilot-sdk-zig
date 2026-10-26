@@ -1977,6 +1977,11 @@
           "type": "string",
           "description": "Fixed-set provider family serving the bring-your-own-key model (for example \"openai\", \"anthropic\", \"azure_openai\", \"ollama\", \"llama_cpp\", or \"other\"). Never the caller-supplied provider name. Absent for Copilot-served models."
         },
+        "providerType": {
+          "type": "string",
+          "description": "Fixed-set configured provider type of the bring-your-own-key model: \"openai\", \"azure\", \"anthropic\", \"local_model\" (a user-configured local model), \"winml\" (a Copilot-managed Windows ML model), or \"other\". Never the caller-supplied provider name. Absent for Copilot-served models.",
+          "visibility": "internal"
+        },
         "isAuto": {
           "type": "boolean",
           "description": "Whether Auto mode was selected for this model call"
@@ -2018,6 +2023,20 @@
         "requestBodyEncoding": {
           "$ref": "#/definitions/ModelCallRequestBodyEncoding",
           "description": "Content-Encoding applied to the request body of the attempt that produced this outcome; identity when uncompressed"
+        },
+        "requestBodyCompressionFallback": {
+          "$ref": "#/definitions/ModelCallRequestBodyCompressionFallback",
+          "description": "Uncompressed fallback that produced this outcome; absent when the body was sent with the requested encoding"
+        },
+        "requestBodyCompressionFallbackFrom": {
+          "$ref": "#/definitions/ModelCallRequestBodyEncoding",
+          "description": "Content-Encoding the request asked for before the uncompressed fallback; present only with requestBodyCompressionFallback"
+        },
+        "requestBodyCompressionRejectedStatus": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999,
+          "description": "HTTP status that rejected the compressed body before the uncompressed resend; present only when requestBodyCompressionFallback is retried"
         },
         "websocketFallbackReason": {
           "$ref": "#/definitions/ModelCallWebSocketFallbackReason",
@@ -2112,6 +2131,24 @@
           "description": "Number of tokens used by tool definitions for this call",
           "visibility": "internal"
         },
+        "customToolCallCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Free-form custom tool calls in the request history before request shaping, counted apart from named function calls",
+          "visibility": "internal"
+        },
+        "unmatchedToolResultCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Tool results in the request history before request shaping that answer no earlier unanswered tool call",
+          "visibility": "internal"
+        },
+        "orphanToolCallCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Tool calls in the request history before request shaping that no later tool result answers",
+          "visibility": "internal"
+        },
         "frontierSource": {
           "type": "string",
           "description": "How the prompt-cache frontier was determined for this call",
@@ -2121,6 +2158,12 @@
           "type": "integer",
           "minimum": 0,
           "description": "Effective prompt-cache lifetime in seconds for this call",
+          "visibility": "internal"
+        },
+        "cachePolicyTtlSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Request-scoped prompt-cache policy lifetime in seconds; the shortest lifetime for mixed known policies. Does not establish or refresh cache state. Omitted when the policy is unknown.",
           "visibility": "internal"
         },
         "cacheDetailsReported": {
@@ -3559,6 +3602,81 @@
         "cap_reached": "Legacy objective state indicating the previous continuation cap was reached.",
         "completed": "Objective was completed by the agent."
       }
+    },
+    "AutopilotStoppedData": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "description": "The terminal policy reason, such as task_complete, aborted, error, or background_timeout."
+        },
+        "requestId": {
+          "type": "string",
+          "description": "Original root user message ID for this request, absent when no root request is available."
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "additionalProperties": false,
+      "description": "The runtime has stopped continuing one Autopilot request. Attached background work may remain active; this is not session-wide idle.",
+      "title": "AutopilotStoppedData"
+    },
+    "AutopilotStoppedEvent": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Unique event identifier (UUID v4), generated when the event is emitted"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp when the event was created"
+        },
+        "parentId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ID of the chronologically preceding event in the session, forming a linked chain. Null for the first event."
+        },
+        "ephemeral": {
+          "type": "boolean",
+          "const": true,
+          "description": "Always true for events that are transient and not persisted to the session event log on disk."
+        },
+        "agentId": {
+          "type": "string",
+          "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "type": {
+          "type": "string",
+          "const": "session.autopilot_stopped",
+          "description": "Type discriminator. Always \"session.autopilot_stopped\"."
+        },
+        "data": {
+          "$ref": "#/definitions/AutopilotStoppedData",
+          "description": "The runtime has stopped continuing one Autopilot request. Attached background work may remain active; this is not session-wide idle."
+        }
+      },
+      "required": [
+        "id",
+        "timestamp",
+        "parentId",
+        "ephemeral",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "description": "Session event \"session.autopilot_stopped\". The runtime has stopped continuing one Autopilot request. Attached background work may remain active; this is not session-wide idle.",
+      "title": "AutopilotStoppedEvent"
     },
     "AutoTier": {
       "type": "string",
@@ -5419,6 +5537,30 @@
           "type": "boolean",
           "description": "Whether compaction completed successfully"
         },
+        "outcome": {
+          "type": "string",
+          "description": "Typed terminal outcome for this observed compaction completion. Unknown future values are preserved."
+        },
+        "outcomeReason": {
+          "type": "string",
+          "description": "Bounded reason for an expected non-application outcome such as cancellation or no applicable history. Unknown future values are preserved."
+        },
+        "failureReason": {
+          "type": "string",
+          "description": "Bounded reason for a typed failed outcome. Unknown future values are preserved."
+        },
+        "compactionAttemptId": {
+          "type": "string",
+          "description": "Identifier shared with the matching compaction start event"
+        },
+        "model": {
+          "type": "string",
+          "description": "Model identifier used for compaction when provider usage does not already supply it"
+        },
+        "initialModel": {
+          "type": "string",
+          "description": "Model identifier at admission when routing later changed to the reported compaction model"
+        },
         "error": {
           "type": "string",
           "description": "Error message if compaction failed"
@@ -5448,6 +5590,10 @@
           "minimum": 0,
           "description": "Number of tokens removed during compaction"
         },
+        "tokenAccountingBasis": {
+          "type": "string",
+          "description": "Open accounting-basis identifier for trustworthy paired pre/post token measurements. The current runtime emits local_full_context_estimate."
+        },
         "customInstructions": {
           "type": "string",
           "description": "User-supplied focus instructions provided to a manual `/compact` invocation. Omitted for automatic compaction and for manual compaction with no focus text."
@@ -5463,11 +5609,6 @@
         "activeWorkflowSummary": {
           "type": "string",
           "description": "Authoritative active-workflow reminder appended to the compacted context",
-          "visibility": "internal"
-        },
-        "activeFactorySummary": {
-          "type": "string",
-          "description": "Legacy active-workflow reminder retained for replay compatibility",
           "visibility": "internal"
         },
         "behaviorModelId": {
@@ -5520,9 +5661,23 @@
           "minimum": 0,
           "description": "Model context window token limit the compaction was targeting, when known"
         },
+        "targetPromptTokenLimit": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Destination prompt-token budget when it differs from the effective compaction token limit"
+        },
+        "switchTargetModel": {
+          "type": "string",
+          "description": "Destination model for a model-switch compaction when it differs from the compacting model; for a HydraFusion turn, the routed root model"
+        },
         "trigger": {
           "$ref": "#/definitions/CompactionTrigger",
           "description": "What initiated this compaction, when known"
+        },
+        "summarizerProgress": {
+          "$ref": "#/definitions/CompactionCompleteSummarizerProgress",
+          "description": "How far the summarizer model calls had progressed when the outcome was decided, so a stalled summarizer can be told from a slow one",
+          "visibility": "internal"
         }
       },
       "required": [
@@ -5586,9 +5741,126 @@
       "description": "Session event \"session.compaction_complete\". Conversation compaction results including success status, metrics, and optional error details",
       "title": "CompactionCompleteEvent"
     },
+    "CompactionCompleteSummarizerProgress": {
+      "type": "object",
+      "properties": {
+        "durationMs": {
+          "type": "integer",
+          "minimum": 0,
+          "format": "duration",
+          "description": "Time from the start of the compaction to the decision of its outcome, in milliseconds",
+          "visibility": "internal"
+        },
+        "attemptCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of summarizer model requests dispatched, including retries",
+          "visibility": "internal"
+        },
+        "attemptAgeMs": {
+          "type": "integer",
+          "minimum": 0,
+          "format": "duration",
+          "description": "Time since the latest request was dispatched, whether or not it had finished, in milliseconds. Absent when no request was dispatched.",
+          "visibility": "internal"
+        },
+        "attemptSettled": {
+          "type": "boolean",
+          "description": "Whether the latest request had already returned a response or an error. False when it was still in flight, such as when the compaction deadline cut it off; absent when no request was dispatched.",
+          "visibility": "internal"
+        },
+        "timeToFirstTokenMs": {
+          "type": "integer",
+          "minimum": 0,
+          "format": "duration",
+          "description": "Time from dispatching the latest request to its first token-bearing stream event, in milliseconds. Absent when no stream event arrived.",
+          "visibility": "internal"
+        },
+        "timeToFirstOutputMs": {
+          "type": "integer",
+          "minimum": 0,
+          "format": "duration",
+          "description": "Time from dispatching the latest request to its first observable text, reasoning, or tool-call output, in milliseconds. Absent when no output arrived.",
+          "visibility": "internal"
+        },
+        "timeToFirstAnswerOutputMs": {
+          "type": "integer",
+          "minimum": 0,
+          "format": "duration",
+          "description": "Time from dispatching the latest request to its first reply text or tool-call output, in milliseconds. Reasoning does not count. Absent when no such output arrived.",
+          "visibility": "internal"
+        },
+        "streamEventCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Token-bearing stream events the latest request received, keepalive deltas included",
+          "visibility": "internal"
+        },
+        "outputEventCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Stream events of the latest request that carried observable output",
+          "visibility": "internal"
+        },
+        "maxStreamEventGapMs": {
+          "type": "integer",
+          "minimum": 0,
+          "format": "duration",
+          "description": "Longest gap between two consecutive stream events of the latest request, in milliseconds. Excludes the still-open gap reported as idleMs; absent with fewer than two events.",
+          "visibility": "internal"
+        },
+        "maxOutputGapBeforeAnswerMs": {
+          "type": "integer",
+          "minimum": 0,
+          "format": "duration",
+          "description": "Longest gap between two consecutive outputs of the latest request up to its first reply text or tool-call output, including the gap that ends there, in milliseconds. Excludes the still-open gap reported as sinceLastOutputMs; absent without such a gap.",
+          "visibility": "internal"
+        },
+        "maxOutputGapAfterAnswerMs": {
+          "type": "integer",
+          "minimum": 0,
+          "format": "duration",
+          "description": "Longest gap between two consecutive outputs of the latest request after its first reply text or tool-call output, in milliseconds. Excludes the still-open gap reported as sinceLastOutputMs; absent without such a gap.",
+          "visibility": "internal"
+        },
+        "idleMs": {
+          "type": "integer",
+          "minimum": 0,
+          "format": "duration",
+          "description": "Time since the latest request's last stream event, or since its dispatch if none arrived, in milliseconds. Absent when no request was dispatched.",
+          "visibility": "internal"
+        },
+        "sinceLastOutputMs": {
+          "type": "integer",
+          "minimum": 0,
+          "format": "duration",
+          "description": "Time since the latest request's last observable output, in milliseconds. Unlike idleMs, keepalive deltas do not reset it. Absent when no output arrived.",
+          "visibility": "internal"
+        },
+        "inputShrunk": {
+          "type": "boolean",
+          "description": "Whether historical attachments and reasoning were dropped from the compaction's input because the session's previous compaction ran out of time.",
+          "visibility": "internal"
+        }
+      },
+      "required": [
+        "durationMs",
+        "attemptCount",
+        "streamEventCount",
+        "outputEventCount"
+      ],
+      "additionalProperties": false,
+      "description": "How far the compaction's summarizer model calls had progressed when the compaction's outcome was decided. Stream statistics describe the latest model request; durationMs and attemptCount cover every request.",
+      "title": "CompactionCompleteSummarizerProgress",
+      "visibility": "internal"
+    },
     "CompactionStartData": {
       "type": "object",
       "properties": {
+        "compactionAttemptId": {
+          "type": "string",
+          "description": "Identifier shared with the matching compaction completion event"
+        },
         "model": {
           "type": "string",
           "description": "Model identifier used for compaction, when known"
@@ -5617,6 +5889,15 @@
           "type": "integer",
           "minimum": 0,
           "description": "Model context window token limit the compaction is targeting, when known"
+        },
+        "targetPromptTokenLimit": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Destination prompt-token budget when it differs from the effective compaction token limit"
+        },
+        "switchTargetModel": {
+          "type": "string",
+          "description": "Destination model for a model-switch compaction when it differs from the compacting model; for a HydraFusion turn, the routed root model"
         },
         "trigger": {
           "$ref": "#/definitions/CompactionTrigger",
@@ -5697,7 +5978,7 @@
         "context_limit_retry": "Compaction forced by a context-limit model response (e.g. HTTP 413) before retrying the request.",
         "manual": "User-requested compaction, e.g. the /compact command or the history.compact API.",
         "memory_pressure": "Emergency compaction triggered by high process memory usage.",
-        "model_switch": "Compaction requested while switching to a model with a smaller context window."
+        "model_switch": "Compaction requested while switching to a model with a smaller context window, including a HydraFusion turn's routed root model."
       }
     },
     "CompletionReceiptData": {
@@ -6596,6 +6877,10 @@
     "ErrorData": {
       "type": "object",
       "properties": {
+        "originatingMessageId": {
+          "type": "string",
+          "description": "Original root user-message ID of the failed request, including failures before user.message is emitted. Absent for session-wide errors or legacy hosts."
+        },
         "errorType": {
           "type": "string",
           "description": "Category of error (e.g., \"authentication\", \"authorization\", \"policy\", \"quota\", \"rate_limit\", \"context_limit\", \"query\")"
@@ -7638,6 +7923,11 @@
           "type": "number",
           "minimum": 0,
           "description": "Total elapsed execution time for the HydraFusion turn in milliseconds."
+        },
+        "awaitingBackgroundWork": {
+          "type": "boolean",
+          "description": "True when the committed first pass ended with background work outstanding, so that work's completion notifications continue the conversation; absent otherwise.",
+          "stability": "experimental"
         }
       },
       "required": [
@@ -8039,6 +8329,11 @@
           "$ref": "#/definitions/FusionStagedTerminal",
           "description": "Terminal request held outside canonical state until selected by the final commit.",
           "visibility": "internal"
+        },
+        "endedWithBackgroundWork": {
+          "type": "boolean",
+          "description": "True when a first pass (Cascade primary or Critique draft) ended with background work outstanding, whether or not the turn then committed it without review; absent otherwise.",
+          "stability": "experimental"
         }
       },
       "required": [
@@ -8363,6 +8658,11 @@
           "type": "string",
           "description": "Identifier of the local policy rule that matched."
         },
+        "selectedRuleId": {
+          "type": "string",
+          "description": "Identifier of the server policy rule whose workflow the plan's steps describe, when CAPI's sticky root routing replaced the workflow of `ruleId`'s rule to keep the previous turn's root model. Absent when no substitution occurred.",
+          "stability": "experimental"
+        },
         "ruleIndex": {
           "type": "integer",
           "minimum": 0,
@@ -8519,6 +8819,10 @@
         "attemptId": {
           "type": "string",
           "description": "Identifier of the routing attempt that failed."
+        },
+        "fusionId": {
+          "type": "string",
+          "description": "Identifier of the HydraFusion turn whose routing failed; its fallback phase runs under the same id. Absent on events written before it was recorded."
         },
         "syntheticModel": {
           "type": "string",
@@ -9954,6 +10258,153 @@
       "description": "Session event \"session.info\". Informational message for timeline display with categorization",
       "title": "InfoEvent"
     },
+    "InstructionUpdateAuthority": {
+      "type": "string",
+      "enum": [
+        "runtime",
+        "host",
+        "managedPolicy"
+      ],
+      "description": "Authority responsible for an instruction update",
+      "title": "InstructionUpdateAuthority",
+      "x-enumDescriptions": {
+        "runtime": "The runtime generated the instruction.",
+        "host": "The SDK host supplied the instruction.",
+        "managedPolicy": "Managed policy supplied the instruction."
+      }
+    },
+    "InstructionUpdateBoundary": {
+      "type": "string",
+      "enum": [
+        "afterToolResults",
+        "nextModelRequest"
+      ],
+      "description": "Earliest legal insertion boundary for an instruction update",
+      "title": "InstructionUpdateBoundary",
+      "x-enumDescriptions": {
+        "afterToolResults": "Insert after the current tool-result run and before the next model request.",
+        "nextModelRequest": "Insert immediately before the next model request at a provider-legal boundary."
+      }
+    },
+    "InstructionUpdateData": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string",
+          "description": "Authoritative instruction text. Empty or whitespace-only content is rejected."
+        },
+        "authority": {
+          "$ref": "#/definitions/InstructionUpdateAuthority",
+          "description": "Authority responsible for the update."
+        },
+        "lifetime": {
+          "$ref": "#/definitions/InstructionUpdateLifetime",
+          "description": "Whether the update persists beyond the current turn."
+        },
+        "boundary": {
+          "$ref": "#/definitions/InstructionUpdateBoundary",
+          "description": "Earliest legal insertion boundary."
+        },
+        "fallback": {
+          "$ref": "#/definitions/InstructionUpdateFallback",
+          "description": "Deterministic behavior when the active provider cannot represent the update."
+        },
+        "name": {
+          "type": "string",
+          "description": "Optional stable source name for diagnostics and future host-authored updates."
+        }
+      },
+      "required": [
+        "content",
+        "authority",
+        "lifetime",
+        "boundary",
+        "fallback"
+      ],
+      "additionalProperties": false,
+      "description": "An authoritative developer-instruction update. Event order defines instruction order. Persistent updates are durable and restore across replay, resume, rewind, fork, and compaction; turn-scoped updates must be emitted with ephemeral=true and are never restored.",
+      "title": "InstructionUpdateData"
+    },
+    "InstructionUpdateEvent": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Unique event identifier (UUID v4), generated when the event is emitted"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp when the event was created"
+        },
+        "parentId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ID of the chronologically preceding event in the session, forming a linked chain. Null for the first event."
+        },
+        "ephemeral": {
+          "type": "boolean",
+          "description": "When true, the event is transient and not persisted to the session event log on disk"
+        },
+        "agentId": {
+          "type": "string",
+          "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "type": {
+          "type": "string",
+          "const": "instruction.update",
+          "description": "Type discriminator. Always \"instruction.update\"."
+        },
+        "data": {
+          "$ref": "#/definitions/InstructionUpdateData",
+          "description": "An authoritative developer-instruction update. Event order defines instruction order. Persistent updates are durable and restore across replay, resume, rewind, fork, and compaction; turn-scoped updates must be emitted with ephemeral=true and are never restored."
+        }
+      },
+      "required": [
+        "id",
+        "timestamp",
+        "parentId",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "description": "Session event \"instruction.update\". An authoritative developer-instruction update. Event order defines instruction order. Persistent updates are durable and restore across replay, resume, rewind, fork, and compaction; turn-scoped updates must be emitted with ephemeral=true and are never restored.",
+      "title": "InstructionUpdateEvent"
+    },
+    "InstructionUpdateFallback": {
+      "type": "string",
+      "enum": [
+        "rebuildSystemPrompt",
+        "reject"
+      ],
+      "description": "Deterministic behavior when the active provider cannot represent the requested update",
+      "title": "InstructionUpdateFallback",
+      "x-enumDescriptions": {
+        "rebuildSystemPrompt": "Rebuild the leading system prompt rather than silently dropping the update.",
+        "reject": "Reject the update without changing authoritative instructions."
+      }
+    },
+    "InstructionUpdateLifetime": {
+      "type": "string",
+      "enum": [
+        "persistent",
+        "turn"
+      ],
+      "description": "How long an instruction update remains authoritative",
+      "title": "InstructionUpdateLifetime",
+      "x-enumDescriptions": {
+        "persistent": "Persists in event order across replay, resume, rewind, fork, and compaction.",
+        "turn": "Applies only to the current turn and is not restored from durable history."
+      }
+    },
     "ManagedPermissionsContext": {
       "type": "object",
       "properties": {
@@ -10711,7 +11162,7 @@
         },
         "outcome": {
           "$ref": "#/definitions/McpOauthCompletionOutcome",
-          "description": "How the pending OAuth request was completed"
+          "description": "How the pending OAuth request was completed. An accepted runtimeRefresh handoff completes once at its authorization terminal: token when recovery succeeded, cancelled when it was cancelled or failed; see mcp.oauth_recovery_completed for the exact outcome."
         }
       },
       "required": [
@@ -10821,6 +11272,100 @@
       "description": "Raw HTTP response details from the OAuth auth challenge, as observed by the runtime.",
       "title": "McpOauthHttpResponse"
     },
+    "McpOauthRecoveryCompletedData": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "description": "Request ID of the MCP OAuth request whose runtimeRefresh handoff was accepted"
+        },
+        "serverName": {
+          "type": "string",
+          "description": "Name of the MCP server whose authorization recovery completed"
+        },
+        "outcome": {
+          "$ref": "#/definitions/McpOauthRecoveryCompletedOutcome",
+          "description": "Terminal outcome of the original authorization reservation, including reconnect"
+        }
+      },
+      "required": [
+        "requestId",
+        "serverName",
+        "outcome"
+      ],
+      "additionalProperties": false,
+      "description": "Terminal outcome of a runtime-owned MCP OAuth recovery accepted through a runtimeRefresh handoff",
+      "title": "McpOauthRecoveryCompletedData"
+    },
+    "McpOauthRecoveryCompletedEvent": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Unique event identifier (UUID v4), generated when the event is emitted"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp when the event was created"
+        },
+        "parentId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ID of the chronologically preceding event in the session, forming a linked chain. Null for the first event."
+        },
+        "ephemeral": {
+          "type": "boolean",
+          "description": "When true, the event is transient and not persisted to the session event log on disk"
+        },
+        "agentId": {
+          "type": "string",
+          "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "type": {
+          "type": "string",
+          "const": "mcp.oauth_recovery_completed",
+          "description": "Type discriminator. Always \"mcp.oauth_recovery_completed\"."
+        },
+        "data": {
+          "$ref": "#/definitions/McpOauthRecoveryCompletedData",
+          "description": "Terminal outcome of a runtime-owned MCP OAuth recovery accepted through a runtimeRefresh handoff"
+        }
+      },
+      "required": [
+        "id",
+        "timestamp",
+        "parentId",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "description": "Session event \"mcp.oauth_recovery_completed\". Terminal outcome of a runtime-owned MCP OAuth recovery accepted through a runtimeRefresh handoff",
+      "title": "McpOauthRecoveryCompletedEvent"
+    },
+    "McpOauthRecoveryCompletedOutcome": {
+      "type": "string",
+      "enum": [
+        "succeeded",
+        "cancelled",
+        "failed"
+      ],
+      "description": "Terminal outcome of the original authorization reservation, including reconnect",
+      "title": "McpOauthRecoveryCompletedOutcome",
+      "x-enumDescriptions": {
+        "succeeded": "Credentials were renewed and the server reconnected.",
+        "cancelled": "The recovery was cancelled before it completed.",
+        "failed": "Credential renewal or reconnect failed, or the server was dropped."
+      }
+    },
     "McpOauthRequestReason": {
       "type": "string",
       "enum": [
@@ -10872,6 +11417,10 @@
         "reason": {
           "$ref": "#/definitions/McpOauthRequestReason",
           "description": "Why the runtime is requesting host-provided OAuth credentials."
+        },
+        "runtimeRefreshSupported": {
+          "type": "boolean",
+          "description": "Whether this Refresh request accepts kind runtimeRefresh to continue noninteractive grant renewal within its original authorization reservation. Missing or false means unsupported; the host must retain its legacy response behavior."
         }
       },
       "required": [
@@ -11519,6 +12068,82 @@
       "description": "Session event \"session.mcp_server_status_changed\". Payload of `session.mcp_server_status_changed` for one MCP server's status and optional failure error.",
       "title": "McpServerStatusChangedEvent"
     },
+    "McpServerToolsLoadedData": {
+      "type": "object",
+      "properties": {
+        "serverName": {
+          "type": "string",
+          "description": "Name of the MCP server whose tools loaded"
+        },
+        "toolCount": {
+          "type": "integer",
+          "description": "Number of tools the server listed"
+        }
+      },
+      "required": [
+        "serverName",
+        "toolCount"
+      ],
+      "additionalProperties": false,
+      "description": "Payload of `session.mcp_server_tools_loaded`, emitted once per connection when an MCP server's tools first become available from tools/list or a cached snapshot. A connected server is still loading tools if this event has not fired since the server last left connected; it can precede connected when the tools come from a cached snapshot.",
+      "title": "McpServerToolsLoadedData"
+    },
+    "McpServerToolsLoadedEvent": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Unique event identifier (UUID v4), generated when the event is emitted"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp when the event was created"
+        },
+        "parentId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ID of the chronologically preceding event in the session, forming a linked chain. Null for the first event."
+        },
+        "ephemeral": {
+          "type": "boolean",
+          "const": true,
+          "description": "Always true for events that are transient and not persisted to the session event log on disk."
+        },
+        "agentId": {
+          "type": "string",
+          "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "type": {
+          "type": "string",
+          "const": "session.mcp_server_tools_loaded",
+          "description": "Type discriminator. Always \"session.mcp_server_tools_loaded\"."
+        },
+        "data": {
+          "$ref": "#/definitions/McpServerToolsLoadedData",
+          "description": "Payload of `session.mcp_server_tools_loaded`, emitted once per connection when an MCP server's tools first become available from tools/list or a cached snapshot. A connected server is still loading tools if this event has not fired since the server last left connected; it can precede connected when the tools come from a cached snapshot."
+        }
+      },
+      "required": [
+        "id",
+        "timestamp",
+        "parentId",
+        "ephemeral",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "description": "Session event \"session.mcp_server_tools_loaded\". Payload of `session.mcp_server_tools_loaded`, emitted once per connection when an MCP server's tools first become available from tools/list or a cached snapshot. A connected server is still loading tools if this event has not fired since the server last left connected; it can precede connected when the tools come from a cached snapshot.",
+      "title": "McpServerToolsLoadedEvent"
+    },
     "McpServerTransport": {
       "type": "string",
       "enum": [
@@ -11813,6 +12438,20 @@
           "$ref": "#/definitions/ModelCallRequestBodyEncoding",
           "description": "Content-Encoding applied to the failed request body; identity when uncompressed"
         },
+        "requestBodyCompressionFallback": {
+          "$ref": "#/definitions/ModelCallRequestBodyCompressionFallback",
+          "description": "Uncompressed fallback that produced this outcome; absent when the body was sent with the requested encoding"
+        },
+        "requestBodyCompressionFallbackFrom": {
+          "$ref": "#/definitions/ModelCallRequestBodyEncoding",
+          "description": "Content-Encoding the request asked for before the uncompressed fallback; present only with requestBodyCompressionFallback"
+        },
+        "requestBodyCompressionRejectedStatus": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999,
+          "description": "HTTP status that rejected the compressed body before the uncompressed resend; present only when requestBodyCompressionFallback is retried"
+        },
         "retryAttempt": {
           "type": "integer",
           "minimum": 0,
@@ -11874,6 +12513,11 @@
           "type": "string",
           "description": "Fixed-set provider family serving the bring-your-own-key model for the failed call (for example \"openai\", \"anthropic\", \"azure_openai\", \"ollama\", \"llama_cpp\", or \"other\"). Never the caller-supplied provider name. Absent for Copilot-served models."
         },
+        "providerType": {
+          "type": "string",
+          "description": "Fixed-set configured provider type of the bring-your-own-key model for the failed call: \"openai\", \"azure\", \"anthropic\", \"local_model\" (a user-configured local model), \"winml\" (a Copilot-managed Windows ML model), or \"other\". Never the caller-supplied provider name. Absent for Copilot-served models.",
+          "visibility": "internal"
+        },
         "isAuto": {
           "type": "boolean",
           "description": "Whether the session selected Auto mode for the failed call"
@@ -11900,11 +12544,11 @@
         },
         "errorCode": {
           "type": "string",
-          "description": "For HTTP 400 failures only: the `code` from the CAPI error envelope (e.g. 'model_max_prompt_tokens_exceeded') identifying which deterministic validation failure occurred. Raw server-controlled string, emitted only through restricted telemetry. Absent for bodyless or non-400 failures."
+          "description": "The `code` from the CAPI error envelope of an HTTP failure of any status (e.g. 'model_max_prompt_tokens_exceeded' on a 400, 'model_overloaded' on a 5xx) identifying which upstream failure occurred. Raw server-controlled string, emitted only through restricted telemetry. Absent when the response carried no error envelope."
         },
         "errorType": {
           "type": "string",
-          "description": "For HTTP 400 failures only: the `type` from the CAPI error envelope (e.g. 'websocket_error'), a coarser companion to errorCode for envelopes that carry no code. Raw server-controlled string, emitted only through restricted telemetry. Absent for bodyless or non-400 failures."
+          "description": "The `type` from the CAPI error envelope of an HTTP failure of any status (e.g. 'websocket_error'), a coarser companion to errorCode for envelopes that carry no code. Raw server-controlled string, emitted only through restricted telemetry. Absent when the response carried no error envelope."
         },
         "quotaSnapshots": {
           "type": "object",
@@ -12024,6 +12668,21 @@
           "type": "integer",
           "minimum": 0,
           "description": "Tool calls whose name is missing or empty (rejected by strict providers)"
+        },
+        "customToolCallCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Free-form custom tool calls in the request history before request shaping, counted apart from named function calls (rejected by strict providers)"
+        },
+        "unmatchedToolResultCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Tool result messages in the request history before request shaping that answer no earlier unanswered tool call"
+        },
+        "orphanToolCallCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Tool calls in the request history before request shaping that no later tool result message answers"
         },
         "imagePartCount": {
           "type": "integer",
@@ -12313,6 +12972,19 @@
         "error": "The dispatch ended with a provider or transport error.",
         "cancelled": "The dispatch was cancelled before an accepted response was produced.",
         "rejected": "The provider response was rejected during post-response acceptance processing."
+      }
+    },
+    "ModelCallRequestBodyCompressionFallback": {
+      "type": "string",
+      "enum": [
+        "retried",
+        "disabled"
+      ],
+      "description": "How the runtime fell back to an uncompressed request body after a compressed body was rejected",
+      "title": "ModelCallRequestBodyCompressionFallback",
+      "x-enumDescriptions": {
+        "retried": "A compressed body was rejected with HTTP 400 or 415 and this outcome comes from the single uncompressed resend.",
+        "disabled": "Request body compression was already turned off for the session by an earlier rejection, so the body was sent uncompressed."
       }
     },
     "ModelCallRequestBodyEncoding": {
@@ -12817,6 +13489,10 @@
         "content": {
           "type": "string",
           "description": "Model-visible transition notice persisted for a mid-turn delivery"
+        },
+        "instructionUpdatePersisted": {
+          "type": "boolean",
+          "description": "Whether the model-visible transition notice was persisted separately as an instruction.update event"
         }
       },
       "required": [
@@ -13023,6 +13699,7 @@
             "inactive",
             "authorization-history-incomplete",
             "managed-approval-required",
+            "extension-permission-access",
             "sandbox-bypass",
             "action-too-long",
             "path-not-authorized",
@@ -13059,6 +13736,7 @@
             "inactive": "Assisted approval was inactive for this request.",
             "authorization-history-incomplete": "The judge was skipped because authorization extraction could not safely establish a complete recent history.",
             "managed-approval-required": "Managed policy required a human decision.",
+            "extension-permission-access": "An extension capability grant required explicit user consent.",
             "sandbox-bypass": "The request asked to bypass sandbox restrictions.",
             "action-too-long": "An action field exceeded the judge input limit.",
             "path-not-authorized": "The script path was not authorized for inspection.",
@@ -13323,6 +14001,10 @@
     "PermissionAssistedApproval": {
       "type": "object",
       "properties": {
+        "evaluationId": {
+          "type": "string",
+          "description": "Runtime-generated correlation ID for the original judge invocation. Cached recommendations retain it. Absent when review was skipped or the event predates correlation support; never part of the judge prompt."
+        },
         "evaluation": {
           "$ref": "#/definitions/PermissionApprovalEvaluation",
           "description": "Runtime reason and judge-call metadata. Absent on older events; missing metadata means unknown, not that the judge was skipped."
@@ -15253,6 +15935,11 @@
         "recoveryEpisodeId": {
           "type": "string",
           "description": "Permission-recovery episode that authorized this request to surface for interactive attention"
+        },
+        "fusion": {
+          "$ref": "#/definitions/FusionAttribution",
+          "description": "Experimental HydraFusion attribution of the staged phase whose tool call raised this request. Absent outside a staged phase.",
+          "stability": "experimental"
         }
       },
       "required": [
@@ -17201,6 +17888,74 @@
       "description": "Session event \"session.remote_steerable_changed\". Notifies that the session's remote steering capability has changed",
       "title": "RemoteSteerableChangedEvent"
     },
+    "RequestBodyCompressionDisabledData": {
+      "type": "object",
+      "properties": {
+        "encoding": {
+          "$ref": "#/definitions/ModelCallRequestBodyEncoding",
+          "description": "Content-Encoding the rejected request asked for, when the call that observed the fallback reported it"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Internal durable marker that the server rejected a compressed model request body, so the session sends uncompressed bodies from now on, including after resume.",
+      "title": "RequestBodyCompressionDisabledData",
+      "visibility": "internal"
+    },
+    "RequestBodyCompressionDisabledEvent": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Unique event identifier (UUID v4), generated when the event is emitted"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp when the event was created"
+        },
+        "parentId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ID of the chronologically preceding event in the session, forming a linked chain. Null for the first event."
+        },
+        "ephemeral": {
+          "type": "boolean",
+          "description": "When true, the event is transient and not persisted to the session event log on disk"
+        },
+        "agentId": {
+          "type": "string",
+          "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "type": {
+          "type": "string",
+          "const": "session.request_body_compression_disabled",
+          "description": "Type discriminator. Always \"session.request_body_compression_disabled\"."
+        },
+        "data": {
+          "$ref": "#/definitions/RequestBodyCompressionDisabledData",
+          "description": "Internal durable marker that the server rejected a compressed model request body, so the session sends uncompressed bodies from now on, including after resume."
+        }
+      },
+      "required": [
+        "id",
+        "timestamp",
+        "parentId",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "description": "Session event \"session.request_body_compression_disabled\". Internal durable marker that the server rejected a compressed model request body, so the session sends uncompressed bodies from now on, including after resume.",
+      "title": "RequestBodyCompressionDisabledEvent",
+      "visibility": "internal"
+    },
     "ResponsesReasoning": {
       "type": "object",
       "properties": {
@@ -18875,6 +19630,10 @@
           "description": "Session event \"session.idle\". Payload indicating the session is idle with no background agents or attached shell commands in flight"
         },
         {
+          "$ref": "#/definitions/AutopilotStoppedEvent",
+          "description": "Session event \"session.autopilot_stopped\". The runtime has stopped continuing one Autopilot request. Attached background work may remain active; this is not session-wide idle."
+        },
+        {
           "$ref": "#/definitions/TitleChangedEvent",
           "description": "Session event \"session.title_changed\". Session title change payload containing the new display title"
         },
@@ -18987,6 +19746,11 @@
         {
           "$ref": "#/definitions/FusionChangeCheckpointEvent",
           "description": "Session event \"session.fusion_change_checkpoint\". Internal durable editing-tool totals after a Fusion turn, including edits from discarded phases.",
+          "visibility": "internal"
+        },
+        {
+          "$ref": "#/definitions/RequestBodyCompressionDisabledEvent",
+          "description": "Session event \"session.request_body_compression_disabled\". Internal durable marker that the server rejected a compressed model request body, so the session sends uncompressed bodies from now on, including after resume.",
           "visibility": "internal"
         },
         {
@@ -19257,6 +20021,10 @@
           "description": "Session event \"system.message\". System/developer instruction content with role and optional template metadata"
         },
         {
+          "$ref": "#/definitions/InstructionUpdateEvent",
+          "description": "Session event \"instruction.update\". An authoritative developer-instruction update. Event order defines instruction order. Persistent updates are durable and restore across replay, resume, rewind, fork, and compaction; turn-scoped updates must be emitted with ephemeral=true and are never restored."
+        },
+        {
           "$ref": "#/definitions/SystemNotificationEvent",
           "description": "Session event \"system.notification\". System-generated notification for runtime events like background task completion"
         },
@@ -19323,6 +20091,10 @@
         {
           "$ref": "#/definitions/McpOauthCompletedEvent",
           "description": "Session event \"mcp.oauth_completed\". MCP OAuth request completion notification"
+        },
+        {
+          "$ref": "#/definitions/McpOauthRecoveryCompletedEvent",
+          "description": "Session event \"mcp.oauth_recovery_completed\". Terminal outcome of a runtime-owned MCP OAuth recovery accepted through a runtimeRefresh handoff"
         },
         {
           "$ref": "#/definitions/McpHeadersRefreshRequiredEvent",
@@ -19447,6 +20219,10 @@
         {
           "$ref": "#/definitions/McpServerStatusChangedEvent",
           "description": "Session event \"session.mcp_server_status_changed\". Payload of `session.mcp_server_status_changed` for one MCP server's status and optional failure error."
+        },
+        {
+          "$ref": "#/definitions/McpServerToolsLoadedEvent",
+          "description": "Session event \"session.mcp_server_tools_loaded\". Payload of `session.mcp_server_tools_loaded`, emitted once per connection when an MCP server's tools first become available from tools/list or a cached snapshot. A connected server is still loading tools if this event has not fired since the server last left connected; it can precede connected when the tools come from a cached snapshot."
         },
         {
           "$ref": "#/definitions/McpServerRemovedEvent",
@@ -19886,6 +20662,14 @@
     "ShutdownData": {
       "type": "object",
       "properties": {
+        "toolUsageRequestIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Runtime tool-operation identities already included in the final accounting snapshot.",
+          "visibility": "internal"
+        },
         "accountingSnapshot": {
           "$ref": "#/definitions/UsageGetMetricsResult",
           "description": "Complete accounting state captured atomically with receipt watermarks.",
@@ -21595,10 +22379,6 @@
           "$ref": "#/definitions/SubagentModelSelectionSource",
           "description": "Authority or runtime mechanism responsible for sub-agent model selection, when known at start."
         },
-        "factoryRunId": {
-          "type": "string",
-          "description": "Legacy root id of the workflow run that spawned this sub-agent. New consumers should use workflowRunId."
-        },
         "workflowRunId": {
           "type": "string",
           "description": "Root id of the workflow run that spawned this sub-agent, when it was spawned by one."
@@ -22932,6 +23712,11 @@
           "type": "string",
           "description": "Model identifier that generated this tool call"
         },
+        "toolUsage": {
+          "$ref": "#/definitions/ToolExecutionUsage",
+          "description": "Provider-reported usage of a separately metered runtime-owned tool operation, independent of the conversation model. Present on success or failure when usage is known. Experimental.",
+          "stability": "experimental"
+        },
         "mcpMeta": {
           "description": "FIDES IFC label projected from tool ingress metadata (MCP `CallToolResult._meta` or synthesized built-in ingress labels). Persisted as `{ ifc: ... }` so the label survives session resume, including model-visible failure results. Experimental.",
           "x-opaque-json": true,
@@ -23806,6 +24591,92 @@
         "app": "Tool is callable by the MCP App view (iframe) via session.mcp.apps.callTool"
       }
     },
+    "ToolExecutionUsage": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "description": "Runtime-generated identifier for this metered operation. Deduplicates repeated delivery or replay; not an upstream billing identifier."
+        },
+        "model": {
+          "type": "string",
+          "description": "Requested model for the tool operation, independent of the conversation model. Not a provider-confirmed serving model."
+        },
+        "provider": {
+          "$ref": "#/definitions/ModelProviderRef",
+          "description": "Provider responsible for the tool operation, captured independently of the conversation provider."
+        },
+        "accounting": {
+          "$ref": "#/definitions/UsageAccountingIdentity",
+          "description": "Runtime-owned accounting order, preserved across session checkpoints and replay."
+        },
+        "inputTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total provider-reported input tokens across all modalities."
+        },
+        "outputTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total provider-reported output tokens across all modalities."
+        },
+        "totalTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Provider-reported sum of input and output tokens."
+        },
+        "inputTokensDetails": {
+          "$ref": "#/definitions/ToolExecutionUsageTokenDetails",
+          "description": "Optional input modality breakdown; these counts are already included in inputTokens."
+        },
+        "outputTokensDetails": {
+          "$ref": "#/definitions/ToolExecutionUsageTokenDetails",
+          "description": "Optional output modality breakdown; these counts are already included in outputTokens."
+        },
+        "copilotUsage": {
+          "$ref": "#/definitions/AssistantUsageCopilotUsage",
+          "description": "Server-reported charge. Divide totalNanoAiu by 1,000,000,000 for AI credits; do not calculate customer cost from token prices."
+        },
+        "quotaSnapshots": {
+          "type": "object",
+          "additionalProperties": {
+            "x-opaque-json": true
+          },
+          "description": "Account quota snapshots, not per-operation cost deltas.",
+          "visibility": "internal"
+        }
+      },
+      "required": [
+        "requestId",
+        "model"
+      ],
+      "additionalProperties": false,
+      "description": "Authoritative usage reported by a separately metered runtime-owned tool operation. May be present on a failed tool when the service reported usage before local result processing failed. Missing token counts or billing mean unavailable, not zero.",
+      "title": "ToolExecutionUsage",
+      "stability": "experimental"
+    },
+    "ToolExecutionUsageTokenDetails": {
+      "type": "object",
+      "properties": {
+        "imageTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Image tokens included in the corresponding input or output total."
+        },
+        "textTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Text tokens included in the corresponding input or output total."
+        }
+      },
+      "required": [
+        "imageTokens",
+        "textTokens"
+      ],
+      "additionalProperties": false,
+      "description": "Provider-reported image and text token counts, which are subsets of the corresponding total rather than additional tokens.",
+      "title": "ToolExecutionUsageTokenDetails"
+    },
     "ToolSearchActivatedData": {
       "type": "object",
       "properties": {
@@ -23903,6 +24774,11 @@
           "type": "integer",
           "minimum": 0,
           "description": "Zero-based publication sequence across all output streams for this tool call. Not a byte offset or an OS write-order guarantee."
+        },
+        "fusion": {
+          "$ref": "#/definitions/FusionAttribution",
+          "description": "Experimental HydraFusion attribution of the staged phase whose tool call produced this output. Absent outside a staged phase.",
+          "stability": "experimental"
         }
       },
       "required": [
@@ -24453,6 +25329,14 @@
     "UsageCheckpointData": {
       "type": "object",
       "properties": {
+        "toolUsageRequestIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Runtime tool-operation identities already included in this checkpoint. Prevents duplicate charges when an operation is delivered again with a newer sequence.",
+          "visibility": "internal"
+        },
         "totalNanoAiu": {
           "type": "number",
           "minimum": 0,
@@ -25660,6 +26544,10 @@
         "message": {
           "type": "string",
           "description": "Human-readable warning message for display in the timeline"
+        },
+        "originatingMessageId": {
+          "type": "string",
+          "description": "Logical ID returned by session.send for the request this warning concerns. Set for policy-blocked prompts, which do not emit a user.message event."
         },
         "url": {
           "type": "string",

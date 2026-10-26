@@ -49,6 +49,7 @@ pub const ProviderConfig = struct {
     base_url: []const u8,
     protocol: Protocol = .{ .openai = .completions },
     authentication: ProviderAuthentication = .none,
+    api_key_command: ?[]const u8 = null,
     bearer_token_provider: ?BearerTokenProvider = null,
     headers: []const ProviderHeader = &.{},
     model_id: ?[]const u8 = null,
@@ -172,6 +173,7 @@ pub const WireProvider = struct {
     transport: ?WireTransport = null,
     baseUrl: []const u8,
     apiKey: ?[]const u8 = null,
+    apiKeyCommand: ?[]const u8 = null,
     bearerToken: ?[]const u8 = null,
     azure: ?WireAzure = null,
     headers: ?WireHeaders = null,
@@ -312,6 +314,7 @@ fn lowerProvider(config: ProviderConfig) !WireProvider {
         .type = undefined,
         .baseUrl = config.base_url,
         .apiKey = authentication.api_key,
+        .apiKeyCommand = config.api_key_command,
         .bearerToken = authentication.bearer_token,
         .headers = if (config.headers.len == 0) null else .{ .values = config.headers },
         .modelId = config.model_id,
@@ -528,6 +531,31 @@ test "legacy authentication variants remain source compatible" {
         const encoded = try encodePrepared(.{
             .base_url = "http://localhost",
             .authentication = case.authentication,
+        });
+        defer std.testing.allocator.free(encoded);
+        try std.testing.expectEqualStrings(case.expected, encoded);
+    }
+}
+
+test "provider API key command lowers alone or with static credentials" {
+    const cases = [_]struct {
+        authentication: Authentication,
+        expected: []const u8,
+    }{
+        .{
+            .authentication = .none,
+            .expected = "{\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"http://localhost\",\"apiKeyCommand\":\"credential-helper\"}",
+        },
+        .{
+            .authentication = .{ .api_key = "static" },
+            .expected = "{\"type\":\"openai\",\"wireApi\":\"completions\",\"baseUrl\":\"http://localhost\",\"apiKey\":\"static\",\"apiKeyCommand\":\"credential-helper\"}",
+        },
+    };
+    for (cases) |case| {
+        const encoded = try encodePrepared(.{
+            .base_url = "http://localhost",
+            .authentication = case.authentication,
+            .api_key_command = "credential-helper",
         });
         defer std.testing.allocator.free(encoded);
         try std.testing.expectEqualStrings(case.expected, encoded);

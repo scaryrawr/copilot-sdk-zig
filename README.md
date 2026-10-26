@@ -249,7 +249,6 @@ var client = try copilot.Client.init(allocator, io, .{
     .log_level = .info,
     .use_logged_in_user = true,
     .session_idle_timeout_seconds = 300,
-    .enable_remote_sessions = true,
 });
 defer client.deinit();
 ```
@@ -331,6 +330,13 @@ schedule-management opt-ins remain outside this API.
 `CreateSessionConfig`, `ResumeSessionConfig`, and `JoinSessionConfig` expose the
 same stable runtime fields. `SessionConfig` remains an alias for
 `CreateSessionConfig`.
+
+Session `.memory.mode` accepts `.@"system-prompt"` or `.@"user-prompt"` to choose
+where memories are injected. Null omits the field and uses the runtime default.
+
+The pinned upstream no longer exposes `remote_session` or
+`ClientOptions.enable_remote_sessions`; these configuration fields have been
+removed from the Zig API.
 
 ```zig
 const session = try client.createSession(.{
@@ -434,13 +440,8 @@ const session = try client.createSession(.{
         .handler = createSessionFilesystem,
         .context = filesystem_context,
     },
-    .remote_session = .@"export",
 });
 ```
-
-`remote_session` accepts `.off`, `.@"export"`, or `.on`. It controls one
-session and is separate from `ClientOptions.enable_remote_sessions`, which
-enables runtime-wide remote-session support for an owned child.
 
 Filesystem callbacks return owned byte slices or `std.json.Parsed` results
 with the allocator supplied by the SDK. Non-SQLite provider failures map
@@ -727,6 +728,10 @@ empty slices remain empty arrays or maps. The SDK rejects duplicate custom
 agent names and an initial custom-agent name that is not in `custom_agents`
 before it changes local session state or sends a lifecycle request.
 
+Custom-agent `.model_policy` uses `AgentModelPolicy`: `.preferred` allows
+fallback to the parent model, while `.required` requires the authored model.
+Null omits `modelPolicy`, preserving the runtime's `.preferred` default.
+
 Custom-agent `.hooks` accepts a slice of `CustomAgentHook` entries. Each entry
 names an event and supplies an array of action objects as `std.json.ObjectMap`
 values. The SDK borrows these objects until the lifecycle call returns.
@@ -780,6 +785,10 @@ const session = try client.createSession(.{
     },
 });
 ```
+
+`ProviderConfig.api_key_command` asks the runtime to obtain a fresh API key
+before each provider request. A static API key takes precedence; a configured
+bearer-token callback takes precedence over both.
 
 `ProviderConfig.Protocol` supports OpenAI Chat Completions, OpenAI Responses
 over HTTP or WebSocket, Azure with an optional API version, and Anthropic.
@@ -993,7 +1002,6 @@ const session = try client.createSession(.{
     .github_mcp_tool_config = .{
         .additional_toolsets = &.{"repos"},
     },
-    .remote_session = .on,
 });
 ```
 

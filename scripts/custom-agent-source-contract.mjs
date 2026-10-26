@@ -15,6 +15,9 @@ export function verifyCustomAgentConfigurationSourceContract(typesSource) {
     infer: "optional:boolean",
     skills: "optional:string[]",
     model: "optional:string",
+    ...(Object.hasOwn(actual, "modelPolicy")
+      ? { modelPolicy: "optional:AgentModelPolicy" }
+      : {}),
     reasoningEffort: "optional:ReasoningEffort",
     ...(Object.hasOwn(actual, "hooks")
       ? { hooks: "optional:Record<string,Record<string,unknown>[]>" }

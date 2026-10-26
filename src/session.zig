@@ -16,6 +16,8 @@ pub const ReasoningEffort = enum {
     max,
 };
 
+pub const AgentModelPolicy = session_events.AgentModelPolicy;
+
 pub const CustomAgentConfig = struct {
     name: []const u8,
     display_name: ?[]const u8 = null,
@@ -26,6 +28,7 @@ pub const CustomAgentConfig = struct {
     infer: ?bool = null,
     skills: ?[]const []const u8 = null,
     model: ?[]const u8 = null,
+    model_policy: ?AgentModelPolicy = null,
     reasoning_effort: ?ReasoningEffort = null,
     hooks: ?[]const CustomAgentHook = null,
 };
@@ -95,6 +98,12 @@ pub const InfiniteSessionConfig = struct {
 
 pub const MemoryConfiguration = struct {
     enabled: bool,
+    mode: ?MemoryMode = null,
+};
+
+pub const MemoryMode = enum {
+    @"system-prompt",
+    @"user-prompt",
 };
 
 pub const EmbeddingCacheStorage = enum {
@@ -105,20 +114,6 @@ pub const EmbeddingCacheStorage = enum {
 pub const CapiSessionOptions = struct {
     auto_tier: ?AutoTier = null,
     enable_websocket_responses: ?bool = null,
-};
-
-pub const RemoteSessionMode = enum {
-    off,
-    @"export",
-    on,
-
-    pub fn wireValue(self: RemoteSessionMode) []const u8 {
-        return switch (self) {
-            .off => "off",
-            .@"export" => "export",
-            .on => "on",
-        };
-    }
 };
 
 pub const CloudSessionRepository = struct {
@@ -278,7 +273,6 @@ pub const CreateSessionConfig = struct {
     git_hub_token_provider: ?GitHubTokenProvider = null,
     feature_flags: ?[]const FeatureFlag = null,
     exp_assignments: ?CopilotExpAssignmentResponse = null,
-    remote_session: ?RemoteSessionMode = null,
     create_session_filesystem_provider: ?runtime.SessionFilesystemProviderFactory = null,
     extensions: extensibility.CreateExtensions = .{},
     client_name: ?[]const u8 = null,
@@ -351,7 +345,6 @@ pub const ResumeSessionConfig = struct {
     exp_assignments: ?CopilotExpAssignmentResponse = null,
     suppress_resume_event: bool = false,
     continue_pending_work: bool = false,
-    remote_session: ?RemoteSessionMode = null,
     create_session_filesystem_provider: ?runtime.SessionFilesystemProviderFactory = null,
     extensions: extensibility.ResumeExtensions = .{},
     client_name: ?[]const u8 = null,
@@ -424,7 +417,6 @@ pub const JoinSessionConfig = struct {
     exp_assignments: ?CopilotExpAssignmentResponse = null,
     suppress_resume_event: bool = true,
     continue_pending_work: bool = false,
-    remote_session: ?RemoteSessionMode = null,
     create_session_filesystem_provider: ?runtime.SessionFilesystemProviderFactory = null,
     extensions: extensibility.JoinExtensions = .{},
     client_name: ?[]const u8 = null,

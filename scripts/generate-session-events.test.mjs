@@ -52,12 +52,12 @@ function reachablePayloadDefinitions(value) {
   return seen;
 }
 
-test("the pinned schema renders 159 explicit event tags", () => {
+test("the pinned schema renders 164 explicit event tags", () => {
   const value = schema();
   const { entries } = buildRegistry(value);
   const rendered = renderSessionEvents(value);
 
-  assert.equal(entries.length, 159);
+  assert.equal(entries.length, 164);
   assert.doesNotMatch(rendered, /Schema sha256|Discriminators:|Regenerate with:|Source:/);
   assert.match(rendered, /pub const SessionEvent = union\(enum\)/);
   assert.match(rendered, /mcp_oauth_required: McpOauthRequired/);
