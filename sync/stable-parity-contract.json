@@ -1,6 +1,6 @@
 {
-  "publicSdkCommit": "b19d3ef043ebfeaeb794339173c39ad6c8eb29ca",
-  "protocolCommit": "b19d3ef043ebfeaeb794339173c39ad6c8eb29ca",
+  "publicSdkCommit": "c57638f4a7ce2255a34192d5035932d0e109bbdd",
+  "protocolCommit": "c57638f4a7ce2255a34192d5035932d0e109bbdd",
   "lifecycle": {
     "createOnly": [
       "cloud"
@@ -15,7 +15,6 @@
       "onAutoModeSwitchRequest",
       "gitHubToken",
       "gitHubTokenProvider",
-      "remoteSession",
       "enableSessionTelemetry",
       "enableFileChangeTracking",
       "coauthorEnabled",
@@ -73,11 +72,6 @@
     "askUserVariant": [
       "legacy",
       "elicitation"
-    ],
-    "remoteSession": [
-      "off",
-      "export",
-      "on"
     ],
     "autoModeSwitch": [
       "yes",

@@ -85,6 +85,8 @@
     },
     "ModelList": {
       "properties": {
+        "auto": "ref:AutoTierMetadata",
+        "imageModels": "array:ref:ImageToolModel",
         "models": "array:ref:Model"
       },
       "required": [
@@ -393,6 +395,12 @@
         "status": "supported",
         "contract": {
           "ref": "ProviderConfigModelProvider"
+        }
+      },
+      "apiKeyCommand": {
+        "status": "supported",
+        "contract": {
+          "type": "string"
         }
       }
     }
