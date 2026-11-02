@@ -52,12 +52,15 @@ function reachablePayloadDefinitions(value) {
   return seen;
 }
 
-test("the pinned schema renders 164 explicit event tags", () => {
+test("the pinned schema renders every explicit event tag", () => {
   const value = schema();
   const { entries } = buildRegistry(value);
   const rendered = renderSessionEvents(value);
 
-  assert.equal(entries.length, 164);
+  assert.equal(entries.length, value.definitions.SessionEvent.anyOf.length);
+  for (const entry of entries) {
+    assert.ok(rendered.includes(`    ${entry.tag}: `), `missing event tag ${entry.tag}`);
+  }
   assert.doesNotMatch(rendered, /Schema sha256|Discriminators:|Regenerate with:|Source:/);
   assert.match(rendered, /pub const SessionEvent = union\(enum\)/);
   assert.match(rendered, /mcp_oauth_required: McpOauthRequired/);
@@ -89,7 +92,11 @@ test("the committed generated registry is current", () => {
 
 test("duplicate wire discriminators are rejected", () => {
   const value = schema();
-  value.definitions.SessionEvent.anyOf.push(value.definitions.SessionEvent.anyOf[0]);
+  value.definitions.SessionEvent.anyOf.push(
+    value.definitions.SessionEvent.anyOf.find((entry) =>
+      value.definitions[entry.$ref.split("/").at(-1)].properties.type.const === "session.start"
+    ),
+  );
   assert.throws(
     () => buildRegistry(value),
     /duplicate session event discriminator: session\.start/,
@@ -143,6 +150,38 @@ test("unsupported reachable schema constructs fail with their path", () => {
   assert.throws(
     () => buildRegistry(value),
     /unsupported schema keyword pattern at #\/definitions\/StartData\/properties\/sessionId/,
+  );
+});
+
+test("SDK append-last annotations do not change generated fields or validation", () => {
+  const value = schema();
+  for (const name of ["AssistantMessageToolRequest", "ToolExecutionStartData"]) {
+    value.definitions[name].properties.mcpServerDisplayName = {
+      type: "string",
+      description: "Explicitly configured MCP server display name.",
+    };
+  }
+  const expected = renderSessionEvents(value);
+  for (const name of ["AssistantMessageToolRequest", "ToolExecutionStartData"]) {
+    value.definitions[name].properties.mcpServerDisplayName["x-copilot-sdk-append-last"] = true;
+  }
+
+  const rendered = renderSessionEvents(value);
+  assert.equal(rendered, expected);
+  assert.match(rendered, /mcp_server_display_name: \?\[\]const u8 = null/);
+  assert.match(rendered, /object\.get\("mcpServerDisplayName"\)/);
+});
+
+test("SDK append-last annotations do not allow unknown schema keywords", () => {
+  const value = schema();
+  value.definitions.AssistantMessageToolRequest.properties.mcpServerDisplayName = {
+    type: "string",
+    "x-copilot-sdk-append-last": true,
+    "x-unsupported-constraint": true,
+  };
+  assert.throws(
+    () => buildRegistry(value),
+    /unsupported schema keyword x-unsupported-constraint at #\/definitions\/AssistantMessageToolRequest\/properties\/mcpServerDisplayName/,
   );
 });
 

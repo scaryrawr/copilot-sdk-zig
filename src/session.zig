@@ -1396,6 +1396,50 @@ test "generated auto-tier events own extensible strings and reject invalid ident
     }
 }
 
+test "MCP display names are owned optional strings in assistant and tool events" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{
+        \\{"type":"assistant.message","data":{"messageId":"m1","content":"","toolRequests":[{"toolCallId":"t1","name":"lookup","intentionSummary":null,
+        ,
+        \\{"type":"tool.execution_start","data":{"toolCallId":"t1","toolName":"lookup",
+    }, 0..) |prefix, index| {
+        const suffix: []const u8 = if (index == 0) "}]}}" else "}}";
+        for ([_][]const u8{
+            \\"mcpServerDisplayName":"Configured MCP"
+            ,
+            \\"mcpServerDisplayName":null
+            ,
+            \\"futureField":true
+            ,
+            \\"mcpServerDisplayName":42
+            ,
+        }, 0..) |field, field_index| {
+            const source = try std.mem.concat(allocator, u8, &.{ prefix, field, suffix });
+            defer allocator.free(source);
+            var event = parsed_event: {
+                const parsed = try std.json.parseFromSlice(std.json.Value, allocator, source, .{});
+                defer parsed.deinit();
+                if (field_index == 3) {
+                    try std.testing.expectError(error.InvalidSessionEvent, parseEvent(allocator, parsed.value));
+                    continue;
+                }
+                break :parsed_event try parseEvent(allocator, parsed.value);
+            };
+            defer event.deinit(allocator);
+            const display_name = switch (event) {
+                .assistant_message => |message| message.tool_requests.?[0].mcp_server_display_name,
+                .tool_execution_start => |started| started.data.mcp_server_display_name,
+                else => return error.TestUnexpectedResult,
+            };
+            if (field_index == 0) {
+                try std.testing.expectEqualStrings("Configured MCP", display_name.?);
+            } else {
+                try std.testing.expect(display_name == null);
+            }
+        }
+    }
+}
+
 test "generated payloads expose nested arrays enums unions and opaque values" {
     const allocator = std.testing.allocator;
     var parsed = try std.json.parseFromSlice(

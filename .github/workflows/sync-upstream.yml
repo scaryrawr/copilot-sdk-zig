@@ -22,6 +22,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.16.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
@@ -54,9 +57,16 @@ jobs:
           git checkout -B "$branch" origin/main
           npm ci
           public_sdk_commit=$(gh api repos/github/copilot-sdk/commits/main --jq .sha)
-          log_file=$(mktemp)
+          log_file="$RUNNER_TEMP/upstream-sync.log"
           set +e
-          npm run sync -- --if-published --public-sdk-commit "$public_sdk_commit" 2>&1 | tee "$log_file"
+          (
+            set -e
+            npm run sync -- --if-published --public-sdk-commit "$public_sdk_commit"
+            npm test
+            zig fmt --check build.zig src examples scripts/parity_census_runner.zig
+            zig build test
+            zig build
+          ) 2>&1 | tee "$log_file"
           sync_status=${PIPESTATUS[0]}
           set -e
           issue_title="Upstream Copilot SDK parity drift detected"
@@ -71,10 +81,11 @@ jobs:
           if [ "$sync_status" -ne 0 ]; then
             {
               echo '<!-- sync-upstream-parity-drift -->'
-              echo 'The scheduled upstream synchronization could not verify the Zig SDK against the latest public Copilot SDK.'
+              echo 'The scheduled upstream synchronization or generated SDK validation failed against the latest public Copilot SDK.'
               echo
               echo "- Public SDK commit: \`$public_sdk_commit\`"
               echo "- Protocol commit: \`$(jq -r .upstreamCommit vendor/copilot/upstream.json)\`"
+              echo "- Copilot CLI version: \`$(jq -r .cliPackageVersion vendor/copilot/upstream.json)\`"
               echo "- Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
               echo
               echo '<details><summary>Verifier output</summary>'

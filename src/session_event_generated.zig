@@ -191,6 +191,7 @@ pub const AssistantMessageToolRequest = struct {
     mcp_tool_name: ?[]const u8 = null,
     intention_summary: ?[]const u8,
     caller: ?AssistantMessageToolRequestCaller = null,
+    mcp_server_display_name: ?[]const u8 = null,
 };
 
 pub const AssistantMessageServerTools = struct {
@@ -322,6 +323,10 @@ pub const AssistantReasoningData = struct {
     reasoning_id: []const u8,
     content: []const u8,
     rte: ?bool = null,
+    turn_id: ?[]const u8 = null,
+    api_call_id: ?[]const u8 = null,
+    model: ?[]const u8 = null,
+    is_byok: ?bool = null,
 };
 
 pub const AssistantReasoningDeltaData = struct {
@@ -358,11 +363,18 @@ pub const AssistantTurnRetryData = struct {
     reason: ?[]const u8 = null,
 };
 
+pub const SessionMode = enum {
+    interactive,
+    plan,
+    autopilot,
+};
+
 pub const AssistantTurnStartData = struct {
     turn_id: []const u8,
     model: ?[]const u8 = null,
     interaction_id: ?[]const u8 = null,
     parent_tool_call_id: ?[]const u8 = null,
+    agent_mode: ?SessionMode = null,
 };
 
 pub const AiCreditsStatus = enum {
@@ -499,6 +511,7 @@ pub const AssistantUsageData = struct {
     accepted_prediction_tokens: ?u64 = null,
     rejected_prediction_tokens: ?u64 = null,
     transport: ?AssistantUsageTransport = null,
+    inference_gateway: ?bool = null,
     request_body_bytes: ?u64 = null,
     request_body_wire_bytes: ?u64 = null,
     request_body_encoding: ?ModelCallRequestBodyEncoding = null,
@@ -515,6 +528,8 @@ pub const AssistantUsageData = struct {
     api_call_id: ?[]const u8 = null,
     provider_call_id: ?[]const u8 = null,
     service_request_id: ?[]const u8 = null,
+    instruction_update_delivery_id: ?[]const u8 = null,
+    instruction_update_latest_event_id: ?[]const u8 = null,
     rte: ?bool = null,
     api_endpoint: ?AssistantUsageApiEndpoint = null,
     parent_tool_call_id: ?[]const u8 = null,
@@ -530,12 +545,15 @@ pub const AssistantUsageData = struct {
     frontier_source: ?[]const u8 = null,
     cache_ttl_seconds: ?u64 = null,
     cache_policy_ttl_seconds: ?u64 = null,
+    prompt_cache_ttl_reason: ?[]const u8 = null,
+    prompt_cache_credits_bucket: ?[]const u8 = null,
     cache_details_reported: ?bool = null,
     num_tool_calls: ?u64 = null,
     tool_counts: ?std.json.ArrayHashMap(i64) = null,
     finish_reason: ?[]const u8 = null,
     content_filter_triggered: ?bool = null,
     fusion: ?FusionAttribution = null,
+    response_model: ?[]const u8 = null,
 };
 
 pub const AutoModeSwitchResponse = enum {
@@ -619,6 +637,7 @@ pub const ElicitationRequestedData = struct {
     request_id: []const u8,
     tool_call_id: ?[]const u8 = null,
     elicitation_source: ?[]const u8 = null,
+    elicitation_source_display_name: ?[]const u8 = null,
     message: []const u8,
     mode: ?ElicitationRequestedMode = null,
     requested_schema: ?ElicitationRequestedSchema = null,
@@ -767,6 +786,40 @@ pub const InstructionUpdateData = struct {
     boundary: InstructionUpdateBoundary,
     fallback: InstructionUpdateFallback,
     name: ?[]const u8 = null,
+    post_initial: ?bool = null,
+};
+
+pub const InstructionUpdateDeliveryOutcome = enum {
+    append,
+    full_rebuild,
+    deterministic_fallback,
+};
+
+pub const InstructionUpdateCapability = enum {
+    supported,
+    unsupported,
+    unknown,
+};
+
+pub const InstructionUpdateDeliveryReason = enum {
+    control_arm,
+    native_transport,
+    advertised_support,
+    advertised_unsupported,
+    capability_unavailable,
+    unsupported_transport,
+    missing_user_boundary,
+};
+
+pub const InstructionUpdateDeliveryData = struct {
+    delivery_id: []const u8,
+    first_update_event_id: []const u8,
+    latest_update_event_id: []const u8,
+    update_count: u64,
+    request_generation: u64,
+    outcome: InstructionUpdateDeliveryOutcome,
+    capability: InstructionUpdateCapability,
+    reason: InstructionUpdateDeliveryReason,
 };
 
 pub const McpHeadersRefreshCompletedOutcome = enum {
@@ -904,6 +957,10 @@ pub const ModelCallFailureBadRequestKind = enum {
     structured_error,
 };
 
+pub const ModelCallProductStateError = enum {
+    input_item_connection_mismatch,
+};
+
 pub const ModelCallFailureRequestFingerprint = struct {
     message_count: u64,
     tool_result_message_count: u64,
@@ -927,11 +984,14 @@ pub const ModelCallFailureData = struct {
     api_call_id: ?[]const u8 = null,
     provider_call_id: ?[]const u8 = null,
     service_request_id: ?[]const u8 = null,
+    instruction_update_delivery_id: ?[]const u8 = null,
+    instruction_update_latest_event_id: ?[]const u8 = null,
     rte: ?bool = null,
     status_code: ?u64 = null,
     duration_ms: ?u64 = null,
     api_endpoint: ?AssistantUsageApiEndpoint = null,
     transport: ?ModelCallFailureTransport = null,
+    inference_gateway: ?bool = null,
     failure_kind: ?ModelCallFailureKind = null,
     request_body_bytes: ?u64 = null,
     request_body_wire_bytes: ?u64 = null,
@@ -940,6 +1000,8 @@ pub const ModelCallFailureData = struct {
     request_body_compression_fallback_from: ?ModelCallRequestBodyEncoding = null,
     request_body_compression_rejected_status: ?u64 = null,
     retry_attempt: ?u64 = null,
+    incomplete_stream_reason: ?[]const u8 = null,
+    stream_done_received: ?bool = null,
     websocket_fallback_reason: ?ModelCallWebSocketFallbackReason = null,
     websocket_fallback_after_ms: ?u64 = null,
     websocket_fallback_error_kind: ?ModelCallWebSocketFallbackErrorKind = null,
@@ -961,6 +1023,7 @@ pub const ModelCallFailureData = struct {
     bad_request_kind: ?ModelCallFailureBadRequestKind = null,
     error_code: ?[]const u8 = null,
     error_type: ?[]const u8 = null,
+    product_state_error: ?ModelCallProductStateError = null,
     quota_snapshots: ?std.json.ArrayHashMap(AssistantUsageQuotaSnapshot) = null,
     request_fingerprint: ?ModelCallFailureRequestFingerprint = null,
     fusion: ?FusionAttribution = null,
@@ -1033,7 +1096,7 @@ pub const TaskBlockerKind = enum {
     permission_recovery,
 };
 
-pub const PermissionRecoveryReason = enum {
+pub const TaskBlockerReason = enum {
     permission_required,
     repeated_attempt,
     attempts_exhausted,
@@ -1041,6 +1104,7 @@ pub const PermissionRecoveryReason = enum {
     permission_denied,
     responder_unavailable,
     equivalent_alternative_succeeded,
+    permission_recovery_run_limit,
 };
 
 pub const PermissionRecoveryStatus = enum {
@@ -1053,6 +1117,16 @@ pub const PermissionRecoveryStatus = enum {
 pub const PermissionRecoveryOnBlocked = enum {
     ask,
     fail,
+};
+
+pub const PermissionRecoveryReason = enum {
+    permission_required,
+    repeated_attempt,
+    attempts_exhausted,
+    permission_approved,
+    permission_denied,
+    responder_unavailable,
+    equivalent_alternative_succeeded,
 };
 
 pub const PermissionRecoveryAttemptRelation = enum {
@@ -1091,6 +1165,13 @@ pub const PermissionRecoveryAttempt = struct {
     ordinal: u64,
 };
 
+pub const PermissionRecoveryRunState = struct {
+    consecutive_blocked_episodes: u64,
+    permission_recovery_terminal_claimed: ?bool = null,
+    total_denial_dispositions: u64,
+    terminal_outcome_claimed: bool,
+};
+
 pub const PermissionRecoveryData = struct {
     episode_id: []const u8,
     owner_session_id: ?[]const u8 = null,
@@ -1100,11 +1181,12 @@ pub const PermissionRecoveryData = struct {
     reason: PermissionRecoveryReason,
     max_attempts: u64,
     attempts: []const PermissionRecoveryAttempt,
+    run_state: ?PermissionRecoveryRunState = null,
 };
 
 pub const TaskBlocker = struct {
     kind: TaskBlockerKind,
-    reason: PermissionRecoveryReason,
+    reason: TaskBlockerReason,
     resumable: bool,
     permission_recovery: PermissionRecoveryData,
 };
@@ -1381,6 +1463,7 @@ pub const PermissionRequestMcp = struct {
     kind: []const u8,
     tool_call_id: ?[]const u8 = null,
     server_name: []const u8,
+    server_display_name: ?[]const u8 = null,
     tool_name: []const u8,
     tool_title: []const u8,
     args: ?std.json.Value = null,
@@ -1448,6 +1531,7 @@ pub const PermissionApprovalEvaluationReasonCode = enum {
     unavailable,
     judge_verdict,
     judge_error,
+    judge_context_too_large,
     inherited,
 };
 
@@ -1640,6 +1724,7 @@ pub const PermissionPromptRequestMcp = struct {
     kind: []const u8,
     tool_call_id: ?[]const u8 = null,
     server_name: []const u8,
+    server_display_name: ?[]const u8 = null,
     tool_name: []const u8,
     tool_title: []const u8,
     args: ?std.json.Value = null,
@@ -1766,22 +1851,55 @@ pub const PermissionPromptRequest = union(enum) {
     extension_env_access: PermissionPromptRequestExtensionEnvAccess,
 };
 
+pub const AssistedApprovalAssessmentVariant1 = struct {
+    status: []const u8,
+};
+
+pub const AssistedApprovalAssessmentVariant2 = struct {
+    reason: []const u8,
+    status: []const u8,
+};
+
+pub const AssistedApprovalAssessmentVariant3 = struct {
+    reason: []const u8,
+    status: []const u8,
+};
+
+pub const AssistedApprovalCompletedRecommendation = enum {
+    approve,
+    require_approval,
+};
+
+pub const AssistedApprovalAssessmentVariant4 = struct {
+    recommendation: AssistedApprovalCompletedRecommendation,
+    rationale: ?[]const u8 = null,
+    status: []const u8,
+};
+
+pub const AssistedApprovalAssessmentVariant5 = struct {
+    reason: []const u8,
+    status: []const u8,
+};
+
+pub const AssistedApprovalAssessment = union(enum) {
+    unavailable: AssistedApprovalAssessmentVariant1,
+    not_run: AssistedApprovalAssessmentVariant2,
+    excluded: AssistedApprovalAssessmentVariant3,
+    completed: AssistedApprovalAssessmentVariant4,
+    failed: AssistedApprovalAssessmentVariant5,
+};
+
 pub const PermissionMode = enum {
     manual,
     assisted,
     allow_all,
 };
 
-pub const SessionMode = enum {
-    interactive,
-    plan,
-    autopilot,
-};
-
 pub const PermissionRequestedData = struct {
     request_id: []const u8,
     permission_request: PermissionRequest,
     prompt_request: ?PermissionPromptRequest = null,
+    assisted_approval_assessment: ?AssistedApprovalAssessment = null,
     permission_mode: ?PermissionMode = null,
     agent_mode: ?SessionMode = null,
     owner_session_id: ?[]const u8 = null,
@@ -1826,6 +1944,7 @@ pub const SamplingCompletedData = struct {
 pub const SamplingRequestedData = struct {
     request_id: []const u8,
     server_name: []const u8,
+    server_display_name: ?[]const u8 = null,
     mcp_request_id: std.json.Value,
 };
 
@@ -2068,6 +2187,8 @@ pub const SandboxDecisionData = union(enum) {
     permissive_retry_completed: SandboxDecisionDataVariant8,
 };
 
+pub const AutoTier = []const u8;
+
 pub const AutoModeResolvedReasoningBucket = enum {
     low,
     medium,
@@ -2076,6 +2197,7 @@ pub const AutoModeResolvedReasoningBucket = enum {
 
 pub const AutoModeResolvedData = struct {
     chosen_model: []const u8,
+    auto_tier: ?AutoTier = null,
     reasoning_bucket: ?AutoModeResolvedReasoningBucket = null,
     category_scores: ?std.json.ArrayHashMap(f64) = null,
     predicted_label: ?[]const u8 = null,
@@ -2098,8 +2220,6 @@ pub const RecommendedAutoTier = []const u8;
 pub const AutoTierRecommendationData = struct {
     recommended_auto_tier: RecommendedAutoTier,
 };
-
-pub const AutoTier = []const u8;
 
 pub const AutoTierSwitchFailureReason = enum {
     policy_rejected,
@@ -2271,7 +2391,39 @@ pub const CompactionCompleteSummarizerProgress = struct {
     max_output_gap_after_answer_ms: ?u64 = null,
     idle_ms: ?u64 = null,
     since_last_output_ms: ?u64 = null,
+    answer_chars: ?u64 = null,
+    reasoning_chars: ?u64 = null,
+    input_tokens_estimate: ?u64 = null,
     input_shrunk: ?bool = null,
+};
+
+pub const CompactionCompleteAttemptMetrics = struct {
+    duration_ms: u64,
+    blocking_wait_ms: ?u64 = null,
+    apply_delay_ms: ?u64 = null,
+    suspended_ms: ?u64 = null,
+    summarizer_reasoning_effort: ?[]const u8 = null,
+    requested_reasoning_effort: ?[]const u8 = null,
+    deadline_policy: ?[]const u8 = null,
+    deadline_limit_ms: ?u64 = null,
+    deadline_overshoot_ms: ?u64 = null,
+    trigger_threshold: ?f64 = null,
+    max_output_tokens: ?f64 = null,
+    failed_request_count: ?u64 = null,
+    failed_request_input_tokens_estimate: ?u64 = null,
+    cancelled_request_count: ?u64 = null,
+    retry_wait_ms: ?u64 = null,
+    last_retry_after_ms: ?u64 = null,
+    shrink_removed_attachments: ?u64 = null,
+    shrink_stripped_reasoning: ?u64 = null,
+    failure_operation: ?[]const u8 = null,
+};
+
+pub const CompactionCompleteFailureDiagnostics = struct {
+    last_attempt_failure_reason: ?[]const u8 = null,
+    provider_error_code: ?[]const u8 = null,
+    transport_error_kind: ?[]const u8 = null,
+    finish_reason: ?[]const u8 = null,
 };
 
 pub const CompactionCompleteData = struct {
@@ -2282,6 +2434,7 @@ pub const CompactionCompleteData = struct {
     compaction_attempt_id: ?[]const u8 = null,
     model: ?[]const u8 = null,
     initial_model: ?[]const u8 = null,
+    reasoning_effort: ?[]const u8 = null,
     error_: ?[]const u8 = null,
     pre_compaction_tokens: ?u64 = null,
     post_compaction_tokens: ?u64 = null,
@@ -2299,6 +2452,7 @@ pub const CompactionCompleteData = struct {
     compaction_tokens_used: ?CompactionCompleteCompactionTokensUsed = null,
     request_id: ?[]const u8 = null,
     service_request_id: ?[]const u8 = null,
+    client_request_id: ?[]const u8 = null,
     system_tokens: ?u64 = null,
     conversation_tokens: ?u64 = null,
     tool_definitions_tokens: ?u64 = null,
@@ -2307,7 +2461,10 @@ pub const CompactionCompleteData = struct {
     target_prompt_token_limit: ?u64 = null,
     switch_target_model: ?[]const u8 = null,
     trigger: ?CompactionTrigger = null,
+    execution: ?[]const u8 = null,
     summarizer_progress: ?CompactionCompleteSummarizerProgress = null,
+    attempt_metrics: ?CompactionCompleteAttemptMetrics = null,
+    failure_diagnostics: ?CompactionCompleteFailureDiagnostics = null,
 };
 
 pub const CompactionStartData = struct {
@@ -2321,6 +2478,7 @@ pub const CompactionStartData = struct {
     target_prompt_token_limit: ?u64 = null,
     switch_target_model: ?[]const u8 = null,
     trigger: ?CompactionTrigger = null,
+    execution: ?[]const u8 = null,
 };
 
 pub const CompletionReceiptEventRange = struct {
@@ -2917,6 +3075,12 @@ pub const InfoData = struct {
     tip: ?[]const u8 = null,
 };
 
+pub const JournalLinkData = struct {
+    version: u64,
+    session_id: []const u8,
+    previous_file: []const u8,
+};
+
 pub const ManagedPluginProgressPhase = enum {
     initializing,
     installing,
@@ -2964,6 +3128,36 @@ pub const ManagedSettingsResolvedSource = enum {
     none,
 };
 
+pub const PolicyHelperHelpLink = struct {
+    url: []const u8,
+    label: ?[]const u8 = null,
+};
+
+pub const PolicyHelperFailureDetail = struct {
+    path: ?[]const u8 = null,
+    message: []const u8,
+};
+
+pub const PolicyHelperFailure = struct {
+    category: []const u8,
+    failure_mode: []const u8,
+    severity: []const u8,
+    reason: []const u8,
+    authority: ?[]const u8 = null,
+    previous_policy_retained: bool,
+    code: ?[]const u8 = null,
+    message: []const u8,
+    remediation: ?[]const u8 = null,
+    help_link: ?PolicyHelperHelpLink = null,
+    details: ?[]const PolicyHelperFailureDetail = null,
+    diagnostic: ?[]const u8 = null,
+};
+
+pub const PolicyHelperCapabilities = struct {
+    structured_failure: bool,
+    recheck: bool,
+};
+
 pub const ManagedSettingsResolvedData = struct {
     permissions_context: ?ManagedPermissionsContext = null,
     source: ManagedSettingsResolvedSource,
@@ -2971,6 +3165,8 @@ pub const ManagedSettingsResolvedData = struct {
     device_managed: bool,
     client_managed: ?bool = null,
     policy_helper_managed: ?bool = null,
+    policy_helper_failure: ?PolicyHelperFailure = null,
+    policy_helper_capabilities: ?PolicyHelperCapabilities = null,
     fail_closed: bool,
     sandbox_enabled_by_undetermined_policy: ?bool = null,
     bypass_permissions_disabled: bool,
@@ -3091,6 +3287,7 @@ pub const ModelChangeData = struct {
     new_model: []const u8,
     provider_id: ?[]const u8 = null,
     previous_provider_id: ?[]const u8 = null,
+    reasoning_invalidated: ?bool = null,
     previous_reasoning_effort: ?[]const u8 = null,
     reasoning_effort: ?[]const u8,
     reasoning_effort_model: ?[]const u8 = null,
@@ -3446,13 +3643,21 @@ pub const SkillSource = enum {
     custom,
     builtin,
     sdk,
+    mcp,
+};
+
+pub const McpSkillOrigin = struct {
+    server_name: []const u8,
+    uri: []const u8,
 };
 
 pub const SkillsLoadedSkill = struct {
     name: []const u8,
+    declared_name: ?[]const u8 = null,
     command_name: ?[]const u8 = null,
     description: []const u8,
     source: SkillSource,
+    mcp_origin: ?McpSkillOrigin = null,
     user_invocable: bool,
     enabled: bool,
     path: ?[]const u8 = null,
@@ -3507,12 +3712,20 @@ pub const TaskCompletionOutcome = enum {
     blocked,
 };
 
+pub const BlockedPermissionAction = struct {
+    episode_id: []const u8,
+    permission_kind: []const u8,
+    recovery_reason: PermissionRecoveryReason,
+    tool_call_id: ?[]const u8 = null,
+};
+
 pub const TaskCompleteData = struct {
     summary: ?[]const u8 = null,
     success: ?bool = null,
     outcome: ?TaskCompletionOutcome = null,
     reason: ?[]const u8 = null,
     objective_id: ?i64 = null,
+    blocked_actions: ?[]const BlockedPermissionAction = null,
     blocker: ?TaskBlocker = null,
 };
 
@@ -3535,6 +3748,7 @@ pub const TruncationData = struct {
     tokens_removed_during_truncation: u64,
     messages_removed_during_truncation: u64,
     performed_by: []const u8,
+    compaction_attempt_id: ?[]const u8 = null,
 };
 
 pub const UsageCheckpointModelCacheState = struct {
@@ -3636,9 +3850,12 @@ pub const SkillInvokedData = struct {
     model: ?[]const u8 = null,
     path: []const u8,
     content: []const u8,
+    arguments: ?[]const u8 = null,
     allowed_tools: ?[]const []const u8 = null,
     disable_model_invocation: ?bool = null,
     source: ?[]const u8 = null,
+    mcp_origin: ?std.json.Value = null,
+    mcp_meta: ?std.json.Value = null,
     plugin_name: ?[]const u8 = null,
     plugin_version: ?[]const u8 = null,
     description: ?[]const u8 = null,
@@ -3652,9 +3869,12 @@ pub const SkillInvokedRefData = struct {
     path: []const u8,
     content_id: []const u8,
     content_length: u64,
+    arguments: ?[]const u8 = null,
     allowed_tools: ?[]const []const u8 = null,
     disable_model_invocation: ?bool = null,
     source: ?[]const u8 = null,
+    mcp_origin: ?std.json.Value = null,
+    mcp_meta: ?std.json.Value = null,
     plugin_name: ?[]const u8 = null,
     plugin_version: ?[]const u8 = null,
     description: ?[]const u8 = null,
@@ -4091,6 +4311,7 @@ pub const ToolExecutionCompleteResult = struct {
     binary_results_for_llm: ?[]const PersistedBinaryResult = null,
     ui_resource: ?ToolExecutionCompleteUIResource = null,
     structured_content: ?std.json.Value = null,
+    mcp_result_meta: ?std.json.ArrayHashMap(std.json.Value) = null,
     citable_sources: ?[]const CitableSource = null,
     mcp_meta: ?std.json.Value = null,
 };
@@ -4198,6 +4419,7 @@ pub const ToolExecutionStartData = struct {
     tool_call_id: []const u8,
     tool_name: []const u8,
     tool_title: ?[]const u8 = null,
+    read_only: ?bool = null,
     arguments: ?std.json.Value = null,
     shell_tool_info: ?ToolExecutionStartShellToolInfo = null,
     model: ?[]const u8 = null,
@@ -4212,6 +4434,7 @@ pub const ToolExecutionStartData = struct {
     tool_description: ?ToolExecutionStartToolDescription = null,
     parent_tool_call_id: ?[]const u8 = null,
     fusion: ?FusionAttribution = null,
+    mcp_server_display_name: ?[]const u8 = null,
 };
 
 pub const ToolShellOutputStream = enum {
@@ -4373,6 +4596,7 @@ pub const HookProgressEventPayload = OwnedPayload(HookProgressData, wipeHookProg
 pub const HookStartEventPayload = OwnedPayload(HookStartData, wipeHookStartData);
 pub const HumanResponseRecordedEventPayload = OwnedPayload(HumanResponseRecordedData, wipeHumanResponseRecordedData);
 pub const InstructionUpdateEventPayload = OwnedPayload(InstructionUpdateData, wipeInstructionUpdateData);
+pub const InstructionUpdateDeliveryEventPayload = OwnedPayload(InstructionUpdateDeliveryData, wipeInstructionUpdateDeliveryData);
 pub const McpHeadersRefreshCompletedEventPayload = OwnedPayload(McpHeadersRefreshCompletedData, wipeMcpHeadersRefreshCompletedData);
 pub const McpHeadersRefreshRequiredEventPayload = OwnedPayload(McpHeadersRefreshRequiredData, wipeMcpHeadersRefreshRequiredData);
 pub const McpOauthCompletedEventPayload = OwnedPayload(McpOauthCompletedData, wipeMcpOauthCompletedData);
@@ -4429,6 +4653,7 @@ pub const FusionRouteStartedEventPayload = OwnedPayload(FusionRouteStartedData, 
 pub const HandoffEventPayload = OwnedPayload(HandoffData, wipeHandoffData);
 pub const IndexedSearchEventPayload = OwnedPayload(IndexedSearchData, wipeIndexedSearchData);
 pub const InfoEventPayload = OwnedPayload(InfoData, wipeInfoData);
+pub const JournalLinkEventPayload = OwnedPayload(JournalLinkData, wipeJournalLinkData);
 pub const ManagedPluginProgressEventPayload = OwnedPayload(ManagedPluginProgressData, wipeManagedPluginProgressData);
 pub const ManagedSettingsEnforcedEventPayload = OwnedPayload(ManagedSettingsEnforcedData, wipeManagedSettingsEnforcedData);
 pub const ManagedSettingsResolvedEventPayload = OwnedPayload(ManagedSettingsResolvedData, wipeManagedSettingsResolvedData);
@@ -4563,6 +4788,10 @@ pub const AssistantReasoning = struct {
     reasoning_id: []const u8,
     content: []const u8,
     rte: ?bool = null,
+    turn_id: ?[]const u8 = null,
+    api_call_id: ?[]const u8 = null,
+    model: ?[]const u8 = null,
+    is_byok: ?bool = null,
     raw: payloads.RawEvent = .{},
     arena: ?std.heap.ArenaAllocator = null,
 
@@ -4624,6 +4853,7 @@ pub const ElicitationRequested = struct {
     request_id: []const u8,
     tool_call_id: ?[]const u8 = null,
     elicitation_source: ?[]const u8 = null,
+    elicitation_source_display_name: ?[]const u8 = null,
     message: []const u8,
     mode: ?ElicitationRequestedMode = null,
     requested_schema: ?ElicitationRequestedSchema = null,
@@ -4715,6 +4945,7 @@ pub const PermissionRequested = struct {
     request_id: []const u8,
     permission_request: ?PermissionRequest = null,
     prompt_request: ?PermissionPromptRequest = null,
+    assisted_approval_assessment: ?AssistedApprovalAssessment = null,
     permission_mode: ?PermissionMode = null,
     agent_mode: ?SessionMode = null,
     owner_session_id: ?[]const u8 = null,
@@ -4853,6 +5084,7 @@ pub const SessionEvent = union(enum) {
     hook_start: HookStartEventPayload,
     human_response_recorded: HumanResponseRecordedEventPayload,
     instruction_update: InstructionUpdateEventPayload,
+    instruction_update_delivery: InstructionUpdateDeliveryEventPayload,
     mcp_headers_refresh_completed: McpHeadersRefreshCompletedEventPayload,
     mcp_headers_refresh_required: McpHeadersRefreshRequiredEventPayload,
     mcp_oauth_completed: McpOauthCompletedEventPayload,
@@ -4913,6 +5145,7 @@ pub const SessionEvent = union(enum) {
     session_idle: SessionIdle,
     session_indexed_search: IndexedSearchEventPayload,
     session_info: InfoEventPayload,
+    session_journal_link: JournalLinkEventPayload,
     session_managed_plugin_progress: ManagedPluginProgressEventPayload,
     session_managed_settings_enforced: ManagedSettingsEnforcedEventPayload,
     session_managed_settings_resolved: ManagedSettingsResolvedEventPayload,
@@ -5021,6 +5254,7 @@ pub const SessionEvent = union(enum) {
             .hook_start => "hook.start",
             .human_response_recorded => "human_response.recorded",
             .instruction_update => "instruction.update",
+            .instruction_update_delivery => "instruction.update_delivery",
             .mcp_headers_refresh_completed => "mcp.headers_refresh_completed",
             .mcp_headers_refresh_required => "mcp.headers_refresh_required",
             .mcp_oauth_completed => "mcp.oauth_completed",
@@ -5081,6 +5315,7 @@ pub const SessionEvent = union(enum) {
             .session_idle => "session.idle",
             .session_indexed_search => "session.indexed_search",
             .session_info => "session.info",
+            .session_journal_link => "session.journal_link",
             .session_managed_plugin_progress => "session.managed_plugin_progress",
             .session_managed_settings_enforced => "session.managed_settings_enforced",
             .session_managed_settings_resolved => "session.managed_settings_resolved",
@@ -5191,6 +5426,7 @@ pub const SessionEvent = union(enum) {
             .hook_start => |value| value.data_json,
             .human_response_recorded => |value| value.data_json,
             .instruction_update => |value| value.data_json,
+            .instruction_update_delivery => |value| value.data_json,
             .mcp_headers_refresh_completed => |value| value.data_json,
             .mcp_headers_refresh_required => |value| value.data_json,
             .mcp_oauth_completed => |value| value.data_json,
@@ -5251,6 +5487,7 @@ pub const SessionEvent = union(enum) {
             .session_idle => |value| value.raw.data_json,
             .session_indexed_search => |value| value.data_json,
             .session_info => |value| value.data_json,
+            .session_journal_link => |value| value.data_json,
             .session_managed_plugin_progress => |value| value.data_json,
             .session_managed_settings_enforced => |value| value.data_json,
             .session_managed_settings_resolved => |value| value.data_json,
@@ -5361,6 +5598,7 @@ pub const SessionEvent = union(enum) {
             .hook_start => |*value| value.deinit(allocator),
             .human_response_recorded => |*value| value.deinit(allocator),
             .instruction_update => |*value| value.deinit(allocator),
+            .instruction_update_delivery => |*value| value.deinit(allocator),
             .mcp_headers_refresh_completed => |*value| value.deinit(allocator),
             .mcp_headers_refresh_required => |*value| value.deinit(allocator),
             .mcp_oauth_completed => |*value| value.deinit(allocator),
@@ -5421,6 +5659,7 @@ pub const SessionEvent = union(enum) {
             .session_idle => |*value| value.deinit(allocator),
             .session_indexed_search => |*value| value.deinit(allocator),
             .session_info => |*value| value.deinit(allocator),
+            .session_journal_link => |*value| value.deinit(allocator),
             .session_managed_plugin_progress => |*value| value.deinit(allocator),
             .session_managed_settings_enforced => |*value| value.deinit(allocator),
             .session_managed_settings_resolved => |*value| value.deinit(allocator),
@@ -5538,6 +5777,7 @@ pub const pinned_discriminators = [_]RegistryEntry{
     .{ .wire = "hook.start", .tag = .hook_start },
     .{ .wire = "human_response.recorded", .tag = .human_response_recorded },
     .{ .wire = "instruction.update", .tag = .instruction_update },
+    .{ .wire = "instruction.update_delivery", .tag = .instruction_update_delivery },
     .{ .wire = "mcp.headers_refresh_completed", .tag = .mcp_headers_refresh_completed },
     .{ .wire = "mcp.headers_refresh_required", .tag = .mcp_headers_refresh_required },
     .{ .wire = "mcp.oauth_completed", .tag = .mcp_oauth_completed },
@@ -5598,6 +5838,7 @@ pub const pinned_discriminators = [_]RegistryEntry{
     .{ .wire = "session.idle", .tag = .session_idle },
     .{ .wire = "session.indexed_search", .tag = .session_indexed_search },
     .{ .wire = "session.info", .tag = .session_info },
+    .{ .wire = "session.journal_link", .tag = .session_journal_link },
     .{ .wire = "session.managed_plugin_progress", .tag = .session_managed_plugin_progress },
     .{ .wire = "session.managed_settings_enforced", .tag = .session_managed_settings_enforced },
     .{ .wire = "session.managed_settings_resolved", .tag = .session_managed_settings_resolved },
@@ -7440,6 +7681,24 @@ fn parseManagedPluginProgressDataPluginSpecsArray(allocator: std.mem.Allocator, 
     return result;
 }
 
+fn parsePolicyHelperFailureDetailsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const PolicyHelperFailureDetail {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc(PolicyHelperFailureDetail, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipePolicyHelperFailureDetail(&item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parsePolicyHelperFailureDetail(allocator, item);
+        initialized += 1;
+    }
+    return result;
+}
+
 fn parseManagedSettingsResolvedDataManagedKeysArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
     const source = switch (value) {
         .array => |array| array.items,
@@ -7880,6 +8139,24 @@ fn parseGitHubMcpToolConfigAdditionalToolsArray(allocator: std.mem.Allocator, va
     return result;
 }
 
+fn parseTaskCompleteDataBlockedActionsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const BlockedPermissionAction {
+    const source = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidSessionEvent,
+    };
+    if (source.len < 0) return error.InvalidSessionEvent;
+    const result = try allocator.alloc(BlockedPermissionAction, source.len);
+    var initialized: usize = 0;
+    errdefer for (@constCast(result[0..initialized])) |*item| {
+        wipeBlockedPermissionAction(&item.*);
+    };
+    for (source, result) |item, *destination| {
+        destination.* = try parseBlockedPermissionAction(allocator, item);
+        initialized += 1;
+    }
+    return result;
+}
+
 fn parseUsageCheckpointDataToolUsageRequestIdsArray(allocator: std.mem.Allocator, value: std.json.Value) ![]const []const u8 {
     const source = switch (value) {
         .array => |array| array.items,
@@ -8304,6 +8581,30 @@ fn parseToolExecutionCompleteResultBinaryResultsForLlmArray(allocator: std.mem.A
     for (source, result) |item, *destination| {
         destination.* = try parsePersistedBinaryResult(allocator, item);
         initialized += 1;
+    }
+    return result;
+}
+
+fn parseToolExecutionCompleteResultMcpResultMetaMap(allocator: std.mem.Allocator, value: std.json.Value) !std.json.ArrayHashMap(std.json.Value) {
+    const source = try payloads.requiredObject(value);
+    var result: std.json.ArrayHashMap(std.json.Value) = .{};
+    errdefer {
+        var cleanup_iterator = result.map.iterator();
+        while (cleanup_iterator.next()) |entry| {
+            wipeString(entry.key_ptr.*);
+            wipeJsonValue(&entry.value_ptr.*);
+        }
+    }
+    var iterator = source.iterator();
+    while (iterator.next()) |entry| {
+        const key = try allocator.dupe(u8, entry.key_ptr.*);
+        errdefer wipeString(key);
+        const parsed_value = try cloneJsonValue(allocator, entry.value_ptr.*);
+        errdefer {
+            var cleanup_value = parsed_value;
+            wipeJsonValue(&cleanup_value);
+        }
+        try result.map.put(allocator, key, parsed_value);
     }
     return result;
 }
@@ -9179,6 +9480,13 @@ fn parseAssistantMessageToolRequest(allocator: std.mem.Allocator, value: std.jso
             wipeAssistantMessageToolRequestCaller(&present.*);
         }
     }
+    const parsed_mcp_server_display_name = if (object.get("mcpServerDisplayName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_mcp_server_display_name = parsed_mcp_server_display_name;
+        if (cleanup_mcp_server_display_name) |*present| {
+            wipeString(present.*);
+        }
+    }
     return .{
         .tool_call_id = parsed_tool_call_id,
         .name = parsed_name,
@@ -9189,6 +9497,7 @@ fn parseAssistantMessageToolRequest(allocator: std.mem.Allocator, value: std.jso
         .mcp_tool_name = parsed_mcp_tool_name,
         .intention_summary = parsed_intention_summary,
         .caller = parsed_caller,
+        .mcp_server_display_name = parsed_mcp_server_display_name,
     };
 }
 
@@ -9810,10 +10119,36 @@ fn parseAssistantReasoningData(allocator: std.mem.Allocator, value: std.json.Val
         wipeString(cleanup_content);
     }
     const parsed_rte = if (object.get("rte")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_turn_id = if (object.get("turnId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_turn_id = parsed_turn_id;
+        if (cleanup_turn_id) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_api_call_id = if (object.get("apiCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_api_call_id = parsed_api_call_id;
+        if (cleanup_api_call_id) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_model = if (object.get("model")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_model = parsed_model;
+        if (cleanup_model) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_is_byok = if (object.get("isByok")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .reasoning_id = parsed_reasoning_id,
         .content = parsed_content,
         .rte = parsed_rte,
+        .turn_id = parsed_turn_id,
+        .api_call_id = parsed_api_call_id,
+        .model = parsed_model,
+        .is_byok = parsed_is_byok,
     };
 }
 
@@ -9959,6 +10294,14 @@ fn parseAssistantTurnRetryData(allocator: std.mem.Allocator, value: std.json.Val
     };
 }
 
+fn parseSessionMode(_: std.mem.Allocator, value: std.json.Value) !SessionMode {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "interactive")) return .interactive;
+    if (std.mem.eql(u8, wire, "plan")) return .plan;
+    if (std.mem.eql(u8, wire, "autopilot")) return .autopilot;
+    return error.InvalidSessionEvent;
+}
+
 fn parseAssistantTurnStartData(allocator: std.mem.Allocator, value: std.json.Value) !AssistantTurnStartData {
     const object = try payloads.requiredObject(value);
 
@@ -9988,11 +10331,19 @@ fn parseAssistantTurnStartData(allocator: std.mem.Allocator, value: std.json.Val
             wipeString(present.*);
         }
     }
+    const parsed_agent_mode = if (object.get("agentMode")) |field_value| if ((field_value) == .null) null else try parseSessionMode(allocator, field_value) else null;
+    errdefer {
+        var cleanup_agent_mode = parsed_agent_mode;
+        if (cleanup_agent_mode) |*present| {
+            wipeSessionMode(&present.*);
+        }
+    }
     return .{
         .turn_id = parsed_turn_id,
         .model = parsed_model,
         .interaction_id = parsed_interaction_id,
         .parent_tool_call_id = parsed_parent_tool_call_id,
+        .agent_mode = parsed_agent_mode,
     };
 }
 
@@ -10323,6 +10674,7 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
             wipeAssistantUsageTransport(&present.*);
         }
     }
+    const parsed_inference_gateway = if (object.get("inferenceGateway")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_request_body_bytes = if (object.get("requestBodyBytes")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_request_body_wire_bytes = if (object.get("requestBodyWireBytes")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_request_body_encoding = if (object.get("requestBodyEncoding")) |field_value| if ((field_value) == .null) null else try parseModelCallRequestBodyEncoding(allocator, field_value) else null;
@@ -10384,6 +10736,20 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
     errdefer {
         var cleanup_service_request_id = parsed_service_request_id;
         if (cleanup_service_request_id) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_instruction_update_delivery_id = if (object.get("instructionUpdateDeliveryId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_instruction_update_delivery_id = parsed_instruction_update_delivery_id;
+        if (cleanup_instruction_update_delivery_id) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_instruction_update_latest_event_id = if (object.get("instructionUpdateLatestEventId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_instruction_update_latest_event_id = parsed_instruction_update_latest_event_id;
+        if (cleanup_instruction_update_latest_event_id) |*present| {
             wipeString(present.*);
         }
     }
@@ -10450,6 +10816,20 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
     }
     const parsed_cache_ttl_seconds = if (object.get("cacheTtlSeconds")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_cache_policy_ttl_seconds = if (object.get("cachePolicyTtlSeconds")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 1, null, null) else null;
+    const parsed_prompt_cache_ttl_reason = if (object.get("promptCacheTtlReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_prompt_cache_ttl_reason = parsed_prompt_cache_ttl_reason;
+        if (cleanup_prompt_cache_ttl_reason) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_prompt_cache_credits_bucket = if (object.get("promptCacheCreditsBucket")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_prompt_cache_credits_bucket = parsed_prompt_cache_credits_bucket;
+        if (cleanup_prompt_cache_credits_bucket) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_cache_details_reported = if (object.get("cacheDetailsReported")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_num_tool_calls = if (object.get("numToolCalls")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_tool_counts = if (object.get("toolCounts")) |field_value| if ((field_value) == .null) null else try parseAssistantUsageDataToolCountsMap(allocator, field_value) else null;
@@ -10477,6 +10857,13 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
         var cleanup_fusion = parsed_fusion;
         if (cleanup_fusion) |*present| {
             wipeFusionAttribution(&present.*);
+        }
+    }
+    const parsed_response_model = if (object.get("responseModel")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_response_model = parsed_response_model;
+        if (cleanup_response_model) |*present| {
+            wipeString(present.*);
         }
     }
     return .{
@@ -10510,6 +10897,7 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
         .accepted_prediction_tokens = parsed_accepted_prediction_tokens,
         .rejected_prediction_tokens = parsed_rejected_prediction_tokens,
         .transport = parsed_transport,
+        .inference_gateway = parsed_inference_gateway,
         .request_body_bytes = parsed_request_body_bytes,
         .request_body_wire_bytes = parsed_request_body_wire_bytes,
         .request_body_encoding = parsed_request_body_encoding,
@@ -10526,6 +10914,8 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
         .api_call_id = parsed_api_call_id,
         .provider_call_id = parsed_provider_call_id,
         .service_request_id = parsed_service_request_id,
+        .instruction_update_delivery_id = parsed_instruction_update_delivery_id,
+        .instruction_update_latest_event_id = parsed_instruction_update_latest_event_id,
         .rte = parsed_rte,
         .api_endpoint = parsed_api_endpoint,
         .parent_tool_call_id = parsed_parent_tool_call_id,
@@ -10541,12 +10931,15 @@ fn parseAssistantUsageData(allocator: std.mem.Allocator, value: std.json.Value) 
         .frontier_source = parsed_frontier_source,
         .cache_ttl_seconds = parsed_cache_ttl_seconds,
         .cache_policy_ttl_seconds = parsed_cache_policy_ttl_seconds,
+        .prompt_cache_ttl_reason = parsed_prompt_cache_ttl_reason,
+        .prompt_cache_credits_bucket = parsed_prompt_cache_credits_bucket,
         .cache_details_reported = parsed_cache_details_reported,
         .num_tool_calls = parsed_num_tool_calls,
         .tool_counts = parsed_tool_counts,
         .finish_reason = parsed_finish_reason,
         .content_filter_triggered = parsed_content_filter_triggered,
         .fusion = parsed_fusion,
+        .response_model = parsed_response_model,
     };
 }
 
@@ -10838,6 +11231,13 @@ fn parseElicitationRequestedData(allocator: std.mem.Allocator, value: std.json.V
             wipeString(present.*);
         }
     }
+    const parsed_elicitation_source_display_name = if (object.get("elicitationSourceDisplayName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_elicitation_source_display_name = parsed_elicitation_source_display_name;
+        if (cleanup_elicitation_source_display_name) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_message = try parseString(allocator, object.get("message") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_message = parsed_message;
@@ -10868,6 +11268,7 @@ fn parseElicitationRequestedData(allocator: std.mem.Allocator, value: std.json.V
         .request_id = parsed_request_id,
         .tool_call_id = parsed_tool_call_id,
         .elicitation_source = parsed_elicitation_source,
+        .elicitation_source_display_name = parsed_elicitation_source_display_name,
         .message = parsed_message,
         .mode = parsed_mode,
         .requested_schema = parsed_requested_schema,
@@ -11421,6 +11822,7 @@ fn parseInstructionUpdateData(allocator: std.mem.Allocator, value: std.json.Valu
             wipeString(present.*);
         }
     }
+    const parsed_post_initial = if (object.get("postInitial")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .content = parsed_content,
         .authority = parsed_authority,
@@ -11428,6 +11830,82 @@ fn parseInstructionUpdateData(allocator: std.mem.Allocator, value: std.json.Valu
         .boundary = parsed_boundary,
         .fallback = parsed_fallback,
         .name = parsed_name,
+        .post_initial = parsed_post_initial,
+    };
+}
+
+fn parseInstructionUpdateDeliveryOutcome(_: std.mem.Allocator, value: std.json.Value) !InstructionUpdateDeliveryOutcome {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "append")) return .append;
+    if (std.mem.eql(u8, wire, "fullRebuild")) return .full_rebuild;
+    if (std.mem.eql(u8, wire, "deterministicFallback")) return .deterministic_fallback;
+    return error.InvalidSessionEvent;
+}
+
+fn parseInstructionUpdateCapability(_: std.mem.Allocator, value: std.json.Value) !InstructionUpdateCapability {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "supported")) return .supported;
+    if (std.mem.eql(u8, wire, "unsupported")) return .unsupported;
+    if (std.mem.eql(u8, wire, "unknown")) return .unknown;
+    return error.InvalidSessionEvent;
+}
+
+fn parseInstructionUpdateDeliveryReason(_: std.mem.Allocator, value: std.json.Value) !InstructionUpdateDeliveryReason {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "controlArm")) return .control_arm;
+    if (std.mem.eql(u8, wire, "nativeTransport")) return .native_transport;
+    if (std.mem.eql(u8, wire, "advertisedSupport")) return .advertised_support;
+    if (std.mem.eql(u8, wire, "advertisedUnsupported")) return .advertised_unsupported;
+    if (std.mem.eql(u8, wire, "capabilityUnavailable")) return .capability_unavailable;
+    if (std.mem.eql(u8, wire, "unsupportedTransport")) return .unsupported_transport;
+    if (std.mem.eql(u8, wire, "missingUserBoundary")) return .missing_user_boundary;
+    return error.InvalidSessionEvent;
+}
+
+fn parseInstructionUpdateDeliveryData(allocator: std.mem.Allocator, value: std.json.Value) !InstructionUpdateDeliveryData {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_delivery_id = try parseString(allocator, object.get("deliveryId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_delivery_id = parsed_delivery_id;
+        wipeString(cleanup_delivery_id);
+    }
+    const parsed_first_update_event_id = try parseString(allocator, object.get("firstUpdateEventId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_first_update_event_id = parsed_first_update_event_id;
+        wipeString(cleanup_first_update_event_id);
+    }
+    const parsed_latest_update_event_id = try parseString(allocator, object.get("latestUpdateEventId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_latest_update_event_id = parsed_latest_update_event_id;
+        wipeString(cleanup_latest_update_event_id);
+    }
+    const parsed_update_count = try parseInteger(u64, object.get("updateCount") orelse return error.InvalidSessionEvent, 1, null, null);
+    const parsed_request_generation = try parseInteger(u64, object.get("requestGeneration") orelse return error.InvalidSessionEvent, 1, null, null);
+    const parsed_outcome = try parseInstructionUpdateDeliveryOutcome(allocator, object.get("outcome") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_outcome = parsed_outcome;
+        wipeInstructionUpdateDeliveryOutcome(&cleanup_outcome);
+    }
+    const parsed_capability = try parseInstructionUpdateCapability(allocator, object.get("capability") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_capability = parsed_capability;
+        wipeInstructionUpdateCapability(&cleanup_capability);
+    }
+    const parsed_reason = try parseInstructionUpdateDeliveryReason(allocator, object.get("reason") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_reason = parsed_reason;
+        wipeInstructionUpdateDeliveryReason(&cleanup_reason);
+    }
+    return .{
+        .delivery_id = parsed_delivery_id,
+        .first_update_event_id = parsed_first_update_event_id,
+        .latest_update_event_id = parsed_latest_update_event_id,
+        .update_count = parsed_update_count,
+        .request_generation = parsed_request_generation,
+        .outcome = parsed_outcome,
+        .capability = parsed_capability,
+        .reason = parsed_reason,
     };
 }
 
@@ -11900,6 +12378,12 @@ fn parseModelCallFailureBadRequestKind(_: std.mem.Allocator, value: std.json.Val
     return error.InvalidSessionEvent;
 }
 
+fn parseModelCallProductStateError(_: std.mem.Allocator, value: std.json.Value) !ModelCallProductStateError {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "input_item_connection_mismatch")) return .input_item_connection_mismatch;
+    return error.InvalidSessionEvent;
+}
+
 fn parseModelCallFailureRequestFingerprint(allocator: std.mem.Allocator, value: std.json.Value) !ModelCallFailureRequestFingerprint {
     const object = try payloads.requiredObject(value);
 
@@ -11984,6 +12468,20 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
             wipeString(present.*);
         }
     }
+    const parsed_instruction_update_delivery_id = if (object.get("instructionUpdateDeliveryId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_instruction_update_delivery_id = parsed_instruction_update_delivery_id;
+        if (cleanup_instruction_update_delivery_id) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_instruction_update_latest_event_id = if (object.get("instructionUpdateLatestEventId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_instruction_update_latest_event_id = parsed_instruction_update_latest_event_id;
+        if (cleanup_instruction_update_latest_event_id) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_rte = if (object.get("rte")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_status_code = if (object.get("statusCode")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, 999) else null;
     const parsed_duration_ms = if (object.get("durationMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
@@ -12001,6 +12499,7 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
             wipeModelCallFailureTransport(&present.*);
         }
     }
+    const parsed_inference_gateway = if (object.get("inferenceGateway")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_failure_kind = if (object.get("failureKind")) |field_value| if ((field_value) == .null) null else try parseModelCallFailureKind(allocator, field_value) else null;
     errdefer {
         var cleanup_failure_kind = parsed_failure_kind;
@@ -12033,6 +12532,14 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
     }
     const parsed_request_body_compression_rejected_status = if (object.get("requestBodyCompressionRejectedStatus")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, 999) else null;
     const parsed_retry_attempt = if (object.get("retryAttempt")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_incomplete_stream_reason = if (object.get("incompleteStreamReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_incomplete_stream_reason = parsed_incomplete_stream_reason;
+        if (cleanup_incomplete_stream_reason) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_stream_done_received = if (object.get("streamDoneReceived")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_websocket_fallback_reason = if (object.get("websocketFallbackReason")) |field_value| if ((field_value) == .null) null else try parseModelCallWebSocketFallbackReason(allocator, field_value) else null;
     errdefer {
         var cleanup_websocket_fallback_reason = parsed_websocket_fallback_reason;
@@ -12124,6 +12631,13 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
             wipeString(present.*);
         }
     }
+    const parsed_product_state_error = if (object.get("productStateError")) |field_value| if ((field_value) == .null) null else try parseModelCallProductStateError(allocator, field_value) else null;
+    errdefer {
+        var cleanup_product_state_error = parsed_product_state_error;
+        if (cleanup_product_state_error) |*present| {
+            wipeModelCallProductStateError(&present.*);
+        }
+    }
     const parsed_quota_snapshots = if (object.get("quotaSnapshots")) |field_value| if ((field_value) == .null) null else try parseModelCallFailureDataQuotaSnapshotsMap(allocator, field_value) else null;
     errdefer {
         var cleanup_quota_snapshots = parsed_quota_snapshots;
@@ -12158,11 +12672,14 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
         .api_call_id = parsed_api_call_id,
         .provider_call_id = parsed_provider_call_id,
         .service_request_id = parsed_service_request_id,
+        .instruction_update_delivery_id = parsed_instruction_update_delivery_id,
+        .instruction_update_latest_event_id = parsed_instruction_update_latest_event_id,
         .rte = parsed_rte,
         .status_code = parsed_status_code,
         .duration_ms = parsed_duration_ms,
         .api_endpoint = parsed_api_endpoint,
         .transport = parsed_transport,
+        .inference_gateway = parsed_inference_gateway,
         .failure_kind = parsed_failure_kind,
         .request_body_bytes = parsed_request_body_bytes,
         .request_body_wire_bytes = parsed_request_body_wire_bytes,
@@ -12171,6 +12688,8 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
         .request_body_compression_fallback_from = parsed_request_body_compression_fallback_from,
         .request_body_compression_rejected_status = parsed_request_body_compression_rejected_status,
         .retry_attempt = parsed_retry_attempt,
+        .incomplete_stream_reason = parsed_incomplete_stream_reason,
+        .stream_done_received = parsed_stream_done_received,
         .websocket_fallback_reason = parsed_websocket_fallback_reason,
         .websocket_fallback_after_ms = parsed_websocket_fallback_after_ms,
         .websocket_fallback_error_kind = parsed_websocket_fallback_error_kind,
@@ -12192,6 +12711,7 @@ fn parseModelCallFailureData(allocator: std.mem.Allocator, value: std.json.Value
         .bad_request_kind = parsed_bad_request_kind,
         .error_code = parsed_error_code,
         .error_type = parsed_error_type,
+        .product_state_error = parsed_product_state_error,
         .quota_snapshots = parsed_quota_snapshots,
         .request_fingerprint = parsed_request_fingerprint,
         .fusion = parsed_fusion,
@@ -12387,7 +12907,7 @@ fn parseTaskBlockerKind(_: std.mem.Allocator, value: std.json.Value) !TaskBlocke
     return error.InvalidSessionEvent;
 }
 
-fn parsePermissionRecoveryReason(_: std.mem.Allocator, value: std.json.Value) !PermissionRecoveryReason {
+fn parseTaskBlockerReason(_: std.mem.Allocator, value: std.json.Value) !TaskBlockerReason {
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "permission_required")) return .permission_required;
     if (std.mem.eql(u8, wire, "repeated_attempt")) return .repeated_attempt;
@@ -12396,6 +12916,7 @@ fn parsePermissionRecoveryReason(_: std.mem.Allocator, value: std.json.Value) !P
     if (std.mem.eql(u8, wire, "permission_denied")) return .permission_denied;
     if (std.mem.eql(u8, wire, "responder_unavailable")) return .responder_unavailable;
     if (std.mem.eql(u8, wire, "equivalent_alternative_succeeded")) return .equivalent_alternative_succeeded;
+    if (std.mem.eql(u8, wire, "permission_recovery_run_limit")) return .permission_recovery_run_limit;
     return error.InvalidSessionEvent;
 }
 
@@ -12412,6 +12933,18 @@ fn parsePermissionRecoveryOnBlocked(_: std.mem.Allocator, value: std.json.Value)
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "ask")) return .ask;
     if (std.mem.eql(u8, wire, "fail")) return .fail;
+    return error.InvalidSessionEvent;
+}
+
+fn parsePermissionRecoveryReason(_: std.mem.Allocator, value: std.json.Value) !PermissionRecoveryReason {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "permission_required")) return .permission_required;
+    if (std.mem.eql(u8, wire, "repeated_attempt")) return .repeated_attempt;
+    if (std.mem.eql(u8, wire, "attempts_exhausted")) return .attempts_exhausted;
+    if (std.mem.eql(u8, wire, "permission_approved")) return .permission_approved;
+    if (std.mem.eql(u8, wire, "permission_denied")) return .permission_denied;
+    if (std.mem.eql(u8, wire, "responder_unavailable")) return .responder_unavailable;
+    if (std.mem.eql(u8, wire, "equivalent_alternative_succeeded")) return .equivalent_alternative_succeeded;
     return error.InvalidSessionEvent;
 }
 
@@ -12499,6 +13032,21 @@ fn parsePermissionRecoveryAttempt(allocator: std.mem.Allocator, value: std.json.
     };
 }
 
+fn parsePermissionRecoveryRunState(_: std.mem.Allocator, value: std.json.Value) !PermissionRecoveryRunState {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_consecutive_blocked_episodes = try parseInteger(u64, object.get("consecutiveBlockedEpisodes") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_permission_recovery_terminal_claimed = if (object.get("permissionRecoveryTerminalClaimed")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_total_denial_dispositions = try parseInteger(u64, object.get("totalDenialDispositions") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_terminal_outcome_claimed = try parseBool(object.get("terminalOutcomeClaimed") orelse return error.InvalidSessionEvent);
+    return .{
+        .consecutive_blocked_episodes = parsed_consecutive_blocked_episodes,
+        .permission_recovery_terminal_claimed = parsed_permission_recovery_terminal_claimed,
+        .total_denial_dispositions = parsed_total_denial_dispositions,
+        .terminal_outcome_claimed = parsed_terminal_outcome_claimed,
+    };
+}
+
 fn parsePermissionRecoveryData(allocator: std.mem.Allocator, value: std.json.Value) !PermissionRecoveryData {
     const object = try payloads.requiredObject(value);
 
@@ -12544,6 +13092,13 @@ fn parsePermissionRecoveryData(allocator: std.mem.Allocator, value: std.json.Val
             wipePermissionRecoveryAttempt(&item.*);
         }
     }
+    const parsed_run_state = if (object.get("runState")) |field_value| if ((field_value) == .null) null else try parsePermissionRecoveryRunState(allocator, field_value) else null;
+    errdefer {
+        var cleanup_run_state = parsed_run_state;
+        if (cleanup_run_state) |*present| {
+            wipePermissionRecoveryRunState(&present.*);
+        }
+    }
     return .{
         .episode_id = parsed_episode_id,
         .owner_session_id = parsed_owner_session_id,
@@ -12553,6 +13108,7 @@ fn parsePermissionRecoveryData(allocator: std.mem.Allocator, value: std.json.Val
         .reason = parsed_reason,
         .max_attempts = parsed_max_attempts,
         .attempts = parsed_attempts,
+        .run_state = parsed_run_state,
     };
 }
 
@@ -12564,10 +13120,10 @@ fn parseTaskBlocker(allocator: std.mem.Allocator, value: std.json.Value) !TaskBl
         var cleanup_kind = parsed_kind;
         wipeTaskBlockerKind(&cleanup_kind);
     }
-    const parsed_reason = try parsePermissionRecoveryReason(allocator, object.get("reason") orelse return error.InvalidSessionEvent);
+    const parsed_reason = try parseTaskBlockerReason(allocator, object.get("reason") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_reason = parsed_reason;
-        wipePermissionRecoveryReason(&cleanup_reason);
+        wipeTaskBlockerReason(&cleanup_reason);
     }
     const parsed_resumable = try parseBool(object.get("resumable") orelse return error.InvalidSessionEvent);
     const parsed_permission_recovery = try parsePermissionRecoveryData(allocator, object.get("permissionRecovery") orelse return error.InvalidSessionEvent);
@@ -13636,6 +14192,13 @@ fn parsePermissionRequestMcp(allocator: std.mem.Allocator, value: std.json.Value
         const cleanup_server_name = parsed_server_name;
         wipeString(cleanup_server_name);
     }
+    const parsed_server_display_name = if (object.get("serverDisplayName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_server_display_name = parsed_server_display_name;
+        if (cleanup_server_display_name) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_tool_name = try parseString(allocator, object.get("toolName") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_tool_name = parsed_tool_name;
@@ -13665,6 +14228,7 @@ fn parsePermissionRequestMcp(allocator: std.mem.Allocator, value: std.json.Value
         .kind = parsed_kind,
         .tool_call_id = parsed_tool_call_id,
         .server_name = parsed_server_name,
+        .server_display_name = parsed_server_display_name,
         .tool_name = parsed_tool_name,
         .tool_title = parsed_tool_title,
         .args = parsed_args,
@@ -13782,6 +14346,7 @@ fn parsePermissionApprovalEvaluationReasonCode(_: std.mem.Allocator, value: std.
     if (std.mem.eql(u8, wire, "unavailable")) return .unavailable;
     if (std.mem.eql(u8, wire, "judge-verdict")) return .judge_verdict;
     if (std.mem.eql(u8, wire, "judge-error")) return .judge_error;
+    if (std.mem.eql(u8, wire, "judge-context-too-large")) return .judge_context_too_large;
     if (std.mem.eql(u8, wire, "inherited")) return .inherited;
     return error.InvalidSessionEvent;
 }
@@ -14524,6 +15089,13 @@ fn parsePermissionPromptRequestMcp(allocator: std.mem.Allocator, value: std.json
         const cleanup_server_name = parsed_server_name;
         wipeString(cleanup_server_name);
     }
+    const parsed_server_display_name = if (object.get("serverDisplayName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_server_display_name = parsed_server_display_name;
+        if (cleanup_server_display_name) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_tool_name = try parseString(allocator, object.get("toolName") orelse return error.InvalidSessionEvent, null, null);
     errdefer {
         const cleanup_tool_name = parsed_tool_name;
@@ -14560,6 +15132,7 @@ fn parsePermissionPromptRequestMcp(allocator: std.mem.Allocator, value: std.json
         .kind = parsed_kind,
         .tool_call_id = parsed_tool_call_id,
         .server_name = parsed_server_name,
+        .server_display_name = parsed_server_display_name,
         .tool_name = parsed_tool_name,
         .tool_title = parsed_tool_title,
         .args = parsed_args,
@@ -15095,19 +15668,126 @@ fn parsePermissionPromptRequest(allocator: std.mem.Allocator, value: std.json.Va
     return error.InvalidSessionEvent;
 }
 
+fn parseAssistedApprovalAssessmentVariant1(allocator: std.mem.Allocator, value: std.json.Value) !AssistedApprovalAssessmentVariant1 {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_status = try parseConstant(allocator, object.get("status") orelse return error.InvalidSessionEvent, "unavailable");
+    errdefer {
+        const cleanup_status = parsed_status;
+        wipeString(cleanup_status);
+    }
+    return .{
+        .status = parsed_status,
+    };
+}
+
+fn parseAssistedApprovalAssessmentVariant2(allocator: std.mem.Allocator, value: std.json.Value) !AssistedApprovalAssessmentVariant2 {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_reason = try parseString(allocator, object.get("reason") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_reason = parsed_reason;
+        wipeString(cleanup_reason);
+    }
+    const parsed_status = try parseConstant(allocator, object.get("status") orelse return error.InvalidSessionEvent, "not-run");
+    errdefer {
+        const cleanup_status = parsed_status;
+        wipeString(cleanup_status);
+    }
+    return .{
+        .reason = parsed_reason,
+        .status = parsed_status,
+    };
+}
+
+fn parseAssistedApprovalAssessmentVariant3(allocator: std.mem.Allocator, value: std.json.Value) !AssistedApprovalAssessmentVariant3 {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_reason = try parseString(allocator, object.get("reason") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_reason = parsed_reason;
+        wipeString(cleanup_reason);
+    }
+    const parsed_status = try parseConstant(allocator, object.get("status") orelse return error.InvalidSessionEvent, "excluded");
+    errdefer {
+        const cleanup_status = parsed_status;
+        wipeString(cleanup_status);
+    }
+    return .{
+        .reason = parsed_reason,
+        .status = parsed_status,
+    };
+}
+
+fn parseAssistedApprovalCompletedRecommendation(_: std.mem.Allocator, value: std.json.Value) !AssistedApprovalCompletedRecommendation {
+    const wire = try valueString(value);
+    if (std.mem.eql(u8, wire, "approve")) return .approve;
+    if (std.mem.eql(u8, wire, "requireApproval")) return .require_approval;
+    return error.InvalidSessionEvent;
+}
+
+fn parseAssistedApprovalAssessmentVariant4(allocator: std.mem.Allocator, value: std.json.Value) !AssistedApprovalAssessmentVariant4 {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_recommendation = try parseAssistedApprovalCompletedRecommendation(allocator, object.get("recommendation") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_recommendation = parsed_recommendation;
+        wipeAssistedApprovalCompletedRecommendation(&cleanup_recommendation);
+    }
+    const parsed_rationale = if (object.get("rationale")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_rationale = parsed_rationale;
+        if (cleanup_rationale) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_status = try parseConstant(allocator, object.get("status") orelse return error.InvalidSessionEvent, "completed");
+    errdefer {
+        const cleanup_status = parsed_status;
+        wipeString(cleanup_status);
+    }
+    return .{
+        .recommendation = parsed_recommendation,
+        .rationale = parsed_rationale,
+        .status = parsed_status,
+    };
+}
+
+fn parseAssistedApprovalAssessmentVariant5(allocator: std.mem.Allocator, value: std.json.Value) !AssistedApprovalAssessmentVariant5 {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_reason = try parseString(allocator, object.get("reason") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_reason = parsed_reason;
+        wipeString(cleanup_reason);
+    }
+    const parsed_status = try parseConstant(allocator, object.get("status") orelse return error.InvalidSessionEvent, "failed");
+    errdefer {
+        const cleanup_status = parsed_status;
+        wipeString(cleanup_status);
+    }
+    return .{
+        .reason = parsed_reason,
+        .status = parsed_status,
+    };
+}
+
+fn parseAssistedApprovalAssessment(allocator: std.mem.Allocator, value: std.json.Value) !AssistedApprovalAssessment {
+    const object = try payloads.requiredObject(value);
+    const discriminator = try payloads.requiredString(object, "status");
+    if (std.mem.eql(u8, discriminator, "unavailable")) return .{ .unavailable = try parseAssistedApprovalAssessmentVariant1(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "not-run")) return .{ .not_run = try parseAssistedApprovalAssessmentVariant2(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "excluded")) return .{ .excluded = try parseAssistedApprovalAssessmentVariant3(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "completed")) return .{ .completed = try parseAssistedApprovalAssessmentVariant4(allocator, value) };
+    if (std.mem.eql(u8, discriminator, "failed")) return .{ .failed = try parseAssistedApprovalAssessmentVariant5(allocator, value) };
+    return error.InvalidSessionEvent;
+}
+
 fn parsePermissionMode(_: std.mem.Allocator, value: std.json.Value) !PermissionMode {
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "manual")) return .manual;
     if (std.mem.eql(u8, wire, "assisted")) return .assisted;
     if (std.mem.eql(u8, wire, "allow-all")) return .allow_all;
-    return error.InvalidSessionEvent;
-}
-
-fn parseSessionMode(_: std.mem.Allocator, value: std.json.Value) !SessionMode {
-    const wire = try valueString(value);
-    if (std.mem.eql(u8, wire, "interactive")) return .interactive;
-    if (std.mem.eql(u8, wire, "plan")) return .plan;
-    if (std.mem.eql(u8, wire, "autopilot")) return .autopilot;
     return error.InvalidSessionEvent;
 }
 
@@ -15129,6 +15809,13 @@ fn parsePermissionRequestedData(allocator: std.mem.Allocator, value: std.json.Va
         var cleanup_prompt_request = parsed_prompt_request;
         if (cleanup_prompt_request) |*present| {
             wipePermissionPromptRequest(&present.*);
+        }
+    }
+    const parsed_assisted_approval_assessment = if (object.get("assistedApprovalAssessment")) |field_value| if ((field_value) == .null) null else try parseAssistedApprovalAssessment(allocator, field_value) else null;
+    errdefer {
+        var cleanup_assisted_approval_assessment = parsed_assisted_approval_assessment;
+        if (cleanup_assisted_approval_assessment) |*present| {
+            wipeAssistedApprovalAssessment(&present.*);
         }
     }
     const parsed_permission_mode = if (object.get("permissionMode")) |field_value| if ((field_value) == .null) null else try parsePermissionMode(allocator, field_value) else null;
@@ -15185,6 +15872,7 @@ fn parsePermissionRequestedData(allocator: std.mem.Allocator, value: std.json.Va
         .request_id = parsed_request_id,
         .permission_request = parsed_permission_request,
         .prompt_request = parsed_prompt_request,
+        .assisted_approval_assessment = parsed_assisted_approval_assessment,
         .permission_mode = parsed_permission_mode,
         .agent_mode = parsed_agent_mode,
         .owner_session_id = parsed_owner_session_id,
@@ -15403,6 +16091,13 @@ fn parseSamplingRequestedData(allocator: std.mem.Allocator, value: std.json.Valu
         const cleanup_server_name = parsed_server_name;
         wipeString(cleanup_server_name);
     }
+    const parsed_server_display_name = if (object.get("serverDisplayName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_server_display_name = parsed_server_display_name;
+        if (cleanup_server_display_name) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_mcp_request_id = try cloneJsonValue(allocator, object.get("mcpRequestId") orelse return error.InvalidSessionEvent);
     errdefer {
         var cleanup_mcp_request_id = parsed_mcp_request_id;
@@ -15411,6 +16106,7 @@ fn parseSamplingRequestedData(allocator: std.mem.Allocator, value: std.json.Valu
     return .{
         .request_id = parsed_request_id,
         .server_name = parsed_server_name,
+        .server_display_name = parsed_server_display_name,
         .mcp_request_id = parsed_mcp_request_id,
     };
 }
@@ -16244,6 +16940,10 @@ fn parseSandboxDecisionData(allocator: std.mem.Allocator, value: std.json.Value)
     return error.InvalidSessionEvent;
 }
 
+fn parseAutoTier(allocator: std.mem.Allocator, value: std.json.Value) !AutoTier {
+    return try parseRoutingIdentifier(allocator, value, 1, null);
+}
+
 fn parseAutoModeResolvedReasoningBucket(_: std.mem.Allocator, value: std.json.Value) !AutoModeResolvedReasoningBucket {
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "low")) return .low;
@@ -16259,6 +16959,13 @@ fn parseAutoModeResolvedData(allocator: std.mem.Allocator, value: std.json.Value
     errdefer {
         const cleanup_chosen_model = parsed_chosen_model;
         wipeString(cleanup_chosen_model);
+    }
+    const parsed_auto_tier = if (object.get("autoTier")) |field_value| if ((field_value) == .null) null else try parseAutoTier(allocator, field_value) else null;
+    errdefer {
+        var cleanup_auto_tier = parsed_auto_tier;
+        if (cleanup_auto_tier) |*present| {
+            wipeAutoTier(&present.*);
+        }
     }
     const parsed_reasoning_bucket = if (object.get("reasoningBucket")) |field_value| if ((field_value) == .null) null else try parseAutoModeResolvedReasoningBucket(allocator, field_value) else null;
     errdefer {
@@ -16334,6 +17041,7 @@ fn parseAutoModeResolvedData(allocator: std.mem.Allocator, value: std.json.Value
     const parsed_has_image = if (object.get("hasImage")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .chosen_model = parsed_chosen_model,
+        .auto_tier = parsed_auto_tier,
         .reasoning_bucket = parsed_reasoning_bucket,
         .category_scores = parsed_category_scores,
         .predicted_label = parsed_predicted_label,
@@ -16367,10 +17075,6 @@ fn parseAutoTierRecommendationData(allocator: std.mem.Allocator, value: std.json
     return .{
         .recommended_auto_tier = parsed_recommended_auto_tier,
     };
-}
-
-fn parseAutoTier(allocator: std.mem.Allocator, value: std.json.Value) !AutoTier {
-    return try parseRoutingIdentifier(allocator, value, 1, null);
 }
 
 fn parseAutoTierSwitchFailureReason(_: std.mem.Allocator, value: std.json.Value) !AutoTierSwitchFailureReason {
@@ -17003,6 +17707,9 @@ fn parseCompactionCompleteSummarizerProgress(_: std.mem.Allocator, value: std.js
     const parsed_max_output_gap_after_answer_ms = if (object.get("maxOutputGapAfterAnswerMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_idle_ms = if (object.get("idleMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_since_last_output_ms = if (object.get("sinceLastOutputMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_answer_chars = if (object.get("answerChars")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_reasoning_chars = if (object.get("reasoningChars")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_input_tokens_estimate = if (object.get("inputTokensEstimate")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_input_shrunk = if (object.get("inputShrunk")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     return .{
         .duration_ms = parsed_duration_ms,
@@ -17019,7 +17726,118 @@ fn parseCompactionCompleteSummarizerProgress(_: std.mem.Allocator, value: std.js
         .max_output_gap_after_answer_ms = parsed_max_output_gap_after_answer_ms,
         .idle_ms = parsed_idle_ms,
         .since_last_output_ms = parsed_since_last_output_ms,
+        .answer_chars = parsed_answer_chars,
+        .reasoning_chars = parsed_reasoning_chars,
+        .input_tokens_estimate = parsed_input_tokens_estimate,
         .input_shrunk = parsed_input_shrunk,
+    };
+}
+
+fn parseCompactionCompleteAttemptMetrics(allocator: std.mem.Allocator, value: std.json.Value) !CompactionCompleteAttemptMetrics {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_duration_ms = try parseInteger(u64, object.get("durationMs") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_blocking_wait_ms = if (object.get("blockingWaitMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_apply_delay_ms = if (object.get("applyDelayMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_suspended_ms = if (object.get("suspendedMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_summarizer_reasoning_effort = if (object.get("summarizerReasoningEffort")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_summarizer_reasoning_effort = parsed_summarizer_reasoning_effort;
+        if (cleanup_summarizer_reasoning_effort) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_requested_reasoning_effort = if (object.get("requestedReasoningEffort")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_requested_reasoning_effort = parsed_requested_reasoning_effort;
+        if (cleanup_requested_reasoning_effort) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_deadline_policy = if (object.get("deadlinePolicy")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_deadline_policy = parsed_deadline_policy;
+        if (cleanup_deadline_policy) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_deadline_limit_ms = if (object.get("deadlineLimitMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_deadline_overshoot_ms = if (object.get("deadlineOvershootMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_trigger_threshold = if (object.get("triggerThreshold")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_max_output_tokens = if (object.get("maxOutputTokens")) |field_value| if ((field_value) == .null) null else try parseNumber(field_value, 0, null, null) else null;
+    const parsed_failed_request_count = if (object.get("failedRequestCount")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_failed_request_input_tokens_estimate = if (object.get("failedRequestInputTokensEstimate")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_cancelled_request_count = if (object.get("cancelledRequestCount")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_retry_wait_ms = if (object.get("retryWaitMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_last_retry_after_ms = if (object.get("lastRetryAfterMs")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_shrink_removed_attachments = if (object.get("shrinkRemovedAttachments")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_shrink_stripped_reasoning = if (object.get("shrinkStrippedReasoning")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
+    const parsed_failure_operation = if (object.get("failureOperation")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_failure_operation = parsed_failure_operation;
+        if (cleanup_failure_operation) |*present| {
+            wipeString(present.*);
+        }
+    }
+    return .{
+        .duration_ms = parsed_duration_ms,
+        .blocking_wait_ms = parsed_blocking_wait_ms,
+        .apply_delay_ms = parsed_apply_delay_ms,
+        .suspended_ms = parsed_suspended_ms,
+        .summarizer_reasoning_effort = parsed_summarizer_reasoning_effort,
+        .requested_reasoning_effort = parsed_requested_reasoning_effort,
+        .deadline_policy = parsed_deadline_policy,
+        .deadline_limit_ms = parsed_deadline_limit_ms,
+        .deadline_overshoot_ms = parsed_deadline_overshoot_ms,
+        .trigger_threshold = parsed_trigger_threshold,
+        .max_output_tokens = parsed_max_output_tokens,
+        .failed_request_count = parsed_failed_request_count,
+        .failed_request_input_tokens_estimate = parsed_failed_request_input_tokens_estimate,
+        .cancelled_request_count = parsed_cancelled_request_count,
+        .retry_wait_ms = parsed_retry_wait_ms,
+        .last_retry_after_ms = parsed_last_retry_after_ms,
+        .shrink_removed_attachments = parsed_shrink_removed_attachments,
+        .shrink_stripped_reasoning = parsed_shrink_stripped_reasoning,
+        .failure_operation = parsed_failure_operation,
+    };
+}
+
+fn parseCompactionCompleteFailureDiagnostics(allocator: std.mem.Allocator, value: std.json.Value) !CompactionCompleteFailureDiagnostics {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_last_attempt_failure_reason = if (object.get("lastAttemptFailureReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_last_attempt_failure_reason = parsed_last_attempt_failure_reason;
+        if (cleanup_last_attempt_failure_reason) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_provider_error_code = if (object.get("providerErrorCode")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_provider_error_code = parsed_provider_error_code;
+        if (cleanup_provider_error_code) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_transport_error_kind = if (object.get("transportErrorKind")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_transport_error_kind = parsed_transport_error_kind;
+        if (cleanup_transport_error_kind) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_finish_reason = if (object.get("finishReason")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_finish_reason = parsed_finish_reason;
+        if (cleanup_finish_reason) |*present| {
+            wipeString(present.*);
+        }
+    }
+    return .{
+        .last_attempt_failure_reason = parsed_last_attempt_failure_reason,
+        .provider_error_code = parsed_provider_error_code,
+        .transport_error_kind = parsed_transport_error_kind,
+        .finish_reason = parsed_finish_reason,
     };
 }
 
@@ -17066,6 +17884,13 @@ fn parseCompactionCompleteData(allocator: std.mem.Allocator, value: std.json.Val
     errdefer {
         var cleanup_initial_model = parsed_initial_model;
         if (cleanup_initial_model) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_reasoning_effort = if (object.get("reasoningEffort")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_reasoning_effort = parsed_reasoning_effort;
+        if (cleanup_reasoning_effort) |*present| {
             wipeString(present.*);
         }
     }
@@ -17152,6 +17977,13 @@ fn parseCompactionCompleteData(allocator: std.mem.Allocator, value: std.json.Val
             wipeString(present.*);
         }
     }
+    const parsed_client_request_id = if (object.get("clientRequestId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_client_request_id = parsed_client_request_id;
+        if (cleanup_client_request_id) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_system_tokens = if (object.get("systemTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_conversation_tokens = if (object.get("conversationTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
     const parsed_tool_definitions_tokens = if (object.get("toolDefinitionsTokens")) |field_value| if ((field_value) == .null) null else try parseInteger(u64, field_value, 0, null, null) else null;
@@ -17172,11 +18004,32 @@ fn parseCompactionCompleteData(allocator: std.mem.Allocator, value: std.json.Val
             wipeCompactionTrigger(&present.*);
         }
     }
+    const parsed_execution = if (object.get("execution")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_execution = parsed_execution;
+        if (cleanup_execution) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_summarizer_progress = if (object.get("summarizerProgress")) |field_value| if ((field_value) == .null) null else try parseCompactionCompleteSummarizerProgress(allocator, field_value) else null;
     errdefer {
         var cleanup_summarizer_progress = parsed_summarizer_progress;
         if (cleanup_summarizer_progress) |*present| {
             wipeCompactionCompleteSummarizerProgress(&present.*);
+        }
+    }
+    const parsed_attempt_metrics = if (object.get("attemptMetrics")) |field_value| if ((field_value) == .null) null else try parseCompactionCompleteAttemptMetrics(allocator, field_value) else null;
+    errdefer {
+        var cleanup_attempt_metrics = parsed_attempt_metrics;
+        if (cleanup_attempt_metrics) |*present| {
+            wipeCompactionCompleteAttemptMetrics(&present.*);
+        }
+    }
+    const parsed_failure_diagnostics = if (object.get("failureDiagnostics")) |field_value| if ((field_value) == .null) null else try parseCompactionCompleteFailureDiagnostics(allocator, field_value) else null;
+    errdefer {
+        var cleanup_failure_diagnostics = parsed_failure_diagnostics;
+        if (cleanup_failure_diagnostics) |*present| {
+            wipeCompactionCompleteFailureDiagnostics(&present.*);
         }
     }
     return .{
@@ -17187,6 +18040,7 @@ fn parseCompactionCompleteData(allocator: std.mem.Allocator, value: std.json.Val
         .compaction_attempt_id = parsed_compaction_attempt_id,
         .model = parsed_model,
         .initial_model = parsed_initial_model,
+        .reasoning_effort = parsed_reasoning_effort,
         .error_ = parsed_error_,
         .pre_compaction_tokens = parsed_pre_compaction_tokens,
         .post_compaction_tokens = parsed_post_compaction_tokens,
@@ -17204,6 +18058,7 @@ fn parseCompactionCompleteData(allocator: std.mem.Allocator, value: std.json.Val
         .compaction_tokens_used = parsed_compaction_tokens_used,
         .request_id = parsed_request_id,
         .service_request_id = parsed_service_request_id,
+        .client_request_id = parsed_client_request_id,
         .system_tokens = parsed_system_tokens,
         .conversation_tokens = parsed_conversation_tokens,
         .tool_definitions_tokens = parsed_tool_definitions_tokens,
@@ -17212,7 +18067,10 @@ fn parseCompactionCompleteData(allocator: std.mem.Allocator, value: std.json.Val
         .target_prompt_token_limit = parsed_target_prompt_token_limit,
         .switch_target_model = parsed_switch_target_model,
         .trigger = parsed_trigger,
+        .execution = parsed_execution,
         .summarizer_progress = parsed_summarizer_progress,
+        .attempt_metrics = parsed_attempt_metrics,
+        .failure_diagnostics = parsed_failure_diagnostics,
     };
 }
 
@@ -17253,6 +18111,13 @@ fn parseCompactionStartData(allocator: std.mem.Allocator, value: std.json.Value)
             wipeCompactionTrigger(&present.*);
         }
     }
+    const parsed_execution = if (object.get("execution")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_execution = parsed_execution;
+        if (cleanup_execution) |*present| {
+            wipeString(present.*);
+        }
+    }
     return .{
         .compaction_attempt_id = parsed_compaction_attempt_id,
         .model = parsed_model,
@@ -17264,6 +18129,7 @@ fn parseCompactionStartData(allocator: std.mem.Allocator, value: std.json.Value)
         .target_prompt_token_limit = parsed_target_prompt_token_limit,
         .switch_target_model = parsed_switch_target_model,
         .trigger = parsed_trigger,
+        .execution = parsed_execution,
     };
 }
 
@@ -19496,6 +20362,27 @@ fn parseInfoData(allocator: std.mem.Allocator, value: std.json.Value) !InfoData 
     };
 }
 
+fn parseJournalLinkData(allocator: std.mem.Allocator, value: std.json.Value) !JournalLinkData {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_version = try parseInteger(u64, object.get("version") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_session_id = try parseString(allocator, object.get("sessionId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_session_id = parsed_session_id;
+        wipeString(cleanup_session_id);
+    }
+    const parsed_previous_file = try parseString(allocator, object.get("previousFile") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_previous_file = parsed_previous_file;
+        wipeString(cleanup_previous_file);
+    }
+    return .{
+        .version = parsed_version,
+        .session_id = parsed_session_id,
+        .previous_file = parsed_previous_file,
+    };
+}
+
 fn parseManagedPluginProgressPhase(_: std.mem.Allocator, value: std.json.Value) !ManagedPluginProgressPhase {
     const wire = try valueString(value);
     if (std.mem.eql(u8, wire, "initializing")) return .initializing;
@@ -19606,6 +20493,148 @@ fn parseManagedSettingsResolvedSource(_: std.mem.Allocator, value: std.json.Valu
     return error.InvalidSessionEvent;
 }
 
+fn parsePolicyHelperHelpLink(allocator: std.mem.Allocator, value: std.json.Value) !PolicyHelperHelpLink {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_url = try parseString(allocator, object.get("url") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_url = parsed_url;
+        wipeString(cleanup_url);
+    }
+    const parsed_label = if (object.get("label")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_label = parsed_label;
+        if (cleanup_label) |*present| {
+            wipeString(present.*);
+        }
+    }
+    return .{
+        .url = parsed_url,
+        .label = parsed_label,
+    };
+}
+
+fn parsePolicyHelperFailureDetail(allocator: std.mem.Allocator, value: std.json.Value) !PolicyHelperFailureDetail {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_path = if (object.get("path")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_path = parsed_path;
+        if (cleanup_path) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_message = try parseString(allocator, object.get("message") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_message = parsed_message;
+        wipeString(cleanup_message);
+    }
+    return .{
+        .path = parsed_path,
+        .message = parsed_message,
+    };
+}
+
+fn parsePolicyHelperFailure(allocator: std.mem.Allocator, value: std.json.Value) !PolicyHelperFailure {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_category = try parseString(allocator, object.get("category") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_category = parsed_category;
+        wipeString(cleanup_category);
+    }
+    const parsed_failure_mode = try parseString(allocator, object.get("failureMode") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_failure_mode = parsed_failure_mode;
+        wipeString(cleanup_failure_mode);
+    }
+    const parsed_severity = try parseString(allocator, object.get("severity") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_severity = parsed_severity;
+        wipeString(cleanup_severity);
+    }
+    const parsed_reason = try parseString(allocator, object.get("reason") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_reason = parsed_reason;
+        wipeString(cleanup_reason);
+    }
+    const parsed_authority = if (object.get("authority")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_authority = parsed_authority;
+        if (cleanup_authority) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_previous_policy_retained = try parseBool(object.get("previousPolicyRetained") orelse return error.InvalidSessionEvent);
+    const parsed_code = if (object.get("code")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_code = parsed_code;
+        if (cleanup_code) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_message = try parseString(allocator, object.get("message") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_message = parsed_message;
+        wipeString(cleanup_message);
+    }
+    const parsed_remediation = if (object.get("remediation")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_remediation = parsed_remediation;
+        if (cleanup_remediation) |*present| {
+            wipeString(present.*);
+        }
+    }
+    const parsed_help_link = if (object.get("helpLink")) |field_value| if ((field_value) == .null) null else try parsePolicyHelperHelpLink(allocator, field_value) else null;
+    errdefer {
+        var cleanup_help_link = parsed_help_link;
+        if (cleanup_help_link) |*present| {
+            wipePolicyHelperHelpLink(&present.*);
+        }
+    }
+    const parsed_details = if (object.get("details")) |field_value| if ((field_value) == .null) null else try parsePolicyHelperFailureDetailsArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_details = parsed_details;
+        if (cleanup_details) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipePolicyHelperFailureDetail(&item.*);
+            }
+        }
+    }
+    const parsed_diagnostic = if (object.get("diagnostic")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_diagnostic = parsed_diagnostic;
+        if (cleanup_diagnostic) |*present| {
+            wipeString(present.*);
+        }
+    }
+    return .{
+        .category = parsed_category,
+        .failure_mode = parsed_failure_mode,
+        .severity = parsed_severity,
+        .reason = parsed_reason,
+        .authority = parsed_authority,
+        .previous_policy_retained = parsed_previous_policy_retained,
+        .code = parsed_code,
+        .message = parsed_message,
+        .remediation = parsed_remediation,
+        .help_link = parsed_help_link,
+        .details = parsed_details,
+        .diagnostic = parsed_diagnostic,
+    };
+}
+
+fn parsePolicyHelperCapabilities(_: std.mem.Allocator, value: std.json.Value) !PolicyHelperCapabilities {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_structured_failure = try parseBool(object.get("structuredFailure") orelse return error.InvalidSessionEvent);
+    const parsed_recheck = try parseBool(object.get("recheck") orelse return error.InvalidSessionEvent);
+    return .{
+        .structured_failure = parsed_structured_failure,
+        .recheck = parsed_recheck,
+    };
+}
+
 fn parseManagedSettingsResolvedData(allocator: std.mem.Allocator, value: std.json.Value) !ManagedSettingsResolvedData {
     const object = try payloads.requiredObject(value);
 
@@ -19625,6 +20654,20 @@ fn parseManagedSettingsResolvedData(allocator: std.mem.Allocator, value: std.jso
     const parsed_device_managed = try parseBool(object.get("deviceManaged") orelse return error.InvalidSessionEvent);
     const parsed_client_managed = if (object.get("clientManaged")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_policy_helper_managed = if (object.get("policyHelperManaged")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
+    const parsed_policy_helper_failure = if (object.get("policyHelperFailure")) |field_value| if ((field_value) == .null) null else try parsePolicyHelperFailure(allocator, field_value) else null;
+    errdefer {
+        var cleanup_policy_helper_failure = parsed_policy_helper_failure;
+        if (cleanup_policy_helper_failure) |*present| {
+            wipePolicyHelperFailure(&present.*);
+        }
+    }
+    const parsed_policy_helper_capabilities = if (object.get("policyHelperCapabilities")) |field_value| if ((field_value) == .null) null else try parsePolicyHelperCapabilities(allocator, field_value) else null;
+    errdefer {
+        var cleanup_policy_helper_capabilities = parsed_policy_helper_capabilities;
+        if (cleanup_policy_helper_capabilities) |*present| {
+            wipePolicyHelperCapabilities(&present.*);
+        }
+    }
     const parsed_fail_closed = try parseBool(object.get("failClosed") orelse return error.InvalidSessionEvent);
     const parsed_sandbox_enabled_by_undetermined_policy = if (object.get("sandboxEnabledByUndeterminedPolicy")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_bypass_permissions_disabled = try parseBool(object.get("bypassPermissionsDisabled") orelse return error.InvalidSessionEvent);
@@ -19650,6 +20693,8 @@ fn parseManagedSettingsResolvedData(allocator: std.mem.Allocator, value: std.jso
         .device_managed = parsed_device_managed,
         .client_managed = parsed_client_managed,
         .policy_helper_managed = parsed_policy_helper_managed,
+        .policy_helper_failure = parsed_policy_helper_failure,
+        .policy_helper_capabilities = parsed_policy_helper_capabilities,
         .fail_closed = parsed_fail_closed,
         .sandbox_enabled_by_undetermined_policy = parsed_sandbox_enabled_by_undetermined_policy,
         .bypass_permissions_disabled = parsed_bypass_permissions_disabled,
@@ -19990,6 +21035,7 @@ fn parseModelChangeData(allocator: std.mem.Allocator, value: std.json.Value) !Mo
             wipeString(present.*);
         }
     }
+    const parsed_reasoning_invalidated = if (object.get("reasoningInvalidated")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_previous_reasoning_effort = if (object.get("previousReasoningEffort")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
         var cleanup_previous_reasoning_effort = parsed_previous_reasoning_effort;
@@ -20082,6 +21128,7 @@ fn parseModelChangeData(allocator: std.mem.Allocator, value: std.json.Value) !Mo
         .new_model = parsed_new_model,
         .provider_id = parsed_provider_id,
         .previous_provider_id = parsed_previous_provider_id,
+        .reasoning_invalidated = parsed_reasoning_invalidated,
         .previous_reasoning_effort = parsed_previous_reasoning_effort,
         .reasoning_effort = parsed_reasoning_effort,
         .reasoning_effort_model = parsed_reasoning_effort_model,
@@ -21276,7 +22323,27 @@ fn parseSkillSource(_: std.mem.Allocator, value: std.json.Value) !SkillSource {
     if (std.mem.eql(u8, wire, "custom")) return .custom;
     if (std.mem.eql(u8, wire, "builtin")) return .builtin;
     if (std.mem.eql(u8, wire, "sdk")) return .sdk;
+    if (std.mem.eql(u8, wire, "mcp")) return .mcp;
     return error.InvalidSessionEvent;
+}
+
+fn parseMcpSkillOrigin(allocator: std.mem.Allocator, value: std.json.Value) !McpSkillOrigin {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_server_name = try parseString(allocator, object.get("serverName") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_server_name = parsed_server_name;
+        wipeString(cleanup_server_name);
+    }
+    const parsed_uri = try parseString(allocator, object.get("uri") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_uri = parsed_uri;
+        wipeString(cleanup_uri);
+    }
+    return .{
+        .server_name = parsed_server_name,
+        .uri = parsed_uri,
+    };
 }
 
 fn parseSkillsLoadedSkill(allocator: std.mem.Allocator, value: std.json.Value) !SkillsLoadedSkill {
@@ -21286,6 +22353,13 @@ fn parseSkillsLoadedSkill(allocator: std.mem.Allocator, value: std.json.Value) !
     errdefer {
         const cleanup_name = parsed_name;
         wipeString(cleanup_name);
+    }
+    const parsed_declared_name = if (object.get("declaredName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_declared_name = parsed_declared_name;
+        if (cleanup_declared_name) |*present| {
+            wipeString(present.*);
+        }
     }
     const parsed_command_name = if (object.get("commandName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
     errdefer {
@@ -21303,6 +22377,13 @@ fn parseSkillsLoadedSkill(allocator: std.mem.Allocator, value: std.json.Value) !
     errdefer {
         var cleanup_source = parsed_source;
         wipeSkillSource(&cleanup_source);
+    }
+    const parsed_mcp_origin = if (object.get("mcpOrigin")) |field_value| if ((field_value) == .null) null else try parseMcpSkillOrigin(allocator, field_value) else null;
+    errdefer {
+        var cleanup_mcp_origin = parsed_mcp_origin;
+        if (cleanup_mcp_origin) |*present| {
+            wipeMcpSkillOrigin(&present.*);
+        }
     }
     const parsed_user_invocable = try parseBool(object.get("userInvocable") orelse return error.InvalidSessionEvent);
     const parsed_enabled = try parseBool(object.get("enabled") orelse return error.InvalidSessionEvent);
@@ -21322,9 +22403,11 @@ fn parseSkillsLoadedSkill(allocator: std.mem.Allocator, value: std.json.Value) !
     }
     return .{
         .name = parsed_name,
+        .declared_name = parsed_declared_name,
         .command_name = parsed_command_name,
         .description = parsed_description,
         .source = parsed_source,
+        .mcp_origin = parsed_mcp_origin,
         .user_invocable = parsed_user_invocable,
         .enabled = parsed_enabled,
         .path = parsed_path,
@@ -21550,6 +22633,39 @@ fn parseTaskCompletionOutcome(_: std.mem.Allocator, value: std.json.Value) !Task
     return error.InvalidSessionEvent;
 }
 
+fn parseBlockedPermissionAction(allocator: std.mem.Allocator, value: std.json.Value) !BlockedPermissionAction {
+    const object = try payloads.requiredObject(value);
+
+    const parsed_episode_id = try parseString(allocator, object.get("episodeId") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_episode_id = parsed_episode_id;
+        wipeString(cleanup_episode_id);
+    }
+    const parsed_permission_kind = try parseString(allocator, object.get("permissionKind") orelse return error.InvalidSessionEvent, null, null);
+    errdefer {
+        const cleanup_permission_kind = parsed_permission_kind;
+        wipeString(cleanup_permission_kind);
+    }
+    const parsed_recovery_reason = try parsePermissionRecoveryReason(allocator, object.get("recoveryReason") orelse return error.InvalidSessionEvent);
+    errdefer {
+        var cleanup_recovery_reason = parsed_recovery_reason;
+        wipePermissionRecoveryReason(&cleanup_recovery_reason);
+    }
+    const parsed_tool_call_id = if (object.get("toolCallId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_tool_call_id = parsed_tool_call_id;
+        if (cleanup_tool_call_id) |*present| {
+            wipeString(present.*);
+        }
+    }
+    return .{
+        .episode_id = parsed_episode_id,
+        .permission_kind = parsed_permission_kind,
+        .recovery_reason = parsed_recovery_reason,
+        .tool_call_id = parsed_tool_call_id,
+    };
+}
+
 fn parseTaskCompleteData(allocator: std.mem.Allocator, value: std.json.Value) !TaskCompleteData {
     const object = try payloads.requiredObject(value);
 
@@ -21576,6 +22692,15 @@ fn parseTaskCompleteData(allocator: std.mem.Allocator, value: std.json.Value) !T
         }
     }
     const parsed_objective_id = if (object.get("objectiveId")) |field_value| if ((field_value) == .null) null else try parseInteger(i64, field_value, null, null, null) else null;
+    const parsed_blocked_actions = if (object.get("blockedActions")) |field_value| if ((field_value) == .null) null else try parseTaskCompleteDataBlockedActionsArray(allocator, field_value) else null;
+    errdefer {
+        var cleanup_blocked_actions = parsed_blocked_actions;
+        if (cleanup_blocked_actions) |*present| {
+            for (@constCast(present.*)) |*item| {
+                wipeBlockedPermissionAction(&item.*);
+            }
+        }
+    }
     const parsed_blocker = if (object.get("blocker")) |field_value| if ((field_value) == .null) null else try parseTaskBlocker(allocator, field_value) else null;
     errdefer {
         var cleanup_blocker = parsed_blocker;
@@ -21589,6 +22714,7 @@ fn parseTaskCompleteData(allocator: std.mem.Allocator, value: std.json.Value) !T
         .outcome = parsed_outcome,
         .reason = parsed_reason,
         .objective_id = parsed_objective_id,
+        .blocked_actions = parsed_blocked_actions,
         .blocker = parsed_blocker,
     };
 }
@@ -21640,6 +22766,13 @@ fn parseTruncationData(allocator: std.mem.Allocator, value: std.json.Value) !Tru
         const cleanup_performed_by = parsed_performed_by;
         wipeString(cleanup_performed_by);
     }
+    const parsed_compaction_attempt_id = if (object.get("compactionAttemptId")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_compaction_attempt_id = parsed_compaction_attempt_id;
+        if (cleanup_compaction_attempt_id) |*present| {
+            wipeString(present.*);
+        }
+    }
     return .{
         .token_limit = parsed_token_limit,
         .pre_truncation_tokens_in_messages = parsed_pre_truncation_tokens_in_messages,
@@ -21649,6 +22782,7 @@ fn parseTruncationData(allocator: std.mem.Allocator, value: std.json.Value) !Tru
         .tokens_removed_during_truncation = parsed_tokens_removed_during_truncation,
         .messages_removed_during_truncation = parsed_messages_removed_during_truncation,
         .performed_by = parsed_performed_by,
+        .compaction_attempt_id = parsed_compaction_attempt_id,
     };
 }
 
@@ -22014,6 +23148,13 @@ fn parseSkillInvokedData(allocator: std.mem.Allocator, value: std.json.Value) !S
         const cleanup_content = parsed_content;
         wipeString(cleanup_content);
     }
+    const parsed_arguments = if (object.get("arguments")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_arguments = parsed_arguments;
+        if (cleanup_arguments) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_allowed_tools = if (object.get("allowedTools")) |field_value| if ((field_value) == .null) null else try parseSkillInvokedDataAllowedToolsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_allowed_tools = parsed_allowed_tools;
@@ -22029,6 +23170,20 @@ fn parseSkillInvokedData(allocator: std.mem.Allocator, value: std.json.Value) !S
         var cleanup_source = parsed_source;
         if (cleanup_source) |*present| {
             wipeString(present.*);
+        }
+    }
+    const parsed_mcp_origin = if (object.get("mcpOrigin")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
+    errdefer {
+        var cleanup_mcp_origin = parsed_mcp_origin;
+        if (cleanup_mcp_origin) |*present| {
+            wipeJsonValue(&present.*);
+        }
+    }
+    const parsed_mcp_meta = if (object.get("mcpMeta")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
+    errdefer {
+        var cleanup_mcp_meta = parsed_mcp_meta;
+        if (cleanup_mcp_meta) |*present| {
+            wipeJsonValue(&present.*);
         }
     }
     const parsed_plugin_name = if (object.get("pluginName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
@@ -22065,9 +23220,12 @@ fn parseSkillInvokedData(allocator: std.mem.Allocator, value: std.json.Value) !S
         .model = parsed_model,
         .path = parsed_path,
         .content = parsed_content,
+        .arguments = parsed_arguments,
         .allowed_tools = parsed_allowed_tools,
         .disable_model_invocation = parsed_disable_model_invocation,
         .source = parsed_source,
+        .mcp_origin = parsed_mcp_origin,
+        .mcp_meta = parsed_mcp_meta,
         .plugin_name = parsed_plugin_name,
         .plugin_version = parsed_plugin_version,
         .description = parsed_description,
@@ -22102,6 +23260,13 @@ fn parseSkillInvokedRefData(allocator: std.mem.Allocator, value: std.json.Value)
         wipeString(cleanup_content_id);
     }
     const parsed_content_length = try parseInteger(u64, object.get("contentLength") orelse return error.InvalidSessionEvent, 0, null, null);
+    const parsed_arguments = if (object.get("arguments")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_arguments = parsed_arguments;
+        if (cleanup_arguments) |*present| {
+            wipeString(present.*);
+        }
+    }
     const parsed_allowed_tools = if (object.get("allowedTools")) |field_value| if ((field_value) == .null) null else try parseSkillInvokedRefDataAllowedToolsArray(allocator, field_value) else null;
     errdefer {
         var cleanup_allowed_tools = parsed_allowed_tools;
@@ -22117,6 +23282,20 @@ fn parseSkillInvokedRefData(allocator: std.mem.Allocator, value: std.json.Value)
         var cleanup_source = parsed_source;
         if (cleanup_source) |*present| {
             wipeString(present.*);
+        }
+    }
+    const parsed_mcp_origin = if (object.get("mcpOrigin")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
+    errdefer {
+        var cleanup_mcp_origin = parsed_mcp_origin;
+        if (cleanup_mcp_origin) |*present| {
+            wipeJsonValue(&present.*);
+        }
+    }
+    const parsed_mcp_meta = if (object.get("mcpMeta")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
+    errdefer {
+        var cleanup_mcp_meta = parsed_mcp_meta;
+        if (cleanup_mcp_meta) |*present| {
+            wipeJsonValue(&present.*);
         }
     }
     const parsed_plugin_name = if (object.get("pluginName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
@@ -22154,9 +23333,12 @@ fn parseSkillInvokedRefData(allocator: std.mem.Allocator, value: std.json.Value)
         .path = parsed_path,
         .content_id = parsed_content_id,
         .content_length = parsed_content_length,
+        .arguments = parsed_arguments,
         .allowed_tools = parsed_allowed_tools,
         .disable_model_invocation = parsed_disable_model_invocation,
         .source = parsed_source,
+        .mcp_origin = parsed_mcp_origin,
+        .mcp_meta = parsed_mcp_meta,
         .plugin_name = parsed_plugin_name,
         .plugin_version = parsed_plugin_version,
         .description = parsed_description,
@@ -23947,6 +25129,19 @@ fn parseToolExecutionCompleteResult(allocator: std.mem.Allocator, value: std.jso
             wipeJsonValue(&present.*);
         }
     }
+    const parsed_mcp_result_meta = if (object.get("mcpResultMeta")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteResultMcpResultMetaMap(allocator, field_value) else null;
+    errdefer {
+        var cleanup_mcp_result_meta = parsed_mcp_result_meta;
+        if (cleanup_mcp_result_meta) |*present| {
+            {
+                var iterator = present.*.map.iterator();
+                while (iterator.next()) |entry| {
+                    wipeString(entry.key_ptr.*);
+                    wipeJsonValue(&entry.value_ptr.*);
+                }
+            }
+        }
+    }
     const parsed_citable_sources = if (object.get("citableSources")) |field_value| if ((field_value) == .null) null else try parseToolExecutionCompleteResultCitableSourcesArray(allocator, field_value) else null;
     errdefer {
         var cleanup_citable_sources = parsed_citable_sources;
@@ -23970,6 +25165,7 @@ fn parseToolExecutionCompleteResult(allocator: std.mem.Allocator, value: std.jso
         .binary_results_for_llm = parsed_binary_results_for_llm,
         .ui_resource = parsed_ui_resource,
         .structured_content = parsed_structured_content,
+        .mcp_result_meta = parsed_mcp_result_meta,
         .citable_sources = parsed_citable_sources,
         .mcp_meta = parsed_mcp_meta,
     };
@@ -24416,6 +25612,7 @@ fn parseToolExecutionStartData(allocator: std.mem.Allocator, value: std.json.Val
             wipeString(present.*);
         }
     }
+    const parsed_read_only = if (object.get("readOnly")) |field_value| if ((field_value) == .null) null else try parseBool(field_value) else null;
     const parsed_arguments = if (object.get("arguments")) |field_value| if ((field_value) == .null) null else try cloneJsonValue(allocator, field_value) else null;
     errdefer {
         var cleanup_arguments = parsed_arguments;
@@ -24502,10 +25699,18 @@ fn parseToolExecutionStartData(allocator: std.mem.Allocator, value: std.json.Val
             wipeFusionAttribution(&present.*);
         }
     }
+    const parsed_mcp_server_display_name = if (object.get("mcpServerDisplayName")) |field_value| if ((field_value) == .null) null else try parseString(allocator, field_value, null, null) else null;
+    errdefer {
+        var cleanup_mcp_server_display_name = parsed_mcp_server_display_name;
+        if (cleanup_mcp_server_display_name) |*present| {
+            wipeString(present.*);
+        }
+    }
     return .{
         .tool_call_id = parsed_tool_call_id,
         .tool_name = parsed_tool_name,
         .tool_title = parsed_tool_title,
+        .read_only = parsed_read_only,
         .arguments = parsed_arguments,
         .shell_tool_info = parsed_shell_tool_info,
         .model = parsed_model,
@@ -24520,6 +25725,7 @@ fn parseToolExecutionStartData(allocator: std.mem.Allocator, value: std.json.Val
         .tool_description = parsed_tool_description,
         .parent_tool_call_id = parsed_parent_tool_call_id,
         .fusion = parsed_fusion,
+        .mcp_server_display_name = parsed_mcp_server_display_name,
     };
 }
 
@@ -25153,6 +26359,9 @@ fn wipeAssistantMessageToolRequest(value: *AssistantMessageToolRequest) void {
     if (value.caller) |*present| {
         wipeAssistantMessageToolRequestCaller(&present.*);
     }
+    if (value.mcp_server_display_name) |*present| {
+        wipeString(present.*);
+    }
 }
 
 fn wipeAssistantMessageServerTools(value: *AssistantMessageServerTools) void {
@@ -25380,6 +26589,15 @@ fn wipeAssistantMessageStartData(value: *AssistantMessageStartData) void {
 fn wipeAssistantReasoningData(value: *AssistantReasoningData) void {
     wipeString(value.reasoning_id);
     wipeString(value.content);
+    if (value.turn_id) |*present| {
+        wipeString(present.*);
+    }
+    if (value.api_call_id) |*present| {
+        wipeString(present.*);
+    }
+    if (value.model) |*present| {
+        wipeString(present.*);
+    }
 }
 
 fn wipeAssistantReasoningDeltaData(value: *AssistantReasoningDeltaData) void {
@@ -25427,6 +26645,10 @@ fn wipeAssistantTurnRetryData(value: *AssistantTurnRetryData) void {
     }
 }
 
+fn wipeSessionMode(value: *SessionMode) void {
+    _ = value;
+}
+
 fn wipeAssistantTurnStartData(value: *AssistantTurnStartData) void {
     wipeString(value.turn_id);
     if (value.model) |*present| {
@@ -25437,6 +26659,9 @@ fn wipeAssistantTurnStartData(value: *AssistantTurnStartData) void {
     }
     if (value.parent_tool_call_id) |*present| {
         wipeString(present.*);
+    }
+    if (value.agent_mode) |*present| {
+        wipeSessionMode(&present.*);
     }
 }
 
@@ -25575,6 +26800,12 @@ fn wipeAssistantUsageData(value: *AssistantUsageData) void {
     if (value.service_request_id) |*present| {
         wipeString(present.*);
     }
+    if (value.instruction_update_delivery_id) |*present| {
+        wipeString(present.*);
+    }
+    if (value.instruction_update_latest_event_id) |*present| {
+        wipeString(present.*);
+    }
     if (value.api_endpoint) |*present| {
         wipeAssistantUsageApiEndpoint(&present.*);
     }
@@ -25602,6 +26833,12 @@ fn wipeAssistantUsageData(value: *AssistantUsageData) void {
     if (value.frontier_source) |*present| {
         wipeString(present.*);
     }
+    if (value.prompt_cache_ttl_reason) |*present| {
+        wipeString(present.*);
+    }
+    if (value.prompt_cache_credits_bucket) |*present| {
+        wipeString(present.*);
+    }
     if (value.tool_counts) |*present| {
         {
             var iterator = present.*.map.iterator();
@@ -25615,6 +26852,9 @@ fn wipeAssistantUsageData(value: *AssistantUsageData) void {
     }
     if (value.fusion) |*present| {
         wipeFusionAttribution(&present.*);
+    }
+    if (value.response_model) |*present| {
+        wipeString(present.*);
     }
 }
 
@@ -25723,6 +26963,9 @@ fn wipeElicitationRequestedData(value: *ElicitationRequestedData) void {
         wipeString(present.*);
     }
     if (value.elicitation_source) |*present| {
+        wipeString(present.*);
+    }
+    if (value.elicitation_source_display_name) |*present| {
         wipeString(present.*);
     }
     wipeString(value.message);
@@ -25923,6 +27166,27 @@ fn wipeInstructionUpdateData(value: *InstructionUpdateData) void {
     }
 }
 
+fn wipeInstructionUpdateDeliveryOutcome(value: *InstructionUpdateDeliveryOutcome) void {
+    _ = value;
+}
+
+fn wipeInstructionUpdateCapability(value: *InstructionUpdateCapability) void {
+    _ = value;
+}
+
+fn wipeInstructionUpdateDeliveryReason(value: *InstructionUpdateDeliveryReason) void {
+    _ = value;
+}
+
+fn wipeInstructionUpdateDeliveryData(value: *InstructionUpdateDeliveryData) void {
+    wipeString(value.delivery_id);
+    wipeString(value.first_update_event_id);
+    wipeString(value.latest_update_event_id);
+    wipeInstructionUpdateDeliveryOutcome(&value.outcome);
+    wipeInstructionUpdateCapability(&value.capability);
+    wipeInstructionUpdateDeliveryReason(&value.reason);
+}
+
 fn wipeMcpHeadersRefreshCompletedOutcome(value: *McpHeadersRefreshCompletedOutcome) void {
     _ = value;
 }
@@ -26090,6 +27354,10 @@ fn wipeModelCallFailureBadRequestKind(value: *ModelCallFailureBadRequestKind) vo
     _ = value;
 }
 
+fn wipeModelCallProductStateError(value: *ModelCallProductStateError) void {
+    _ = value;
+}
+
 fn wipeModelCallFailureRequestFingerprint(value: *ModelCallFailureRequestFingerprint) void {
     if (value.last_message_role) |*present| {
         wipeString(present.*);
@@ -26115,6 +27383,12 @@ fn wipeModelCallFailureData(value: *ModelCallFailureData) void {
     if (value.service_request_id) |*present| {
         wipeString(present.*);
     }
+    if (value.instruction_update_delivery_id) |*present| {
+        wipeString(present.*);
+    }
+    if (value.instruction_update_latest_event_id) |*present| {
+        wipeString(present.*);
+    }
     if (value.api_endpoint) |*present| {
         wipeAssistantUsageApiEndpoint(&present.*);
     }
@@ -26132,6 +27406,9 @@ fn wipeModelCallFailureData(value: *ModelCallFailureData) void {
     }
     if (value.request_body_compression_fallback_from) |*present| {
         wipeModelCallRequestBodyEncoding(&present.*);
+    }
+    if (value.incomplete_stream_reason) |*present| {
+        wipeString(present.*);
     }
     if (value.websocket_fallback_reason) |*present| {
         wipeModelCallWebSocketFallbackReason(&present.*);
@@ -26166,6 +27443,9 @@ fn wipeModelCallFailureData(value: *ModelCallFailureData) void {
     }
     if (value.error_type) |*present| {
         wipeString(present.*);
+    }
+    if (value.product_state_error) |*present| {
+        wipeModelCallProductStateError(&present.*);
     }
     if (value.quota_snapshots) |*present| {
         {
@@ -26244,7 +27524,7 @@ fn wipeTaskBlockerKind(value: *TaskBlockerKind) void {
     _ = value;
 }
 
-fn wipePermissionRecoveryReason(value: *PermissionRecoveryReason) void {
+fn wipeTaskBlockerReason(value: *TaskBlockerReason) void {
     _ = value;
 }
 
@@ -26253,6 +27533,10 @@ fn wipePermissionRecoveryStatus(value: *PermissionRecoveryStatus) void {
 }
 
 fn wipePermissionRecoveryOnBlocked(value: *PermissionRecoveryOnBlocked) void {
+    _ = value;
+}
+
+fn wipePermissionRecoveryReason(value: *PermissionRecoveryReason) void {
     _ = value;
 }
 
@@ -26280,6 +27564,10 @@ fn wipePermissionRecoveryAttempt(value: *PermissionRecoveryAttempt) void {
     wipePermissionRecoveryAttemptReason(&value.reason);
 }
 
+fn wipePermissionRecoveryRunState(value: *PermissionRecoveryRunState) void {
+    _ = value;
+}
+
 fn wipePermissionRecoveryData(value: *PermissionRecoveryData) void {
     wipeString(value.episode_id);
     if (value.owner_session_id) |*present| {
@@ -26294,11 +27582,14 @@ fn wipePermissionRecoveryData(value: *PermissionRecoveryData) void {
     for (@constCast(value.attempts)) |*item| {
         wipePermissionRecoveryAttempt(&item.*);
     }
+    if (value.run_state) |*present| {
+        wipePermissionRecoveryRunState(&present.*);
+    }
 }
 
 fn wipeTaskBlocker(value: *TaskBlocker) void {
     wipeTaskBlockerKind(&value.kind);
-    wipePermissionRecoveryReason(&value.reason);
+    wipeTaskBlockerReason(&value.reason);
     wipePermissionRecoveryData(&value.permission_recovery);
 }
 
@@ -26693,6 +27984,9 @@ fn wipePermissionRequestMcp(value: *PermissionRequestMcp) void {
         wipeString(present.*);
     }
     wipeString(value.server_name);
+    if (value.server_display_name) |*present| {
+        wipeString(present.*);
+    }
     wipeString(value.tool_name);
     wipeString(value.tool_title);
     if (value.args) |*present| {
@@ -26999,6 +28293,9 @@ fn wipePermissionPromptRequestMcp(value: *PermissionPromptRequestMcp) void {
         wipeString(present.*);
     }
     wipeString(value.server_name);
+    if (value.server_display_name) |*present| {
+        wipeString(present.*);
+    }
     wipeString(value.tool_name);
     wipeString(value.tool_title);
     if (value.args) |*present| {
@@ -27214,11 +28511,58 @@ fn wipePermissionPromptRequest(value: *PermissionPromptRequest) void {
     }
 }
 
-fn wipePermissionMode(value: *PermissionMode) void {
+fn wipeAssistedApprovalAssessmentVariant1(value: *AssistedApprovalAssessmentVariant1) void {
+    wipeString(value.status);
+}
+
+fn wipeAssistedApprovalAssessmentVariant2(value: *AssistedApprovalAssessmentVariant2) void {
+    wipeString(value.reason);
+    wipeString(value.status);
+}
+
+fn wipeAssistedApprovalAssessmentVariant3(value: *AssistedApprovalAssessmentVariant3) void {
+    wipeString(value.reason);
+    wipeString(value.status);
+}
+
+fn wipeAssistedApprovalCompletedRecommendation(value: *AssistedApprovalCompletedRecommendation) void {
     _ = value;
 }
 
-fn wipeSessionMode(value: *SessionMode) void {
+fn wipeAssistedApprovalAssessmentVariant4(value: *AssistedApprovalAssessmentVariant4) void {
+    wipeAssistedApprovalCompletedRecommendation(&value.recommendation);
+    if (value.rationale) |*present| {
+        wipeString(present.*);
+    }
+    wipeString(value.status);
+}
+
+fn wipeAssistedApprovalAssessmentVariant5(value: *AssistedApprovalAssessmentVariant5) void {
+    wipeString(value.reason);
+    wipeString(value.status);
+}
+
+fn wipeAssistedApprovalAssessment(value: *AssistedApprovalAssessment) void {
+    switch (value.*) {
+        .unavailable => |*payload| {
+            wipeAssistedApprovalAssessmentVariant1(&payload.*);
+        },
+        .not_run => |*payload| {
+            wipeAssistedApprovalAssessmentVariant2(&payload.*);
+        },
+        .excluded => |*payload| {
+            wipeAssistedApprovalAssessmentVariant3(&payload.*);
+        },
+        .completed => |*payload| {
+            wipeAssistedApprovalAssessmentVariant4(&payload.*);
+        },
+        .failed => |*payload| {
+            wipeAssistedApprovalAssessmentVariant5(&payload.*);
+        },
+    }
+}
+
+fn wipePermissionMode(value: *PermissionMode) void {
     _ = value;
 }
 
@@ -27227,6 +28571,9 @@ fn wipePermissionRequestedData(value: *PermissionRequestedData) void {
     wipePermissionRequest(&value.permission_request);
     if (value.prompt_request) |*present| {
         wipePermissionPromptRequest(&present.*);
+    }
+    if (value.assisted_approval_assessment) |*present| {
+        wipeAssistedApprovalAssessment(&present.*);
     }
     if (value.permission_mode) |*present| {
         wipePermissionMode(&present.*);
@@ -27333,6 +28680,9 @@ fn wipeSamplingCompletedData(value: *SamplingCompletedData) void {
 fn wipeSamplingRequestedData(value: *SamplingRequestedData) void {
     wipeString(value.request_id);
     wipeString(value.server_name);
+    if (value.server_display_name) |*present| {
+        wipeString(present.*);
+    }
     wipeJsonValue(&value.mcp_request_id);
 }
 
@@ -27606,12 +28956,19 @@ fn wipeSandboxDecisionData(value: *SandboxDecisionData) void {
     }
 }
 
+fn wipeAutoTier(value: *AutoTier) void {
+    wipeString(value.*);
+}
+
 fn wipeAutoModeResolvedReasoningBucket(value: *AutoModeResolvedReasoningBucket) void {
     _ = value;
 }
 
 fn wipeAutoModeResolvedData(value: *AutoModeResolvedData) void {
     wipeString(value.chosen_model);
+    if (value.auto_tier) |*present| {
+        wipeAutoTier(&present.*);
+    }
     if (value.reasoning_bucket) |*present| {
         wipeAutoModeResolvedReasoningBucket(&present.*);
     }
@@ -27653,10 +29010,6 @@ fn wipeRecommendedAutoTier(value: *RecommendedAutoTier) void {
 
 fn wipeAutoTierRecommendationData(value: *AutoTierRecommendationData) void {
     wipeRecommendedAutoTier(&value.recommended_auto_tier);
-}
-
-fn wipeAutoTier(value: *AutoTier) void {
-    wipeString(value.*);
 }
 
 fn wipeAutoTierSwitchFailureReason(value: *AutoTierSwitchFailureReason) void {
@@ -27863,6 +29216,36 @@ fn wipeCompactionCompleteSummarizerProgress(value: *CompactionCompleteSummarizer
     _ = value;
 }
 
+fn wipeCompactionCompleteAttemptMetrics(value: *CompactionCompleteAttemptMetrics) void {
+    if (value.summarizer_reasoning_effort) |*present| {
+        wipeString(present.*);
+    }
+    if (value.requested_reasoning_effort) |*present| {
+        wipeString(present.*);
+    }
+    if (value.deadline_policy) |*present| {
+        wipeString(present.*);
+    }
+    if (value.failure_operation) |*present| {
+        wipeString(present.*);
+    }
+}
+
+fn wipeCompactionCompleteFailureDiagnostics(value: *CompactionCompleteFailureDiagnostics) void {
+    if (value.last_attempt_failure_reason) |*present| {
+        wipeString(present.*);
+    }
+    if (value.provider_error_code) |*present| {
+        wipeString(present.*);
+    }
+    if (value.transport_error_kind) |*present| {
+        wipeString(present.*);
+    }
+    if (value.finish_reason) |*present| {
+        wipeString(present.*);
+    }
+}
+
 fn wipeCompactionCompleteData(value: *CompactionCompleteData) void {
     if (value.outcome) |*present| {
         wipeString(present.*);
@@ -27880,6 +29263,9 @@ fn wipeCompactionCompleteData(value: *CompactionCompleteData) void {
         wipeString(present.*);
     }
     if (value.initial_model) |*present| {
+        wipeString(present.*);
+    }
+    if (value.reasoning_effort) |*present| {
         wipeString(present.*);
     }
     if (value.error_) |*present| {
@@ -27915,14 +29301,26 @@ fn wipeCompactionCompleteData(value: *CompactionCompleteData) void {
     if (value.service_request_id) |*present| {
         wipeString(present.*);
     }
+    if (value.client_request_id) |*present| {
+        wipeString(present.*);
+    }
     if (value.switch_target_model) |*present| {
         wipeString(present.*);
     }
     if (value.trigger) |*present| {
         wipeCompactionTrigger(&present.*);
     }
+    if (value.execution) |*present| {
+        wipeString(present.*);
+    }
     if (value.summarizer_progress) |*present| {
         wipeCompactionCompleteSummarizerProgress(&present.*);
+    }
+    if (value.attempt_metrics) |*present| {
+        wipeCompactionCompleteAttemptMetrics(&present.*);
+    }
+    if (value.failure_diagnostics) |*present| {
+        wipeCompactionCompleteFailureDiagnostics(&present.*);
     }
 }
 
@@ -27938,6 +29336,9 @@ fn wipeCompactionStartData(value: *CompactionStartData) void {
     }
     if (value.trigger) |*present| {
         wipeCompactionTrigger(&present.*);
+    }
+    if (value.execution) |*present| {
+        wipeString(present.*);
     }
 }
 
@@ -28664,6 +30065,11 @@ fn wipeInfoData(value: *InfoData) void {
     }
 }
 
+fn wipeJournalLinkData(value: *JournalLinkData) void {
+    wipeString(value.session_id);
+    wipeString(value.previous_file);
+}
+
 fn wipeManagedPluginProgressPhase(value: *ManagedPluginProgressPhase) void {
     _ = value;
 }
@@ -28702,11 +30108,63 @@ fn wipeManagedSettingsResolvedSource(value: *ManagedSettingsResolvedSource) void
     _ = value;
 }
 
+fn wipePolicyHelperHelpLink(value: *PolicyHelperHelpLink) void {
+    wipeString(value.url);
+    if (value.label) |*present| {
+        wipeString(present.*);
+    }
+}
+
+fn wipePolicyHelperFailureDetail(value: *PolicyHelperFailureDetail) void {
+    if (value.path) |*present| {
+        wipeString(present.*);
+    }
+    wipeString(value.message);
+}
+
+fn wipePolicyHelperFailure(value: *PolicyHelperFailure) void {
+    wipeString(value.category);
+    wipeString(value.failure_mode);
+    wipeString(value.severity);
+    wipeString(value.reason);
+    if (value.authority) |*present| {
+        wipeString(present.*);
+    }
+    if (value.code) |*present| {
+        wipeString(present.*);
+    }
+    wipeString(value.message);
+    if (value.remediation) |*present| {
+        wipeString(present.*);
+    }
+    if (value.help_link) |*present| {
+        wipePolicyHelperHelpLink(&present.*);
+    }
+    if (value.details) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipePolicyHelperFailureDetail(&item.*);
+        }
+    }
+    if (value.diagnostic) |*present| {
+        wipeString(present.*);
+    }
+}
+
+fn wipePolicyHelperCapabilities(value: *PolicyHelperCapabilities) void {
+    _ = value;
+}
+
 fn wipeManagedSettingsResolvedData(value: *ManagedSettingsResolvedData) void {
     if (value.permissions_context) |*present| {
         wipeManagedPermissionsContext(&present.*);
     }
     wipeManagedSettingsResolvedSource(&value.source);
+    if (value.policy_helper_failure) |*present| {
+        wipePolicyHelperFailure(&present.*);
+    }
+    if (value.policy_helper_capabilities) |*present| {
+        wipePolicyHelperCapabilities(&present.*);
+    }
     for (@constCast(value.managed_keys)) |*item| {
         wipeString(item.*);
     }
@@ -29298,13 +30756,24 @@ fn wipeSkillSource(value: *SkillSource) void {
     _ = value;
 }
 
+fn wipeMcpSkillOrigin(value: *McpSkillOrigin) void {
+    wipeString(value.server_name);
+    wipeString(value.uri);
+}
+
 fn wipeSkillsLoadedSkill(value: *SkillsLoadedSkill) void {
     wipeString(value.name);
+    if (value.declared_name) |*present| {
+        wipeString(present.*);
+    }
     if (value.command_name) |*present| {
         wipeString(present.*);
     }
     wipeString(value.description);
     wipeSkillSource(&value.source);
+    if (value.mcp_origin) |*present| {
+        wipeMcpSkillOrigin(&present.*);
+    }
     if (value.path) |*present| {
         wipeString(present.*);
     }
@@ -29388,6 +30857,15 @@ fn wipeTaskCompletionOutcome(value: *TaskCompletionOutcome) void {
     _ = value;
 }
 
+fn wipeBlockedPermissionAction(value: *BlockedPermissionAction) void {
+    wipeString(value.episode_id);
+    wipeString(value.permission_kind);
+    wipePermissionRecoveryReason(&value.recovery_reason);
+    if (value.tool_call_id) |*present| {
+        wipeString(present.*);
+    }
+}
+
 fn wipeTaskCompleteData(value: *TaskCompleteData) void {
     if (value.summary) |*present| {
         wipeString(present.*);
@@ -29397,6 +30875,11 @@ fn wipeTaskCompleteData(value: *TaskCompleteData) void {
     }
     if (value.reason) |*present| {
         wipeString(present.*);
+    }
+    if (value.blocked_actions) |*present| {
+        for (@constCast(present.*)) |*item| {
+            wipeBlockedPermissionAction(&item.*);
+        }
     }
     if (value.blocker) |*present| {
         wipeTaskBlocker(&present.*);
@@ -29417,6 +30900,9 @@ fn wipeToolsUpdatedData(value: *ToolsUpdatedData) void {
 
 fn wipeTruncationData(value: *TruncationData) void {
     wipeString(value.performed_by);
+    if (value.compaction_attempt_id) |*present| {
+        wipeString(present.*);
+    }
 }
 
 fn wipeUsageCheckpointModelCacheState(value: *UsageCheckpointModelCacheState) void {
@@ -29539,6 +31025,9 @@ fn wipeSkillInvokedData(value: *SkillInvokedData) void {
     }
     wipeString(value.path);
     wipeString(value.content);
+    if (value.arguments) |*present| {
+        wipeString(present.*);
+    }
     if (value.allowed_tools) |*present| {
         for (@constCast(present.*)) |*item| {
             wipeString(item.*);
@@ -29546,6 +31035,12 @@ fn wipeSkillInvokedData(value: *SkillInvokedData) void {
     }
     if (value.source) |*present| {
         wipeString(present.*);
+    }
+    if (value.mcp_origin) |*present| {
+        wipeJsonValue(&present.*);
+    }
+    if (value.mcp_meta) |*present| {
+        wipeJsonValue(&present.*);
     }
     if (value.plugin_name) |*present| {
         wipeString(present.*);
@@ -29568,6 +31063,9 @@ fn wipeSkillInvokedRefData(value: *SkillInvokedRefData) void {
     }
     wipeString(value.path);
     wipeString(value.content_id);
+    if (value.arguments) |*present| {
+        wipeString(present.*);
+    }
     if (value.allowed_tools) |*present| {
         for (@constCast(present.*)) |*item| {
             wipeString(item.*);
@@ -29575,6 +31073,12 @@ fn wipeSkillInvokedRefData(value: *SkillInvokedRefData) void {
     }
     if (value.source) |*present| {
         wipeString(present.*);
+    }
+    if (value.mcp_origin) |*present| {
+        wipeJsonValue(&present.*);
+    }
+    if (value.mcp_meta) |*present| {
+        wipeJsonValue(&present.*);
     }
     if (value.plugin_name) |*present| {
         wipeString(present.*);
@@ -30264,6 +31768,15 @@ fn wipeToolExecutionCompleteResult(value: *ToolExecutionCompleteResult) void {
     if (value.structured_content) |*present| {
         wipeJsonValue(&present.*);
     }
+    if (value.mcp_result_meta) |*present| {
+        {
+            var iterator = present.*.map.iterator();
+            while (iterator.next()) |entry| {
+                wipeString(entry.key_ptr.*);
+                wipeJsonValue(&entry.value_ptr.*);
+            }
+        }
+    }
     if (value.citable_sources) |*present| {
         for (@constCast(present.*)) |*item| {
             wipeCitableSource(&item.*);
@@ -30473,6 +31986,9 @@ fn wipeToolExecutionStartData(value: *ToolExecutionStartData) void {
     }
     if (value.fusion) |*present| {
         wipeFusionAttribution(&present.*);
+    }
+    if (value.mcp_server_display_name) |*present| {
+        wipeString(present.*);
     }
 }
 
@@ -30875,6 +32391,10 @@ fn freeAssistantMessageToolRequest(value: *AssistantMessageToolRequest, allocato
     if (value.caller) |*present| {
         freeAssistantMessageToolRequestCaller(&present.*, allocator);
     }
+    if (value.mcp_server_display_name) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
 }
 
 fn freeAssistantMessageServerTools(value: *AssistantMessageServerTools, allocator: std.mem.Allocator) void {
@@ -31160,6 +32680,18 @@ fn freeAssistantReasoningData(value: *AssistantReasoningData, allocator: std.mem
     allocator.free(@constCast(value.reasoning_id));
     wipeString(value.content);
     allocator.free(@constCast(value.content));
+    if (value.turn_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.api_call_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.model) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
 }
 
 fn freeAssistantReasoningDeltaData(value: *AssistantReasoningDeltaData, allocator: std.mem.Allocator) void {
@@ -31221,6 +32753,10 @@ fn freeAssistantTurnRetryData(value: *AssistantTurnRetryData, allocator: std.mem
     }
 }
 
+fn freeSessionMode(value: *SessionMode, _: std.mem.Allocator) void {
+    _ = value;
+}
+
 fn freeAssistantTurnStartData(value: *AssistantTurnStartData, allocator: std.mem.Allocator) void {
     wipeString(value.turn_id);
     allocator.free(@constCast(value.turn_id));
@@ -31235,6 +32771,9 @@ fn freeAssistantTurnStartData(value: *AssistantTurnStartData, allocator: std.mem
     if (value.parent_tool_call_id) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
+    }
+    if (value.agent_mode) |*present| {
+        freeSessionMode(&present.*, allocator);
     }
 }
 
@@ -31395,6 +32934,14 @@ fn freeAssistantUsageData(value: *AssistantUsageData, allocator: std.mem.Allocat
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.instruction_update_delivery_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.instruction_update_latest_event_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.api_endpoint) |*present| {
         freeAssistantUsageApiEndpoint(&present.*, allocator);
     }
@@ -31427,6 +32974,14 @@ fn freeAssistantUsageData(value: *AssistantUsageData, allocator: std.mem.Allocat
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.prompt_cache_ttl_reason) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.prompt_cache_credits_bucket) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.tool_counts) |*present| {
         {
             var iterator = present.*.map.iterator();
@@ -31443,6 +32998,10 @@ fn freeAssistantUsageData(value: *AssistantUsageData, allocator: std.mem.Allocat
     }
     if (value.fusion) |*present| {
         freeFusionAttribution(&present.*, allocator);
+    }
+    if (value.response_model) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
     }
 }
 
@@ -31575,6 +33134,10 @@ fn freeElicitationRequestedData(value: *ElicitationRequestedData, allocator: std
         allocator.free(@constCast(present.*));
     }
     if (value.elicitation_source) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.elicitation_source_display_name) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
@@ -31822,6 +33385,30 @@ fn freeInstructionUpdateData(value: *InstructionUpdateData, allocator: std.mem.A
     }
 }
 
+fn freeInstructionUpdateDeliveryOutcome(value: *InstructionUpdateDeliveryOutcome, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeInstructionUpdateCapability(value: *InstructionUpdateCapability, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeInstructionUpdateDeliveryReason(value: *InstructionUpdateDeliveryReason, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freeInstructionUpdateDeliveryData(value: *InstructionUpdateDeliveryData, allocator: std.mem.Allocator) void {
+    wipeString(value.delivery_id);
+    allocator.free(@constCast(value.delivery_id));
+    wipeString(value.first_update_event_id);
+    allocator.free(@constCast(value.first_update_event_id));
+    wipeString(value.latest_update_event_id);
+    allocator.free(@constCast(value.latest_update_event_id));
+    freeInstructionUpdateDeliveryOutcome(&value.outcome, allocator);
+    freeInstructionUpdateCapability(&value.capability, allocator);
+    freeInstructionUpdateDeliveryReason(&value.reason, allocator);
+}
+
 fn freeMcpHeadersRefreshCompletedOutcome(value: *McpHeadersRefreshCompletedOutcome, _: std.mem.Allocator) void {
     _ = value;
 }
@@ -32022,6 +33609,10 @@ fn freeModelCallFailureBadRequestKind(value: *ModelCallFailureBadRequestKind, _:
     _ = value;
 }
 
+fn freeModelCallProductStateError(value: *ModelCallProductStateError, _: std.mem.Allocator) void {
+    _ = value;
+}
+
 fn freeModelCallFailureRequestFingerprint(value: *ModelCallFailureRequestFingerprint, allocator: std.mem.Allocator) void {
     if (value.last_message_role) |*present| {
         wipeString(present.*);
@@ -32054,6 +33645,14 @@ fn freeModelCallFailureData(value: *ModelCallFailureData, allocator: std.mem.All
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.instruction_update_delivery_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.instruction_update_latest_event_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.api_endpoint) |*present| {
         freeAssistantUsageApiEndpoint(&present.*, allocator);
     }
@@ -32071,6 +33670,10 @@ fn freeModelCallFailureData(value: *ModelCallFailureData, allocator: std.mem.All
     }
     if (value.request_body_compression_fallback_from) |*present| {
         freeModelCallRequestBodyEncoding(&present.*, allocator);
+    }
+    if (value.incomplete_stream_reason) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
     }
     if (value.websocket_fallback_reason) |*present| {
         freeModelCallWebSocketFallbackReason(&present.*, allocator);
@@ -32113,6 +33716,9 @@ fn freeModelCallFailureData(value: *ModelCallFailureData, allocator: std.mem.All
     if (value.error_type) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
+    }
+    if (value.product_state_error) |*present| {
+        freeModelCallProductStateError(&present.*, allocator);
     }
     if (value.quota_snapshots) |*present| {
         {
@@ -32205,7 +33811,7 @@ fn freeTaskBlockerKind(value: *TaskBlockerKind, _: std.mem.Allocator) void {
     _ = value;
 }
 
-fn freePermissionRecoveryReason(value: *PermissionRecoveryReason, _: std.mem.Allocator) void {
+fn freeTaskBlockerReason(value: *TaskBlockerReason, _: std.mem.Allocator) void {
     _ = value;
 }
 
@@ -32214,6 +33820,10 @@ fn freePermissionRecoveryStatus(value: *PermissionRecoveryStatus, _: std.mem.All
 }
 
 fn freePermissionRecoveryOnBlocked(value: *PermissionRecoveryOnBlocked, _: std.mem.Allocator) void {
+    _ = value;
+}
+
+fn freePermissionRecoveryReason(value: *PermissionRecoveryReason, _: std.mem.Allocator) void {
     _ = value;
 }
 
@@ -32245,6 +33855,11 @@ fn freePermissionRecoveryAttempt(value: *PermissionRecoveryAttempt, allocator: s
     freePermissionRecoveryAttemptReason(&value.reason, allocator);
 }
 
+fn freePermissionRecoveryRunState(value: *PermissionRecoveryRunState, allocator: std.mem.Allocator) void {
+    _ = value;
+    _ = allocator;
+}
+
 fn freePermissionRecoveryData(value: *PermissionRecoveryData, allocator: std.mem.Allocator) void {
     wipeString(value.episode_id);
     allocator.free(@constCast(value.episode_id));
@@ -32263,11 +33878,14 @@ fn freePermissionRecoveryData(value: *PermissionRecoveryData, allocator: std.mem
         freePermissionRecoveryAttempt(&item.*, allocator);
     }
     allocator.free(@constCast(value.attempts));
+    if (value.run_state) |*present| {
+        freePermissionRecoveryRunState(&present.*, allocator);
+    }
 }
 
 fn freeTaskBlocker(value: *TaskBlocker, allocator: std.mem.Allocator) void {
     freeTaskBlockerKind(&value.kind, allocator);
-    freePermissionRecoveryReason(&value.reason, allocator);
+    freeTaskBlockerReason(&value.reason, allocator);
     freePermissionRecoveryData(&value.permission_recovery, allocator);
 }
 
@@ -32759,6 +34377,10 @@ fn freePermissionRequestMcp(value: *PermissionRequestMcp, allocator: std.mem.All
     }
     wipeString(value.server_name);
     allocator.free(@constCast(value.server_name));
+    if (value.server_display_name) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     wipeString(value.tool_name);
     allocator.free(@constCast(value.tool_name));
     wipeString(value.tool_title);
@@ -33138,6 +34760,10 @@ fn freePermissionPromptRequestMcp(value: *PermissionPromptRequestMcp, allocator:
     }
     wipeString(value.server_name);
     allocator.free(@constCast(value.server_name));
+    if (value.server_display_name) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     wipeString(value.tool_name);
     allocator.free(@constCast(value.tool_name));
     wipeString(value.tool_title);
@@ -33401,11 +35027,67 @@ fn freePermissionPromptRequest(value: *PermissionPromptRequest, allocator: std.m
     }
 }
 
-fn freePermissionMode(value: *PermissionMode, _: std.mem.Allocator) void {
+fn freeAssistedApprovalAssessmentVariant1(value: *AssistedApprovalAssessmentVariant1, allocator: std.mem.Allocator) void {
+    wipeString(value.status);
+    allocator.free(@constCast(value.status));
+}
+
+fn freeAssistedApprovalAssessmentVariant2(value: *AssistedApprovalAssessmentVariant2, allocator: std.mem.Allocator) void {
+    wipeString(value.reason);
+    allocator.free(@constCast(value.reason));
+    wipeString(value.status);
+    allocator.free(@constCast(value.status));
+}
+
+fn freeAssistedApprovalAssessmentVariant3(value: *AssistedApprovalAssessmentVariant3, allocator: std.mem.Allocator) void {
+    wipeString(value.reason);
+    allocator.free(@constCast(value.reason));
+    wipeString(value.status);
+    allocator.free(@constCast(value.status));
+}
+
+fn freeAssistedApprovalCompletedRecommendation(value: *AssistedApprovalCompletedRecommendation, _: std.mem.Allocator) void {
     _ = value;
 }
 
-fn freeSessionMode(value: *SessionMode, _: std.mem.Allocator) void {
+fn freeAssistedApprovalAssessmentVariant4(value: *AssistedApprovalAssessmentVariant4, allocator: std.mem.Allocator) void {
+    freeAssistedApprovalCompletedRecommendation(&value.recommendation, allocator);
+    if (value.rationale) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    wipeString(value.status);
+    allocator.free(@constCast(value.status));
+}
+
+fn freeAssistedApprovalAssessmentVariant5(value: *AssistedApprovalAssessmentVariant5, allocator: std.mem.Allocator) void {
+    wipeString(value.reason);
+    allocator.free(@constCast(value.reason));
+    wipeString(value.status);
+    allocator.free(@constCast(value.status));
+}
+
+fn freeAssistedApprovalAssessment(value: *AssistedApprovalAssessment, allocator: std.mem.Allocator) void {
+    switch (value.*) {
+        .unavailable => |*payload| {
+            freeAssistedApprovalAssessmentVariant1(&payload.*, allocator);
+        },
+        .not_run => |*payload| {
+            freeAssistedApprovalAssessmentVariant2(&payload.*, allocator);
+        },
+        .excluded => |*payload| {
+            freeAssistedApprovalAssessmentVariant3(&payload.*, allocator);
+        },
+        .completed => |*payload| {
+            freeAssistedApprovalAssessmentVariant4(&payload.*, allocator);
+        },
+        .failed => |*payload| {
+            freeAssistedApprovalAssessmentVariant5(&payload.*, allocator);
+        },
+    }
+}
+
+fn freePermissionMode(value: *PermissionMode, _: std.mem.Allocator) void {
     _ = value;
 }
 
@@ -33415,6 +35097,9 @@ fn freePermissionRequestedData(value: *PermissionRequestedData, allocator: std.m
     freePermissionRequest(&value.permission_request, allocator);
     if (value.prompt_request) |*present| {
         freePermissionPromptRequest(&present.*, allocator);
+    }
+    if (value.assisted_approval_assessment) |*present| {
+        freeAssistedApprovalAssessment(&present.*, allocator);
     }
     if (value.permission_mode) |*present| {
         freePermissionMode(&present.*, allocator);
@@ -33554,6 +35239,10 @@ fn freeSamplingRequestedData(value: *SamplingRequestedData, allocator: std.mem.A
     allocator.free(@constCast(value.request_id));
     wipeString(value.server_name);
     allocator.free(@constCast(value.server_name));
+    if (value.server_display_name) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     freeJsonValue(&value.mcp_request_id, allocator);
 }
 
@@ -33864,6 +35553,11 @@ fn freeSandboxDecisionData(value: *SandboxDecisionData, allocator: std.mem.Alloc
     }
 }
 
+fn freeAutoTier(value: *AutoTier, allocator: std.mem.Allocator) void {
+    wipeString(value.*);
+    allocator.free(@constCast(value.*));
+}
+
 fn freeAutoModeResolvedReasoningBucket(value: *AutoModeResolvedReasoningBucket, _: std.mem.Allocator) void {
     _ = value;
 }
@@ -33871,6 +35565,9 @@ fn freeAutoModeResolvedReasoningBucket(value: *AutoModeResolvedReasoningBucket, 
 fn freeAutoModeResolvedData(value: *AutoModeResolvedData, allocator: std.mem.Allocator) void {
     wipeString(value.chosen_model);
     allocator.free(@constCast(value.chosen_model));
+    if (value.auto_tier) |*present| {
+        freeAutoTier(&present.*, allocator);
+    }
     if (value.reasoning_bucket) |*present| {
         freeAutoModeResolvedReasoningBucket(&present.*, allocator);
     }
@@ -33923,11 +35620,6 @@ fn freeRecommendedAutoTier(value: *RecommendedAutoTier, allocator: std.mem.Alloc
 
 fn freeAutoTierRecommendationData(value: *AutoTierRecommendationData, allocator: std.mem.Allocator) void {
     freeRecommendedAutoTier(&value.recommended_auto_tier, allocator);
-}
-
-fn freeAutoTier(value: *AutoTier, allocator: std.mem.Allocator) void {
-    wipeString(value.*);
-    allocator.free(@constCast(value.*));
 }
 
 fn freeAutoTierSwitchFailureReason(value: *AutoTierSwitchFailureReason, _: std.mem.Allocator) void {
@@ -34184,6 +35876,44 @@ fn freeCompactionCompleteSummarizerProgress(value: *CompactionCompleteSummarizer
     _ = allocator;
 }
 
+fn freeCompactionCompleteAttemptMetrics(value: *CompactionCompleteAttemptMetrics, allocator: std.mem.Allocator) void {
+    if (value.summarizer_reasoning_effort) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.requested_reasoning_effort) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.deadline_policy) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.failure_operation) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+}
+
+fn freeCompactionCompleteFailureDiagnostics(value: *CompactionCompleteFailureDiagnostics, allocator: std.mem.Allocator) void {
+    if (value.last_attempt_failure_reason) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.provider_error_code) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.transport_error_kind) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.finish_reason) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+}
+
 fn freeCompactionCompleteData(value: *CompactionCompleteData, allocator: std.mem.Allocator) void {
     if (value.outcome) |*present| {
         wipeString(present.*);
@@ -34206,6 +35936,10 @@ fn freeCompactionCompleteData(value: *CompactionCompleteData, allocator: std.mem
         allocator.free(@constCast(present.*));
     }
     if (value.initial_model) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.reasoning_effort) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
@@ -34251,6 +35985,10 @@ fn freeCompactionCompleteData(value: *CompactionCompleteData, allocator: std.mem
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
+    if (value.client_request_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.switch_target_model) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
@@ -34258,8 +35996,18 @@ fn freeCompactionCompleteData(value: *CompactionCompleteData, allocator: std.mem
     if (value.trigger) |*present| {
         freeCompactionTrigger(&present.*, allocator);
     }
+    if (value.execution) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.summarizer_progress) |*present| {
         freeCompactionCompleteSummarizerProgress(&present.*, allocator);
+    }
+    if (value.attempt_metrics) |*present| {
+        freeCompactionCompleteAttemptMetrics(&present.*, allocator);
+    }
+    if (value.failure_diagnostics) |*present| {
+        freeCompactionCompleteFailureDiagnostics(&present.*, allocator);
     }
 }
 
@@ -34278,6 +36026,10 @@ fn freeCompactionStartData(value: *CompactionStartData, allocator: std.mem.Alloc
     }
     if (value.trigger) |*present| {
         freeCompactionTrigger(&present.*, allocator);
+    }
+    if (value.execution) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
     }
 }
 
@@ -35192,6 +36944,13 @@ fn freeInfoData(value: *InfoData, allocator: std.mem.Allocator) void {
     }
 }
 
+fn freeJournalLinkData(value: *JournalLinkData, allocator: std.mem.Allocator) void {
+    wipeString(value.session_id);
+    allocator.free(@constCast(value.session_id));
+    wipeString(value.previous_file);
+    allocator.free(@constCast(value.previous_file));
+}
+
 fn freeManagedPluginProgressPhase(value: *ManagedPluginProgressPhase, _: std.mem.Allocator) void {
     _ = value;
 }
@@ -35234,11 +36993,78 @@ fn freeManagedSettingsResolvedSource(value: *ManagedSettingsResolvedSource, _: s
     _ = value;
 }
 
+fn freePolicyHelperHelpLink(value: *PolicyHelperHelpLink, allocator: std.mem.Allocator) void {
+    wipeString(value.url);
+    allocator.free(@constCast(value.url));
+    if (value.label) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+}
+
+fn freePolicyHelperFailureDetail(value: *PolicyHelperFailureDetail, allocator: std.mem.Allocator) void {
+    if (value.path) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    wipeString(value.message);
+    allocator.free(@constCast(value.message));
+}
+
+fn freePolicyHelperFailure(value: *PolicyHelperFailure, allocator: std.mem.Allocator) void {
+    wipeString(value.category);
+    allocator.free(@constCast(value.category));
+    wipeString(value.failure_mode);
+    allocator.free(@constCast(value.failure_mode));
+    wipeString(value.severity);
+    allocator.free(@constCast(value.severity));
+    wipeString(value.reason);
+    allocator.free(@constCast(value.reason));
+    if (value.authority) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.code) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    wipeString(value.message);
+    allocator.free(@constCast(value.message));
+    if (value.remediation) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.help_link) |*present| {
+        freePolicyHelperHelpLink(&present.*, allocator);
+    }
+    if (value.details) |*present| {
+        for (@constCast(present.*)) |*item| {
+            freePolicyHelperFailureDetail(&item.*, allocator);
+        }
+        allocator.free(@constCast(present.*));
+    }
+    if (value.diagnostic) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+}
+
+fn freePolicyHelperCapabilities(value: *PolicyHelperCapabilities, allocator: std.mem.Allocator) void {
+    _ = value;
+    _ = allocator;
+}
+
 fn freeManagedSettingsResolvedData(value: *ManagedSettingsResolvedData, allocator: std.mem.Allocator) void {
     if (value.permissions_context) |*present| {
         freeManagedPermissionsContext(&present.*, allocator);
     }
     freeManagedSettingsResolvedSource(&value.source, allocator);
+    if (value.policy_helper_failure) |*present| {
+        freePolicyHelperFailure(&present.*, allocator);
+    }
+    if (value.policy_helper_capabilities) |*present| {
+        freePolicyHelperCapabilities(&present.*, allocator);
+    }
     for (@constCast(value.managed_keys)) |*item| {
         wipeString(item.*);
         allocator.free(@constCast(item.*));
@@ -35929,9 +37755,20 @@ fn freeSkillSource(value: *SkillSource, _: std.mem.Allocator) void {
     _ = value;
 }
 
+fn freeMcpSkillOrigin(value: *McpSkillOrigin, allocator: std.mem.Allocator) void {
+    wipeString(value.server_name);
+    allocator.free(@constCast(value.server_name));
+    wipeString(value.uri);
+    allocator.free(@constCast(value.uri));
+}
+
 fn freeSkillsLoadedSkill(value: *SkillsLoadedSkill, allocator: std.mem.Allocator) void {
     wipeString(value.name);
     allocator.free(@constCast(value.name));
+    if (value.declared_name) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.command_name) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
@@ -35939,6 +37776,9 @@ fn freeSkillsLoadedSkill(value: *SkillsLoadedSkill, allocator: std.mem.Allocator
     wipeString(value.description);
     allocator.free(@constCast(value.description));
     freeSkillSource(&value.source, allocator);
+    if (value.mcp_origin) |*present| {
+        freeMcpSkillOrigin(&present.*, allocator);
+    }
     if (value.path) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
@@ -36041,6 +37881,18 @@ fn freeTaskCompletionOutcome(value: *TaskCompletionOutcome, _: std.mem.Allocator
     _ = value;
 }
 
+fn freeBlockedPermissionAction(value: *BlockedPermissionAction, allocator: std.mem.Allocator) void {
+    wipeString(value.episode_id);
+    allocator.free(@constCast(value.episode_id));
+    wipeString(value.permission_kind);
+    allocator.free(@constCast(value.permission_kind));
+    freePermissionRecoveryReason(&value.recovery_reason, allocator);
+    if (value.tool_call_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+}
+
 fn freeTaskCompleteData(value: *TaskCompleteData, allocator: std.mem.Allocator) void {
     if (value.summary) |*present| {
         wipeString(present.*);
@@ -36051,6 +37903,12 @@ fn freeTaskCompleteData(value: *TaskCompleteData, allocator: std.mem.Allocator) 
     }
     if (value.reason) |*present| {
         wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.blocked_actions) |*present| {
+        for (@constCast(present.*)) |*item| {
+            freeBlockedPermissionAction(&item.*, allocator);
+        }
         allocator.free(@constCast(present.*));
     }
     if (value.blocker) |*present| {
@@ -36076,6 +37934,10 @@ fn freeToolsUpdatedData(value: *ToolsUpdatedData, allocator: std.mem.Allocator) 
 fn freeTruncationData(value: *TruncationData, allocator: std.mem.Allocator) void {
     wipeString(value.performed_by);
     allocator.free(@constCast(value.performed_by));
+    if (value.compaction_attempt_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
 }
 
 fn freeUsageCheckpointModelCacheState(value: *UsageCheckpointModelCacheState, allocator: std.mem.Allocator) void {
@@ -36227,6 +38089,10 @@ fn freeSkillInvokedData(value: *SkillInvokedData, allocator: std.mem.Allocator) 
     allocator.free(@constCast(value.path));
     wipeString(value.content);
     allocator.free(@constCast(value.content));
+    if (value.arguments) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.allowed_tools) |*present| {
         for (@constCast(present.*)) |*item| {
             wipeString(item.*);
@@ -36237,6 +38103,12 @@ fn freeSkillInvokedData(value: *SkillInvokedData, allocator: std.mem.Allocator) 
     if (value.source) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
+    }
+    if (value.mcp_origin) |*present| {
+        freeJsonValue(&present.*, allocator);
+    }
+    if (value.mcp_meta) |*present| {
+        freeJsonValue(&present.*, allocator);
     }
     if (value.plugin_name) |*present| {
         wipeString(present.*);
@@ -36266,6 +38138,10 @@ fn freeSkillInvokedRefData(value: *SkillInvokedRefData, allocator: std.mem.Alloc
     allocator.free(@constCast(value.path));
     wipeString(value.content_id);
     allocator.free(@constCast(value.content_id));
+    if (value.arguments) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
     if (value.allowed_tools) |*present| {
         for (@constCast(present.*)) |*item| {
             wipeString(item.*);
@@ -36276,6 +38152,12 @@ fn freeSkillInvokedRefData(value: *SkillInvokedRefData, allocator: std.mem.Alloc
     if (value.source) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
+    }
+    if (value.mcp_origin) |*present| {
+        freeJsonValue(&present.*, allocator);
+    }
+    if (value.mcp_meta) |*present| {
+        freeJsonValue(&present.*, allocator);
     }
     if (value.plugin_name) |*present| {
         wipeString(present.*);
@@ -37126,6 +39008,17 @@ fn freeToolExecutionCompleteResult(value: *ToolExecutionCompleteResult, allocato
     if (value.structured_content) |*present| {
         freeJsonValue(&present.*, allocator);
     }
+    if (value.mcp_result_meta) |*present| {
+        {
+            var iterator = present.*.map.iterator();
+            while (iterator.next()) |entry| {
+                wipeString(entry.key_ptr.*);
+                allocator.free(@constCast(entry.key_ptr.*));
+                freeJsonValue(&entry.value_ptr.*, allocator);
+            }
+            present.*.deinit(allocator);
+        }
+    }
     if (value.citable_sources) |*present| {
         for (@constCast(present.*)) |*item| {
             freeCitableSource(&item.*, allocator);
@@ -37372,6 +39265,10 @@ fn freeToolExecutionStartData(value: *ToolExecutionStartData, allocator: std.mem
     }
     if (value.fusion) |*present| {
         freeFusionAttribution(&present.*, allocator);
+    }
+    if (value.mcp_server_display_name) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
     }
 }
 
@@ -37633,6 +39530,15 @@ fn wipeAssistantMessageDeltaDataFields(value: *AssistantMessageDelta) void {
 fn wipeAssistantReasoningDataFields(value: *AssistantReasoning) void {
     wipeString(value.reasoning_id);
     wipeString(value.content);
+    if (value.turn_id) |*present| {
+        wipeString(present.*);
+    }
+    if (value.api_call_id) |*present| {
+        wipeString(present.*);
+    }
+    if (value.model) |*present| {
+        wipeString(present.*);
+    }
 }
 
 fn wipeAssistantReasoningDeltaDataFields(value: *AssistantReasoningDelta) void {
@@ -37653,6 +39559,9 @@ fn wipeElicitationRequestedDataFields(value: *ElicitationRequested) void {
         wipeString(present.*);
     }
     if (value.elicitation_source) |*present| {
+        wipeString(present.*);
+    }
+    if (value.elicitation_source_display_name) |*present| {
         wipeString(present.*);
     }
     wipeString(value.message);
@@ -37715,6 +39624,9 @@ fn wipePermissionRequestedDataFields(value: *PermissionRequested) void {
     }
     if (value.prompt_request) |*present| {
         wipePermissionPromptRequest(&present.*);
+    }
+    if (value.assisted_approval_assessment) |*present| {
+        wipeAssistedApprovalAssessment(&present.*);
     }
     if (value.permission_mode) |*present| {
         wipePermissionMode(&present.*);
@@ -37889,6 +39801,18 @@ fn freeAssistantReasoningDataFields(
     allocator.free(@constCast(value.reasoning_id));
     wipeString(value.content);
     allocator.free(@constCast(value.content));
+    if (value.turn_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.api_call_id) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.model) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
 }
 
 fn freeAssistantReasoningDeltaDataFields(
@@ -37926,6 +39850,10 @@ fn freeElicitationRequestedDataFields(
         allocator.free(@constCast(present.*));
     }
     if (value.elicitation_source) |*present| {
+        wipeString(present.*);
+        allocator.free(@constCast(present.*));
+    }
+    if (value.elicitation_source_display_name) |*present| {
         wipeString(present.*);
         allocator.free(@constCast(present.*));
     }
@@ -38013,6 +39941,9 @@ fn freePermissionRequestedDataFields(
     }
     if (value.prompt_request) |*present| {
         freePermissionPromptRequest(&present.*, allocator);
+    }
+    if (value.assisted_approval_assessment) |*present| {
+        freeAssistedApprovalAssessment(&present.*, allocator);
     }
     if (value.permission_mode) |*present| {
         freePermissionMode(&present.*, allocator);
@@ -38198,6 +40129,10 @@ fn parseAssistantReasoning(
         .reasoning_id = parsed.reasoning_id,
         .content = parsed.content,
         .rte = parsed.rte,
+        .turn_id = parsed.turn_id,
+        .api_call_id = parsed.api_call_id,
+        .model = parsed.model,
+        .is_byok = parsed.is_byok,
 
         .raw = raw.take(),
         .arena = arena,
@@ -38258,6 +40193,7 @@ fn parseElicitationRequested(
         .request_id = parsed.request_id,
         .tool_call_id = parsed.tool_call_id,
         .elicitation_source = parsed.elicitation_source,
+        .elicitation_source_display_name = parsed.elicitation_source_display_name,
         .message = parsed.message,
         .mode = parsed.mode,
         .requested_schema = parsed.requested_schema,
@@ -38382,6 +40318,7 @@ fn parsePermissionRequested(
         .request_id = parsed.request_id,
         .permission_request = parsed.permission_request,
         .prompt_request = parsed.prompt_request,
+        .assisted_approval_assessment = parsed.assisted_approval_assessment,
         .permission_mode = parsed.permission_mode,
         .agent_mode = parsed.agent_mode,
         .owner_session_id = parsed.owner_session_id,
@@ -38485,6 +40422,7 @@ fn tagFromDiscriminator(wire: []const u8) ?SessionEventTag {
     if (std.mem.eql(u8, wire, "hook.start")) return .hook_start;
     if (std.mem.eql(u8, wire, "human_response.recorded")) return .human_response_recorded;
     if (std.mem.eql(u8, wire, "instruction.update")) return .instruction_update;
+    if (std.mem.eql(u8, wire, "instruction.update_delivery")) return .instruction_update_delivery;
     if (std.mem.eql(u8, wire, "mcp.headers_refresh_completed")) return .mcp_headers_refresh_completed;
     if (std.mem.eql(u8, wire, "mcp.headers_refresh_required")) return .mcp_headers_refresh_required;
     if (std.mem.eql(u8, wire, "mcp.oauth_completed")) return .mcp_oauth_completed;
@@ -38545,6 +40483,7 @@ fn tagFromDiscriminator(wire: []const u8) ?SessionEventTag {
     if (std.mem.eql(u8, wire, "session.idle")) return .session_idle;
     if (std.mem.eql(u8, wire, "session.indexed_search")) return .session_indexed_search;
     if (std.mem.eql(u8, wire, "session.info")) return .session_info;
+    if (std.mem.eql(u8, wire, "session.journal_link")) return .session_journal_link;
     if (std.mem.eql(u8, wire, "session.managed_plugin_progress")) return .session_managed_plugin_progress;
     if (std.mem.eql(u8, wire, "session.managed_settings_enforced")) return .session_managed_settings_enforced;
     if (std.mem.eql(u8, wire, "session.managed_settings_resolved")) return .session_managed_settings_resolved;
@@ -38946,6 +40885,16 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
             errdefer arena.deinit();
             const typed = try parseInstructionUpdateData(arena.allocator(), data_value);
             return .{ .instruction_update = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
+        .instruction_update_delivery => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseInstructionUpdateDeliveryData(arena.allocator(), data_value);
+            return .{ .instruction_update_delivery = .{
                 .data = typed,
                 .data_json = raw.takeData(),
                 .arena = arena,
@@ -39510,6 +41459,16 @@ pub fn parseEvent(allocator: std.mem.Allocator, value: std.json.Value) !SessionE
             errdefer arena.deinit();
             const typed = try parseInfoData(arena.allocator(), data_value);
             return .{ .session_info = .{
+                .data = typed,
+                .data_json = raw.takeData(),
+                .arena = arena,
+            } };
+        },
+        .session_journal_link => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const typed = try parseJournalLinkData(arena.allocator(), data_value);
+            return .{ .session_journal_link = .{
                 .data = typed,
                 .data_json = raw.takeData(),
                 .arena = arena,
@@ -40223,6 +42182,7 @@ const pinned_event_samples = [_]EventSample{
     .{ .json = "{\"type\":\"hook.start\",\"data\":{\"hookInvocationId\":\"\",\"hookType\":\"\"}}", .tag = .hook_start },
     .{ .json = "{\"type\":\"human_response.recorded\",\"data\":{\"requestId\":\"\",\"actor\":\"human_response\",\"response\":{\"responseKind\":\"ask_user\",\"content\":{},\"message\":\"\",\"requestedSchema\":{\"type\":\"object\",\"properties\":{}}}}}", .tag = .human_response_recorded },
     .{ .json = "{\"type\":\"instruction.update\",\"data\":{\"content\":\"\",\"authority\":\"runtime\",\"lifetime\":\"persistent\",\"boundary\":\"afterToolResults\",\"fallback\":\"rebuildSystemPrompt\"}}", .tag = .instruction_update },
+    .{ .json = "{\"type\":\"instruction.update_delivery\",\"data\":{\"deliveryId\":\"\",\"firstUpdateEventId\":\"\",\"latestUpdateEventId\":\"\",\"updateCount\":1,\"requestGeneration\":1,\"outcome\":\"append\",\"capability\":\"supported\",\"reason\":\"controlArm\"}}", .tag = .instruction_update_delivery },
     .{ .json = "{\"type\":\"mcp.headers_refresh_completed\",\"data\":{\"requestId\":\"\",\"outcome\":\"headers\"}}", .tag = .mcp_headers_refresh_completed },
     .{ .json = "{\"type\":\"mcp.headers_refresh_required\",\"data\":{\"requestId\":\"\",\"serverName\":\"\",\"serverUrl\":\"\",\"reason\":\"startup\"}}", .tag = .mcp_headers_refresh_required },
     .{ .json = "{\"type\":\"mcp.oauth_completed\",\"data\":{\"requestId\":\"\",\"outcome\":\"token\"}}", .tag = .mcp_oauth_completed },
@@ -40283,6 +42243,7 @@ const pinned_event_samples = [_]EventSample{
     .{ .json = "{\"type\":\"session.idle\",\"data\":{}}", .tag = .session_idle },
     .{ .json = "{\"type\":\"session.indexed_search\",\"data\":{\"kind\":\"status\",\"state\":\"disabled\"}}", .tag = .session_indexed_search },
     .{ .json = "{\"type\":\"session.info\",\"data\":{\"infoType\":\"\",\"message\":\"\"}}", .tag = .session_info },
+    .{ .json = "{\"type\":\"session.journal_link\",\"data\":{\"version\":0,\"sessionId\":\"\",\"previousFile\":\"\"}}", .tag = .session_journal_link },
     .{ .json = "{\"type\":\"session.managed_plugin_progress\",\"data\":{\"phase\":\"initializing\",\"pluginSpecs\":[]}}", .tag = .session_managed_plugin_progress },
     .{ .json = "{\"type\":\"session.managed_settings_enforced\",\"data\":{\"action\":\"bypass_permissions_blocked\",\"setting\":\"\",\"failClosed\":false,\"message\":\"\"}}", .tag = .session_managed_settings_enforced },
     .{ .json = "{\"type\":\"session.managed_settings_resolved\",\"data\":{\"source\":\"server\",\"serverManaged\":false,\"deviceManaged\":false,\"failClosed\":false,\"bypassPermissionsDisabled\":false,\"managedKeys\":[]}}", .tag = .session_managed_settings_resolved },
@@ -40420,6 +42381,7 @@ const malformed_event_samples = [_][]const u8{
     "{\"type\":\"hook.start\",\"data\":{\"hookType\":\"\"}}",
     "{\"type\":\"human_response.recorded\",\"data\":{\"actor\":\"human_response\",\"response\":{\"responseKind\":\"ask_user\",\"content\":{},\"message\":\"\",\"requestedSchema\":{\"type\":\"object\",\"properties\":{}}}}}",
     "{\"type\":\"instruction.update\",\"data\":{\"authority\":\"runtime\",\"lifetime\":\"persistent\",\"boundary\":\"afterToolResults\",\"fallback\":\"rebuildSystemPrompt\"}}",
+    "{\"type\":\"instruction.update_delivery\",\"data\":{\"firstUpdateEventId\":\"\",\"latestUpdateEventId\":\"\",\"updateCount\":1,\"requestGeneration\":1,\"outcome\":\"append\",\"capability\":\"supported\",\"reason\":\"controlArm\"}}",
     "{\"type\":\"mcp.headers_refresh_completed\",\"data\":{\"outcome\":\"headers\"}}",
     "{\"type\":\"mcp.headers_refresh_required\",\"data\":{\"serverName\":\"\",\"serverUrl\":\"\",\"reason\":\"startup\"}}",
     "{\"type\":\"mcp.oauth_completed\",\"data\":{\"outcome\":\"token\"}}",
@@ -40474,6 +42436,7 @@ const malformed_event_samples = [_][]const u8{
     "{\"type\":\"session.fusion_route_started\",\"data\":{\"turnKind\":\"user\"}}",
     "{\"type\":\"session.handoff\",\"data\":{\"sourceType\":\"remote\"}}",
     "{\"type\":\"session.info\",\"data\":{\"message\":\"\"}}",
+    "{\"type\":\"session.journal_link\",\"data\":{\"sessionId\":\"\",\"previousFile\":\"\"}}",
     "{\"type\":\"session.managed_plugin_progress\",\"data\":{\"pluginSpecs\":[]}}",
     "{\"type\":\"session.managed_settings_enforced\",\"data\":{\"setting\":\"\",\"failClosed\":false,\"message\":\"\"}}",
     "{\"type\":\"session.managed_settings_resolved\",\"data\":{\"serverManaged\":false,\"deviceManaged\":false,\"failClosed\":false,\"bypassPermissionsDisabled\":false,\"managedKeys\":[]}}",

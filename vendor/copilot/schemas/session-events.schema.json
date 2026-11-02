@@ -49,6 +49,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "abort",
@@ -231,6 +235,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "agent.interrupted",
@@ -315,6 +323,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "assistant.fusion_phase_activity",
@@ -371,6 +383,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "assistant.fusion_phase_completed",
@@ -425,6 +441,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -481,6 +501,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -550,6 +574,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -621,6 +649,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -829,6 +861,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "assistant.message_delta",
@@ -883,6 +919,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -1035,6 +1075,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "assistant.message_start",
@@ -1082,7 +1126,7 @@
         },
         "mcpServerName": {
           "type": "string",
-          "description": "Name of the MCP server hosting this tool, when the tool is an MCP tool"
+          "description": "Configured key of the MCP server hosting this tool. Legacy events may contain the display name instead."
         },
         "mcpToolName": {
           "type": "string",
@@ -1098,6 +1142,11 @@
         "caller": {
           "$ref": "#/definitions/AssistantMessageToolRequestCaller",
           "description": "Hosted program that requested this client tool call"
+        },
+        "mcpServerDisplayName": {
+          "type": "string",
+          "description": "Explicitly configured MCP server display name.",
+          "x-copilot-sdk-append-last": true
         }
       },
       "required": [
@@ -1106,7 +1155,18 @@
       ],
       "additionalProperties": false,
       "description": "A tool invocation request from the assistant",
-      "title": "AssistantMessageToolRequest"
+      "title": "AssistantMessageToolRequest",
+      "x-legacy-parameters": [
+        "toolCallId",
+        "name",
+        "arguments",
+        "type",
+        "toolTitle",
+        "mcpServerName",
+        "mcpToolName",
+        "intentionSummary",
+        "caller"
+      ]
     },
     "AssistantMessageToolRequestCaller": {
       "type": "object",
@@ -1163,6 +1223,22 @@
         "rte": {
           "type": "boolean",
           "description": "Per-request treatment/eligibility signal returned by the Copilot API in the `X-GitHub-Copilot-Request-TE` response header for the associated model call; `false` when the header was absent or unparseable."
+        },
+        "turnId": {
+          "type": "string",
+          "description": "Identifier for the agent loop turn that produced this reasoning, matching the corresponding assistant.turn_start event"
+        },
+        "apiCallId": {
+          "type": "string",
+          "description": "Provider's completion / response identifier of the model call that produced this reasoning, matching the apiCallId of that call's assistant.message"
+        },
+        "model": {
+          "type": "string",
+          "description": "Model that produced this reasoning, if known"
+        },
+        "isByok": {
+          "type": "boolean",
+          "description": "Whether the model call that produced this reasoning used a user-managed provider or an on-device model"
         }
       },
       "required": [
@@ -1227,6 +1303,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "assistant.reasoning_delta",
@@ -1281,6 +1361,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -1362,6 +1446,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "assistant.server_tool_progress",
@@ -1433,6 +1521,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -1518,6 +1610,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "assistant.tool_call_delta",
@@ -1595,6 +1691,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -1674,6 +1774,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "assistant.turn_retry",
@@ -1715,6 +1819,10 @@
         "parentToolCallId": {
           "type": "string",
           "description": "Parent task tool call ID when this turn belongs to a sub-agent"
+        },
+        "agentMode": {
+          "$ref": "#/definitions/SessionMode",
+          "description": "Agent mode whose tools this turn's run was offered. Absent on historical events and sub-agent turns."
         }
       },
       "required": [
@@ -1756,6 +1864,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -2010,6 +2122,10 @@
           "$ref": "#/definitions/AssistantUsageTransport",
           "description": "Transport used for this model call (http or websocket)"
         },
+        "inferenceGateway": {
+          "type": "boolean",
+          "description": "Whether this dispatched request selected the managed inference gateway. Absent for older producers or when no request was dispatched; not proof of gateway receipt."
+        },
         "requestBodyBytes": {
           "type": "integer",
           "minimum": 0,
@@ -2083,6 +2199,16 @@
         "serviceRequestId": {
           "type": "string",
           "description": "Copilot service request ID (x-copilot-service-request-id header) for CAPI log correlation"
+        },
+        "instructionUpdateDeliveryId": {
+          "type": "string",
+          "description": "Internal correlation identifier for the qualifying instruction-update delivery consumed by this model request.",
+          "visibility": "internal"
+        },
+        "instructionUpdateLatestEventId": {
+          "type": "string",
+          "description": "Event identifier of the latest canonical instruction update included in this model request.",
+          "visibility": "internal"
         },
         "rte": {
           "type": "boolean",
@@ -2166,6 +2292,16 @@
           "description": "Request-scoped prompt-cache policy lifetime in seconds; the shortest lifetime for mixed known policies. Does not establish or refresh cache state. Omitted when the policy is unknown.",
           "visibility": "internal"
         },
+        "promptCacheTtlReason": {
+          "type": "string",
+          "description": "Why the adaptive Anthropic prompt-cache policy chose this call's TTL: warmup, l1_first, l1_lapsed, l1_hot, g_guard, or ineligible. Omitted outside the adaptive TTL experiment.",
+          "visibility": "internal"
+        },
+        "promptCacheCreditsBucket": {
+          "type": "string",
+          "description": "Bucket of AI credits the session had billed before this call, for the adaptive Anthropic prompt-cache policy. Omitted outside the adaptive TTL experiment.",
+          "visibility": "internal"
+        },
         "cacheDetailsReported": {
           "type": "boolean",
           "description": "Whether the provider reported prompt-cache usage details for this call",
@@ -2197,6 +2333,10 @@
           "$ref": "#/definitions/FusionAttribution",
           "description": "Experimental HydraFusion attribution for this concrete model call's usage.",
           "stability": "experimental"
+        },
+        "responseModel": {
+          "type": "string",
+          "description": "Model identifier returned by the provider, absent when the response does not identify it."
         }
       },
       "required": [
@@ -2239,6 +2379,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -2354,6 +2498,131 @@
         "http": "HTTP transport, including SSE streams.",
         "websocket": "WebSocket transport."
       }
+    },
+    "AssistedApprovalAssessment": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "const": "unavailable",
+              "description": "Assisted Permissions assessment outcome discriminator."
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false,
+          "description": "No trusted Assisted Permissions assessment is available, including for historical events.",
+          "stability": "experimental"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string",
+              "description": "Machine-readable reason. Current runtimes emit `inactive` or `not-reached`; consumers must tolerate future strings."
+            },
+            "status": {
+              "type": "string",
+              "const": "not-run",
+              "description": "Assisted Permissions assessment outcome discriminator."
+            }
+          },
+          "required": [
+            "status",
+            "reason"
+          ],
+          "additionalProperties": false,
+          "description": "The request did not reach the Assisted Permissions judge.",
+          "stability": "experimental"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string",
+              "description": "Machine-readable exclusion reason. Current runtimes emit `managed-approval-required`, `sandbox-bypass`, `extension-permission-access`, `action-too-long`, `authorization-history-incomplete`, `path-not-authorized`, or `content-excluded`; consumers must tolerate future strings."
+            },
+            "status": {
+              "type": "string",
+              "const": "excluded",
+              "description": "Assisted Permissions assessment outcome discriminator."
+            }
+          },
+          "required": [
+            "status",
+            "reason"
+          ],
+          "additionalProperties": false,
+          "description": "A deterministic runtime or policy gate prevented automatic approval without consulting the judge.",
+          "stability": "experimental"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "recommendation": {
+              "$ref": "#/definitions/AssistedApprovalCompletedRecommendation",
+              "description": "Judge verdict for this request."
+            },
+            "rationale": {
+              "type": "string",
+              "description": "Judge-authored human-readable rationale. A bare ALLOW or DENY verdict legitimately leaves this absent."
+            },
+            "status": {
+              "type": "string",
+              "const": "completed",
+              "description": "Assisted Permissions assessment outcome discriminator."
+            }
+          },
+          "required": [
+            "status",
+            "recommendation"
+          ],
+          "additionalProperties": false,
+          "description": "The Assisted Permissions judge returned a usable verdict.",
+          "stability": "experimental"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string",
+              "description": "Machine-readable failure reason. Current runtimes emit `timeout`, `abort`, `empty_response`, `model_error`, `parse_error`, or `context_too_large`; consumers must tolerate future strings."
+            },
+            "status": {
+              "type": "string",
+              "const": "failed",
+              "description": "Assisted Permissions assessment outcome discriminator."
+            }
+          },
+          "required": [
+            "status",
+            "reason"
+          ],
+          "additionalProperties": false,
+          "description": "The judge path produced no usable verdict.",
+          "stability": "experimental"
+        }
+      ],
+      "description": "Canonical runtime-owned Assisted Permissions assessment for one permission request. This assessment is advisory; `permission.completed` remains the authoritative final permission decision.",
+      "title": "AssistedApprovalAssessment",
+      "stability": "experimental"
+    },
+    "AssistedApprovalCompletedRecommendation": {
+      "type": "string",
+      "enum": [
+        "approve",
+        "requireApproval"
+      ],
+      "description": "Usable verdict returned by the Assisted Permissions judge.",
+      "title": "AssistedApprovalCompletedRecommendation",
+      "x-enumDescriptions": {
+        "approve": "The judge recommends automatic approval.",
+        "requireApproval": "The judge requires an explicit permission decision."
+      },
+      "stability": "experimental"
     },
     "AssistedApprovalJudgeFailureReason": {
       "type": "string",
@@ -3169,6 +3438,10 @@
           "type": "string",
           "description": "The concrete model the session will use after any intent refinement"
         },
+        "autoTier": {
+          "$ref": "#/definitions/AutoTier",
+          "description": "The effective Auto routing preference at publication, including managed defaults. Recorded so resume can distinguish an unchanged preference from a tier switch. Absent when no preference is known or in older session histories."
+        },
         "reasoningBucket": {
           "$ref": "#/definitions/AutoModeResolvedReasoningBucket",
           "description": "Coarse request-difficulty bucket, for explaining why a model was chosen (\"picked X because this looks like high-reasoning work\")"
@@ -3247,7 +3520,7 @@
         "chosenModel"
       ],
       "additionalProperties": false,
-      "description": "Auto Intent resolution: the concrete model the session settled on for the first prompt of an auto-mode session, and why. Lets SDK clients render the chosen model and the full reason it was picked. The core selection fields (chosenModel/reasoningBucket/categoryScores) are stable; the routing-analytics fields (predictedLabel/confidence/candidateModels) mirror the upstream intent service and may evolve, hence the event's experimental stability.",
+      "description": "Auto Intent resolution: the concrete model an auto-mode session settled on, and why. Published when Auto settles on a model that differs from the one it last published in the current Auto selection, so a routing check that keeps the same model does not repeat it; selecting a model, switching Auto tiers, or returning to Auto starts a new selection. Lets SDK clients render the chosen model and the full reason it was picked. The core selection fields (chosenModel/reasoningBucket/categoryScores) are stable; the routing-analytics fields (predictedLabel/confidence/candidateModels) mirror the upstream intent service and may evolve, hence the event's experimental stability.",
       "title": "AutoModeResolvedData",
       "stability": "experimental"
     },
@@ -3284,6 +3557,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.auto_mode_resolved",
@@ -3291,7 +3568,7 @@
         },
         "data": {
           "$ref": "#/definitions/AutoModeResolvedData",
-          "description": "Auto Intent resolution: the concrete model the session settled on for the first prompt of an auto-mode session, and why. Lets SDK clients render the chosen model and the full reason it was picked. The core selection fields (chosenModel/reasoningBucket/categoryScores) are stable; the routing-analytics fields (predictedLabel/confidence/candidateModels) mirror the upstream intent service and may evolve, hence the event's experimental stability."
+          "description": "Auto Intent resolution: the concrete model an auto-mode session settled on, and why. Published when Auto settles on a model that differs from the one it last published in the current Auto selection, so a routing check that keeps the same model does not repeat it; selecting a model, switching Auto tiers, or returning to Auto starts a new selection. Lets SDK clients render the chosen model and the full reason it was picked. The core selection fields (chosenModel/reasoningBucket/categoryScores) are stable; the routing-analytics fields (predictedLabel/confidence/candidateModels) mirror the upstream intent service and may evolve, hence the event's experimental stability."
         }
       },
       "required": [
@@ -3302,7 +3579,7 @@
         "data"
       ],
       "additionalProperties": false,
-      "description": "Session event \"session.auto_mode_resolved\". Auto Intent resolution: the concrete model the session settled on for the first prompt of an auto-mode session, and why. Lets SDK clients render the chosen model and the full reason it was picked. The core selection fields (chosenModel/reasoningBucket/categoryScores) are stable; the routing-analytics fields (predictedLabel/confidence/candidateModels) mirror the upstream intent service and may evolve, hence the event's experimental stability.",
+      "description": "Session event \"session.auto_mode_resolved\". Auto Intent resolution: the concrete model an auto-mode session settled on, and why. Published when Auto settles on a model that differs from the one it last published in the current Auto selection, so a routing check that keeps the same model does not repeat it; selecting a model, switching Auto tiers, or returning to Auto starts a new selection. Lets SDK clients render the chosen model and the full reason it was picked. The core selection fields (chosenModel/reasoningBucket/categoryScores) are stable; the routing-analytics fields (predictedLabel/confidence/candidateModels) mirror the upstream intent service and may evolve, hence the event's experimental stability.",
       "title": "AutoModeResolvedEvent",
       "stability": "experimental"
     },
@@ -3374,6 +3651,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -3455,6 +3736,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -3549,6 +3834,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -3656,6 +3945,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.autopilot_stopped",
@@ -3747,6 +4040,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.auto_tier_recommendation",
@@ -3836,6 +4133,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.auto_tier_switch_failed",
@@ -3915,6 +4216,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -4019,6 +4324,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.binary_asset",
@@ -4110,6 +4419,36 @@
         "resource": "Other binary resource data."
       }
     },
+    "BlockedPermissionAction": {
+      "type": "object",
+      "properties": {
+        "episodeId": {
+          "type": "string",
+          "description": "Permission-recovery episode that owns this blocked action"
+        },
+        "permissionKind": {
+          "type": "string",
+          "description": "Controlled permission request kind for the blocked action"
+        },
+        "recoveryReason": {
+          "$ref": "#/definitions/PermissionRecoveryReason",
+          "description": "Recovery transition that made the action binding for the epoch"
+        },
+        "toolCallId": {
+          "type": "string",
+          "description": "Tool call that produced the final blocked permission request. Consumers can join this identifier to labeled permission and tool events for user-facing details."
+        }
+      },
+      "required": [
+        "episodeId",
+        "permissionKind",
+        "recoveryReason"
+      ],
+      "additionalProperties": false,
+      "description": "Privacy-safe reference to a permission-protected action that remains blocked for the current Autopilot epoch",
+      "title": "BlockedPermissionAction",
+      "stability": "experimental"
+    },
     "CanvasClosedData": {
       "type": "object",
       "properties": {
@@ -4170,6 +4509,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -4278,6 +4621,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.canvas.opened",
@@ -4368,6 +4715,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -4521,6 +4872,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.canvas.registry_changed",
@@ -4603,6 +4958,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -4687,6 +5046,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.canvas.unavailable",
@@ -4755,6 +5118,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -5124,6 +5491,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "command.completed",
@@ -5210,6 +5581,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "command.execute",
@@ -5286,6 +5661,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "command.queued",
@@ -5343,7 +5722,7 @@
         "commands"
       ],
       "additionalProperties": false,
-      "description": "SDK command registration change notification",
+      "description": "Session command list change notification, for SDK command registration or built-in command availability; `session.commands.list` returns the full list",
       "title": "CommandsChangedData"
     },
     "CommandsChangedEvent": {
@@ -5380,6 +5759,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "commands.changed",
@@ -5387,7 +5770,7 @@
         },
         "data": {
           "$ref": "#/definitions/CommandsChangedData",
-          "description": "SDK command registration change notification"
+          "description": "Session command list change notification, for SDK command registration or built-in command availability; `session.commands.list` returns the full list"
         }
       },
       "required": [
@@ -5399,8 +5782,138 @@
         "data"
       ],
       "additionalProperties": false,
-      "description": "Session event \"commands.changed\". SDK command registration change notification",
+      "description": "Session event \"commands.changed\". Session command list change notification, for SDK command registration or built-in command availability; `session.commands.list` returns the full list",
       "title": "CommandsChangedEvent"
+    },
+    "CompactionCompleteAttemptMetrics": {
+      "type": "object",
+      "properties": {
+        "durationMs": {
+          "type": "integer",
+          "minimum": 0,
+          "format": "duration",
+          "description": "Time from the start of the compaction to this event, in milliseconds, whatever the outcome",
+          "visibility": "internal"
+        },
+        "blockingWaitMs": {
+          "type": "integer",
+          "minimum": 0,
+          "format": "duration",
+          "description": "Time a turn, or a prompt-mode run's prompt, spent blocked waiting for this compaction, in milliseconds. Absent for compactions that block nothing.",
+          "visibility": "internal"
+        },
+        "applyDelayMs": {
+          "type": "integer",
+          "minimum": 0,
+          "format": "duration",
+          "description": "Time from the decision of the compaction's outcome to this event, in milliseconds. Absent when no outcome was decided.",
+          "visibility": "internal"
+        },
+        "suspendedMs": {
+          "type": "integer",
+          "minimum": 0,
+          "format": "duration",
+          "description": "Estimated time the machine spent suspended or asleep during the compaction, in milliseconds",
+          "visibility": "internal"
+        },
+        "summarizerReasoningEffort": {
+          "type": "string",
+          "description": "Reasoning effort the summarizer requests were sent with",
+          "visibility": "internal"
+        },
+        "requestedReasoningEffort": {
+          "type": "string",
+          "description": "Reasoning effort the summarizer would have used before any compaction-specific reduction",
+          "visibility": "internal"
+        },
+        "deadlinePolicy": {
+          "type": "string",
+          "description": "Deadline policy bounding the summarizer, such as \"fixed\" or \"progress_aware\"",
+          "visibility": "internal"
+        },
+        "deadlineLimitMs": {
+          "type": "integer",
+          "minimum": 0,
+          "format": "duration",
+          "description": "The deadline limit that ended the compaction, in milliseconds. Absent unless a deadline fired.",
+          "visibility": "internal"
+        },
+        "deadlineOvershootMs": {
+          "type": "integer",
+          "minimum": 0,
+          "format": "duration",
+          "description": "How long after its limit the deadline was observed to fire, in milliseconds. Absent unless a deadline fired.",
+          "visibility": "internal"
+        },
+        "triggerThreshold": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Context utilization threshold, as a fraction of the token limit, whose crossing started this compaction. Absent for compactions not started by a threshold.",
+          "visibility": "internal"
+        },
+        "maxOutputTokens": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Output token limit of the latest summarizer request. Absent when no request was sent.",
+          "visibility": "internal"
+        },
+        "failedRequestCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Summarizer requests that failed with a provider or transport error. Absent when none failed.",
+          "visibility": "internal"
+        },
+        "failedRequestInputTokensEstimate": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Sum of the sampled input token estimates of the summarizer requests that failed, whose usage the provider never reported. Absent when none failed.",
+          "visibility": "internal"
+        },
+        "cancelledRequestCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Summarizer requests cancelled while in flight, one per model call cancellation reported for this compaction. Not counted in failedRequestCount. Absent when none was cancelled.",
+          "visibility": "internal"
+        },
+        "retryWaitMs": {
+          "type": "integer",
+          "minimum": 0,
+          "format": "duration",
+          "description": "Total time from a failed summarizer request settling to the next one starting, which includes the retry backoff, in milliseconds. Absent when no request was retried.",
+          "visibility": "internal"
+        },
+        "lastRetryAfterMs": {
+          "type": "integer",
+          "minimum": 0,
+          "format": "duration",
+          "description": "Retry-After of the latest failed summarizer request, in milliseconds. Absent when that request sent none.",
+          "visibility": "internal"
+        },
+        "shrinkRemovedAttachments": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Historical attachments removed from the summarizer input when it was shrunk. Absent unless the input was shrunk.",
+          "visibility": "internal"
+        },
+        "shrinkStrippedReasoning": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Historical reasoning items stripped from the summarizer input when it was shrunk. Absent unless the input was shrunk.",
+          "visibility": "internal"
+        },
+        "failureOperation": {
+          "type": "string",
+          "description": "Step whose failure ended the compaction before or after its summarizer request: \"session_read\", \"auth_hydration\", \"model_resolution\", \"context_breakdown\", \"token_limit\", \"start_publication\", \"pre_compact_hook\", \"output_hydration\", \"auth_missing\", \"agent_context_missing\", \"summarizer_setup\", \"summary_parse\", \"plan_read\", \"history_write\" or \"background_apply\". Absent when the summarizer request itself failed, or nothing failed.",
+          "visibility": "internal"
+        }
+      },
+      "required": [
+        "durationMs"
+      ],
+      "additionalProperties": false,
+      "description": "End-to-end timing of a compaction attempt and the configuration it ran under, measured from the start of the compaction to its terminal event.",
+      "title": "CompactionCompleteAttemptMetrics",
+      "visibility": "internal"
     },
     "CompactionCompleteCompactionTokensUsed": {
       "type": "object",
@@ -5561,6 +6074,10 @@
           "type": "string",
           "description": "Model identifier at admission when routing later changed to the reported compaction model"
         },
+        "reasoningEffort": {
+          "type": "string",
+          "description": "Reasoning effort level the compaction summarizer request used, if applicable (e.g. \"none\", \"low\", \"medium\", \"high\", \"xhigh\", \"max\")"
+        },
         "error": {
           "type": "string",
           "description": "Error message if compaction failed"
@@ -5636,6 +6153,11 @@
           "type": "string",
           "description": "Copilot service request ID (x-copilot-service-request-id header) for the compaction LLM call"
         },
+        "clientRequestId": {
+          "type": "string",
+          "description": "Client-generated request ID (X-Request-Id header) the runtime sent with the latest compaction LLM request. Present even when the request failed before any response arrived.",
+          "visibility": "internal"
+        },
         "systemTokens": {
           "type": "integer",
           "minimum": 0,
@@ -5674,9 +6196,24 @@
           "$ref": "#/definitions/CompactionTrigger",
           "description": "What initiated this compaction, when known"
         },
+        "execution": {
+          "type": "string",
+          "description": "How the compaction ran relative to the conversation: \"background\" (alongside the turn), \"turn_blocking\" (the turn waited for it), \"pre_prompt\" (a non-interactive run waited before recording its prompt), or \"direct\" (an explicit compaction request). Open set; readers must tolerate other values.",
+          "visibility": "internal"
+        },
         "summarizerProgress": {
           "$ref": "#/definitions/CompactionCompleteSummarizerProgress",
           "description": "How far the summarizer model calls had progressed when the outcome was decided, so a stalled summarizer can be told from a slow one",
+          "visibility": "internal"
+        },
+        "attemptMetrics": {
+          "$ref": "#/definitions/CompactionCompleteAttemptMetrics",
+          "description": "How long the compaction attempt took end to end, how long it blocked the user, and the configuration it ran under",
+          "visibility": "internal"
+        },
+        "failureDiagnostics": {
+          "$ref": "#/definitions/CompactionCompleteFailureDiagnostics",
+          "description": "Evidence about the summarizer's latest model call for a failed compaction, so a failure its reason alone does not explain can be diagnosed",
           "visibility": "internal"
         }
       },
@@ -5720,6 +6257,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.compaction_complete",
@@ -5740,6 +6281,35 @@
       "additionalProperties": false,
       "description": "Session event \"session.compaction_complete\". Conversation compaction results including success status, metrics, and optional error details",
       "title": "CompactionCompleteEvent"
+    },
+    "CompactionCompleteFailureDiagnostics": {
+      "type": "object",
+      "properties": {
+        "lastAttemptFailureReason": {
+          "type": "string",
+          "description": "Failure reason of the summarizer's latest failed model call, kept when a later attempt or the compaction deadline ended the compaction. Uses the failureReason values.",
+          "visibility": "internal"
+        },
+        "providerErrorCode": {
+          "type": "string",
+          "description": "Error code the provider returned for that call, or its error type when it gave no code",
+          "visibility": "internal"
+        },
+        "transportErrorKind": {
+          "type": "string",
+          "description": "Bounded kind of that call's transport failure, such as dns, tls, proxy, connection_refused, connection_reset, connect_timeout, or timeout",
+          "visibility": "internal"
+        },
+        "finishReason": {
+          "type": "string",
+          "description": "Finish reason of the summarizer's latest successful response, such as stop, length, or content_filter",
+          "visibility": "internal"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Evidence about the summarizer's latest model call when a compaction failed. Every value is a string so that new values stay readable by older runtimes.",
+      "title": "CompactionCompleteFailureDiagnostics",
+      "visibility": "internal"
     },
     "CompactionCompleteSummarizerProgress": {
       "type": "object",
@@ -5837,6 +6407,24 @@
           "description": "Time since the latest request's last observable output, in milliseconds. Unlike idleMs, keepalive deltas do not reset it. Absent when no output arrived.",
           "visibility": "internal"
         },
+        "answerChars": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Characters of reply text the latest request streamed, counted as received, so it measures output even when the request was cut off before reporting usage. Tool-call arguments and reasoning are not counted. Absent when no request was dispatched.",
+          "visibility": "internal"
+        },
+        "reasoningChars": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Characters of reasoning text, summarized or raw, the latest request streamed, counted as received. Encrypted reasoning is not counted. Absent when no request was dispatched.",
+          "visibility": "internal"
+        },
+        "inputTokensEstimate": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Sampled estimate of the input tokens the latest request sent, taken at dispatch, so it is known even when the request was cut off before reporting usage. Absent when no request was dispatched.",
+          "visibility": "internal"
+        },
         "inputShrunk": {
           "type": "boolean",
           "description": "Whether historical attachments and reasoning were dropped from the compaction's input because the session's previous compaction ran out of time.",
@@ -5902,6 +6490,11 @@
         "trigger": {
           "$ref": "#/definitions/CompactionTrigger",
           "description": "What initiated this compaction, when known"
+        },
+        "execution": {
+          "type": "string",
+          "description": "How the compaction ran relative to the conversation: \"background\" (alongside the turn), \"turn_blocking\" (the turn waited for it), \"pre_prompt\" (a non-interactive run waited before recording its prompt), or \"direct\" (an explicit compaction request). Open set; readers must tolerate other values.",
+          "visibility": "internal"
         }
       },
       "additionalProperties": false,
@@ -5940,6 +6533,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -6067,6 +6664,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -6205,6 +6806,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.context_changed",
@@ -6278,6 +6883,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -6456,6 +7065,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.custom_agents_updated",
@@ -6547,6 +7160,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -6664,6 +7281,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "elicitation.completed",
@@ -6700,6 +7321,10 @@
         "elicitationSource": {
           "type": "string",
           "description": "The source that initiated the request (MCP server name, or absent for agent-initiated)"
+        },
+        "elicitationSourceDisplayName": {
+          "type": "string",
+          "description": "Display label for a Connector-owned MCP server that initiated the request, from the trusted Connector catalog; absent for other sources. `elicitationSource` stays the identity."
         },
         "message": {
           "type": "string",
@@ -6758,6 +7383,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -6973,6 +7602,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.error",
@@ -7076,6 +7709,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "exit_plan_mode.completed",
@@ -7175,6 +7812,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "exit_plan_mode.requested",
@@ -7250,6 +7891,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.extensions.attachments_pushed",
@@ -7324,6 +7969,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -7460,6 +8109,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "external_tool.completed",
@@ -7566,6 +8219,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -7699,6 +8356,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.fusion_change_checkpoint",
@@ -7807,6 +8468,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -7987,6 +8652,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.fusion_completed",
@@ -8148,6 +8817,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -8791,6 +9464,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.fusion_resolved",
@@ -8895,6 +9572,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.fusion_route_failed",
@@ -8979,6 +9660,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -9217,6 +9902,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.handoff",
@@ -9388,6 +10077,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "hook.end",
@@ -9461,6 +10154,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -9544,6 +10241,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -9642,6 +10343,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -9844,6 +10549,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -10101,6 +10810,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.indexed_search",
@@ -10237,6 +10950,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.info",
@@ -10286,6 +11003,21 @@
         "nextModelRequest": "Insert immediately before the next model request at a provider-legal boundary."
       }
     },
+    "InstructionUpdateCapability": {
+      "type": "string",
+      "enum": [
+        "supported",
+        "unsupported",
+        "unknown"
+      ],
+      "description": "The active provider's known support for appending later developer instructions",
+      "title": "InstructionUpdateCapability",
+      "x-enumDescriptions": {
+        "supported": "The provider advertises support for later developer instructions.",
+        "unsupported": "The provider advertises that later developer instructions are unsupported.",
+        "unknown": "Provider capability information was unavailable."
+      }
+    },
     "InstructionUpdateData": {
       "type": "object",
       "properties": {
@@ -10312,6 +11044,11 @@
         "name": {
           "type": "string",
           "description": "Optional stable source name for diagnostics and future host-authored updates."
+        },
+        "postInitial": {
+          "type": "boolean",
+          "description": "Whether this update was recorded after the conversation's initial user message.",
+          "visibility": "internal"
         }
       },
       "required": [
@@ -10324,6 +11061,148 @@
       "additionalProperties": false,
       "description": "An authoritative developer-instruction update. Event order defines instruction order. Persistent updates are durable and restore across replay, resume, rewind, fork, and compaction; turn-scoped updates must be emitted with ephemeral=true and are never restored.",
       "title": "InstructionUpdateData"
+    },
+    "InstructionUpdateDeliveryData": {
+      "type": "object",
+      "properties": {
+        "deliveryId": {
+          "type": "string"
+        },
+        "firstUpdateEventId": {
+          "type": "string"
+        },
+        "latestUpdateEventId": {
+          "type": "string"
+        },
+        "updateCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "requestGeneration": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "outcome": {
+          "$ref": "#/definitions/InstructionUpdateDeliveryOutcome"
+        },
+        "capability": {
+          "$ref": "#/definitions/InstructionUpdateCapability"
+        },
+        "reason": {
+          "$ref": "#/definitions/InstructionUpdateDeliveryReason"
+        }
+      },
+      "required": [
+        "deliveryId",
+        "firstUpdateEventId",
+        "latestUpdateEventId",
+        "updateCount",
+        "requestGeneration",
+        "outcome",
+        "capability",
+        "reason"
+      ],
+      "additionalProperties": false,
+      "description": "Internal content-free receipt for the first model request that consumed one or more pending canonical instruction updates.",
+      "title": "InstructionUpdateDeliveryData",
+      "visibility": "internal"
+    },
+    "InstructionUpdateDeliveryEvent": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Unique event identifier (UUID v4), generated when the event is emitted"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp when the event was created"
+        },
+        "parentId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ID of the chronologically preceding event in the session, forming a linked chain. Null for the first event."
+        },
+        "ephemeral": {
+          "type": "boolean",
+          "description": "When true, the event is transient and not persisted to the session event log on disk"
+        },
+        "agentId": {
+          "type": "string",
+          "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
+        "type": {
+          "type": "string",
+          "const": "instruction.update_delivery",
+          "description": "Type discriminator. Always \"instruction.update_delivery\"."
+        },
+        "data": {
+          "$ref": "#/definitions/InstructionUpdateDeliveryData",
+          "description": "Internal content-free receipt for the first model request that consumed one or more pending canonical instruction updates."
+        }
+      },
+      "required": [
+        "id",
+        "timestamp",
+        "parentId",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "description": "Session event \"instruction.update_delivery\". Internal content-free receipt for the first model request that consumed one or more pending canonical instruction updates.",
+      "title": "InstructionUpdateDeliveryEvent",
+      "visibility": "internal"
+    },
+    "InstructionUpdateDeliveryOutcome": {
+      "type": "string",
+      "enum": [
+        "append",
+        "fullRebuild",
+        "deterministicFallback"
+      ],
+      "description": "How the active model request incorporated pending canonical instruction updates",
+      "title": "InstructionUpdateDeliveryOutcome",
+      "x-enumDescriptions": {
+        "append": "Appended the update at a provider-supported instruction boundary.",
+        "fullRebuild": "Rebuilt the complete system prompt with the update included.",
+        "deterministicFallback": "Applied the update through the configured deterministic fallback."
+      }
+    },
+    "InstructionUpdateDeliveryReason": {
+      "type": "string",
+      "enum": [
+        "controlArm",
+        "nativeTransport",
+        "advertisedSupport",
+        "advertisedUnsupported",
+        "capabilityUnavailable",
+        "unsupportedTransport",
+        "missingUserBoundary"
+      ],
+      "description": "Why the runtime selected the recorded instruction-update delivery outcome",
+      "title": "InstructionUpdateDeliveryReason",
+      "x-enumDescriptions": {
+        "controlArm": "The session was assigned to the experiment control arm.",
+        "nativeTransport": "The active transport natively represents later developer instructions.",
+        "advertisedSupport": "The provider advertised support for later developer instructions.",
+        "advertisedUnsupported": "The provider advertised that later developer instructions are unsupported.",
+        "capabilityUnavailable": "Provider capability information was unavailable.",
+        "unsupportedTransport": "The active transport cannot represent later developer instructions.",
+        "missingUserBoundary": "The provider accepts later instructions only after a user or tool turn, and the request had none, so every instruction was rebuilt into the leading system prompt."
+      }
     },
     "InstructionUpdateEvent": {
       "type": "object",
@@ -10357,6 +11236,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -10404,6 +11287,89 @@
         "persistent": "Persists in event order across replay, resume, rewind, fork, and compaction.",
         "turn": "Applies only to the current turn and is not restored from durable history."
       }
+    },
+    "JournalLinkData": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Journal checkpoint format version."
+        },
+        "sessionId": {
+          "type": "string",
+          "description": "Session owning this journal chain."
+        },
+        "previousFile": {
+          "type": "string",
+          "description": "Numbered predecessor filename in the same session directory."
+        }
+      },
+      "required": [
+        "version",
+        "sessionId",
+        "previousFile"
+      ],
+      "additionalProperties": false,
+      "description": "Links a standalone replay head to its complete preceding numbered journal archive."
+    },
+    "JournalLinkEvent": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Unique event identifier (UUID v4), generated when the event is emitted"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp when the event was created"
+        },
+        "parentId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ID of the chronologically preceding event in the session, forming a linked chain. Null for the first event."
+        },
+        "ephemeral": {
+          "type": "boolean",
+          "description": "When true, the event is transient and not persisted to the session event log on disk"
+        },
+        "agentId": {
+          "type": "string",
+          "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
+        "type": {
+          "type": "string",
+          "const": "session.journal_link",
+          "description": "Type discriminator. Always \"session.journal_link\"."
+        },
+        "data": {
+          "$ref": "#/definitions/JournalLinkData",
+          "description": "Links a standalone replay head to its complete preceding numbered journal archive."
+        }
+      },
+      "required": [
+        "id",
+        "timestamp",
+        "parentId",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "description": "Session event \"session.journal_link\". Links a standalone replay head to its complete preceding numbered journal archive.",
+      "title": "JournalLinkEvent"
     },
     "ManagedPermissionsContext": {
       "type": "object",
@@ -10480,6 +11446,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -10623,6 +11593,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.managed_settings_enforced",
@@ -10672,6 +11646,14 @@
         "policyHelperManaged": {
           "type": "boolean",
           "description": "Whether the policy-helper managed-settings layer was present. The policy helper is the weakest channel: it fills keys no enterprise source set and can never replace one."
+        },
+        "policyHelperFailure": {
+          "$ref": "#/definitions/PolicyHelperFailure",
+          "description": "The latest unresolved Policy Helper failure for this exact policy context. It remains present across retained-policy refresh failures and clears only after fresh success or authoritative removal."
+        },
+        "policyHelperCapabilities": {
+          "$ref": "#/definitions/PolicyHelperCapabilities",
+          "description": "Explicit Policy Helper structured-failure and recheck capabilities supported by this runtime."
         },
         "failClosed": {
           "type": "boolean",
@@ -10747,6 +11729,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -10893,6 +11879,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "mcp_app.tool_call_complete",
@@ -10998,6 +11988,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "mcp.headers_refresh_completed",
@@ -11100,6 +12094,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -11206,6 +12204,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -11329,6 +12331,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -11467,6 +12473,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "mcp.oauth_required",
@@ -11575,6 +12585,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "mcp.prompts.list_changed",
@@ -11630,6 +12644,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -11720,6 +12738,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.mcp_server_needs_reconnect",
@@ -11790,6 +12812,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -11865,6 +12891,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -12046,6 +13076,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.mcp_server_status_changed",
@@ -12122,6 +13156,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.mcp_server_tools_loaded",
@@ -12161,6 +13199,26 @@
         "memory": "Server is backed by an in-memory runtime implementation."
       }
     },
+    "McpSkillOrigin": {
+      "type": "object",
+      "properties": {
+        "serverName": {
+          "type": "string",
+          "description": "Name of the MCP server hosting the skill, matching serverName in session.mcp.resources.read."
+        },
+        "uri": {
+          "type": "string",
+          "description": "Exact URI of the skill's SKILL.md resource, matching uri in session.mcp.resources.read."
+        }
+      },
+      "required": [
+        "serverName",
+        "uri"
+      ],
+      "additionalProperties": false,
+      "description": "Public MCP skill provenance. The server name and resource URI address session.mcp.resources.read without invoking the skill; they do not grant permission or identify a durable server registration.",
+      "title": "McpSkillOrigin"
+    },
     "McpToolsListChangedEvent": {
       "type": "object",
       "properties": {
@@ -12194,6 +13252,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -12258,6 +13320,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -12335,6 +13401,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.mode_changed",
@@ -12396,6 +13466,16 @@
           "type": "string",
           "description": "Copilot service request ID (x-copilot-service-request-id header) for CAPI log correlation"
         },
+        "instructionUpdateDeliveryId": {
+          "type": "string",
+          "description": "Internal correlation identifier for the qualifying instruction-update delivery consumed by this failed model request.",
+          "visibility": "internal"
+        },
+        "instructionUpdateLatestEventId": {
+          "type": "string",
+          "description": "Event identifier of the latest canonical instruction update included in this failed model request.",
+          "visibility": "internal"
+        },
         "rte": {
           "type": "boolean",
           "description": "Per-request treatment/eligibility signal returned by the Copilot API in the `X-GitHub-Copilot-Request-TE` response header for the associated model call; `false` when the header was absent or unparseable."
@@ -12419,6 +13499,10 @@
         "transport": {
           "$ref": "#/definitions/ModelCallFailureTransport",
           "description": "Transport used for the failed model call (http or websocket)"
+        },
+        "inferenceGateway": {
+          "type": "boolean",
+          "description": "Whether this failed dispatched request selected the managed inference gateway. Absent for older producers or when no request was dispatched; not proof of gateway receipt."
         },
         "failureKind": {
           "$ref": "#/definitions/ModelCallFailureKind",
@@ -12456,6 +13540,14 @@
           "type": "integer",
           "minimum": 0,
           "description": "Zero-based orchestrator retry index of the failed attempt"
+        },
+        "incompleteStreamReason": {
+          "type": "string",
+          "description": "Why a chat-completions stream that the server ended could not be assembled into a response, as a fixed snake_case reason such as `missing_finish_reason`, `missing_tool_call_id` or `no_chunks`; absent for other failures. New reasons may be added"
+        },
+        "streamDoneReceived": {
+          "type": "boolean",
+          "description": "Whether the incomplete stream ended with the `[DONE]` sentinel; present only with incompleteStreamReason"
         },
         "websocketFallbackReason": {
           "$ref": "#/definitions/ModelCallWebSocketFallbackReason",
@@ -12550,6 +13642,11 @@
           "type": "string",
           "description": "The `type` from the CAPI error envelope of an HTTP failure of any status (e.g. 'websocket_error'), a coarser companion to errorCode for envelopes that carry no code. Raw server-controlled string, emitted only through restricted telemetry. Absent when the response carried no error envelope."
         },
+        "productStateError": {
+          "$ref": "#/definitions/ModelCallProductStateError",
+          "description": "Bounded product-state failure classified before telemetry projection.",
+          "visibility": "internal"
+        },
         "quotaSnapshots": {
           "type": "object",
           "additionalProperties": {
@@ -12610,6 +13707,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -12837,6 +13938,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "model.call_final_result",
@@ -12935,6 +14040,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "model.call_finished",
@@ -12972,6 +14081,18 @@
         "error": "The dispatch ended with a provider or transport error.",
         "cancelled": "The dispatch was cancelled before an accepted response was produced.",
         "rejected": "The provider response was rejected during post-response acceptance processing."
+      }
+    },
+    "ModelCallProductStateError": {
+      "type": "string",
+      "enum": [
+        "input_item_connection_mismatch"
+      ],
+      "description": "Bounded product-state failure classified before telemetry projection.",
+      "title": "ModelCallProductStateError",
+      "visibility": "internal",
+      "x-enumDescriptions": {
+        "input_item_connection_mismatch": "A Responses input item belongs to a different transport connection."
       }
     },
     "ModelCallRequestBodyCompressionFallback": {
@@ -13069,6 +14190,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "model.call_start",
@@ -13162,6 +14287,10 @@
         "previousProviderId": {
           "type": "string",
           "description": "Provider of previousModel, when known. A provider-only change is a model selection change even when the model identifiers are equal."
+        },
+        "reasoningInvalidated": {
+          "type": "boolean",
+          "description": "True when prior reasoning is incompatible with the selected provider routing even though model and provider identifiers are unchanged. Omitted for compatible or legacy selections."
         },
         "previousReasoningEffort": {
           "type": "string",
@@ -13298,6 +14427,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.model_change",
@@ -13406,6 +14539,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -13534,6 +14671,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -13666,6 +14807,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "pending_messages.modified",
@@ -13727,6 +14872,7 @@
             "unavailable",
             "judge-verdict",
             "judge-error",
+            "judge-context-too-large",
             "inherited"
           ],
           "description": "Machine-readable runtime gate reason, never a command, path or human rationale.",
@@ -13764,6 +14910,7 @@
             "unavailable": "Script review was unavailable.",
             "judge-verdict": "The judge interface returned a usable verdict.",
             "judge-error": "The judge interface returned an error.",
+            "judge-context-too-large": "The fully assembled judge request exceeded the selected model's input capacity after reserving output headroom.",
             "inherited": "The request inherited an outcome from another decision."
           }
         },
@@ -13976,6 +15123,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "permission.assentDetected",
@@ -14122,6 +15273,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "permission.carriedForward",
@@ -14213,6 +15368,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -14317,6 +15476,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -14594,6 +15757,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "permission.messageAuthorizationDegraded",
@@ -14648,6 +15815,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -14740,6 +15911,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -15113,6 +16288,10 @@
         "serverName": {
           "type": "string",
           "description": "Name of the MCP server providing the tool"
+        },
+        "serverDisplayName": {
+          "type": "string",
+          "description": "Display label for a Connector-owned MCP server, from the trusted Connector catalog; absent for other servers. `serverName` stays the identity for approvals and rules."
         },
         "toolName": {
           "type": "string",
@@ -15680,6 +16859,10 @@
             "$ref": "#/definitions/PermissionRecoveryAttempt"
           },
           "description": "Ordered privacy-safe record of permission attempts and the successful alternative, when any"
+        },
+        "runState": {
+          "$ref": "#/definitions/PermissionRecoveryRunState",
+          "description": "Optional replay checkpoint for the epoch-scoped permission-recovery breaker. New runtimes persist it on state-changing recovery snapshots; older runtimes ignore it."
         }
       },
       "required": [
@@ -15692,7 +16875,17 @@
       ],
       "additionalProperties": false,
       "description": "Authoritative snapshot of an Autopilot permission-recovery episode",
-      "title": "PermissionRecoveryData"
+      "title": "PermissionRecoveryData",
+      "x-legacy-parameters": [
+        "episodeId",
+        "ownerSessionId",
+        "ownerAgentId",
+        "status",
+        "onBlocked",
+        "reason",
+        "maxAttempts",
+        "attempts"
+      ]
     },
     "PermissionRecoveryEvent": {
       "type": "object",
@@ -15726,6 +16919,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -15783,6 +16980,43 @@
         "responder_unavailable": "The response-capable client became unavailable while escalation was pending.",
         "equivalent_alternative_succeeded": "A later tool call succeeded without requiring the blocked permission."
       }
+    },
+    "PermissionRecoveryRunState": {
+      "type": "object",
+      "properties": {
+        "consecutiveBlockedEpisodes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of blocked recovery episodes since the latest successful permitted effectful tool call"
+        },
+        "permissionRecoveryTerminalClaimed": {
+          "type": "boolean",
+          "description": "Whether the claimed epoch terminal is an authoritative permission-recovery block that remains latched until the next genuine root user message"
+        },
+        "totalDenialDispositions": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total deferred, denied, or blocked attempt transitions in the current genuine-user-message epoch"
+        },
+        "terminalOutcomeClaimed": {
+          "type": "boolean",
+          "description": "Whether a permission-recovery terminal completion has already been claimed for the epoch"
+        }
+      },
+      "required": [
+        "consecutiveBlockedEpisodes",
+        "totalDenialDispositions",
+        "terminalOutcomeClaimed"
+      ],
+      "additionalProperties": false,
+      "description": "Replay-safe epoch counters for Autopilot Assisted Permissions recovery",
+      "title": "PermissionRecoveryRunState",
+      "stability": "experimental",
+      "x-legacy-parameters": [
+        "consecutiveBlockedEpisodes",
+        "totalDenialDispositions",
+        "terminalOutcomeClaimed"
+      ]
     },
     "PermissionRecoveryStatus": {
       "type": "string",
@@ -15908,6 +17142,11 @@
           "$ref": "#/definitions/PermissionPromptRequest",
           "description": "Derived user-facing permission prompt details for UI consumers"
         },
+        "assistedApprovalAssessment": {
+          "$ref": "#/definitions/AssistedApprovalAssessment",
+          "description": "Canonical runtime-owned Assisted Permissions assessment. New runtimes emit this for every permission request; absence means the event predates this field. Consumers must use `permission.completed` for the final permission result.",
+          "stability": "experimental"
+        },
         "permissionMode": {
           "$ref": "#/definitions/PermissionMode",
           "description": "Permission mode captured when evaluation began. Absent on historical events."
@@ -15982,6 +17221,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -16148,6 +17391,10 @@
         "serverName": {
           "type": "string",
           "description": "Name of the MCP server providing the tool"
+        },
+        "serverDisplayName": {
+          "type": "string",
+          "description": "Display label for a Connector-owned MCP server, from the trusted Connector catalog; absent for other servers. `serverName` stays the identity for approvals and rules."
         },
         "toolName": {
           "type": "string",
@@ -16885,6 +18132,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.permissions_changed",
@@ -17060,6 +18311,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.plan_changed",
@@ -17095,6 +18350,132 @@
         "update": "The plan file was updated.",
         "delete": "The plan file was deleted."
       }
+    },
+    "PolicyHelperCapabilities": {
+      "type": "object",
+      "properties": {
+        "structuredFailure": {
+          "type": "boolean",
+          "description": "The runtime emits PolicyHelperFailure on shared managed-settings snapshots and applicable structured operation errors."
+        },
+        "recheck": {
+          "type": "boolean",
+          "description": "The runtime supports session.managedSettings.recheckPolicyHelper for a fresh scoped helper evaluation."
+        }
+      },
+      "required": [
+        "structuredFailure",
+        "recheck"
+      ],
+      "additionalProperties": false,
+      "description": "Policy Helper failure and recovery features implemented by this runtime. Capability presence, not absence of an optional failure, determines whether a client may rely on these contracts.",
+      "title": "PolicyHelperCapabilities"
+    },
+    "PolicyHelperFailure": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "type": "string",
+          "description": "Stable runtime classification. Known values are helper-reported, registration-undetermined, working-directory, resolve, resolve-task, spawn, timeout, exit-status, output-too-large, envelope, schema, and internal. This is not a closed set; clients must tolerate unknown values."
+        },
+        "failureMode": {
+          "type": "string",
+          "description": "Effective runtime behavior: ignore continues with remaining or retained policy, while failClosed activates restrictive safeguards. This is runtime-owned, not helper-authored."
+        },
+        "severity": {
+          "type": "string",
+          "description": "Runtime-calculated presentation severity: warning for ignore and error for failClosed. Error severity does not imply that session creation failed."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Invocation reason. Known values are sessionStart and pluginActivation; clients must tolerate future values."
+        },
+        "authority": {
+          "type": "string",
+          "description": "Managed authority that registered the helper, when known. Known values are device and server; clients must tolerate future values."
+        },
+        "previousPolicyRetained": {
+          "type": "boolean",
+          "description": "True when an earlier successful helper-derived layer still contributes to this effective snapshot. This does not promise that every relaxation from the old layer was retained."
+        },
+        "code": {
+          "type": "string",
+          "description": "Stable bounded helper-defined identifier for a valid structured helper error. Absent for runtime-detected failures and not globally unique."
+        },
+        "message": {
+          "type": "string",
+          "description": "Bounded plain-text primary explanation. Runtime-authored for runtime failures and helper-authored for a valid structured helper error."
+        },
+        "remediation": {
+          "type": "string",
+          "description": "Optional bounded helper-authored plain-text recovery guidance. It is explanatory and must not be executed automatically."
+        },
+        "helpLink": {
+          "$ref": "#/definitions/PolicyHelperHelpLink",
+          "description": "Optional explicit validated additional-information link. URLs embedded in other text are not links."
+        },
+        "details": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PolicyHelperFailureDetail",
+            "description": "One bounded field-specific finding reported by a Policy Helper. The path is a helper-defined logical configuration path, not necessarily a filesystem path."
+          },
+          "description": "Optional bounded field-specific findings supplied by the helper."
+        },
+        "diagnostic": {
+          "type": "string",
+          "description": "Optional bounded untrusted secondary troubleshooting text, such as trimmed stderr. Do not use it as primary UI copy."
+        }
+      },
+      "required": [
+        "category",
+        "failureMode",
+        "severity",
+        "reason",
+        "previousPolicyRetained",
+        "message"
+      ],
+      "additionalProperties": false,
+      "description": "The latest unresolved Policy Helper failure for this policy context. Helper-authored text is bounded display-intended content but remains untrusted; render it as plain text, keep diagnostics secondary, and do not automatically log, persist, export, execute, or inject it into model context.",
+      "title": "PolicyHelperFailure"
+    },
+    "PolicyHelperFailureDetail": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Optional helper-defined logical configuration path."
+        },
+        "message": {
+          "type": "string",
+          "description": "Bounded helper-authored plain-text explanation for this finding."
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "additionalProperties": false,
+      "description": "One bounded field-specific finding reported by a Policy Helper. The path is a helper-defined logical configuration path, not necessarily a filesystem path.",
+      "title": "PolicyHelperFailureDetail"
+    },
+    "PolicyHelperHelpLink": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "Validated absolute HTTP(S) URL."
+        },
+        "label": {
+          "type": "string",
+          "description": "Optional bounded helper-authored plain-text label. Clients may use localized fallback text when absent."
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "additionalProperties": false,
+      "description": "An explicit bounded absolute HTTP(S) destination supplied by a Policy Helper. The runtime validates but never fetches, previews, resolves redirects for, or opens it; clients must sanitize it again before navigation.",
+      "title": "PolicyHelperHelpLink"
     },
     "PromptCacheBreakData": {
       "type": "object",
@@ -17309,6 +18690,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -17564,6 +18949,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -17867,6 +19256,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.remote_steerable_changed",
@@ -17933,6 +19326,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -18142,6 +19539,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.resume",
@@ -18212,6 +19613,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "sampling.completed",
@@ -18244,6 +19649,10 @@
         "serverName": {
           "type": "string",
           "description": "Name of the MCP server that initiated the sampling request"
+        },
+        "serverDisplayName": {
+          "type": "string",
+          "description": "Display label for a Connector-owned MCP server, from the trusted Connector catalog; absent for other servers. `serverName` stays the identity for request matching."
         },
         "mcpRequestId": {
           "description": "The JSON-RPC request ID from the MCP protocol",
@@ -18291,6 +19700,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -19108,6 +20521,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "sandbox.decision",
@@ -19387,6 +20804,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.schedule_cancelled",
@@ -19497,6 +20918,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.schedule_created",
@@ -19586,6 +21011,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.schedule_rearmed",
@@ -19609,6 +21038,10 @@
     },
     "SessionEvent": {
       "anyOf": [
+        {
+          "$ref": "#/definitions/JournalLinkEvent",
+          "description": "Session event \"session.journal_link\". Links a standalone replay head to its complete preceding numbered journal archive."
+        },
         {
           "$ref": "#/definitions/StartEvent",
           "description": "Session event \"session.start\". Session initialization metadata including context and configuration"
@@ -20025,6 +21458,11 @@
           "description": "Session event \"instruction.update\". An authoritative developer-instruction update. Event order defines instruction order. Persistent updates are durable and restore across replay, resume, rewind, fork, and compaction; turn-scoped updates must be emitted with ephemeral=true and are never restored."
         },
         {
+          "$ref": "#/definitions/InstructionUpdateDeliveryEvent",
+          "description": "Session event \"instruction.update_delivery\". Internal content-free receipt for the first model request that consumed one or more pending canonical instruction updates.",
+          "visibility": "internal"
+        },
+        {
           "$ref": "#/definitions/SystemNotificationEvent",
           "description": "Session event \"system.notification\". System-generated notification for runtime events like background task completion"
         },
@@ -20150,7 +21588,7 @@
         },
         {
           "$ref": "#/definitions/AutoModeResolvedEvent",
-          "description": "Session event \"session.auto_mode_resolved\". Auto Intent resolution: the concrete model the session settled on for the first prompt of an auto-mode session, and why. Lets SDK clients render the chosen model and the full reason it was picked. The core selection fields (chosenModel/reasoningBucket/categoryScores) are stable; the routing-analytics fields (predictedLabel/confidence/candidateModels) mirror the upstream intent service and may evolve, hence the event's experimental stability."
+          "description": "Session event \"session.auto_mode_resolved\". Auto Intent resolution: the concrete model an auto-mode session settled on, and why. Published when Auto settles on a model that differs from the one it last published in the current Auto selection, so a routing check that keeps the same model does not repeat it; selecting a model, switching Auto tiers, or returning to Auto starts a new selection. Lets SDK clients render the chosen model and the full reason it was picked. The core selection fields (chosenModel/reasoningBucket/categoryScores) are stable; the routing-analytics fields (predictedLabel/confidence/candidateModels) mirror the upstream intent service and may evolve, hence the event's experimental stability."
         },
         {
           "$ref": "#/definitions/ManagedPluginProgressEvent",
@@ -20166,7 +21604,7 @@
         },
         {
           "$ref": "#/definitions/CommandsChangedEvent",
-          "description": "Session event \"commands.changed\". SDK command registration change notification"
+          "description": "Session event \"commands.changed\". Session command list change notification, for SDK command registration or built-in command availability; `session.commands.list` returns the full list"
         },
         {
           "$ref": "#/definitions/CapabilitiesChangedEvent",
@@ -20339,6 +21777,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.session_limits_changed",
@@ -20427,6 +21869,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session_limits_exhausted.completed",
@@ -20509,6 +21955,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -20824,6 +22274,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.shutdown",
@@ -21039,6 +22493,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "skill.context_delivered",
@@ -21127,6 +22585,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "skill.context_delivered_ref",
@@ -21175,6 +22637,10 @@
           "type": "string",
           "description": "Full content of the skill file, injected into the conversation for the model"
         },
+        "arguments": {
+          "type": "string",
+          "description": "Exact invocation arguments when recorded, retained separately from the reusable skill body"
+        },
         "allowedTools": {
           "type": "array",
           "items": {
@@ -21189,6 +22655,14 @@
         "source": {
           "type": "string",
           "description": "Source identifier for where the skill was discovered. Known values include: project (workspace skill), inherited (parent-directory skill), personal-copilot (~/.copilot/skills), personal-agents (~/.agents/skills), custom (configured directory), plugin (installed plugin), builtin (bundled runtime skill), remote (org/enterprise skill), and sdk (SDK-provided skill)"
+        },
+        "mcpOrigin": {
+          "description": "Held MCP skill origin and manifest. Remote execution restrictions survive replay while this provenance remains in the session.",
+          "x-opaque-json": true
+        },
+        "mcpMeta": {
+          "description": "MCP resource metadata associated with the verified skill content.",
+          "x-opaque-json": true
         },
         "pluginName": {
           "type": "string",
@@ -21249,6 +22723,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "skill.invoked",
@@ -21300,6 +22778,10 @@
           "minimum": 0,
           "description": "UTF-16 code unit length of the referenced skill content. Derived from the referenced body and validated against it when the reference is expanded; a reference whose length disagrees with the body it names is rejected instead of expanded"
         },
+        "arguments": {
+          "type": "string",
+          "description": "Exact invocation arguments preserved from this invocation's inline event data, not from the referenced reusable body"
+        },
         "allowedTools": {
           "type": "array",
           "items": {
@@ -21314,6 +22796,14 @@
         "source": {
           "type": "string",
           "description": "Source identifier for where the skill was discovered"
+        },
+        "mcpOrigin": {
+          "description": "Held MCP skill origin and manifest, preserved from the inline invocation.",
+          "x-opaque-json": true
+        },
+        "mcpMeta": {
+          "description": "MCP resource metadata preserved from the inline invocation.",
+          "x-opaque-json": true
         },
         "pluginName": {
           "type": "string",
@@ -21374,6 +22864,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -21466,6 +22960,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.skills_loaded",
@@ -21495,6 +22993,10 @@
           "type": "string",
           "description": "Unique identifier for the skill"
         },
+        "declaredName": {
+          "type": "string",
+          "description": "Original frontmatter name for an MCP skill, for display only. Use name for identity and enable/disable operations."
+        },
         "commandName": {
           "type": "string",
           "description": "Canonical slash command name used to invoke the skill, without the leading '/'"
@@ -21506,6 +23008,10 @@
         "source": {
           "$ref": "#/definitions/SkillSource",
           "description": "Source location type (e.g., project, personal-copilot, plugin, builtin, remote, sdk)"
+        },
+        "mcpOrigin": {
+          "$ref": "#/definitions/McpSkillOrigin",
+          "description": "MCP server and skill resource address when source is 'mcp'. Contains no activation grants or internal verification metadata."
         },
         "userInvocable": {
           "type": "boolean",
@@ -21545,9 +23051,10 @@
         "plugin",
         "custom",
         "builtin",
-        "sdk"
+        "sdk",
+        "mcp"
       ],
-      "description": "Source location type (e.g., project, personal-copilot, plugin, builtin, sdk)",
+      "description": "Source location type (e.g., project, personal-copilot, plugin, builtin, sdk, mcp)",
       "title": "SkillSource",
       "x-enumDescriptions": {
         "project": "Skill defined in the current project's skill directories.",
@@ -21557,7 +23064,8 @@
         "plugin": "Skill provided by an installed plugin.",
         "custom": "Skill loaded from a configured custom skill directory.",
         "builtin": "Skill bundled with the runtime.",
-        "sdk": "Pathless skill supplied lazily by an SDK skill provider."
+        "sdk": "Pathless skill supplied lazily by an SDK skill provider.",
+        "mcp": "Pathless skill discovered from an MCP server through the skills extension."
       }
     },
     "SnapshotRewindData": {
@@ -21621,6 +23129,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -21809,6 +23321,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.start",
@@ -21940,6 +23456,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "subagent.completed",
@@ -22022,6 +23542,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "subagent.configured",
@@ -22082,6 +23606,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -22215,6 +23743,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "subagent.failed",
@@ -22326,6 +23858,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -22442,6 +23978,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -22576,6 +24116,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -22814,6 +24358,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -23117,7 +24665,7 @@
           "description": "Category of intervention that blocked the task"
         },
         "reason": {
-          "$ref": "#/definitions/PermissionRecoveryReason",
+          "$ref": "#/definitions/TaskBlockerReason",
           "description": "Controlled reason for the current blocked state"
         },
         "resumable": {
@@ -23151,6 +24699,31 @@
         "permission_recovery": "Autopilot permission recovery requires intervention or has no safe autonomous path."
       }
     },
+    "TaskBlockerReason": {
+      "type": "string",
+      "enum": [
+        "permission_required",
+        "repeated_attempt",
+        "attempts_exhausted",
+        "permission_approved",
+        "permission_denied",
+        "responder_unavailable",
+        "equivalent_alternative_succeeded",
+        "permission_recovery_run_limit"
+      ],
+      "description": "Controlled reason that a task is blocked by permission recovery",
+      "title": "TaskBlockerReason",
+      "x-enumDescriptions": {
+        "permission_required": "A required action is waiting on or could not obtain permission.",
+        "repeated_attempt": "The agent repeated an equivalent denied permission request.",
+        "attempts_exhausted": "The bounded autonomous attempts for one permission-recovery episode were exhausted.",
+        "permission_approved": "Historical compatibility value for a recovery resolved by permission approval; new task blockers do not emit it.",
+        "permission_denied": "A responder denied the escalated permission request.",
+        "responder_unavailable": "No response-capable client remained available for the permission request.",
+        "equivalent_alternative_succeeded": "Historical compatibility value for a recovery resolved by an equivalent permitted alternative; new task blockers do not emit it.",
+        "permission_recovery_run_limit": "The epoch-wide consecutive-block or total-denial limit was reached."
+      }
+    },
     "TaskCompleteData": {
       "type": "object",
       "properties": {
@@ -23175,6 +24748,14 @@
           "type": "integer",
           "description": "Active autopilot objective ID evaluated by the completion reviewer"
         },
+        "blockedActions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/BlockedPermissionAction",
+            "description": "Privacy-safe reference to a permission-protected action that remains blocked for the current Autopilot epoch"
+          },
+          "description": "Permission-protected actions that remained blocked for this genuine-user-message epoch. Present on successful completion when the objective was completed without them and on blocked completion when one or more were required."
+        },
         "blocker": {
           "$ref": "#/definitions/TaskBlocker",
           "description": "Structured blocker details when outcome is blocked"
@@ -23182,7 +24763,15 @@
       },
       "additionalProperties": false,
       "description": "Task completion notification with summary from the agent",
-      "title": "TaskCompleteData"
+      "title": "TaskCompleteData",
+      "x-legacy-parameters": [
+        "summary",
+        "success",
+        "outcome",
+        "reason",
+        "objectiveId",
+        "blocker"
+      ]
     },
     "TaskCompleteEvent": {
       "type": "object",
@@ -23216,6 +24805,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -23302,6 +24895,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.title_changed",
@@ -23364,6 +24961,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -23850,6 +25451,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "tool.execution_complete",
@@ -23943,6 +25548,14 @@
         "structuredContent": {
           "description": "Structured content (arbitrary JSON) returned verbatim by the MCP tool",
           "x-opaque-json": true
+        },
+        "mcpResultMeta": {
+          "type": "object",
+          "additionalProperties": {
+            "x-opaque-json": true
+          },
+          "description": "MCP `CallToolResult._meta` returned verbatim by an MCP Apps tool, for delivery to the app UI only; never sent to the model. Experimental.",
+          "stability": "experimental"
         },
         "citableSources": {
           "type": "array",
@@ -24256,6 +25869,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "tool.execution_partial_result",
@@ -24338,6 +25955,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "tool.execution_progress",
@@ -24375,6 +25996,10 @@
           "type": "string",
           "description": "Human-readable display title for the tool, when the selected tool descriptor has a non-empty title."
         },
+        "readOnly": {
+          "type": "boolean",
+          "description": "Whether the selected tool descriptor explicitly classifies this call as read-only."
+        },
         "arguments": {
           "description": "Arguments passed to the tool",
           "x-opaque-json": true
@@ -24393,11 +26018,11 @@
         },
         "mcpServerName": {
           "type": "string",
-          "description": "Name of the MCP server hosting this tool, when the tool is an MCP tool"
+          "description": "Configured key of the MCP server hosting this tool. Legacy events may contain the display name instead; prefer mcpConfigServerName for their identity when available."
         },
         "mcpConfigServerName": {
           "type": "string",
-          "description": "Preferred lookup name for the MCP server hosting this tool: the configured (namespaced) config-map key when the tool carries one, otherwise the display name from `mcpServerName`. Present when the tool is an MCP tool; this is the name unrestricted provenance telemetry hashes so it joins with `mcp_server_setup`, which keys off the configured name too."
+          "description": "Configured MCP server key, retained for compatibility. New events write the same value as mcpServerName; on legacy events this field distinguishes the configured key from the display name in mcpServerName. Unrestricted provenance telemetry hashes this key to join with mcp_server_setup."
         },
         "mcpToolName": {
           "type": "string",
@@ -24432,6 +26057,11 @@
           "$ref": "#/definitions/FusionAttribution",
           "description": "Experimental HydraFusion attribution for this tool execution.",
           "stability": "experimental"
+        },
+        "mcpServerDisplayName": {
+          "type": "string",
+          "description": "Explicitly configured MCP server display name.",
+          "x-copilot-sdk-append-last": true
         }
       },
       "required": [
@@ -24440,7 +26070,26 @@
       ],
       "additionalProperties": false,
       "description": "Tool execution startup details including MCP server information when applicable",
-      "title": "ToolExecutionStartData"
+      "title": "ToolExecutionStartData",
+      "x-legacy-parameters": [
+        "toolCallId",
+        "toolName",
+        "toolTitle",
+        "arguments",
+        "shellToolInfo",
+        "model",
+        "rte",
+        "mcpServerName",
+        "mcpConfigServerName",
+        "mcpToolName",
+        "mcpTransport",
+        "mcpConfigSource",
+        "turnId",
+        "displayVerbatim",
+        "toolDescription",
+        "parentToolCallId",
+        "fusion"
+      ]
     },
     "ToolExecutionStartEvent": {
       "type": "object",
@@ -24474,6 +26123,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -24733,6 +26386,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "tool_search.activated",
@@ -24824,6 +26481,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "tool.shell_output",
@@ -24909,6 +26570,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.tools_updated",
@@ -24988,6 +26653,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "tool.user_requested",
@@ -25050,6 +26719,10 @@
         "performedBy": {
           "type": "string",
           "description": "Identifier of the component that performed truncation (e.g., \"BasicTruncator\")"
+        },
+        "compactionAttemptId": {
+          "type": "string",
+          "description": "Identifier of the automatic compaction applied just before this truncation, when one was"
         }
       },
       "required": [
@@ -25098,6 +26771,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -25186,6 +26863,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -25303,6 +26984,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -25427,6 +27112,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -25655,6 +27344,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -25984,6 +27677,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "user_input.completed",
@@ -26074,6 +27771,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -26238,6 +27939,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -26599,6 +28304,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "session.warning",
@@ -26729,6 +28438,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "workflow.run_settled",
@@ -26832,6 +28545,10 @@
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
         },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
+        },
         "type": {
           "type": "string",
           "const": "workflow.run_started",
@@ -26910,6 +28627,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
@@ -27046,6 +28767,10 @@
         "agentId": {
           "type": "string",
           "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+        },
+        "checkpoint": {
+          "type": "boolean",
+          "description": "Whether this physical journal record belongs to a replay checkpoint rather than original session history."
         },
         "type": {
           "type": "string",
