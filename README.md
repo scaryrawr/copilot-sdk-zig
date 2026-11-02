@@ -1244,6 +1244,10 @@ The sync script downloads the Linux x64 package from the corresponding
 `session-events.schema.json`. It then generates the Zig protocol version
 constant and `sync/schema-snapshot.json`.
 
+Session-event generation ignores SDK field-ordering metadata such as
+`x-copilot-sdk-append-last` without changing field types or validation. Unknown
+schema keywords still fail synchronization.
+
 The snapshot contains every RPC method, every session event discriminator, and
 the vendored `ProviderConfig` contract. `npm test` checks the snapshot and the
 supported or deferred classification for every provider property in
@@ -1259,7 +1263,10 @@ The scheduled workflow checks upstream once a week. When inputs change, it
 updates one `sync/upstream` branch and opens or refreshes one pull request. The
 workflow starts from current `main`, waits for the exact CLI package version to
 reach the registry, and replaces the bot branch only if its fetched tip has not
-changed.
+changed. It installs the pinned Zig toolchain and runs the contract checks,
+format check, SDK tests, and build before pushing generated changes. Generation
+or validation failures update the parity-drift issue with the candidate CLI
+version and captured failure output instead of opening an unverified PR.
 
 ## License
 

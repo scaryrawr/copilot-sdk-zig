@@ -23,6 +23,31 @@ const stageStart = workflow.indexOf("          git add \\\n");
 const stageEnd = workflow.indexOf("          if ! git diff --cached --quiet", stageStart);
 assert(stageStart >= 0 && stageEnd > stageStart);
 const stage = workflow.slice(stageStart, stageEnd).replace(/^ {10}/gm, "");
+const validationStart = workflow.indexOf('          log_file="$RUNNER_TEMP/upstream-sync.log"\n');
+const validationEnd = workflow.indexOf("          issue_title=", validationStart);
+assert(validationStart >= 0 && validationEnd > validationStart && validationEnd < stageStart);
+const validation = workflow.slice(validationStart, validationEnd).replace(/^ {10}/gm, "");
+
+const validationCommands = [
+  "npm run sync -- --if-published --public-sdk-commit test-commit",
+  "npm test",
+  "zig fmt --check build.zig src examples scripts/parity_census_runner.zig",
+  "zig build test",
+  "zig build",
+];
+
+const validationStubs = `
+public_sdk_commit=test-commit
+record() {
+  printf '%s\\n' "$*" >> commands.log
+  if [ "$*" = "$FAIL_COMMAND" ]; then
+    echo "validation failed: $*"
+    return 42
+  fi
+}
+npm() { record npm "$@"; }
+zig() { record zig "$@"; }
+`;
 
 function run(cwd, command, args, env = process.env) {
   return execFileSync(command, args, {
@@ -64,6 +89,38 @@ function fixture(t, { staleBranch = true } = {}) {
   git(work, "commit", "-am", "new main pin");
   git(work, "push", "origin", "main");
   return { root, work, stale, main: git(work, "rev-parse", "HEAD") };
+}
+
+test("installs the pinned Zig toolchain needed for generation and validation", () => {
+  assert.match(workflow, /uses: mlugg\/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2\n\s+with:\n\s+version: 0\.16\.0/);
+});
+
+for (const failedCommand of [null, ...validationCommands]) {
+  test(`sync validation ${failedCommand ? `stops on ${failedCommand}` : "runs every gate"}`, (t) => {
+    const root = mkdtempSync(join(tmpdir(), "sync-validation-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const execute = () => run(root, "bash", ["-e", "-o", "pipefail", "-c",
+      `${validationStubs}\n${validation}\nexit "$sync_status"`], {
+      ...process.env,
+      RUNNER_TEMP: root,
+      FAIL_COMMAND: failedCommand ?? "",
+    });
+    if (failedCommand) {
+      assert.throws(execute, (error) => {
+        assert.equal(error.status, 42);
+        assert.match(error.stdout.toString(), /validation failed:/);
+        return true;
+      });
+      assert.match(readFileSync(join(root, "upstream-sync.log"), "utf8"), /validation failed:/);
+    } else {
+      execute();
+    }
+    const count = failedCommand ? validationCommands.indexOf(failedCommand) + 1 : validationCommands.length;
+    assert.deepEqual(
+      readFileSync(join(root, "commands.log"), "utf8").trim().split("\n"),
+      validationCommands.slice(0, count),
+    );
+  });
 }
 
 test("regenerates a stale sync branch from main without merging conflicting pins", (t) => {

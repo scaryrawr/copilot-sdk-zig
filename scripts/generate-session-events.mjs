@@ -180,6 +180,7 @@ const ignoredKeywords = new Set([
   "stability",
   "title",
   "visibility",
+  "x-copilot-sdk-append-last",
   "x-enumDescriptions",
 ]);
 const shapeKeywords = new Set([
